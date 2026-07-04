@@ -34,6 +34,14 @@ Thumbs.db
 .superpowers/
 .playwright-mcp/
 
+# Local code analysis indexes and scratch output
+.codegraph/
+graphify-out/
+.understand-anything/intermediate/
+.understand-anything/tmp/
+.understand-anything/.trash-*/
+.understand-anything/diff-overlay.json
+
 # Local screenshot artifacts
 config-editor-*.png
 

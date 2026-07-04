@@ -1,0 +1,50 @@
+# .understandignore — patterns for files/dirs to exclude from analysis
+# Syntax: same as .gitignore (globs, # comments, ! negation, trailing / for dirs)
+# Lines below are suggestions — uncomment to activate.
+# Use ! prefix to force-include something excluded by defaults.
+#
+# Built-in defaults (always excluded unless negated):
+#   node_modules/, .git/, dist/, build/, obj/, *.lock, *.min.js, etc.
+#
+
+# --- From .gitignore (uncomment to exclude) ---
+
+.pnpm-store/
+src-tauri/target/
+.DS_Store
+Thumbs.db
+.env
+.env.local
+.env*.local
+.temp
+.tmp
+*.tsbuildinfo
+.claude/
+.superpowers/
+.playwright-mcp/
+config-editor-*.png
+pengvi@*
+/tauri
+src-tauri/icons/ios/
+src-tauri/icons/android/
+
+# Project-specific build/session artifacts
+.codegraph/
+.nse/
+.understand-anything/
+dist/
+*.png
+*.icns
+*.tsbuildinfo
+
+# --- Detected directories (uncomment to exclude) ---
+
+# tests/
+# docs/
+# scripts/
+
+# --- Test file patterns (uncomment to exclude) ---
+
+# *.test.*
+# *.spec.*
+# *.snap
