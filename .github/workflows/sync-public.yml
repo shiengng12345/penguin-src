@@ -1,0 +1,45 @@
+name: Sync docs & remote config to public repo
+
+# The source repo is private; docs (GitHub Pages) and the remote config that
+# installed apps fetch live in the public releases-only repo
+# (shiengng12345/penguin). This keeps them in sync on every main push.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "config/penguin.remote-config.json"
+      - ".github/workflows/sync-public.yml"
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Push docs and remote config to public repo
+        env:
+          RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          set -euo pipefail
+          git clone --depth 1 "https://x-access-token:${RELEASES_TOKEN}@github.com/shiengng12345/penguin.git" public
+          # Only the doc site itself — docs/ also holds internal notes
+          # (ai-knowledge-vault.md, superpowers/, DOWNLOAD.md) that must not
+          # be published.
+          rm -rf public/docs public/config
+          mkdir -p public/docs public/config
+          cp docs/*.html public/docs/
+          cp -R docs/assets public/docs/assets
+          cp config/penguin.remote-config.json public/config/penguin.remote-config.json
+          cd public
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Nothing to sync."
+            exit 0
+          fi
+          git commit -m "sync: docs & remote config from source repo"
+          git push
