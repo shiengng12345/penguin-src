@@ -24,16 +24,16 @@ jobs:
           RELEASES_TOKEN: ${{ secrets.RELEASES_TOKEN }}
         run: |
           set -euo pipefail
-          git clone --depth 1 "https://x-access-token:${RELEASES_TOKEN}@github.com/shiengng12345/penguin.git" public
+          git clone --depth 1 "https://x-access-token:${RELEASES_TOKEN}@github.com/shiengng12345/penguin.git" /tmp/public-repo
           # Only the doc site itself — docs/ also holds internal notes
           # (ai-knowledge-vault.md, superpowers/, DOWNLOAD.md) that must not
           # be published.
-          rm -rf public/docs public/config
-          mkdir -p public/docs public/config
-          cp docs/*.html public/docs/
-          cp -R docs/assets public/docs/assets
-          cp config/penguin.remote-config.json public/config/penguin.remote-config.json
-          cd public
+          rm -rf /tmp/public-repo/docs /tmp/public-repo/config
+          mkdir -p /tmp/public-repo/docs /tmp/public-repo/config
+          cp docs/*.html /tmp/public-repo/docs/
+          cp -R docs/assets /tmp/public-repo/docs/assets
+          cp config/penguin.remote-config.json /tmp/public-repo/config/penguin.remote-config.json
+          cd /tmp/public-repo
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A
