@@ -45,7 +45,7 @@ const ITEMS: RailItem[] = [
   // REST / Docs / Database are super-admin only — not part of the
   // Vault + Browser release. Normal admins (token, not super) see only
   // Client + Vault + Browser.
-  { kind: "rest", icon: Globe, label: "REST", longLabel: "REST API / 接口客户端 (Super Admin)", requires: "super-admin" },
+  { kind: "rest", icon: Globe, label: "REST", longLabel: "REST API / 接口客户端", requires: "none" },
   { kind: "docs", icon: BookOpen, label: "Docs", longLabel: "Knowledge Base / 知识库 (Super Admin)", requires: "super-admin" },
   { kind: "database", icon: Database, label: "Database", longLabel: "Database / 数据库 (Super Admin)", requires: "super-admin" },
 ];

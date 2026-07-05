@@ -213,10 +213,8 @@ export default function App() {
   const devModeHydrated = useAppStore((s) => s.devModeHydrated);
   const canAccessVault = devModeEnabled && hasValidToken;
   const canAccessDocs = devModeEnabled && isSuperAdmin;
-  // Sprint 10 — REST module is super-admin-only. Normal admins (dev token but
-  // not super) only see Client + Vault; the Home launcher AND REST + Docs all
-  // require the super-admin token. Updated post-10D per user direction.
-  const canAccessRest = devModeEnabled && isSuperAdmin;
+  // REST is now open to all users — no token required.
+  const canAccessRest = true;
   // If user loses their token mid-session, fall back to the API Client so
   // they're not stuck on a "please validate token" gate. Each module checks
   // its own gate so revoking super-admin but keeping dev token leaves the
@@ -697,7 +695,7 @@ export default function App() {
             active={activeModule}
             onSelect={handleModuleSelect}
             hasValidToken={canAccessVault}
-            isSuperAdmin={canAccessDocs || canAccessRest || canAccessDatabase || canAccessBrowser}
+            isSuperAdmin={canAccessDocs || canAccessDatabase || canAccessBrowser}
           />
           <div className="flex flex-1 flex-col min-w-0">
             {vaultOpen ? (

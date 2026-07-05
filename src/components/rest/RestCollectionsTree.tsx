@@ -1,9 +1,10 @@
 // Sprint 10 Phase 10A.7 — Postman-style collections tree.
 
 import { useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, Folder, FolderOpen, Plus, Trash2 } from "lucide-react";
+import { ChevronDown, ChevronRight, Folder, FolderOpen, Pencil, Plus, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { RestCollection, RestRequestRecord } from "./rest-types";
+import { Input } from "@/components/ui/input";
 
 export interface RestCollectionsTreeProps {
   collections: RestCollection[];
@@ -14,6 +15,7 @@ export interface RestCollectionsTreeProps {
   onNewRequest: (collectionId: string) => void;
   onDeleteRequest: (id: string) => void;
   onDeleteCollection: (id: string) => void;
+  onRenameCollection: (id: string, name: string) => void;
 }
 
 const METHOD_COLORS: Record<string, string> = {
@@ -29,6 +31,16 @@ const METHOD_COLORS: Record<string, string> = {
 export function RestCollectionsTree(props: RestCollectionsTreeProps) {
   // Track expansion state per collection — default: all expanded (Postman).
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState("");
+
+  const commitRename = () => {
+    if (renamingId && renameDraft.trim()) {
+      props.onRenameCollection(renamingId, renameDraft.trim());
+    }
+    setRenamingId(null);
+    setRenameDraft("");
+  };
 
   const filtered = useMemo(() => {
     const q = props.search.trim().toLowerCase();
@@ -87,8 +99,36 @@ export function RestCollectionsTree(props: RestCollectionsTreeProps) {
             >
               <ChevronIcon className="h-3 w-3 shrink-0 text-muted-foreground" />
               <Icon className="h-3.5 w-3.5 shrink-0 text-amber-500" />
-              <span className="truncate text-foreground">{collection.name}</span>
+              {renamingId === collection.id ? (
+                <Input
+                  autoFocus
+                  value={renameDraft}
+                  onChange={(e) => setRenameDraft(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") { e.preventDefault(); commitRename(); }
+                    else if (e.key === "Escape") { e.preventDefault(); setRenamingId(null); setRenameDraft(""); }
+                  }}
+                  onBlur={commitRename}
+                  className="h-5 flex-1 text-xs"
+                  onClick={(e) => e.stopPropagation()}
+                />
+              ) : (
+                <span className="truncate text-foreground">{collection.name}</span>
+              )}
               <span className="ml-auto flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                <span
+                  className="text-muted-foreground hover:text-foreground"
+                  role="button"
+                  tabIndex={0}
+                  title="Rename"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setRenamingId(collection.id);
+                    setRenameDraft(collection.name);
+                  }}
+                >
+                  <Pencil className="h-3 w-3" />
+                </span>
                 <span
                   className="text-muted-foreground hover:text-foreground"
                   role="button"

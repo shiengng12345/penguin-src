@@ -1,20 +1,15 @@
-// Sprint 10 Phase 10A.8 — Postman-style REST workspace with sidebar CRUD.
-//
-// Layout:
+// Simplified layout (no multi-tab workspace, matches client module):
 //   ┌────────────────────────────────────────────────────────┐
 //   │ Workspace header: REST  …  + New                       │
 //   ├──────────────┬─────────────────────────────────────────┤
-//   │ 🔍 Search    │ ┌─tab1─┬─tab2─┬─+──┐                    │
-//   │ ▾ Projects + │ │      │      │    │                    │
-//   │   Brazil     │ ├──────┴──────┴────┘                    │
-//   │   Newport    │ │ Name [Save] [Share]                   │
-//   │ ▾ Envs    +  │ │ GET▾ URL ────────── [Send]            │
-//   │   (no env)   │ │ Params │ Auth │ Headers │ Body │ ...  │
-//   │   DEV        │ │                                        │
-//   │   UAT        │ │ (active tab content)                   │
-//   │ Collections+ │ │                                        │
-//   │  ▾ auth      │ │ ─── Response ───                       │
-//   │    GET /…    │ │ (response panel)                       │
+//   │ 🔍 Search    │ Name [Save]                             │
+//   │ ▾ Projects + │ GET▾ URL ────────── [Send]              │
+//   │   Newport    │ Params │ Auth │ Headers │ Body           │
+//   │ ▾ Envs    +  │                                          │
+//   │   DEV        │ ─── Response ───                         │
+//   │ Collections+ │                                          │
+//   │  ▾ auth      │                                          │
+//   │    GET /…    │                                          │
 //   └──────────────┴─────────────────────────────────────────┘
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -34,25 +29,29 @@ import {
   createProject,
   createRequest,
   deleteCollection,
+  deleteEnvVar,
   deleteEnvironment,
   deleteProject,
   deleteRequest,
   loadCollections,
+  loadEnvVars,
   loadEnvironments,
   loadProjects,
   loadRequests,
+  renameCollection,
   renameEnvironment,
   renameProject,
+  upsertEnvVar,
   upsertRequest,
 } from "./rest-storage";
 import type {
   RestCollection,
   RestEnvironment,
+  RestEnvVar,
   RestProject,
   RestRequestRecord,
 } from "./rest-types";
 import { RestSidebar } from "./RestSidebar";
-import { RestWorkspaceTabs } from "./RestWorkspaceTabs";
 import { RestRequestEditor } from "./RestRequestEditor";
 import { RestNewRequestDialog } from "./RestNewRequestDialog";
 import { RestCurlImportDialog } from "./RestCurlImportDialog";
@@ -91,27 +90,19 @@ export function RestPage({ onClose }: RestPageProps) {
   const [environments, setEnvironments] = useState<RestEnvironment[]>(() => loadEnvironments());
   const [collections, setCollections] = useState<RestCollection[]>(() => loadCollections());
   const [requests, setRequests] = useState<RestRequestRecord[]>(() => loadRequests());
+  const [envVars, setEnvVars] = useState<RestEnvVar[]>(() => loadEnvVars());
 
   // Workspace UI state lives in Zustand (session-only). Lifted out so
-  // module switch (REST → Vault → REST) doesn't reset the user's open
-  // tabs, active tab, or sidebar selections.
+  // module switch (REST → Vault → REST) doesn't reset sidebar selections.
   const workspace = useAppStore((s) => s.restWorkspace);
   const setWorkspace = useAppStore((s) => s.setRestWorkspace);
   const selectedProjectId = workspace.selectedProjectId;
   const selectedEnvId = workspace.selectedEnvId;
-  const openTabIds = workspace.openTabIds;
-  const activeTabId = workspace.activeTabId;
-  // Convenience setters that match the prior useState API so the rest
-  // of the file reads naturally. Each patches its own field via the
-  // store mutator.
   const setSelectedProjectId = (id: string | null) => setWorkspace({ selectedProjectId: id });
   const setSelectedEnvId = (id: string | null) => setWorkspace({ selectedEnvId: id });
-  const setOpenTabIds = (
-    next: string[] | ((prev: string[]) => string[]),
-  ) => setWorkspace({
-    openTabIds: typeof next === "function" ? next(openTabIds) : next,
-  });
-  const setActiveTabId = (id: string | null) => setWorkspace({ activeTabId: id });
+
+  // Single active request (no multi-tab workspace — matches client module layout).
+  const [activeRequestId, setActiveRequestId] = useState<string | null>(null);
 
   // Bootstrap: on first mount of the session, seed selectedProjectId
   // to the first project if nothing's been picked yet. Subsequent
@@ -156,32 +147,10 @@ export function RestPage({ onClose }: RestPageProps) {
         : [],
     [collections, selectedProject, selectedEnvId],
   );
-  const openTabs = useMemo(
-    () =>
-      openTabIds
-        .map((id) => requests.find((r) => r.id === id))
-        .filter((r): r is RestRequestRecord => !!r),
-    [openTabIds, requests],
-  );
   const activeRequest = useMemo(
-    () => requests.find((r) => r.id === activeTabId) ?? null,
-    [requests, activeTabId],
+    () => requests.find((r) => r.id === activeRequestId) ?? null,
+    [requests, activeRequestId],
   );
-
-  const openRequestInTab = (id: string) => {
-    setOpenTabIds((ids) => (ids.includes(id) ? ids : [...ids, id]));
-    setActiveTabId(id);
-  };
-
-  const closeTab = (id: string) => {
-    setOpenTabIds((ids) => {
-      const next = ids.filter((tid) => tid !== id);
-      if (activeTabId === id) {
-        setActiveTabId(next[next.length - 1] ?? null);
-      }
-      return next;
-    });
-  };
 
   // ---- Project handlers (name string from inline sidebar input) ----
   const handleNewProject = (name: string) => {
@@ -211,8 +180,7 @@ export function RestPage({ onClose }: RestPageProps) {
       setSelectedProjectId(null);
       setSelectedEnvId(null);
     }
-    setOpenTabIds([]);
-    setActiveTabId(null);
+    setActiveRequestId(null);
   };
 
   // ---- Env handlers ----
@@ -255,9 +223,37 @@ export function RestPage({ onClose }: RestPageProps) {
     if (!window.confirm(`Delete collection "${col.name}" and its requests?`)) return;
     setCollections(deleteCollection({ id }));
     setRequests(loadRequests());
-    setOpenTabIds((ids) =>
-      ids.filter((tid) => requests.find((r) => r.id === tid)?.collectionId !== id),
-    );
+    // Clear active request if it belonged to the deleted collection
+    if (activeRequest?.collectionId === id) setActiveRequestId(null);
+  };
+
+  const handleRenameCollection = (id: string, name: string) => {
+    setCollections(renameCollection({ id, name }));
+  };
+
+  // ---- Env var handlers ----
+  const envVarsForSelectedEnv = useMemo(
+    () => envVars.filter((v) => v.scope === "env" && v.scopeId === selectedEnvId),
+    [envVars, selectedEnvId],
+  );
+
+  const envVarMap = useMemo(
+    () => {
+      const m: Record<string, string> = {};
+      for (const v of envVarsForSelectedEnv) {
+        if (v.key.trim() && v.value != null) m[v.key.trim()] = v.value;
+      }
+      return m;
+    },
+    [envVarsForSelectedEnv],
+  );
+
+  const handleUpsertEnvVar = (v: RestEnvVar) => {
+    setEnvVars(upsertEnvVar(v));
+  };
+
+  const handleDeleteEnvVar = (id: string) => {
+    setEnvVars(deleteEnvVar(id));
   };
 
   // ---- Request handlers ----
@@ -265,7 +261,7 @@ export function RestPage({ onClose }: RestPageProps) {
     const r = createRequest({ collectionId, name: "New Request" });
     setRequests(loadRequests());
     setLastCollectionId(collectionId);
-    openRequestInTab(r.id);
+    setActiveRequestId(r.id);
   };
 
   // Called when the user picks a method in the New Request dialog. Creates
@@ -283,7 +279,7 @@ export function RestPage({ onClose }: RestPageProps) {
     upsertRequest(promoted);
     setRequests(loadRequests());
     setLastCollectionId(collectionId);
-    openRequestInTab(r.id);
+    setActiveRequestId(r.id);
     setNewRequestDialogOpen(false);
   };
 
@@ -364,7 +360,7 @@ export function RestPage({ onClose }: RestPageProps) {
     upsertRequest(promoted);
     setRequests(loadRequests());
     setLastCollectionId(targetCollectionId);
-    openRequestInTab(promoted.id);
+    setActiveRequestId(promoted.id);
 
     if (authStripped) {
       setReplayWarning(
@@ -400,7 +396,7 @@ export function RestPage({ onClose }: RestPageProps) {
     upsertRequest(promoted);
     setRequests(loadRequests());
     setLastCollectionId(params.collectionId);
-    openRequestInTab(promoted.id);
+    setActiveRequestId(promoted.id);
     return promoted;
   };
 
@@ -409,7 +405,7 @@ export function RestPage({ onClose }: RestPageProps) {
     if (!r) return;
     if (!window.confirm(`Delete request "${r.name}"?`)) return;
     setRequests(deleteRequest({ id }));
-    closeTab(id);
+    if (activeRequestId === id) setActiveRequestId(null);
     // Drop the session-only response slot for this id so deleted
     // requests don't keep their response payload pinned in memory.
     useAppStore.getState().clearRestResponse(id);
@@ -426,12 +422,12 @@ export function RestPage({ onClose }: RestPageProps) {
     setNewRequestDialogOpen(true);
   };
 
-  // Listen for REST-scoped keyboard events dispatched by App.tsx. New / close-tab
-  // / focus-search / curl-import are the REST counterparts to the gRPC shortcuts.
+  // Listen for REST-scoped keyboard events dispatched by App.tsx.
   useEffect(() => {
     const onNewRequest = () => handleNewFromHeader();
-    const onCloseTab = () => {
-      if (activeTabId) closeTab(activeTabId);
+    // Cmd+W (close-tab) in REST module: just deselect the active request
+    const onCloseCurrent = () => {
+      if (activeRequestId) setActiveRequestId(null);
     };
     const onFocusSearch = () => {
       const el = searchInputRef.current;
@@ -443,13 +439,13 @@ export function RestPage({ onClose }: RestPageProps) {
     const onOpenCurlImport = () => setCurlImportOpen(true);
     const onOpenHistory = () => setHistoryOpen(true);
     document.addEventListener(REST_NEW_REQUEST_EVENT, onNewRequest);
-    document.addEventListener(REST_CLOSE_TAB_EVENT, onCloseTab);
+    document.addEventListener(REST_CLOSE_TAB_EVENT, onCloseCurrent);
     document.addEventListener(REST_FOCUS_SEARCH_EVENT, onFocusSearch);
     document.addEventListener(REST_OPEN_CURL_IMPORT_EVENT, onOpenCurlImport);
     document.addEventListener(REST_OPEN_HISTORY_EVENT, onOpenHistory);
     return () => {
       document.removeEventListener(REST_NEW_REQUEST_EVENT, onNewRequest);
-      document.removeEventListener(REST_CLOSE_TAB_EVENT, onCloseTab);
+      document.removeEventListener(REST_CLOSE_TAB_EVENT, onCloseCurrent);
       document.removeEventListener(REST_FOCUS_SEARCH_EVENT, onFocusSearch);
       document.removeEventListener(REST_OPEN_CURL_IMPORT_EVENT, onOpenCurlImport);
       document.removeEventListener(REST_OPEN_HISTORY_EVENT, onOpenHistory);
@@ -500,7 +496,7 @@ export function RestPage({ onClose }: RestPageProps) {
           requests={requests}
           selectedProjectId={selectedProjectId}
           selectedEnvId={selectedEnvId}
-          activeRequestId={activeTabId}
+          activeRequestId={activeRequestId}
           search={search}
           onSearchChange={setSearch}
           searchInputRef={searchInputRef}
@@ -517,9 +513,13 @@ export function RestPage({ onClose }: RestPageProps) {
           onDeleteEnvironment={handleDeleteEnvironment}
           onNewCollection={handleNewCollection}
           onDeleteCollection={handleDeleteCollection}
-          onSelectRequest={openRequestInTab}
+          onRenameCollection={handleRenameCollection}
+          onSelectRequest={setActiveRequestId}
           onNewRequest={handleNewRequest}
           onDeleteRequest={handleDeleteRequest}
+          envVars={envVarsForSelectedEnv}
+          onUpsertEnvVar={handleUpsertEnvVar}
+          onDeleteEnvVar={handleDeleteEnvVar}
         />
 
         <div className="flex flex-1 min-h-0 min-w-0 flex-col">
@@ -537,7 +537,13 @@ export function RestPage({ onClose }: RestPageProps) {
               </button>
             </div>
           )}
-          {openTabs.length === 0 ? (
+          {activeRequest ? (
+            <RestRequestEditor
+              request={activeRequest}
+              onChange={handleUpdateRequest}
+              envVars={envVarMap}
+            />
+          ) : (
             <WorkspaceEmptyState
               hasProject={!!selectedProject}
               hasCollection={projectCollections.length > 0}
@@ -545,22 +551,6 @@ export function RestPage({ onClose }: RestPageProps) {
                 projectCollections[0] && handleNewRequest(projectCollections[0].id)
               }
             />
-          ) : (
-            <>
-              <RestWorkspaceTabs
-                tabs={openTabs}
-                activeTabId={activeTabId}
-                onSelect={setActiveTabId}
-                onClose={closeTab}
-              />
-              {activeRequest ? (
-                <RestRequestEditor request={activeRequest} onChange={handleUpdateRequest} />
-              ) : (
-                <div className="flex flex-1 items-center justify-center text-[11px] text-muted-foreground">
-                  Select a tab.
-                </div>
-              )}
-            </>
           )}
         </div>
       </div>

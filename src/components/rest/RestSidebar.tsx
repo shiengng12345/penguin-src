@@ -15,6 +15,7 @@ import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import type {
   RestCollection,
+  RestEnvVar,
   RestEnvironment,
   RestProject,
   RestRequestRecord,
@@ -53,10 +54,15 @@ export interface RestSidebarProps {
   // Collection handlers
   onNewCollection: (name: string) => void;
   onDeleteCollection: (id: string) => void;
+  onRenameCollection: (id: string, name: string) => void;
   // Request handlers
   onSelectRequest: (id: string) => void;
   onNewRequest: (collectionId: string) => void;
   onDeleteRequest: (id: string) => void;
+  // Env var handlers
+  envVars: RestEnvVar[];
+  onUpsertEnvVar: (v: RestEnvVar) => void;
+  onDeleteEnvVar: (id: string) => void;
 }
 
 export function RestSidebar(props: RestSidebarProps) {
@@ -238,6 +244,79 @@ export function RestSidebar(props: RestSidebarProps) {
         </SidebarSection>
       )}
 
+      {/* Environment variables section — key-value table for selected env */}  
+      {selectedProject && props.selectedEnvId && (
+        <div className="shrink-0 border-b border-border/60 pb-1">
+          <div className="flex h-7 items-center justify-between px-2">
+            <span className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+              Variables
+            </span>
+            <button
+              type="button"
+              className="text-muted-foreground hover:text-foreground"
+              title="Add variable"
+              onClick={() => {
+                const newVar: RestEnvVar = {
+                  id: `ev_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+                  scope: "env",
+                  scopeId: props.selectedEnvId!,
+                  key: "",
+                  value: "",
+                  isSecret: false,
+                  secretHandleId: null,
+                  updatedAt: Date.now(),
+                };
+                props.onUpsertEnvVar(newVar);
+              }}
+            >
+              <Plus className="h-3.5 w-3.5" />
+            </button>
+          </div>
+          <div className="px-2">
+            {props.envVars.length === 0 ? (
+              <p className="px-3 py-1.5 text-[11px] text-muted-foreground/70">
+                No variables — click + to add
+              </p>
+            ) : (
+              props.envVars.map((v) => (
+                <div key={v.id} className="mb-1 flex items-center gap-1.5">
+                  <Input
+                    value={v.key}
+                    onChange={(e) =>
+                      props.onUpsertEnvVar({ ...v, key: e.target.value, updatedAt: Date.now() })
+                    }
+                    placeholder="KEY"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
+                    className="h-6 w-[40%] text-[10px] font-mono"
+                  />
+                  <Input
+                    value={v.value ?? ""}
+                    onChange={(e) =>
+                      props.onUpsertEnvVar({ ...v, value: e.target.value, updatedAt: Date.now() })
+                    }
+                    placeholder="value"
+                    autoCorrect="off"
+                    autoCapitalize="off"
+                    spellCheck={false}
+                    className="h-6 flex-1 text-[10px] font-mono"
+                  />
+                  <button
+                    type="button"
+                    className="shrink-0 text-muted-foreground hover:text-destructive"
+                    onClick={() => props.onDeleteEnvVar(v.id)}
+                    aria-label="Remove variable"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Collections section — tree of collections + requests. Header
           uses the same h-9 token as SidebarSection so all three
           section headers (Projects / Environments / Collections)
@@ -279,6 +358,7 @@ export function RestSidebar(props: RestSidebarProps) {
             onNewRequest={props.onNewRequest}
             onDeleteRequest={props.onDeleteRequest}
             onDeleteCollection={props.onDeleteCollection}
+            onRenameCollection={props.onRenameCollection}
           />
         </div>
       )}

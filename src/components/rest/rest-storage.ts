@@ -228,6 +228,12 @@ export function upsertEnvVar(envVar: RestEnvVar): RestEnvVar[] {
   return list;
 }
 
+export function deleteEnvVar(id: string): RestEnvVar[] {
+  const list = loadEnvVars().filter((v) => v.id !== id);
+  saveList(KEYS.envVars, list);
+  return list;
+}
+
 // ---- Migration ----
 
 export function getMigrationVersion(): number {

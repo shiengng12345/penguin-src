@@ -85,9 +85,9 @@ test("REST FE module — files exist with expected exports", async () => {
 
   const page = await loadSource("../src/components/rest/RestPage.tsx");
   assert.match(page, /export function RestPage\(/);
-  // Postman-style layout (10A.8 rewrite): RestSidebar (projects + envs + collections CRUD) + multi-tab workspace.
+  // Simplified layout: RestSidebar + RestRequestEditor (no multi-tab workspace).
   assert.match(page, /RestSidebar/);
-  assert.match(page, /RestWorkspaceTabs/);
+  assert.doesNotMatch(page, /RestWorkspaceTabs/);
   assert.match(page, /RestRequestEditor/);
 
   await loadSource("../src/components/rest/RestSidebar.tsx");
@@ -105,38 +105,24 @@ test("REST FE module — files exist with expected exports", async () => {
   assert.match(sidebar, /onDeleteEnvironment/);
 });
 
-test("RestRequestEditor uses Postman-style tab layout (post-sections refactor)", async () => {
-  // History: tabs (Phase 10A) → sections (gRPC-client style) → tabs
-  // again (Postman style, per user direction). The full set of
-  // editable concepts must remain reachable from a single tab strip.
+test("RestRequestEditor uses client-module-style section layout (Headers + Body)", async () => {
+  // Simplified layout — matching gRPC client RequestPanel.
+  // Sections: Headers (compact table) + Body (JsonEditor, JSON only).
   const editor = await loadSource("../src/components/rest/RestRequestEditor.tsx");
-  // Tab IDs must all appear in the RequestTab union. Scripts +
-  // Settings were Phase-11 placeholders and were removed at user
-  // request ("这两个 tab 不需要"); negative assertions below lock the
-  // removal so a future refactor doesn't bring them back as dead UI.
-  for (const key of ["params", "auth", "headers", "body", "cookies"]) {
-    assert.match(editor, new RegExp(`"${key}"`), `tab "${key}" must remain reachable`);
-  }
-  assert.doesNotMatch(editor, /id: "scripts"/);
-  assert.doesNotMatch(editor, /id: "settings"/);
-  assert.doesNotMatch(editor, /TabPlaceholder/);
-  // Active-tab state drives which pane mounts.
-  assert.match(editor, /RequestTab/);
-  assert.match(editor, /REQUEST_TABS/);
-  assert.match(editor, /setActiveTab/);
-  // KV table helper for Params + Headers.
-  assert.match(editor, /InlineKvRows/);
-  // URL bar with method dropdown + URL input + Send button.
+  assert.match(editor, /Headers/);
+  assert.match(editor, /handleAddHeader/);
+  assert.match(editor, /handleRemoveHeader/);
+  assert.match(editor, /Body/);
+  assert.match(editor, /handleFormatBody/);
+  assert.match(editor, /JsonEditor/);
+  // No tab strip, no toggle buttons.
+  assert.doesNotMatch(editor, /REQUEST_TABS/);
+  assert.doesNotMatch(editor, /BODY_MODES/);
+  assert.doesNotMatch(editor, /handleBodyMode/);
+  assert.doesNotMatch(editor, /bodyMode/);
   assert.match(editor, /METHOD_OPTIONS/);
   assert.match(editor, /Send/);
-  // Right pane always shows a response state — never the bare "click Send"
-  // placeholder centered in an empty half-screen.
   assert.match(editor, /ResponseEmptyState/);
-  // Cookies button is pinned to the right of the tab strip via ml-auto.
-  assert.match(editor, /onClick=\{\(\) => setActiveTab\("cookies"\)\}[\s\S]{0,400}?Cookies/);
-  // No more SectionHeader / ExpandedState — section-based layout is gone.
-  assert.doesNotMatch(editor, /SectionHeader/);
-  assert.doesNotMatch(editor, /ExpandedState/);
 });
 
 test("RestRequestEditor — request/response split is fixed 50/50, NOT draggable", async () => {
@@ -190,43 +176,37 @@ test("REST FE — RestRequestEditor wires Send button to Tauri command", async (
   assert.match(editor, /Sending/);
 });
 
-test("MainSidebar — REST registered as super-admin module (post-10D tier change)", async () => {
+test("MainSidebar — REST open to all users (requires: \"none\")", async () => {
   const sidebar = await loadSource("../src/components/layout/MainSidebar.tsx");
   // MainModule type union still includes "rest".
   assert.match(sidebar, /"client"\s*\|\s*"rest"\s*\|\s*"vault"\s*\|\s*"docs"/);
-  // Item entry — REST is super-admin gated (was token-gated before; normal
-  // admins now only see Home + Client + Vault, like the user wanted).
-  assert.match(sidebar, /kind:\s*"rest"[\s\S]*?icon:\s*Globe[\s\S]*?requires:\s*"super-admin"/);
+  // Item entry: REST now requires: "none" (open to all).
+  // source: { kind: "rest", ... requires: "none" }
+  assert.match(sidebar, /kind:\s*"rest"[\s\S]*?requires:\s*"none"/);
   assert.match(sidebar, /import\s+{[^}]*\bGlobe\b[^}]*}\s+from\s+"lucide-react"/);
-  // Anti-regression: must NOT silently drop back to token tier.
-  assert.doesNotMatch(
-    sidebar,
-    /kind:\s*"rest"[\s\S]{0,200}?requires:\s*"token"/,
-  );
+  // Anti-regression: REST's own requires field must NOT be token or super-admin.
+  // Match the full REST entry without crossing to the next kind: line.
+  assert.doesNotMatch(sidebar, /kind:\s*"rest",[^}]*?requires:\s*"token"/);
+  assert.doesNotMatch(sidebar, /kind:\s*"rest",[^}]*?requires:\s*"super-admin"/);
 });
 
-test("App.tsx — REST module routed + super-admin gated + redirect on revoke", async () => {
+test("App.tsx — REST module routed + open to all users (no token required)", async () => {
   const app = await loadSource("../src/App.tsx");
   // restOpen state.
   assert.match(app, /\[restOpen,\s*setRestOpen\]/);
-  // canAccessRest uses isSuperAdmin (not hasValidToken — that was Phase 10
-  // initial wiring, since revised). Normal admins now stay on Vault/Client.
-  assert.match(app, /canAccessRest\s*=\s*devModeEnabled\s*&&\s*isSuperAdmin/);
-  // Redirect effect when super-admin revoked.
-  assert.match(app, /if\s*\(restOpen\s*&&\s*!canAccessRest\)\s*setRestOpen\(false\);/);
+  // canAccessRest is now always true — REST open to everyone.
+  assert.match(app, /canAccessRest\s*=\s*true/);
   // Routed RestPage.
   assert.match(app, /restOpen\s*\?\s*\(\s*<RestPage/);
   // Active module enum includes "rest".
   assert.match(app, /restOpen[\s\S]*?\?\s*"rest"/);
 });
 
-test("MainSidebar props — REST / Docs / Database / Browser under isSuperAdmin (token tier = Vault only)", async () => {
-  // REST / Docs / Database / Browser are all super-admin now; only Vault
-  // stays at the token tier. Lock props so a refactor that drops one
-  // super-admin module from the isSuperAdmin OR fails loudly.
+test("MainSidebar props — REST open to all, Docs/Database/Browser still super-admin", async () => {
+  // REST is now open to all (requires: "none"). isSuperAdmin still gates Docs/Database/Browser.
   const app = await loadSource("../src/App.tsx");
   assert.match(app, /hasValidToken=\{canAccessVault\}/);
-  assert.match(app, /isSuperAdmin=\{canAccessDocs\s*\|\|\s*canAccessRest\s*\|\|\s*canAccessDatabase\s*\|\|\s*canAccessBrowser\}/);
+  assert.match(app, /isSuperAdmin=\{canAccessDocs\s*\|\|\s*canAccessDatabase\s*\|\|\s*canAccessBrowser\}/);
 });
 
 test("REST module — context-aware keyboard shortcuts wired (shortcut audit fix)", async () => {
@@ -630,10 +610,9 @@ test("RestRequestEditor — Send passes auth-derived secretRefs (no more empty a
   // the user filled the Authorization tab. The fix wires authToSecretRefs.
   const editor = await loadSource("../src/components/rest/RestRequestEditor.tsx");
   assert.match(editor, /authToSecretRefs\(req\.auth\)/);
-  // The placeholder AuthorizationPanel function in this file is gone — the
-  // real implementation now lives in RestAuthorizationPanel.tsx.
-  assert.doesNotMatch(editor, /function AuthorizationPanel\(\)/);
-  assert.match(editor, /<RestAuthorizationPanel request=\{request\} onChange=\{onChange\}/);
+  // RestAuthorizationPanel is no longer imported (simplified layout — auth
+  // lives in the data model, managed via curl import / history replay).
+  assert.doesNotMatch(editor, /RestAuthorizationPanel/);
 });
 
 test("cookie_store — Phase 10B SQLite persistence replaces empty stubs", async () => {
@@ -739,39 +718,15 @@ test("RestRequestEditor — Cancel button + Esc abort + Copy curl wiring", async
   assert.match(editor, /handleCopyCurl/);
   assert.match(editor, /writeClipboard\(/);
   assert.match(editor, /Copy curl/);
-
-  // Response size guard: 1 MiB threshold + formatBytes display.
-  assert.match(editor, /isLargeResponse = response\.bodyBytes > 1024 \* 1024/);
-  assert.match(editor, /function formatBytes\(/);
 });
 
-test("RestRequestEditor — URL blur extracts ?key=val pairs into Query Params + strips query from URL", async () => {
-  // User direction: pasting / typing a URL with a query string should
-  // auto-fill the Query Params table. Trigger on blur (not per-
-  // keystroke) so mid-typing doesn't shuffle the URL. URL is stripped
-  // of its query portion after extraction so the backend's send-time
-  // append doesn't double-emit (it iterates req.queryParams onto
-  // req.url via url.query_pairs_mut()).
+test("RestRequestEditor — URL bar has no onBlur query-param extraction (simplified layout)", async () => {
+  // Simplified layout: URL bar is plain input — query params are appended
+  // by Rust backend from the stored queryParams array. No extraction on blur.
   const editor = await loadSource("../src/components/rest/RestRequestEditor.tsx");
-  // Fired on blur of the URL Input.
-  assert.match(editor, /onBlur=\{\(\) => \{[\s\S]{0,2000}?const url = request\.url/);
-  // Splits on the first `?`, then on `&` for each pair.
-  assert.match(editor, /url\.indexOf\("\?"\)/);
-  assert.match(editor, /queryString[\s\S]{0,40}?\.split\("&"\)/);
-  // Pairs go through decodeURIComponent on both sides.
-  assert.match(editor, /decodeURIComponent\(rawK\)/);
-  assert.match(editor, /decodeURIComponent\(rawV\)/);
-  // After extraction, URL is rewritten without its query string AND
-  // extracted rows are merged with the user's existing non-empty rows.
-  // Empty rows are filtered out (so auto-detected pairs don't end up
-  // below a leading blank row). Dedup by key: re-extracting the same
-  // URL UPDATES existing rows rather than duplicating them (user
-  // complaint: "已经 fill 过了的，重新 detect 会 duplicate").
-  assert.match(editor, /url: url\.slice\(0, qIndex\)/);
-  assert.match(editor, /const nonEmpty = request\.queryParams\.filter\(/);
-  assert.match(editor, /new Map<string,/);
-  assert.match(editor, /byKey\.set\(row\.key, row\)/);
-  assert.match(editor, /queryParams: Array\.from\(byKey\.values\(\)\)/);
+  assert.doesNotMatch(editor, /onBlur/);
+  assert.doesNotMatch(editor, /decodeURIComponent/);
+  assert.doesNotMatch(editor, /queryString.*split/);
 });
 
 test("RestPage — workspace UI (selectedProject/Env, openTabIds, activeTabId, lastCollectionId) lives in Zustand", async () => {
@@ -942,9 +897,9 @@ test("RestCookiesPanel — list/clear/add/delete UI backed by rest-keychain help
   assert.match(store, /pub fn delete_cookie\(/);
   assert.match(store, /synthetic_id = format!\("\{\}::\{\}::\{\}", collection_id, domain, name\)/);
 
-  // Editor still mounts the Cookies panel.
+  // Editor no longer mounts Cookies panel (simplified layout — Headers + Body only).
   const editor = await loadSource("../src/components/rest/RestRequestEditor.tsx");
-  assert.match(editor, /<RestCookiesPanel request=\{request\}/);
+  assert.doesNotMatch(editor, /RestCookiesPanel/);
 });
 
 test("jsonpath-mini — supports $.x / [n] / [-n] / [*] for back-compat consumers", async () => {
@@ -984,21 +939,14 @@ test("rest-curl-builder — Copy fetch button + buildFetchSnippet helper removed
   assert.doesNotMatch(editor, /buildFetchSnippet/);
 });
 
-test("RestRequestEditor — binary body upload with 50 MB cap (Phase 10D)", async () => {
+test("RestRequestEditor — body: JSON only (no toggle, no raw)", async () => {
   const editor = await loadSource("../src/components/rest/RestRequestEditor.tsx");
-  // binary mode appears in the radio row (Postman-style) so users can switch into it.
-  // Post-Postman-UI refactor the modes live in a structured array — check each
-  // value independently rather than the array literal shape.
-  for (const m of ["none", "json", "raw", "form-urlencoded", "binary"]) {
-    assert.match(editor, new RegExp(`value:\\s*"${m}"`), `body mode "${m}" must be in the radio row`);
-  }
-  // Radio-style input is the new render mode (no longer chunky buttons).
-  assert.match(editor, /name="body-mode"/);
-  // BinaryBodyPicker exists + enforces the cap + base64-encodes for IPC.
-  assert.match(editor, /function BinaryBodyPicker\(/);
-  assert.match(editor, /MAX_UPLOAD_BYTES = 50 \* 1024 \* 1024/);
-  assert.match(editor, /file\.size > MAX_UPLOAD_BYTES/);
-  assert.match(editor, /btoa\(bin\)/);
+  assert.match(editor, /JsonEditor/);
+  assert.match(editor, /handleFormatBody/);
+  assert.doesNotMatch(editor, /BODY_MODES/);
+  assert.doesNotMatch(editor, /handleBodyMode/);
+  assert.doesNotMatch(editor, /bodyMode/);
+  assert.doesNotMatch(editor, /<textarea/);
 });
 
 test("Phase 10D review fixes — must-fix invariants locked (post-adversarial-review)", async () => {
@@ -1181,8 +1129,9 @@ test("REST send path — materializes req.auth into placeholder headers/queryPar
   // api-key in query) before invoke()'ing rest_send_request.
   const editor = await loadSource("../src/components/rest/RestRequestEditor.tsx");
   // Local mutable copies that don't write back to the persisted record.
-  assert.match(editor, /const sendHeaders[\s\S]{0,80}?\[\.\.\.req\.headers\]/);
-  assert.match(editor, /const sendQuery[\s\S]{0,80}?\[\.\.\.req\.queryParams\]/);
+  // Changed from spread to .map() in Phase 10C to inject env-var interpolation.
+  assert.match(editor, /const sendHeaders[\s\S]{0,120}?req\.headers\.map\(/);
+  assert.match(editor, /const sendQuery[\s\S]{0,120}?req\.queryParams\.map\(/);
   // Each auth branch pushes the right row.
   assert.match(
     editor,
@@ -1269,8 +1218,8 @@ test("REST split pane — min-w-0 chain still locks content-driven width drift",
         && !toks.includes("flex-col");
     });
   assert.ok(editorRow, "RestRequestEditor two-pane row — no flex row with flex-1 + min-h-0 + min-w-0");
-  // ResponsePanel sub-tab content wrapper — p-3 + overflow-hidden + chain-safe.
-  hasDivWithAll(editor, "ResponsePanel sub-tab content", "flex", "flex-col", "p-3", "overflow-hidden", "min-h-0", "min-w-0");
+  // Response body viewer — p-3 + overflow-hidden (simplified, no sub-tabs).
+  hasDivWithAll(editor, "Response body wrapper", "flex", "flex-1", "min-h-0", "min-w-0", "overflow-hidden", "p-3");
 
   // Response-body viewer — read-only JsonEditor (syntax-highlighted JSON).
   assert.match(editor, /<JsonEditor[\s\S]{0,200}?readOnly/);
@@ -1287,59 +1236,13 @@ test("REST split pane — min-w-0 chain still locks content-driven width drift",
   assert.ok(pageRow, "RestPage sidebar+workspace row — no flex row with flex-1 + min-h-0 + min-w-0");
 });
 
-test("REST body panel — both json AND raw modes render CodeMirror JsonEditor (per user request)", async () => {
-  // History: json got CodeMirror first, raw stayed as a plain textarea
-  // because raw bodies aren't JSON (lint warnings would be noisy).
-  // User pushed back ("这里的 json editor 不见了"): they want line
-  // numbers + highlighting + bracket matching in raw too. Linter
-  // squiggles on non-JSON are accepted as a known trade-off — the
-  // visual editing affordances are worth more than a clean lint.
+test("REST body panel — JSON only, always JsonEditor (no raw)", async () => {
+  // Simplified: json → CodeMirror only, no raw mode.
   const editor = await loadSource("../src/components/rest/RestRequestEditor.tsx");
-
-  // Static import — no lazy / Suspense. The dev-mode chunk
-  // granularity of CodeMirror's 30+ sub-modules made Suspense visibly
-  // flash the plain-<pre> fallback before the editor swapped in;
-  // users flagged it. REST is statically imported by App.tsx anyway,
-  // so we pay the editor cost once on REST cold-start instead of on
-  // first Send. No more flash.
   assert.match(editor, /^import \{ JsonEditor \} from "@\/components\/ui\/json-editor"/m);
-  assert.doesNotMatch(editor, /\bLazyJsonEditor\b/);
-  assert.doesNotMatch(editor, /<Suspense\b/);
-
-  // Both json and raw body modes mount the editor directly.
-  const jsonEditorCount = (editor.match(/<JsonEditor\b/g) || []).length;
-  assert.ok(jsonEditorCount >= 2, `json + raw + response viewer should all use JsonEditor (got ${jsonEditorCount})`);
-
-  // BodyPanel root has min-w-0 + min-h-0 — without these the CodeMirror
-  // editor's intrinsic width/height leak up the flex chain and we get
-  // the ratio-drift bug back. Token-set check (not substring) so a
-  // Prettier reorder doesn't break the test.
-  const bodyRoot = [...editor.matchAll(/className="([^"]+)"/g)]
-    .map((m) => m[1])
-    .find((cn) => {
-      const toks = cn.split(/\s+/);
-      return ["flex", "flex-1", "min-h-0", "min-w-0", "flex-col", "gap-2", "p-3"].every((t) =>
-        toks.includes(t),
-      );
-    });
-  assert.ok(bodyRoot, "BodyPanel root div must carry flex + flex-1 + min-h-0 + min-w-0 + flex-col + gap-2 + p-3");
-
-  // Both branches use a wrapper with the min-h-[20rem] floor. Counting
-  // wrappers that contain min-h-[20rem] in their className tolerates
-  // Tailwind class reorder while still locking the load-bearing token.
-  // min-h-[20rem] matters: BodyPanel's parent is overflow-auto
-  // (unbounded), so flex-1 alone collapses the editor to its content
-  // height. The min-height gives a 16-line default editing area.
-  const wrapperCount = [...editor.matchAll(/className="([^"]+)"/g)]
-    .map((m) => m[1])
-    .filter((cn) => /min-h-\[20rem\]/.test(cn) && /\brounded\b/.test(cn) && /\bborder\b/.test(cn))
-    .length;
-  assert.ok(wrapperCount >= 2, `json + raw body wrappers both need min-h-[20rem] (got ${wrapperCount})`);
-
-  // Raw mode specifically — JsonEditor is wired into the raw branch,
-  // not just a textarea.
-  assert.match(
-    editor,
-    /\{mode === "raw" && \([\s\S]{0,1500}?<JsonEditor[\s\S]{0,300}?onChange=\{\(content\) => onChange\(\{ mode: "raw"/,
-  );
+  assert.match(editor, /<JsonEditor/);
+  assert.doesNotMatch(editor, /<textarea/);
+  assert.doesNotMatch(editor, /BODY_MODES/);
+  assert.doesNotMatch(editor, /bodyMode/);
+  assert.doesNotMatch(editor, /name="body-mode"/);
 });
