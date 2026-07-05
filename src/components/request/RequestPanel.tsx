@@ -4,6 +4,7 @@ import { useEnvironments } from "@/hooks/useEnvironments";
 import { interpolate } from "@/lib/environment-store";
 import { logger } from "@/lib/logger";
 import { isEmptyAuthHeader } from "@/lib/header-utils";
+import { computeServicePath } from "@penguin/core";
 import { generatePenguinRequestId, PENGUIN_REQUEST_ID_HEADER } from "@/lib/penguin-request-id";
 import { Button } from "@/components/ui/button";
 import { Send, Plus, X, RotateCcw, Copy, Braces, Bookmark, Check, FileText, Terminal, Ban, Code2 } from "lucide-react";
@@ -161,14 +162,7 @@ export function RequestPanel() {
           metadata: mergedMetadata,
         });
       } else if (protocol === "grpc-web" && tab.selectedMethod) {
-        const typeName = tab.selectedMethod.fullName.substring(
-          0, tab.selectedMethod.fullName.lastIndexOf(".")
-        );
-        const methodName = tab.selectedMethod.fullName.substring(
-          tab.selectedMethod.fullName.lastIndexOf(".") +1
-        );
-        const protoPackage = typeName.split(".")[0];
-        const servicePath = tab.pathOverride ?? `/${protoPackage}/${typeName}/${methodName}`;
+        const servicePath = tab.pathOverride ?? computeServicePath(tab.selectedMethod.fullName);
         const { callGrpcWeb } = await import("@/lib/grpc-web-client");
         result = await callGrpcWeb({
           url: resolvedUrl,
@@ -178,14 +172,7 @@ export function RequestPanel() {
           packageName: tab.selectedPackage ?? undefined,
         }, controller.signal);
       } else if (protocol === "grpc" && tab.selectedMethod) {
-        const typeName = tab.selectedMethod.fullName.substring(
-          0, tab.selectedMethod.fullName.lastIndexOf(".")
-        );
-        const methodName = tab.selectedMethod.fullName.substring(
-          tab.selectedMethod.fullName.lastIndexOf(".") +1
-        );
-        const protoPackage = typeName.split(".")[0];
-        const servicePath = tab.pathOverride ?? `/${protoPackage}/${typeName}/${methodName}`;
+        const servicePath = tab.pathOverride ?? computeServicePath(tab.selectedMethod.fullName);
         const { getPackagesDir } = await import("@/lib/package-manager");
         const packagesDir = await getPackagesDir("grpc");
         const { callGrpcNative } = await import("@/lib/grpc-native-client");
@@ -352,14 +339,7 @@ export function RequestPanel() {
     const resolvedUrl = interpolate(tab.targetUrl, activeEnv);
     const selectedMethod = tab.selectedMethod;
     if (!selectedMethod) return;
-    const typeName = selectedMethod.fullName.substring(
-      0, selectedMethod.fullName.lastIndexOf(".")
-    );
-    const methodName = selectedMethod.fullName.substring(
-      selectedMethod.fullName.lastIndexOf(".") +1
-    );
-    const protoPackage = typeName.split(".")[0];
-    const servicePath = tab.pathOverride ?? `/${protoPackage}/${typeName}/${methodName}`;
+    const servicePath = tab.pathOverride ?? computeServicePath(selectedMethod.fullName);
     const fullUrl = `${resolvedUrl.replace(/\/$/, "")}${servicePath}`;
 
     // Mirror the live send path: tab metadata only (no re-merge of defaults),

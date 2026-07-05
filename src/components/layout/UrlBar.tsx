@@ -6,20 +6,10 @@ import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
 import { REST_METHODS, toRestMethod } from "@/lib/rest";
+import { computeServicePath } from "@penguin/core";
 
 interface UrlBarProps {
   resolvedUrl: string | null;
-}
-
-function computeAutoPath(fullName: string): string {
-  const typeName = fullName.substring(0, fullName.lastIndexOf("."));
-  const methodName = fullName.substring(fullName.lastIndexOf(".") + 1);
-  const [pkgRaw, ...rest] = typeName.split(".");
-  // proto package segment is force-lowercased so URL routing stays case-stable
-  // even when the .proto declares the package in mixed case
-  const protoPackage = pkgRaw.toLowerCase();
-  const normalizedType = [protoPackage, ...rest].join(".");
-  return `/${protoPackage}/${normalizedType}/${methodName}`;
 }
 
 const REST_METHOD_OPTIONS = REST_METHODS.map((method) => ({
@@ -33,7 +23,7 @@ export function UrlBar({ resolvedUrl }: UrlBarProps) {
 
   if (!tab) return null;
 
-  const autoPath = tab.selectedMethod ? computeAutoPath(tab.selectedMethod.fullName) : null;
+  const autoPath = tab.selectedMethod ? computeServicePath(tab.selectedMethod.fullName) : null;
   const effectivePath = tab.pathOverride ?? autoPath;
   const isOverridden = tab.pathOverride !== null;
   const displayUrl = resolvedUrl ?? tab.targetUrl;

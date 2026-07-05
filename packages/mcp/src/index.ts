@@ -15,6 +15,7 @@ import {
   callGrpcWeb,
   callGrpcNative,
   callSdk,
+  computeServicePath,
   generateDefaultJson,
   snsoftPackageNameFromSpec,
   type MetadataEntry,
@@ -112,9 +113,9 @@ function findMethod(
 }
 
 // Build the protocol-specific routing fields from the unified
-// (packageName, serviceName, methodName) triple. Mirrors the servicePath
-// shape the desktop's RequestPanel constructs (see RequestPanel.tsx:131) —
-// `/<first_segment_of_proto_pkg>/<full_typename>/<method>`. For SDK we only
+// (packageName, serviceName, methodName) triple. Uses the same
+// computeServicePath as the desktop app —
+// `/<lowercased_gateway_prefix>/<full_typename>/<method>`. For SDK we only
 // need the serviceName/methodName fields the SDK runner already expects.
 function resolveCallRouting(args: {
   protocol: Protocol;
@@ -160,12 +161,9 @@ function resolveCallRouting(args: {
       `Cannot build servicePath: method ${method.name} has no proto package in fullName=${method.fullName}`,
     );
   }
-  const typeName = method.fullName.slice(0, lastDot);
-  const mName = method.fullName.slice(lastDot + 1);
-  const protoPkg = typeName.split(".")[0];
   return {
     packageName: args.packageName,
-    servicePath: `/${protoPkg}/${typeName}/${mName}`,
+    servicePath: computeServicePath(method.fullName),
   };
 }
 

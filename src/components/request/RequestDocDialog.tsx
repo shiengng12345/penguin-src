@@ -8,6 +8,7 @@ import {
 } from "@/lib/store";
 import { useEnvironments } from "@/hooks/useEnvironments";
 import { interpolate } from "@/lib/environment-store";
+import { computeServicePath } from "@penguin/core";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { Copy, Check, FileText, X, ImageIcon } from "lucide-react";
@@ -236,15 +237,7 @@ export function RequestDocDialog({ open, onClose }: RequestDocDialogProps) {
 
   const method = tab.selectedMethod;
   const resolvedUrl = interpolate(tab.targetUrl, activeEnv);
-  const typeName = method.fullName.substring(
-    0,
-    method.fullName.lastIndexOf(".")
-  );
-  const methodName = method.fullName.substring(
-    method.fullName.lastIndexOf(".") +1
-  );
-  const protoPackage = typeName.split(".")[0];
-  const servicePath = tab.pathOverride ?? `/${protoPackage}/${typeName}/${methodName}`;
+  const servicePath = tab.pathOverride ?? computeServicePath(method.fullName);
   const fullUrl = `${resolvedUrl.replace(/\/$/, "")}${servicePath}`;
 
   const allPkgs =

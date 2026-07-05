@@ -11,6 +11,7 @@ export type {
 
 export { logger, setLoggerSink, type LoggerSink } from "./logger.js";
 export { parseProtoContent, generateDefaultJson, generateMethodPath } from "./proto-parser.js";
+export { computeServicePath } from "./service-path.js";
 export { parseSdkDts } from "./sdk-parser.js";
 export { discoverServices } from "./discover-services.js";
 export { normalizeGrpcJsonBody, type GrpcJsonRequestType } from "./grpc-json.js";
