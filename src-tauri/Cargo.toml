@@ -1,6 +1,6 @@
 [package]
 name = "penguin"
-version = "1.11.6"
+version = "1.11.7"
 description = "gRPC/gRPC-Web API Client"
 authors = ["Penguin"]
 edition = "2021"
