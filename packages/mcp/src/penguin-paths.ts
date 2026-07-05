@@ -8,6 +8,7 @@ import {
   readdirSync,
   readFileSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -53,14 +54,24 @@ export function ensurePackageDir(protocol: Protocol): string {
     );
   }
 
+  // True mirror of ~/.npmrc, matching the Rust `mirror_npmrc` semantics:
+  // refresh when the global copy changes (registry settings now live in
+  // ~/.npmrc, so a copy-once snapshot would keep stale credentials), and
+  // drop the local snapshot when the global file is gone.
   const localNpmrc = join(dir, ".npmrc");
   const globalNpmrc = join(homedir(), ".npmrc");
-  if (!existsSync(localNpmrc) && existsSync(globalNpmrc)) {
-    try {
-      copyFileSync(globalNpmrc, localNpmrc);
-    } catch {
-      // Non-fatal: the install will use the global config directly.
+  try {
+    if (existsSync(globalNpmrc)) {
+      const globalContent = readFileSync(globalNpmrc);
+      const localContent = existsSync(localNpmrc) ? readFileSync(localNpmrc) : null;
+      if (localContent === null || !globalContent.equals(localContent)) {
+        copyFileSync(globalNpmrc, localNpmrc);
+      }
+    } else if (existsSync(localNpmrc)) {
+      unlinkSync(localNpmrc);
     }
+  } catch {
+    // Non-fatal: the install will use the global config directly.
   }
 
   return dir;

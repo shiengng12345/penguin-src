@@ -1,13 +1,12 @@
-use crate::packages::{ensure_packages_dir, penguin_packages_dir};
+use crate::packages::ensure_packages_dir;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use serde::Serialize;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const REGISTRY_AUTH_SUFFIX: &str = ":_auth=";
 const REGISTRY_PROTOCOLS: [&str; 3] = ["grpc-web", "grpc", "sdk"];
-const REGISTRY_STATUS_PROTOCOL: &str = "grpc-web";
 const REGISTRY_NPMRC_FILE: &str = ".npmrc";
 const REGISTRY_NPMRC_TMP_FILE: &str = ".npmrc.tmp";
 const REGISTRY_AUTH_SEPARATOR: &str = ":";
@@ -20,7 +19,7 @@ const REGISTRY_INVALID_CREDENTIAL_MESSAGE: &str = "用户名/密码不能包含 
 const REGISTRY_EMPTY_URL_MESSAGE: &str = "请输入 Registry URL";
 const REGISTRY_INVALID_URL_MESSAGE: &str = "Registry URL 必须以 http:// 或 https:// 开头";
 const REGISTRY_WRITE_SUCCESS_MESSAGE: &str =
-    "已保存（已更新 grpc-web / grpc / sdk 三个目录的 .npmrc）";
+    "已保存到 ~/.npmrc（并同步 grpc-web / grpc / sdk 三个目录）";
 const REGISTRY_HTTP_PREFIX: &str = "http://";
 const REGISTRY_HTTPS_PREFIX: &str = "https://";
 const REGISTRY_URL_TRAILING_SLASH: char = '/';
@@ -154,23 +153,43 @@ fn read_optional_registry_npmrc(path: &Path) -> Result<String, String> {
     }
 }
 
-fn write_registry_npmrc_for_protocol(
-    protocol: &str,
+// 业务原因：registry 配置必须写进「全局」~/.npmrc 而不是 ~/.penguin/<protocol>/.npmrc。
+// 每次安装前 mirror_npmrc 都会用 ~/.npmrc 覆盖（或删除）各协议目录的本地 .npmrc；
+// 配置只写本地的话，下一次安装就会被抹掉，npm 回落到公网 registry 导致 E404。
+fn write_registry_npmrc_into(
+    npmrc_path: &Path,
     auth_key: &str,
     auth_line: &str,
     scope_lines: &[String; 2],
 ) -> Result<(), String> {
     eprintln!(
-        "INFO write_registry_npmrc_for_protocol - entry protocol={}",
-        protocol
+        "INFO write_registry_npmrc_into - entry path={}",
+        npmrc_path.display()
     );
-    let dir = ensure_packages_dir(protocol.to_string())?;
-    let dir_path = PathBuf::from(dir);
-    let npmrc_path = dir_path.join(REGISTRY_NPMRC_FILE);
+    let dir_path = npmrc_path
+        .parent()
+        .ok_or_else(|| format!("npmrc 路径没有父目录: {}", npmrc_path.display()))?;
     let tmp_path = dir_path.join(REGISTRY_NPMRC_TMP_FILE);
-    let content = read_optional_registry_npmrc(&npmrc_path)?;
+    let content = read_optional_registry_npmrc(npmrc_path)?;
     let mut auth_replaced = false;
     let mut lines: Vec<String> = Vec::new();
+
+    // 业务原因：换 Registry URL 后，旧 Nexus 主机的 _auth 行不能留在 ~/.npmrc 里
+    // （这是用户全局文件，遗留凭证会一直随请求发给旧主机）。只删「旧 @snsoft scope
+    // 行指向的主机」的 auth 行，用户其他工具（如 GitHub Packages）的 auth 行不动。
+    let stale_auth_keys: Vec<String> = content
+        .lines()
+        .filter_map(|line| {
+            let stale_main = line
+                .strip_prefix(REGISTRY_SNSOFT_SCOPE_PREFIX)
+                .filter(|_| line != scope_lines[0]);
+            let stale_dev = line
+                .strip_prefix(REGISTRY_SNSOFT_DEV_SCOPE_PREFIX)
+                .filter(|_| line != scope_lines[1]);
+            stale_main.or(stale_dev)
+        })
+        .map(derive_registry_auth_key)
+        .collect();
 
     for line in content.lines() {
         let is_auth_line = line.starts_with(auth_key);
@@ -179,22 +198,23 @@ fn write_registry_npmrc_for_protocol(
         let is_stale_snsoft_dev_scope_line =
             line.starts_with(REGISTRY_SNSOFT_DEV_SCOPE_PREFIX) && line != scope_lines[1];
         let is_stale_scope_line = is_stale_snsoft_scope_line || is_stale_snsoft_dev_scope_line;
+        let is_stale_auth_line =
+            !is_auth_line && stale_auth_keys.iter().any(|key| line.starts_with(key.as_str()));
         // 业务原因：Sonatype token 轮换后必须覆盖旧 _auth 行，避免 npm 继续用失效凭证。
         if is_auth_line {
-            eprintln!(
-                "WARN write_registry_npmrc_for_protocol - 替换旧 registry auth protocol={}",
-                protocol
-            );
+            eprintln!("WARN write_registry_npmrc_into - 替换旧 registry auth");
             lines.push(auth_line.to_string());
             auth_replaced = true;
             continue;
         }
         // 业务原因：用户改了 Registry URL 后，旧的 @snsoft scope 行还指向旧 URL，会导致 npm 路由错误，必须丢弃。
         if is_stale_scope_line {
-            eprintln!(
-                "WARN write_registry_npmrc_for_protocol - 丢弃旧 scope 行 protocol={}",
-                protocol
-            );
+            eprintln!("WARN write_registry_npmrc_into - 丢弃旧 scope 行");
+            continue;
+        }
+        // 业务原因：旧 Nexus 的 _auth 行随 scope 一起丢弃，避免失效凭证残留在用户全局 .npmrc。
+        if is_stale_auth_line {
+            eprintln!("WARN write_registry_npmrc_into - 丢弃旧 registry auth 行");
             continue;
         }
         lines.push(line.to_string());
@@ -203,10 +223,7 @@ fn write_registry_npmrc_for_protocol(
     let auth_line_is_missing = !auth_replaced;
     // 业务原因：缺少 registry auth 行时必须补上，否则安装内部包仍会 401。
     if auth_line_is_missing {
-        eprintln!(
-            "WARN write_registry_npmrc_for_protocol - 追加 registry auth protocol={}",
-            protocol
-        );
+        eprintln!("WARN write_registry_npmrc_into - 追加 registry auth");
         lines.push(auth_line.to_string());
     }
 
@@ -215,20 +232,17 @@ fn write_registry_npmrc_for_protocol(
         let scope_line_is_missing = !scope_line_exists;
         // 业务原因：内部包作用域必须显式指向 Nexus，避免 npm 走默认公网 registry。
         if scope_line_is_missing {
-            eprintln!(
-                "WARN write_registry_npmrc_for_protocol - 补齐 scope registry protocol={}",
-                protocol
-            );
+            eprintln!("WARN write_registry_npmrc_into - 补齐 scope registry");
             lines.insert(0, scope_line.to_string());
         }
     }
 
     let output = format!("{}\n", lines.join("\n"));
     fs::write(&tmp_path, output).map_err(|error| error.to_string())?;
-    fs::rename(&tmp_path, &npmrc_path).map_err(|error| error.to_string())?;
+    fs::rename(&tmp_path, npmrc_path).map_err(|error| error.to_string())?;
     eprintln!(
-        "INFO write_registry_npmrc_for_protocol - exit protocol={}",
-        protocol
+        "INFO write_registry_npmrc_into - exit path={}",
+        npmrc_path.display()
     );
     Ok(())
 }
@@ -298,16 +312,23 @@ pub(crate) fn write_registry_npmrc(
     let scope_lines = derive_registry_scope_lines(&normalized_url);
     let auth_value = encode_registry_auth_value(&username, &password);
     let auth_line = format!("{auth_key}{auth_value}");
-    let mut errors: Vec<String> = Vec::new();
 
+    // 业务原因：~/.npmrc 是唯一事实来源——mirror_npmrc 在每次安装前都会用它
+    // 覆盖各协议目录的 .npmrc，配置只有写在这里才能存活到下一次安装。
+    let home = dirs::home_dir().ok_or("无法定位用户主目录")?;
+    let global_npmrc = home.join(REGISTRY_NPMRC_FILE);
+    write_registry_npmrc_into(&global_npmrc, &auth_key, &auth_line, &scope_lines)?;
+
+    let mut errors: Vec<String> = Vec::new();
     for protocol in REGISTRY_PROTOCOLS {
-        match write_registry_npmrc_for_protocol(protocol, &auth_key, &auth_line, &scope_lines) {
-            Ok(()) => {
-                eprintln!("INFO write_registry_npmrc - protocol saved {}", protocol);
+        // ensure_packages_dir 会把刚写好的 ~/.npmrc 镜像进协议目录，让配置立即生效。
+        match ensure_packages_dir(protocol.to_string()) {
+            Ok(_dir) => {
+                eprintln!("INFO write_registry_npmrc - protocol synced {}", protocol);
             }
             Err(error) => {
                 eprintln!(
-                    "ERROR write_registry_npmrc - protocol failed {} error={}",
+                    "ERROR write_registry_npmrc - protocol sync failed {} error={}",
                     protocol, error
                 );
                 errors.push(format!("{protocol}: {error}"));
@@ -316,7 +337,7 @@ pub(crate) fn write_registry_npmrc(
     }
 
     let has_errors = !errors.is_empty();
-    // 业务原因：任一协议目录写入失败都会导致安装链路仍可能 401，必须把失败明细返回给 UI。
+    // 业务原因：任一协议目录同步失败都会导致安装链路仍可能 401，必须把失败明细返回给 UI。
     if has_errors {
         let joined_errors = errors.join(REGISTRY_ERROR_SEPARATOR);
         eprintln!(
@@ -332,17 +353,15 @@ pub(crate) fn write_registry_npmrc(
 
 fn read_registry_npmrc_status_inner() -> ConfiguredStatus {
     eprintln!("INFO read_registry_npmrc_status_inner - entry");
-    let dir = match penguin_packages_dir(REGISTRY_STATUS_PROTOCOL) {
-        Ok(dir) => dir,
-        Err(error) => {
-            eprintln!(
-                "WARN read_registry_npmrc_status_inner - 无法定位目录 error={}",
-                error
-            );
+    // 业务原因：配置的事实来源是 ~/.npmrc（协议目录里的只是镜像副本），状态必须从源头读。
+    let home = match dirs::home_dir() {
+        Some(home) => home,
+        None => {
+            eprintln!("WARN read_registry_npmrc_status_inner - 无法定位用户主目录");
             return registry_unconfigured_status();
         }
     };
-    let npmrc_path = dir.join(REGISTRY_NPMRC_FILE);
+    let npmrc_path = home.join(REGISTRY_NPMRC_FILE);
     let content = match fs::read_to_string(&npmrc_path) {
         Ok(content) => content,
         Err(error) => {
@@ -492,6 +511,107 @@ mod registry_auth_tests {
         let line = "@snsoft:registry=http://sonatype.client88.me/repository/npm_hosted/";
         let url = derive_registry_url_from_auth_line(line);
         assert!(url.is_none());
+    }
+
+    // Regression test for the adrianchong E404: registry settings used to be
+    // written ONLY into ~/.penguin/<protocol>/.npmrc, which mirror_npmrc
+    // clobbers (or deletes) from ~/.npmrc on every install. The fix writes
+    // settings into the GLOBAL npmrc so the mirror propagates them instead
+    // of wiping them.
+    #[test]
+    fn write_into_global_then_mirror_preserves_registry_config() {
+        let dir = registry_scratch_dir("survive-mirror");
+        let global = dir.join("home.npmrc");
+        let local = dir.join("local.npmrc");
+        let url = "http://nexus.example.com/repo/";
+        let auth_key = derive_registry_auth_key(url);
+        let auth_line = format!(
+            "{auth_key}{}",
+            encode_registry_auth_value(TEST_USERNAME, TEST_PASSWORD)
+        );
+        let scope_lines = derive_registry_scope_lines(url);
+
+        write_registry_npmrc_into(&global, &auth_key, &auth_line, &scope_lines)
+            .expect("write into global npmrc");
+        crate::packages::mirror_npmrc(&global, &local);
+
+        let local_content = fs::read_to_string(&local).expect("local npmrc after mirror");
+        assert!(
+            local_content.contains("@snsoft:registry=http://nexus.example.com/repo/"),
+            "scope line lost after mirror: {local_content:?}"
+        );
+        assert!(
+            local_content.contains(&auth_line),
+            "auth line lost after mirror: {local_content:?}"
+        );
+    }
+
+    #[test]
+    fn write_into_creates_file_when_missing() {
+        let dir = registry_scratch_dir("create");
+        let npmrc = dir.join("home.npmrc");
+        let url = "http://nexus.example.com/repo/";
+        let auth_key = derive_registry_auth_key(url);
+        let auth_line = format!(
+            "{auth_key}{}",
+            encode_registry_auth_value(TEST_USERNAME, TEST_PASSWORD)
+        );
+        let scope_lines = derive_registry_scope_lines(url);
+
+        write_registry_npmrc_into(&npmrc, &auth_key, &auth_line, &scope_lines)
+            .expect("write into fresh npmrc");
+
+        let content = fs::read_to_string(&npmrc).expect("npmrc created");
+        assert!(content.contains(&scope_lines[0]), "missing scope: {content:?}");
+        assert!(content.contains(&scope_lines[1]), "missing dev scope: {content:?}");
+        assert!(content.contains(&auth_line), "missing auth: {content:?}");
+    }
+
+    #[test]
+    fn write_into_replaces_stale_lines_and_keeps_unrelated_ones() {
+        let dir = registry_scratch_dir("merge");
+        let npmrc = dir.join("home.npmrc");
+        fs::write(
+            &npmrc,
+            "registry=https://registry.npmjs.org/\n\
+             @snsoft:registry=http://old.example.com/repo/\n\
+             @snsoft-dev:registry=http://old.example.com/repo/\n\
+             //old.example.com/repo/:_auth=b2xkOm9sZA==\n",
+        )
+        .unwrap();
+        let url = "http://new.example.com/repo/";
+        let auth_key = derive_registry_auth_key(url);
+        let auth_line = format!(
+            "{auth_key}{}",
+            encode_registry_auth_value(TEST_USERNAME, TEST_PASSWORD)
+        );
+        let scope_lines = derive_registry_scope_lines(url);
+
+        write_registry_npmrc_into(&npmrc, &auth_key, &auth_line, &scope_lines)
+            .expect("merge into existing npmrc");
+
+        let content = fs::read_to_string(&npmrc).unwrap();
+        assert!(
+            content.contains("registry=https://registry.npmjs.org/"),
+            "unrelated line dropped: {content:?}"
+        );
+        assert!(
+            !content.contains("old.example.com"),
+            "stale scope line survived: {content:?}"
+        );
+        assert!(content.contains(&scope_lines[0]), "missing scope: {content:?}");
+        assert!(content.contains(&auth_line), "missing auth: {content:?}");
+    }
+
+    fn registry_scratch_dir(label: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("penguin-registry-{label}-{pid}-{n}"));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
     }
 
     #[test]
