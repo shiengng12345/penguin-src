@@ -147,9 +147,13 @@ jobs:
       # (shiengng12345/penguin) so installed apps can fetch updates while the
       # source repo stays private. RELEASES_TOKEN is a fine-grained PAT with
       # contents:write on that repo — the default GITHUB_TOKEN cannot cross repos.
+      # NOTE: action-gh-release v2's `token` input defaults to github.token,
+      # and a non-empty input overrides env.GITHUB_TOKEN — so the PAT must be
+      # passed via `with: token`, NOT env, or the cross-repo publish 403s.
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          token: ${{ secrets.RELEASES_TOKEN }}
           repository: shiengng12345/penguin
           draft: false
           tag_name: ${{ github.ref_name }}
@@ -161,5 +165,3 @@ jobs:
             **/*.app.tar.gz
             **/*.app.tar.gz.sig
             latest.json
-        env:
-          GITHUB_TOKEN: ${{ secrets.RELEASES_TOKEN }}
