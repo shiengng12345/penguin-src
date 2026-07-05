@@ -1,11 +1,7 @@
 import ReactDOM from "react-dom/client";
-import { invoke } from "@tauri-apps/api/core";
 import "./index.css";
-import pkg from "../package.json";
-import { getPersistedValue, hydratePersistedValues } from "./lib/app-persistence";
-import { getAppValueFromDatabase, setAppValueInDatabase } from "./lib/penguin-db";
+import { hydratePersistedValues } from "./lib/app-persistence";
 import { installErrorLogSink } from "./lib/error-log-sink";
-import { APP_VALUE_KEYS } from "./lib/persistence-keys";
 // IMPORTANT: do NOT statically `import App from "./App"` here. App's
 // transitive import graph includes src/lib/store.ts, whose Zustand
 // initializer SYNCHRONOUSLY reads getPersistedValue(devModeEnabled) at
@@ -16,25 +12,13 @@ import { APP_VALUE_KEYS } from "./lib/persistence-keys";
 // the in-memory flags stay false → Vault/Docs/REST/Home look locked.
 // Dynamic-importing App AFTER hydration restores the ordering contract.
 
-const APP_VERSION = pkg.version;
-const CACHE_VERSION_KEY = APP_VALUE_KEYS.cacheVersion;
-
-// Version sync no longer blocks first paint — it just clears outdated package
-// caches when the app version bumps. Running this in parallel with hydration
-// (and AFTER render starts) shaves 50-100ms off cold start. The clear itself
-// is fire-and-forget — the package list refreshes automatically.
-function syncPackageCacheVersionAsync(): void {
-  void (async () => {
-    const lastVersion =
-      getPersistedValue(CACHE_VERSION_KEY) ??
-      await getAppValueFromDatabase(CACHE_VERSION_KEY);
-    if (lastVersion === APP_VERSION) return;
-    const persisted = await setAppValueInDatabase(CACHE_VERSION_KEY, APP_VERSION);
-    if (persisted) {
-      invoke("clear_all_packages").catch(() => {});
-    }
-  })();
-}
+// NOTE: installed packages (~/.penguin/*/node_modules) deliberately survive
+// app updates. They are standard npm installs read at runtime — user data,
+// not an app-version-derived cache. A version-triggered package wipe used to
+// live here and forced everyone to reinstall every package (with registry
+// auth) after every release. Manual clearing stays available in Settings; a
+// future version that truly needs a wipe should ship a one-shot targeted
+// migration instead.
 
 // Hash-routed mini-apps (popovers spawned in their own Tauri window).
 // Each runs in a fresh OS window with the same Vite bundle, so we
@@ -70,7 +54,6 @@ async function bootstrap(): Promise<void> {
   // the SQLite error_log table BEFORE App mounts — otherwise the
   // earliest crashes / warnings during boot escape the dialog.
   installErrorLogSink();
-  syncPackageCacheVersionAsync();
   const { default: App } = await import("./App");
   const { ErrorBoundary } = await import("./components/error-log/ErrorBoundary");
 

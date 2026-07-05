@@ -10,7 +10,6 @@ export const APP_VALUE_KEYS = {
   maxHistory: "penguin-max-history",
   savedRequests: "penguin-saved-requests",
   defaultHeaders: "penguin-default-headers",
-  cacheVersion: "penguin-cache-version",
   remoteConfigCache: "penguin-remote-config-cache",
   remoteConfigLastPulledAt: "penguin-remote-config-last-pulled-at",
   remoteConfigSource: "penguin-remote-config-source",

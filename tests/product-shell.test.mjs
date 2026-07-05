@@ -92,11 +92,12 @@ test("desktop persistence has SQLite commands for app state and saved requests",
   assert.match(dbBridgeSource, /invoke<SavedRequest\[\]>\("db_list_saved_requests"/);
 });
 
-test("version cache uses SQLite app values", async () => {
+test("app bootstrap persists via SQLite only — no localStorage", async () => {
+  // The version-cache reads/writes (getAppValueFromDatabase /
+  // setAppValueInDatabase) left main.tsx together with the update-time
+  // package wipe; see app-update-keeps-packages.test.mjs.
   const mainSource = await readFile(new URL("../src/main.tsx", import.meta.url), "utf8");
 
-  assert.match(mainSource, /getAppValueFromDatabase/);
-  assert.match(mainSource, /setAppValueInDatabase/);
   assert.doesNotMatch(mainSource, /localStorage/);
 });
 
