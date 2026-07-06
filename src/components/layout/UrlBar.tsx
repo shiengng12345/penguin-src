@@ -4,7 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Send, Globe, Server, RotateCcw, Pencil } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
-import { cn } from "@/lib/utils";
+import { cn, ensureProtocol } from "@/lib/utils";
 import { REST_METHODS, toRestMethod } from "@/lib/rest";
 import { computeServicePath } from "@penguin/core";
 
@@ -22,6 +22,14 @@ export function UrlBar({ resolvedUrl }: UrlBarProps) {
   const tab = useActiveTab();
 
   if (!tab) return null;
+
+  // Resolve protocol immediately as soon as the value looks URL-like
+  // (contains a dot, no existing protocol, not a {{VAR}} template).
+  const maybeEnsureProtocol = (url: string): string => {
+    if (tab.protocolTab !== "grpc-web" && tab.protocolTab !== "sdk") return url;
+    if (!url.includes(".")) return url;
+    return ensureProtocol(url);
+  };
 
   const autoPath = tab.selectedMethod ? computeServicePath(tab.selectedMethod.fullName) : null;
   const effectivePath = tab.pathOverride ?? autoPath;
@@ -58,7 +66,12 @@ export function UrlBar({ resolvedUrl }: UrlBarProps) {
 
         <EnvInput
           value={tab.targetUrl}
-          onChange={(url) => updateActiveTab({ targetUrl: url })}
+          onChange={(url) => updateActiveTab({ targetUrl: maybeEnsureProtocol(url) })}
+          onBlur={() => {
+            if (tab.protocolTab !== "grpc-web" && tab.protocolTab !== "sdk") return;
+            const normalized = ensureProtocol(tab.targetUrl);
+            if (normalized !== tab.targetUrl) updateActiveTab({ targetUrl: normalized });
+          }}
           placeholder={isRest
             ? "https://api.example.com/v1/users or {{URL}}/v1/users"
             : "Enter URL — e.g. {{ URL }} or http://localhost:8080"}

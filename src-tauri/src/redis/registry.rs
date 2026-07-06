@@ -31,9 +31,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use tauri::{AppHandle, Emitter, Runtime, State};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 
 /// One live connection. Holds the fred client (cheap to clone out) plus the
@@ -43,12 +43,26 @@ pub struct ConnectionInstance {
     pub label: String,
     pub host: String,
     pub port: u16,
+    /// Effective dial address for the bypass connections (MONITOR / Pub-Sub).
+    /// Differs from `host`/`port` when an SSH tunnel rewrites the target —
+    /// dialing the raw address would bypass the tunnel and hang.
+    pub bypass_host: String,
+    pub bypass_port: u16,
     pub client: RedisClient,
     pub config: RedisConfig,
-    /// Per-connection MONITOR cancellation. `None` = not monitoring.
-    pub monitor_cancel: RwLock<Option<CancellationToken>>,
+    /// Per-connection MONITOR cancellation. `None` = not monitoring. Arc so
+    /// the stream task can identity-check (`Arc::ptr_eq`) before clearing —
+    /// a stop+start pair may already have installed a fresh token.
+    pub monitor_cancel: RwLock<Option<Arc<CancellationToken>>>,
     /// Per-connection Pub/Sub subscription cancellation. `None` = not subscribed.
-    pub pubsub_cancel: RwLock<Option<CancellationToken>>,
+    pub pubsub_cancel: RwLock<Option<Arc<CancellationToken>>>,
+    /// Serializes SELECT+command sequences on the shared fred connection so
+    /// two tabs on different dbs can't interleave and land on the wrong db.
+    /// Held per command batch (SELECT + the command), not per long scan.
+    pub op_lock: Arc<Mutex<()>>,
+    /// Live SSH tunnel backing this connection (`None` = direct). Must be
+    /// shut down wherever the instance is removed, or the ssh process leaks.
+    pub ssh_tunnel: Mutex<Option<super::ssh_tunnel::SshTunnel>>,
 }
 
 /// Multi-connection registry — replaces the single-connection global model.
@@ -63,6 +77,12 @@ impl RedisRegistry {
     /// Clone the fred client for a connection (used by the keys module).
     pub async fn client_for(&self, id: &str) -> Result<RedisClient, String> {
         self.get(id).await.map(|instance| instance.client.clone())
+    }
+
+    /// Arc out the full instance — for db-routed commands that must hold the
+    /// per-connection `op_lock` across SELECT + command.
+    pub async fn instance_for(&self, id: &str) -> Result<Arc<ConnectionInstance>, String> {
+        self.get(id).await
     }
 
     async fn get(&self, id: &str) -> Result<Arc<ConnectionInstance>, String> {
@@ -119,6 +139,25 @@ struct ClusterOpt {
 }
 
 #[derive(Default, serde::Deserialize)]
+struct SshOpt {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    host: String,
+    #[serde(default)]
+    port: u16,
+    #[serde(default)]
+    username: String,
+    /// "password" | "key"
+    #[serde(default)]
+    auth_type: String,
+    #[serde(default)]
+    password: String,
+    #[serde(default)]
+    key_path: String,
+}
+
+#[derive(Default, serde::Deserialize)]
 struct AdvancedConfig {
     #[serde(default)]
     deployment: String,
@@ -128,6 +167,8 @@ struct AdvancedConfig {
     sentinel: SentinelOpt,
     #[serde(default)]
     cluster: ClusterOpt,
+    #[serde(default)]
+    ssh: SshOpt,
 }
 
 /// Build a fred RedisConfig from the stored fields + advanced `config_json`.
@@ -269,12 +310,17 @@ pub async fn redis_reg_connect(
             let instance = Arc::new(ConnectionInstance {
                 id: id.clone(),
                 label,
+                // Legacy ad-hoc connect has no SSH config — bypass = raw address.
+                bypass_host: host.clone(),
+                bypass_port: port,
                 host,
                 port,
                 client,
                 config,
                 monitor_cancel: RwLock::new(None),
                 pubsub_cancel: RwLock::new(None),
+                op_lock: Arc::new(Mutex::new(())),
+                ssh_tunnel: Mutex::new(None),
             });
             registry
                 .instances
@@ -330,7 +376,11 @@ pub async fn redis_reg_disconnect(
             if let Some(token) = inst.monitor_cancel.write().await.take() {
                 token.cancel();
             }
+            if let Some(token) = inst.pubsub_cancel.write().await.take() {
+                token.cancel();
+            }
             let _ = inst.client.quit().await;
+            shutdown_tunnel(inst.ssh_tunnel.lock().await.take()).await;
             Ok(())
         }
         None => {
@@ -452,7 +502,11 @@ pub async fn redis_conn_delete(
         if let Some(token) = instance.monitor_cancel.write().await.take() {
             token.cancel();
         }
+        if let Some(token) = instance.pubsub_cancel.write().await.take() {
+            token.cancel();
+        }
         let _ = instance.client.quit().await;
+        shutdown_tunnel(instance.ssh_tunnel.lock().await.take()).await;
     }
     db_delete_connection(&id)
 }
@@ -465,16 +519,65 @@ pub async fn redis_conn_open(
     let full = db_get_connection_full(&id)?;
     let password = db_load_connection_password(&id)?.unwrap_or_default();
 
-    let config = build_redis_config(
-        &full.host,
-        full.port,
+    let (host, port, tunnel) =
+        resolve_ssh_tunnel(&full.host, full.port, &full.config_json).await?;
+    let config = match build_redis_config(
+        &host,
+        port,
         full.db,
         &full.username,
         &password,
         &full.config_json,
-    )?;
-    connect_and_register(&registry, full.id.clone(), full.label, full.host.clone(), full.port, config)
-        .await
+    ) {
+        Ok(config) => config,
+        Err(err) => {
+            shutdown_tunnel(tunnel).await;
+            return Err(err);
+        }
+    };
+    connect_and_register(
+        &registry,
+        full.id.clone(),
+        full.label,
+        full.host.clone(),
+        full.port,
+        host,
+        port,
+        config,
+        tunnel,
+    )
+    .await
+}
+
+/// If the connection's advanced config enables SSH, start a tunnel and return
+/// the rewritten (host, port) plus the live tunnel handle. The caller owns the
+/// tunnel and must shut it down when the connection closes or fails to open.
+async fn resolve_ssh_tunnel(
+    host: &str,
+    port: u16,
+    config_json: &str,
+) -> Result<(String, u16, Option<super::ssh_tunnel::SshTunnel>), String> {
+    let adv = serde_json::from_str::<AdvancedConfig>(config_json).unwrap_or_default();
+    if !adv.ssh.enabled || adv.ssh.host.is_empty() {
+        return Ok((host.to_string(), port, None));
+    }
+    let ssh_cfg = super::ssh_tunnel::SshConfig {
+        host: adv.ssh.host,
+        port: adv.ssh.port,
+        username: adv.ssh.username,
+        auth_type: adv.ssh.auth_type,
+        password: adv.ssh.password,
+        key_path: adv.ssh.key_path,
+    };
+    let tunnel = super::ssh_tunnel::start_tunnel(&ssh_cfg, host, port).await?;
+    let local_port = tunnel.local_port;
+    Ok(("127.0.0.1".to_string(), local_port, Some(tunnel)))
+}
+
+async fn shutdown_tunnel(tunnel: Option<super::ssh_tunnel::SshTunnel>) {
+    if let Some(t) = tunnel {
+        t.shutdown().await;
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -492,42 +595,52 @@ pub struct TestConnectionInput {
 pub async fn redis_conn_test(
     input: TestConnectionInput,
 ) -> Result<RegistryConnectResult, String> {
-    let config = build_redis_config(
-        &input.host,
-        input.port,
-        input.db,
-        &input.username,
-        &input.password,
-        &input.config_json,
-    )?;
-    let client = Builder::from_config(config)
-        .build()
-        .map_err(|e| e.to_string())?;
-    let t0 = Instant::now();
-    if let Err(err) = client.init().await {
-        return Ok(RegistryConnectResult {
-            ok: false,
-            id: String::new(),
-            latency_ms: 0,
-            error: Some(err.to_string()),
-        });
+    // WHY: test must exercise the same SSH path as open — a tunnel-only Redis
+    // would otherwise fail "Test" yet succeed "Open". The throwaway tunnel is
+    // torn down after the ping regardless of outcome.
+    let (host, port, tunnel) =
+        resolve_ssh_tunnel(&input.host, input.port, &input.config_json).await?;
+    let outcome = async {
+        let config = build_redis_config(
+            &host,
+            port,
+            input.db,
+            &input.username,
+            &input.password,
+            &input.config_json,
+        )?;
+        let client = Builder::from_config(config)
+            .build()
+            .map_err(|e| e.to_string())?;
+        let t0 = Instant::now();
+        if let Err(err) = client.init().await {
+            return Ok(RegistryConnectResult {
+                ok: false,
+                id: String::new(),
+                latency_ms: 0,
+                error: Some(err.to_string()),
+            });
+        }
+        let result = match client.ping::<()>().await {
+            Ok(_) => RegistryConnectResult {
+                ok: true,
+                id: String::new(),
+                latency_ms: t0.elapsed().as_millis() as u64,
+                error: None,
+            },
+            Err(err) => RegistryConnectResult {
+                ok: false,
+                id: String::new(),
+                latency_ms: 0,
+                error: Some(err.to_string()),
+            },
+        };
+        let _ = client.quit().await;
+        Ok(result)
     }
-    let result = match client.ping::<()>().await {
-        Ok(_) => RegistryConnectResult {
-            ok: true,
-            id: String::new(),
-            latency_ms: t0.elapsed().as_millis() as u64,
-            error: None,
-        },
-        Err(err) => RegistryConnectResult {
-            ok: false,
-            id: String::new(),
-            latency_ms: 0,
-            error: Some(err.to_string()),
-        },
-    };
-    let _ = client.quit().await;
-    Ok(result)
+    .await;
+    shutdown_tunnel(tunnel).await;
+    outcome
 }
 
 /// Shared connect-and-insert path used by `redis_conn_open`.
@@ -537,13 +650,25 @@ async fn connect_and_register(
     label: String,
     host: String,
     port: u16,
+    // Effective dial address (tunnel-rewritten when SSH is on) — what the
+    // MONITOR / Pub-Sub bypass connections must use instead of host/port.
+    bypass_host: String,
+    bypass_port: u16,
     config: RedisConfig,
+    tunnel: Option<super::ssh_tunnel::SshTunnel>,
 ) -> Result<RegistryConnectResult, String> {
-    let client = Builder::from_config(config.clone())
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = match Builder::from_config(config.clone()).build() {
+        Ok(client) => client,
+        Err(err) => {
+            shutdown_tunnel(tunnel).await;
+            return Err(err.to_string());
+        }
+    };
     let t0 = Instant::now();
-    client.init().await.map_err(|e| e.to_string())?;
+    if let Err(err) = client.init().await {
+        shutdown_tunnel(tunnel).await;
+        return Err(err.to_string());
+    }
     match client.ping::<()>().await {
         Ok(_) => {
             let latency_ms = t0.elapsed().as_millis() as u64;
@@ -552,16 +677,32 @@ async fn connect_and_register(
                 label,
                 host,
                 port,
+                bypass_host,
+                bypass_port,
                 client,
                 config,
                 monitor_cancel: RwLock::new(None),
                 pubsub_cancel: RwLock::new(None),
+                op_lock: Arc::new(Mutex::new(())),
+                ssh_tunnel: Mutex::new(tunnel),
             });
-            registry
+            let previous = registry
                 .instances
                 .write()
                 .await
                 .insert(id.clone(), instance);
+            // WHY: re-opening an already-open id replaces the instance — quit
+            // the old client and kill its tunnel or the ssh process leaks.
+            if let Some(old) = previous {
+                if let Some(token) = old.monitor_cancel.write().await.take() {
+                    token.cancel();
+                }
+                if let Some(token) = old.pubsub_cancel.write().await.take() {
+                    token.cancel();
+                }
+                let _ = old.client.quit().await;
+                shutdown_tunnel(old.ssh_tunnel.lock().await.take()).await;
+            }
             Ok(RegistryConnectResult {
                 ok: true,
                 id,
@@ -571,6 +712,7 @@ async fn connect_and_register(
         }
         Err(err) => {
             let _ = client.quit().await;
+            shutdown_tunnel(tunnel).await;
             Ok(RegistryConnectResult {
                 ok: false,
                 id,
@@ -605,8 +747,9 @@ pub async fn redis_reg_dbsize(
 
     let t0 = Instant::now();
     // WHY: SELECT the requested db first — the db comes from the caller (tab),
-    // never from backend state. RedisClient is a single connection so SELECT
-    // reliably pins the subsequent DBSIZE to the same db.
+    // never from backend state. Hold the per-connection op lock across
+    // SELECT + DBSIZE so a concurrent request for another db can't interleave.
+    let _op_guard = instance.op_lock.lock().await;
     let select = CustomCommand::new_static("SELECT", ClusterHash::FirstKey, false);
     let _: RedisValue = client
         .custom(select, vec![db.to_string()])
@@ -647,6 +790,40 @@ pub async fn redis_reg_info(
 // Event name: `redis://monitor/{connectionId}` — payload is each command line.
 // ---------------------------------------------------------------------------
 
+/// Encode a command as a RESP array — inline commands break on passwords with
+/// spaces/quotes and can't carry binary-safe args.
+fn resp_command(parts: &[&str]) -> Vec<u8> {
+    let mut out = format!("*{}\r\n", parts.len()).into_bytes();
+    for part in parts {
+        out.extend_from_slice(format!("${}\r\n", part.len()).as_bytes());
+        out.extend_from_slice(part.as_bytes());
+        out.extend_from_slice(b"\r\n");
+    }
+    out
+}
+
+/// AUTH command for the bypass connections — includes the ACL username when
+/// the connection has one (plain `AUTH <pw>` gets WRONGPASS for ACL users).
+fn bypass_auth_command(config: &RedisConfig) -> Option<Vec<u8>> {
+    let password = config.password.as_deref()?;
+    Some(match config.username.as_deref() {
+        Some(user) if !user.is_empty() => resp_command(&["AUTH", user, password]),
+        _ => resp_command(&["AUTH", password]),
+    })
+}
+
+/// Clear a cancel slot IF it still holds `token` — a stop+start pair may have
+/// installed a fresh token that must not be wiped by the old stream's exit.
+async fn clear_own_token(
+    slot: &RwLock<Option<Arc<CancellationToken>>>,
+    token: &Arc<CancellationToken>,
+) {
+    let mut guard = slot.write().await;
+    if guard.as_ref().is_some_and(|t| Arc::ptr_eq(t, token)) {
+        *guard = None;
+    }
+}
+
 #[tauri::command]
 pub async fn redis_reg_monitor_start<R: Runtime>(
     id: String,
@@ -655,22 +832,24 @@ pub async fn redis_reg_monitor_start<R: Runtime>(
 ) -> Result<(), String> {
     let instance = registry.get(&id).await?;
 
-    // WHY: refuse a second MONITOR on the same connection — one stream per conn.
+    // WHY: refuse a second MONITOR on the same connection — one stream per
+    // conn. Check + install under ONE write lock so two concurrent starts
+    // can't both pass the check.
+    let token = Arc::new(CancellationToken::new());
     {
-        let guard = instance.monitor_cancel.read().await;
+        let mut guard = instance.monitor_cancel.write().await;
         if guard.is_some() {
             return Err("MONITOR already running on this connection".to_string());
         }
+        *guard = Some(token.clone());
     }
-
-    let token = CancellationToken::new();
-    *instance.monitor_cancel.write().await = Some(token.clone());
 
     // WHY: MONITOR locks its connection into a one-way stream, so it gets its OWN
     // raw-TCP bypass connection — the fred command pool stays free for CRUD.
-    let host = instance.host.clone();
-    let port = instance.port;
-    let password = instance.config.password.clone();
+    // Dial the bypass address: with SSH it is the local tunnel end, not the raw host.
+    let host = instance.bypass_host.clone();
+    let port = instance.bypass_port;
+    let auth = bypass_auth_command(&instance.config);
     let event = format!("redis://monitor/{id}");
 
     tokio::spawn(async move {
@@ -678,6 +857,7 @@ pub async fn redis_reg_monitor_start<R: Runtime>(
             Ok(stream) => stream,
             Err(err) => {
                 let _ = app.emit(&event, format!("MONITOR connect error: {err}"));
+                clear_own_token(&instance.monitor_cancel, &token).await;
                 return;
             }
         };
@@ -685,15 +865,16 @@ pub async fn redis_reg_monitor_start<R: Runtime>(
 
         // WHY: authenticate first when the server needs a password, else MONITOR
         // is rejected with NOAUTH.
-        if let Some(pw) = password {
-            let auth = format!("AUTH {pw}\r\n");
-            if let Err(err) = write_half.write_all(auth.as_bytes()).await {
+        if let Some(auth_cmd) = auth {
+            if let Err(err) = write_half.write_all(&auth_cmd).await {
                 let _ = app.emit(&event, format!("MONITOR auth error: {err}"));
+                clear_own_token(&instance.monitor_cancel, &token).await;
                 return;
             }
         }
-        if let Err(err) = write_half.write_all(b"MONITOR\r\n").await {
+        if let Err(err) = write_half.write_all(&resp_command(&["MONITOR"])).await {
             let _ = app.emit(&event, format!("MONITOR start error: {err}"));
+            clear_own_token(&instance.monitor_cancel, &token).await;
             return;
         }
 
@@ -722,6 +903,9 @@ pub async fn redis_reg_monitor_start<R: Runtime>(
                 }
             }
         }
+        // WHY: on natural exit (EOF / error) the slot must clear, or every
+        // future start is refused with "already running".
+        clear_own_token(&instance.monitor_cancel, &token).await;
     });
 
     Ok(())
@@ -741,9 +925,73 @@ pub async fn redis_reg_monitor_stop(
 
 // ---------------------------------------------------------------------------
 // Pub/Sub — dedicated raw-TCP subscriber connection; emits redis://pubsub/{id}
-// (Same bypass-connection pattern as MONITOR. Line-based parse assumes text
-// payloads — binary payloads with embedded CRLF are a later refinement.)
+// (Same bypass-connection pattern as MONITOR.)
 // ---------------------------------------------------------------------------
+
+/// Minimal RESP2 value — just enough shape for the pub/sub push frames.
+enum RespValue {
+    Simple(String),
+    Error(String),
+    Integer(i64),
+    Bulk(Option<String>),
+    Array(Vec<RespValue>),
+}
+
+impl RespValue {
+    fn as_text(&self) -> String {
+        match self {
+            RespValue::Simple(s) | RespValue::Error(s) => s.clone(),
+            RespValue::Integer(i) => i.to_string(),
+            RespValue::Bulk(Some(s)) => s.clone(),
+            _ => String::new(),
+        }
+    }
+}
+
+/// Read one full RESP value. Length-prefixed bulk strings are read with
+/// `read_exact`, so payloads that start with `*`/`$`/`:` or contain embedded
+/// newlines parse correctly (a line-based skip would misalign every frame after).
+async fn read_resp_value<R>(reader: &mut R) -> std::io::Result<RespValue>
+where
+    R: AsyncBufRead + Unpin + Send,
+{
+    let mut line = String::new();
+    if reader.read_line(&mut line).await? == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "connection closed",
+        ));
+    }
+    let line = line.trim_end_matches(['\r', '\n']);
+    let (kind, rest) = line.split_at(1.min(line.len()));
+    match kind {
+        "+" => Ok(RespValue::Simple(rest.to_string())),
+        "-" => Ok(RespValue::Error(rest.to_string())),
+        ":" => Ok(RespValue::Integer(rest.parse().unwrap_or(0))),
+        "$" => {
+            let len: i64 = rest.parse().unwrap_or(-1);
+            if len < 0 {
+                return Ok(RespValue::Bulk(None));
+            }
+            // payload + trailing CRLF
+            let mut buf = vec![0u8; len as usize + 2];
+            reader.read_exact(&mut buf).await?;
+            buf.truncate(len as usize);
+            Ok(RespValue::Bulk(Some(
+                String::from_utf8_lossy(&buf).to_string(),
+            )))
+        }
+        "*" => {
+            let count: i64 = rest.parse().unwrap_or(-1);
+            let mut items = Vec::new();
+            for _ in 0..count.max(0) {
+                items.push(Box::pin(read_resp_value(reader)).await?);
+            }
+            Ok(RespValue::Array(items))
+        }
+        _ => Ok(RespValue::Simple(line.to_string())),
+    }
+}
 
 #[tauri::command]
 pub async fn reg_pubsub_start<R: Runtime>(
@@ -753,80 +1001,85 @@ pub async fn reg_pubsub_start<R: Runtime>(
     registry: State<'_, RedisRegistry>,
 ) -> Result<(), String> {
     let instance = registry.get(&id).await?;
+    // WHY: check + install under one write lock (same race as MONITOR start).
+    let token = Arc::new(CancellationToken::new());
     {
-        let guard = instance.pubsub_cancel.read().await;
+        let mut guard = instance.pubsub_cancel.write().await;
         if guard.is_some() {
             return Err("已有订阅在运行".to_string());
         }
+        *guard = Some(token.clone());
     }
-    let token = CancellationToken::new();
-    *instance.pubsub_cancel.write().await = Some(token.clone());
 
-    let host = instance.host.clone();
-    let port = instance.port;
-    let password = instance.config.password.clone();
+    // Dial the bypass address: with SSH it is the local tunnel end.
+    let host = instance.bypass_host.clone();
+    let port = instance.bypass_port;
+    let auth = bypass_auth_command(&instance.config);
     let event = format!("redis://pubsub/{id}");
     let is_pattern = channel.contains('*');
 
     tokio::spawn(async move {
+        let cleanup = |i: Arc<ConnectionInstance>, t: Arc<CancellationToken>| async move {
+            clear_own_token(&i.pubsub_cancel, &t).await;
+        };
         let stream = match TcpStream::connect((host.as_str(), port)).await {
             Ok(stream) => stream,
             Err(err) => {
                 let _ = app.emit(&event, format!("订阅连接失败: {err}"));
+                cleanup(instance, token).await;
                 return;
             }
         };
         let (read_half, mut write_half) = stream.into_split();
-        if let Some(pw) = password {
-            let _ = write_half.write_all(format!("AUTH {pw}\r\n").as_bytes()).await;
+        if let Some(auth_cmd) = auth {
+            if let Err(err) = write_half.write_all(&auth_cmd).await {
+                let _ = app.emit(&event, format!("订阅认证失败: {err}"));
+                cleanup(instance, token).await;
+                return;
+            }
         }
         let sub_cmd = if is_pattern { "PSUBSCRIBE" } else { "SUBSCRIBE" };
         if let Err(err) = write_half
-            .write_all(format!("{sub_cmd} {channel}\r\n").as_bytes())
+            .write_all(&resp_command(&[sub_cmd, &channel]))
             .await
         {
             let _ = app.emit(&event, format!("订阅失败: {err}"));
+            cleanup(instance, token).await;
             return;
         }
 
         let mut reader = BufReader::new(read_half);
-        let mut line = String::new();
-        // WHY: collect RESP bulk-string data lines; skip *N / $N / :N markers.
-        let mut data: Vec<String> = Vec::new();
         loop {
-            line.clear();
             tokio::select! {
                 _ = token.cancelled() => break,
-                read = reader.read_line(&mut line) => match read {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        let trimmed = line.trim_end();
-                        if trimmed.starts_with('*') || trimmed.starts_with('$') || trimmed.starts_with(':') {
-                            continue;
-                        }
-                        data.push(trimmed.to_string());
-                        match data.first().map(|s| s.as_str()) {
-                            Some("message") if data.len() >= 3 => {
-                                let _ = app.emit(&event, format!("[{}] {}", data[1], data[2]));
-                                data.clear();
+                value = read_resp_value(&mut reader) => match value {
+                    Ok(RespValue::Error(err)) => {
+                        // AUTH / SUBSCRIBE rejection — surface it, then stop.
+                        let _ = app.emit(&event, format!("订阅错误: {err}"));
+                        break;
+                    }
+                    Ok(RespValue::Array(items)) => {
+                        let text = |i: usize| items.get(i).map(RespValue::as_text).unwrap_or_default();
+                        match text(0).as_str() {
+                            "message" if items.len() >= 3 => {
+                                let _ = app.emit(&event, format!("[{}] {}", text(1), text(2)));
                             }
-                            Some("pmessage") if data.len() >= 4 => {
-                                let _ = app.emit(&event, format!("[{}] {}", data[2], data[3]));
-                                data.clear();
+                            "pmessage" if items.len() >= 4 => {
+                                let _ = app.emit(&event, format!("[{}] {}", text(2), text(3)));
                             }
-                            Some("subscribe") | Some("psubscribe") if data.len() >= 2 => {
+                            "subscribe" | "psubscribe" => {
                                 let _ = app.emit(&event, format!("✅ 已订阅 {channel}"));
-                                data.clear();
                             }
-                            // WHY: safety reset so a malformed frame can't grow unbounded.
-                            _ if data.len() > 6 => data.clear(),
                             _ => {}
                         }
                     }
+                    // +OK from AUTH, integers, stray frames — ignore.
+                    Ok(_) => {}
                     Err(_) => break,
                 }
             }
         }
+        cleanup(instance, token).await;
     });
     Ok(())
 }
@@ -841,4 +1094,95 @@ pub async fn reg_pubsub_stop(
         token.cancel();
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ssh_config_absent_or_invalid_defaults_to_disabled() {
+        for json in ["{}", "", "not json", r#"{"deployment":"standalone"}"#] {
+            let adv = serde_json::from_str::<AdvancedConfig>(json).unwrap_or_default();
+            assert!(!adv.ssh.enabled, "json {json:?} should not enable ssh");
+        }
+    }
+
+    #[test]
+    fn ssh_config_round_trips_fields() {
+        let json = r#"{"ssh":{"enabled":true,"host":"jump.internal","port":2222,
+            "username":"deploy","auth_type":"key","key_path":"~/.ssh/id_ed25519"}}"#;
+        let adv = serde_json::from_str::<AdvancedConfig>(json).unwrap();
+        assert!(adv.ssh.enabled);
+        assert_eq!(adv.ssh.host, "jump.internal");
+        assert_eq!(adv.ssh.port, 2222);
+        assert_eq!(adv.ssh.username, "deploy");
+        assert_eq!(adv.ssh.auth_type, "key");
+        assert_eq!(adv.ssh.key_path, "~/.ssh/id_ed25519");
+    }
+
+    fn block_on<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
+    #[test]
+    fn resp_command_encodes_args_with_spaces_safely() {
+        let encoded = resp_command(&["AUTH", "user", "p w\"d"]);
+        assert_eq!(
+            String::from_utf8(encoded).unwrap(),
+            "*3\r\n$4\r\nAUTH\r\n$4\r\nuser\r\n$5\r\np w\"d\r\n"
+        );
+    }
+
+    #[test]
+    fn resp_parser_handles_payloads_that_look_like_protocol_markers() {
+        // A pubsub push whose payload starts with ':' and contains a newline —
+        // the old line-based skip misaligned every frame after this.
+        let frame = b"*3\r\n$7\r\nmessage\r\n$4\r\nnews\r\n$9\r\n:123\nline\r\n";
+        let value = block_on(async {
+            let mut reader = BufReader::new(&frame[..]);
+            read_resp_value(&mut reader).await.unwrap()
+        });
+        match value {
+            RespValue::Array(items) => {
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[0].as_text(), "message");
+                assert_eq!(items[1].as_text(), "news");
+                assert_eq!(items[2].as_text(), ":123\nline");
+            }
+            _ => panic!("expected array frame"),
+        }
+    }
+
+    #[test]
+    fn resp_parser_reads_consecutive_frames_without_desync() {
+        let frames = b"+OK\r\n*3\r\n$7\r\nmessage\r\n$2\r\nch\r\n$5\r\n*mark\r\n-ERR boom\r\n";
+        block_on(async {
+            let mut reader = BufReader::new(&frames[..]);
+            assert!(matches!(
+                read_resp_value(&mut reader).await.unwrap(),
+                RespValue::Simple(s) if s == "OK"
+            ));
+            match read_resp_value(&mut reader).await.unwrap() {
+                RespValue::Array(items) => assert_eq!(items[2].as_text(), "*mark"),
+                _ => panic!("expected array"),
+            }
+            assert!(matches!(
+                read_resp_value(&mut reader).await.unwrap(),
+                RespValue::Error(e) if e == "ERR boom"
+            ));
+        });
+    }
+
+    #[test]
+    fn ssh_config_tolerates_legacy_passphrase_field() {
+        // Old saved connections may still carry key_passphrase — serde must
+        // ignore it rather than fail the whole connection open.
+        let json = r#"{"ssh":{"enabled":true,"host":"j","key_passphrase":"x"}}"#;
+        let adv = serde_json::from_str::<AdvancedConfig>(json).unwrap();
+        assert!(adv.ssh.enabled);
+    }
 }

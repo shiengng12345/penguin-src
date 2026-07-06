@@ -8,6 +8,7 @@
 // Migration from blob → table happens at first-time entry to REST module
 // (DEC #198 — idempotent copy migration with version flag).
 
+import { invoke } from "@tauri-apps/api/core";
 import { logger } from "@/lib/logger";
 import { getPersistedValue, setPersistedValue } from "@/lib/app-persistence";
 import type {
@@ -80,14 +81,37 @@ export function deleteProject(payload: { id: string }): RestProject[] {
   // Cascade delete child environments / collections / requests / env vars.
   const projects = loadProjects().filter((p) => p.id !== payload.id);
   saveList(KEYS.projects, projects);
-  const envs = loadEnvironments().filter((e) => e.projectId !== payload.id);
+  const allEnvs = loadEnvironments();
+  const deletedEnvIds = new Set(
+    allEnvs.filter((e) => e.projectId === payload.id).map((e) => e.id),
+  );
+  const envs = allEnvs.filter((e) => e.projectId !== payload.id);
   saveList(KEYS.environments, envs);
-  const collections = loadCollections().filter((c) => c.projectId !== payload.id);
+  const allCollections = loadCollections();
+  const deletedCollectionIds = new Set(
+    allCollections.filter((c) => c.projectId === payload.id).map((c) => c.id),
+  );
+  const collections = allCollections.filter((c) => c.projectId !== payload.id);
   saveList(KEYS.collections, collections);
   const collectionIds = new Set(collections.map((c) => c.id));
   const requests = loadRequests().filter((r) => collectionIds.has(r.collectionId));
   saveList(KEYS.requests, requests);
+  // Env vars scoped to the deleted envs/collections would otherwise orphan
+  // forever in app_kv (only surviving scopes are ever rendered).
+  const envVars = loadEnvVars().filter(
+    (v) => !deletedEnvIds.has(v.scopeId) && !deletedCollectionIds.has(v.scopeId),
+  );
+  saveList(KEYS.envVars, envVars);
+  for (const collectionId of deletedCollectionIds) {
+    clearCollectionCookies(collectionId);
+  }
   return projects;
+}
+
+// Best-effort SQLite cookie cleanup — cookies are keyed by collection in the
+// backend store and nothing else deletes them when a collection goes away.
+function clearCollectionCookies(collectionId: string): void {
+  void invoke("rest_clear_cookies", { payload: { collectionId } }).catch(() => {});
 }
 
 // ---- Environments ----
@@ -124,6 +148,9 @@ export function deleteEnvironment(payload: { id: string }): RestEnvironment[] {
     c.envId === payload.id ? { ...c, envId: null } : c,
   );
   saveList(KEYS.collections, collections);
+  // Env-scoped vars die with the env — nothing can render them again.
+  const envVars = loadEnvVars().filter((v) => v.scopeId !== payload.id);
+  saveList(KEYS.envVars, envVars);
   return envs;
 }
 
@@ -167,6 +194,10 @@ export function deleteCollection(payload: { id: string }): RestCollection[] {
   saveList(KEYS.collections, collections);
   const requests = loadRequests().filter((r) => r.collectionId !== payload.id);
   saveList(KEYS.requests, requests);
+  // Collection-scoped vars + backend cookie rows die with the collection.
+  const envVars = loadEnvVars().filter((v) => v.scopeId !== payload.id);
+  saveList(KEYS.envVars, envVars);
+  clearCollectionCookies(payload.id);
   return collections;
 }
 

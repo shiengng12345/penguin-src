@@ -444,7 +444,13 @@ pub async fn redis_string_set(
     state: State<'_, RedisState>,
 ) -> Result<(), String> {
     with_client(&state, |c| async move {
-        let exp = ttl_secs.filter(|&t| t > 0).map(Expiration::EX);
+        // WHY: None = value-only edit → KEEPTTL preserves the existing expiry
+        // (a bare SET silently wipes it); non-positive TTL = explicit clear.
+        let exp = match ttl_secs {
+            Some(t) if t > 0 => Some(Expiration::EX(t)),
+            Some(_) => None,
+            None => Some(Expiration::KEEPTTL),
+        };
         c.set::<(), _, _>(&key, value, exp, None, false)
             .await
             .map_err(|e| e.to_string())

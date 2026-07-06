@@ -171,14 +171,35 @@ pub async fn reg_cli_exec(
     }
 }
 
+/// Client + held per-connection op lock. The lock spans SELECT and every
+/// command the handler runs, so concurrent requests for different dbs can't
+/// interleave on the shared connection and land on the wrong db. Derefs to
+/// RedisClient so existing `run(&client, ...)` call sites are unchanged.
+struct DbClient {
+    client: RedisClient,
+    _op_guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+impl std::ops::Deref for DbClient {
+    type Target = RedisClient;
+    fn deref(&self) -> &RedisClient {
+        &self.client
+    }
+}
+
 async fn client_db(
     registry: &State<'_, RedisRegistry>,
     id: &str,
     db: u8,
-) -> Result<RedisClient, String> {
-    let client = registry.client_for(id).await?;
+) -> Result<DbClient, String> {
+    let instance = registry.instance_for(id).await?;
+    let guard = instance.op_lock.clone().lock_owned().await;
+    let client = instance.client.clone();
     prep(&client, db).await?;
-    Ok(client)
+    Ok(DbClient {
+        client,
+        _op_guard: guard,
+    })
 }
 
 // --- key listing / metadata ----------------------------------------------
@@ -197,7 +218,7 @@ pub async fn reg_scan(
     count: u32,
     registry: State<'_, RedisRegistry>,
 ) -> Result<EnrichedScanPage, String> {
-    let client = registry.client_for(&id).await?;
+    let plain = registry.client_for(&id).await?;
     let pat = if pattern.trim().is_empty() {
         "*".to_string()
     } else {
@@ -205,11 +226,11 @@ pub async fn reg_scan(
     };
     let count_u = count.max(1);
 
-    let (names, next_cursor): (Vec<String>, u64) = if client.is_clustered() {
+    let (names, next_cursor): (Vec<String>, u64) = if plain.is_clustered() {
         // WHY: on a cluster a raw SCAN only hits one node and cross-slot commands
         // return MOVED. fred's scan_cluster_buffered walks ALL master nodes.
         let mut collected: Vec<String> = Vec::new();
-        let mut stream = Box::pin(client.scan_cluster_buffered(pat.clone(), Some(count_u), None));
+        let mut stream = Box::pin(plain.scan_cluster_buffered(pat.clone(), Some(count_u), None));
         while let Some(item) = stream.next().await {
             match item {
                 Ok(key) => {
@@ -223,8 +244,9 @@ pub async fn reg_scan(
         }
         (collected, 0)
     } else {
-        // WHY: standalone — SELECT the db then cursor-paginate as the caller drives.
-        prep(&client, db).await?;
+        // WHY: standalone — SELECT the db then cursor-paginate as the caller
+        // drives. client_db holds the op lock across SELECT + this SCAN page.
+        let client = client_db(&registry, &id, db).await?;
         let raw = run(
             &client,
             "SCAN",
@@ -368,10 +390,19 @@ pub async fn reg_string_set(
     registry: State<'_, RedisRegistry>,
 ) -> Result<(), String> {
     let client = client_db(&registry, &id, db).await?;
-    run(&client, "SET", vec![key.clone(), value]).await?;
-    if let Some(ttl) = ttl_secs {
-        if ttl > 0 {
+    match ttl_secs {
+        // WHY: no TTL passed = plain value edit — KEEPTTL preserves the key's
+        // existing expiry (a bare SET silently wipes it).
+        None => {
+            run(&client, "SET", vec![key, value, "KEEPTTL".to_string()]).await?;
+        }
+        Some(ttl) if ttl > 0 => {
+            run(&client, "SET", vec![key.clone(), value]).await?;
             run(&client, "EXPIRE", vec![key, ttl.to_string()]).await?;
+        }
+        // Explicit non-positive TTL = clear the expiry.
+        Some(_) => {
+            run(&client, "SET", vec![key, value]).await?;
         }
     }
     Ok(())

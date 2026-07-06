@@ -77,9 +77,17 @@ interface DraftConnection {
   deployment: string; // "standalone" | "sentinel" | "cluster"
   tlsEnabled: boolean;
   sentinelMaster: string;
-  sentinelNodes: string; // one "host:port" per line
+  sentinelNodes: string;
   sentinelPassword: string;
-  clusterNodes: string; // one "host:port" per line
+  clusterNodes: string;
+  // SSH Tunnel (Phase 2b)
+  sshEnabled: boolean;
+  sshHost: string;
+  sshPort: number;
+  sshUsername: string;
+  sshAuthType: string; // "password" | "key"
+  sshPassword: string;
+  sshKeyPath: string;
 }
 
 function emptyDraft(): DraftConnection {
@@ -100,6 +108,13 @@ function emptyDraft(): DraftConnection {
     sentinelNodes: "",
     sentinelPassword: "",
     clusterNodes: "",
+    sshEnabled: false,
+    sshHost: "",
+    sshPort: 22,
+    sshUsername: "",
+    sshAuthType: "key",
+    sshPassword: "",
+    sshKeyPath: "",
   };
 }
 
@@ -124,16 +139,29 @@ function buildConfigJson(form: DraftConnection): string {
       nodes: parseNodes(form.sentinelNodes),
     },
     cluster: { nodes: parseNodes(form.clusterNodes) },
+    ssh: {
+      enabled: form.sshEnabled,
+      host: form.sshHost,
+      port: form.sshPort,
+      username: form.sshUsername,
+      auth_type: form.sshAuthType,
+      password: form.sshPassword,
+      key_path: form.sshKeyPath,
+    },
   });
 }
 
 function toDraft(connection: SavedConnectionFull): DraftConnection {
-  // WHY: edit must round-trip the stored advanced config back into the form.
   let parsed: {
     deployment?: string;
     tls?: { enabled?: boolean };
     sentinel?: { master?: string; password?: string; nodes?: Array<{ host: string; port: number }> };
     cluster?: { nodes?: Array<{ host: string; port: number }> };
+    ssh?: {
+      enabled?: boolean; host?: string; port?: number;
+      username?: string; auth_type?: string;
+      password?: string; key_path?: string;
+    };
   } = {};
   try {
     parsed = JSON.parse(connection.config_json || "{}");
@@ -159,6 +187,13 @@ function toDraft(connection: SavedConnectionFull): DraftConnection {
     sentinelNodes: nodesToText(parsed.sentinel?.nodes),
     sentinelPassword: parsed.sentinel?.password ?? "",
     clusterNodes: nodesToText(parsed.cluster?.nodes),
+    sshEnabled: parsed.ssh?.enabled ?? false,
+    sshHost: parsed.ssh?.host ?? "",
+    sshPort: parsed.ssh?.port ?? 22,
+    sshUsername: parsed.ssh?.username ?? "",
+    sshAuthType: parsed.ssh?.auth_type ?? "key",
+    sshPassword: parsed.ssh?.password ?? "",
+    sshKeyPath: parsed.ssh?.key_path ?? "",
   };
 }
 
@@ -792,12 +827,82 @@ function ConnectionDialog({
                   />
                 </DialogField>
               </div>
+            ) : tab === "SSH Tunnel" ? (
+              <div className="space-y-3">
+                <label className="flex items-center gap-2 text-xs">
+                  <input
+                    type="checkbox"
+                    checked={form.sshEnabled}
+                    onChange={(event) => set("sshEnabled", event.target.checked)}
+                  />
+                  Enable SSH Tunnel / 启用 SSH 隧道
+                </label>
+                {form.sshEnabled && (
+                  <>
+                    <DialogField label="SSH Host / 跳板机地址">
+                      <input
+                        value={form.sshHost}
+                        onChange={(event) => set("sshHost", event.target.value)}
+                        placeholder="jump.example.com"
+                        className="h-8 w-full rounded border border-border bg-background px-2 text-xs"
+                      />
+                    </DialogField>
+                    <div className="flex gap-2">
+                      <DialogField label="Port">
+                        <input
+                          type="number"
+                          value={form.sshPort}
+                          onChange={(event) => set("sshPort", Number(event.target.value) || 22)}
+                          className="h-8 w-20 rounded border border-border bg-background px-2 text-xs"
+                        />
+                      </DialogField>
+                      <DialogField label="Username / 用户名">
+                        <input
+                          value={form.sshUsername}
+                          onChange={(event) => set("sshUsername", event.target.value)}
+                          placeholder="root"
+                          className="h-8 w-full rounded border border-border bg-background px-2 text-xs"
+                        />
+                      </DialogField>
+                    </div>
+                    <DialogField label="Auth Type / 认证方式">
+                      <select
+                        value={form.sshAuthType}
+                        onChange={(event) => set("sshAuthType", event.target.value)}
+                        className="h-8 w-full rounded border border-border bg-background px-2 text-xs"
+                      >
+                        <option value="key">SSH Key (默认 ~/.ssh/id_rsa)</option>
+                        <option value="password">Password / 密码</option>
+                      </select>
+                    </DialogField>
+                    {form.sshAuthType === "password" ? (
+                      <DialogField label="Password / 密码">
+                        <input
+                          type="password"
+                          value={form.sshPassword}
+                          onChange={(event) => set("sshPassword", event.target.value)}
+                          className="h-8 w-full rounded border border-border bg-background px-2 text-xs"
+                        />
+                      </DialogField>
+                    ) : (
+                      <DialogField label="Key Path / 私钥路径 (留空用默认，需为无 passphrase 的 key)">
+                        <input
+                          value={form.sshKeyPath}
+                          onChange={(event) => set("sshKeyPath", event.target.value)}
+                          placeholder="~/.ssh/id_ed25519"
+                          className="h-8 w-full rounded border border-border bg-background px-2 text-xs"
+                        />
+                      </DialogField>
+                    )}
+                  </>
+                )}
+              </div>
             ) : (
               <div className="flex h-full flex-col items-center justify-center gap-2 text-center text-xs text-muted-foreground">
                 <Settings className="h-5 w-5" />
                 <div className="font-medium text-foreground">{tab}</div>
                 <div className="rounded border border-dashed border-border px-3 py-1.5">
-                  {tab === "SSH Tunnel" ? "SSH 隧道 — 阶段 2b（需 russh）" : `阶段 2+ — ${tab}`}
+                  阶段 2+ — {tab}
                 </div>
               </div>
             )}

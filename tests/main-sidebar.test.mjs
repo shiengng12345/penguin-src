@@ -64,7 +64,7 @@ test("MainSidebar items include English label + bilingual tooltip", async () => 
     'longLabel: "API Client / 客户端"',
     'longLabel: "Vault / 凭据库"',
     'longLabel: "In-App Browser / 内嵌浏览器 (Super Admin)"',
-    'longLabel: "REST API / 接口客户端 (Super Admin)"',
+    'longLabel: "REST API / 接口客户端"',
     'longLabel: "Knowledge Base / 知识库 (Super Admin)"',
     'longLabel: "Database / 数据库 (Super Admin)"',
   ]) {
@@ -86,35 +86,33 @@ test("App.tsx computes per-module gates (Vault = token, Docs = super-admin)", as
   assert.match(src, /canAccessDocs\s*=\s*devModeEnabled\s*&&\s*isSuperAdmin/);
 });
 
-test("MainSidebar — REST module locked to super-admin tier (regression guard)", async () => {
-  // Without this anti-regression test, a future refactor that drops REST
-  // back to the token tier would silently let normal admins see / click
-  // the REST icon — and (since HomePage + Header are also gated on super)
-  // create a UX where REST is reachable only via shortcuts, not visible.
-  // Lock both positive (must be super-admin) and negative (must NOT be token).
+test("MainSidebar — REST module open to all users (regression guard)", async () => {
+  // v1.12.0 deliberately opened REST to every user (client-module-style
+  // layout, no tier gate). Without this guard, a future refactor could
+  // silently re-gate REST behind token/super-admin and hide it from the
+  // normal users who now rely on it.
   //
   // Regex anchors with `[^}]*?` (not `[\s\S]`) so the match window can't
-  // cross an item boundary `}` — otherwise the `requires: "none"` of the
-  // adjacent `client` item would false-match the home block.
+  // cross an item boundary `}` and false-match an adjacent item's tier.
   const src = await loadSource("../src/components/layout/MainSidebar.tsx");
   assert.match(
     src,
-    /kind:\s*"rest"[^}]*?requires:\s*"super-admin"/,
-    "REST must be super-admin tier",
+    /kind:\s*"rest"[^}]*?requires:\s*"none"/,
+    "REST must be open to all (requires: none)",
   );
   assert.doesNotMatch(
     src,
-    /kind:\s*"rest"[^}]*?requires:\s*"token"/,
-    "REST must NOT be token tier (regression check)",
+    /kind:\s*"rest"[^}]*?requires:\s*"(token|super-admin)"/,
+    "REST must NOT be gated behind a tier (regression check)",
   );
 });
 
 test("App.tsx wires MainSidebar gate props from per-tier access flags", async () => {
   const src = await loadSource("../src/App.tsx");
-  // Token tier = Vault only. Browser joins REST / Docs / Database under
-  // super-admin.
+  // Token tier = Vault only. Docs / Database / Browser stay under
+  // super-admin; REST left the OR when it opened to all users (v1.12.0).
   assert.match(src, /hasValidToken=\{canAccessVault\}/);
-  assert.match(src, /isSuperAdmin=\{canAccessDocs\s*\|\|\s*canAccessRest\s*\|\|\s*canAccessDatabase\s*\|\|\s*canAccessBrowser\}/);
+  assert.match(src, /isSuperAdmin=\{canAccessDocs\s*\|\|\s*canAccessDatabase\s*\|\|\s*canAccessBrowser\}/);
 });
 
 test("App.tsx redirects out of Vault when dev token revoked (regression)", async () => {
@@ -135,13 +133,13 @@ test("App.tsx redirects out of Docs when super-admin revoked (regression)", asyn
   );
 });
 
-test("Dev token holder (token=true, super=false) sees Client + Vault only", async () => {
+test("Dev token holder (token=true, super=false) sees Client + REST + Vault only", async () => {
   const src = await loadSource("../src/components/layout/MainSidebar.tsx");
   const expected = {
     client: "none",
     vault: "token",
     browser: "super-admin",
-    rest: "super-admin",
+    rest: "none",
     docs: "super-admin",
     database: "super-admin",
   };

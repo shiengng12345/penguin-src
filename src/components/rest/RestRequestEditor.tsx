@@ -14,6 +14,7 @@ import {
   REST_SEND_REQUEST_EVENT,
 } from "@/lib/rest-events";
 import { authToSecretRefs } from "./rest-keychain";
+import { RestAuthorizationPanel } from "./RestAuthorizationPanel";
 import { buildCurl } from "./rest-curl-builder";
 import { applyCurlToRequest } from "./rest-curl-apply";
 import { appendHistory } from "./rest-history";
@@ -57,6 +58,10 @@ export function RestRequestEditor({ request, onChange, envVars = {} }: RestReque
   const { response, sendError, sending } = slot;
 
   const [savedFlash, setSavedFlash] = useState(false);
+  // WHY: collapsed by default to keep the client-module layout — but the
+  // section header always shows whether credentials are configured, so auth
+  // is never silently injected with zero UI indication.
+  const [authOpen, setAuthOpen] = useState(false);
   const [curlCopiedFlash, setCurlCopiedFlash] = useState(false);
   const [clipboardError, setClipboardError] = useState<string | null>(null);
   const [curlPasteFlash, setCurlPasteFlash] = useState<string | null>(null);
@@ -123,7 +128,8 @@ export function RestRequestEditor({ request, onChange, envVars = {} }: RestReque
     } finally {
       const currentVersion = useAppStore.getState().restResponses[req.id]?.sendVersion ?? 0;
       if (currentVersion === myVersion) {
-        if (sanitizedUrl !== rawUrl) onChange({ ...req, url: sanitizedUrl });
+        // NOTE: sanitizedUrl is send-only — never write the interpolated URL
+        // back into the record, or the {{var}} template is destroyed on save.
         appendHistory({
           status: failure ? 0 : resp?.status ?? 0,
           elapsedMs: resp?.elapsedMs ?? 0, bodyBytes: resp?.bodyBytes ?? 0,
@@ -144,6 +150,12 @@ export function RestRequestEditor({ request, onChange, envVars = {} }: RestReque
     useAppStore.getState().setRestSending(request.id, false);
   };
 
+  // WHY: the ⌘↩ document listener registers once ([] deps) and would capture
+  // the first render's handleSend — whose `interpolate` closes over the first
+  // render's envVars. Latest-ref keeps keyboard sends on current env values.
+  const handleSendRef = useRef(handleSend);
+  handleSendRef.current = handleSend;
+
   // ---- Headers (matching client module style) ----
   const handleAddHeader = () => patch({ headers: [...request.headers, { key: "", value: "", enabled: true }] });
   const handleUpdateHeader = (i: number, p: Partial<typeof request.headers[number]>) =>
@@ -151,11 +163,26 @@ export function RestRequestEditor({ request, onChange, envVars = {} }: RestReque
   const handleRemoveHeader = (i: number) =>
     onChange({ ...request, headers: request.headers.filter((_, j) => j !== i) });
 
-  // ---- Body (JSON only — matching gRPC client) ----
-  const bodyContent = (request.body && (request.body.mode === "json" || request.body.mode === "raw"))
-    ? request.body.content : "{}";
+  // ---- Body (JSON/raw editable — matching gRPC client) ----
+  const body = request.body;
+  const bodyContent =
+    body === undefined || body.mode === "none"
+      ? "{}"
+      : body.mode === "form-urlencoded" || body.mode === "multipart"
+        ? // Legacy form bodies (pre-simplification): show the real fields as
+          // urlencoded text instead of a fake "{}" that hides them.
+          body.fields
+            .filter((f) => f.enabled)
+            .map((f) => `${encodeURIComponent(f.key)}=${encodeURIComponent(f.value)}`)
+            .join("&")
+        : body.content;
   const handleBodyChange = (content: string) =>
-    onChange({ ...request, body: { mode: "json", content } });
+    // WHY: keep non-json bodies raw — stamping mode:"json" onto an edited
+    // form/raw body would misrepresent what gets sent.
+    onChange({
+      ...request,
+      body: { mode: !request.body || request.body.mode === "json" ? "json" : "raw", content },
+    });
   const handleFormatBody = () => {
     try { onChange({ ...request, body: { mode: "json", content: JSON.stringify(JSON.parse(bodyContent), null, 2) } }); }
     catch { /* not JSON */ }
@@ -175,7 +202,7 @@ export function RestRequestEditor({ request, onChange, envVars = {} }: RestReque
 
   // ---- Event listeners ----
   useEffect(() => {
-    const onSend = () => { void handleSend(); };
+    const onSend = () => { void handleSendRef.current(); };
     const onSave = () => { setSavedFlash(true); window.setTimeout(() => setSavedFlash(false), 1200); };
     const onFocusUrl = () => { const el = urlInputRef.current; if (el) { el.focus(); el.select(); } };
     const onEscape = (e: KeyboardEvent) => {
@@ -290,6 +317,31 @@ export function RestRequestEditor({ request, onChange, envVars = {} }: RestReque
                       </button>
                     </div>
                   ))}
+                </div>
+              )}
+            </div>
+
+            {/* Authorization — collapsible; restored after the simplify
+                refactor orphaned the panel while auth kept being sent */}
+            <div className="border-b border-border">
+              <button
+                type="button"
+                onClick={() => setAuthOpen((open) => !open)}
+                className="flex w-full items-center justify-between px-3 py-1.5 bg-muted/20"
+              >
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                  Authorization
+                  {request.auth && request.auth.kind !== "none" && (
+                    <span className="ml-1.5 normal-case tracking-normal text-primary">· {request.auth.kind} 已配置</span>
+                  )}
+                </span>
+                {authOpen
+                  ? <ChevronUp className="h-3 w-3 opacity-60" />
+                  : <ChevronDown className="h-3 w-3 opacity-60" />}
+              </button>
+              {authOpen && (
+                <div className="px-3 py-2">
+                  <RestAuthorizationPanel request={request} onChange={onChange} />
                 </div>
               )}
             </div>

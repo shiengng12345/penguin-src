@@ -68,7 +68,10 @@ export interface RestPageProps {
 export function RestPage({ onClose }: RestPageProps) {
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      // WHY: inline editors (sidebar rename/create, find-in-response) cancel
+      // with Escape + preventDefault — honoring defaultPrevented keeps their
+      // Escape from bubbling up and closing the whole REST module.
+      if (e.key === "Escape" && !e.defaultPrevented) onClose();
     };
     document.addEventListener("keydown", handler);
     return () => document.removeEventListener("keydown", handler);
@@ -82,9 +85,6 @@ export function RestPage({ onClose }: RestPageProps) {
 
   // Sidebar search input — referenced by REST_FOCUS_SEARCH_EVENT (Cmd+F).
   const searchInputRef = useRef<HTMLInputElement | null>(null);
-
-  const _isSuperAdmin = useAppStore((s) => s.isSuperAdmin);
-  void _isSuperAdmin;
 
   const [projects, setProjects] = useState<RestProject[]>(() => loadProjects());
   const [environments, setEnvironments] = useState<RestEnvironment[]>(() => loadEnvironments());
@@ -364,7 +364,7 @@ export function RestPage({ onClose }: RestPageProps) {
 
     if (authStripped) {
       setReplayWarning(
-        "Stored credentials for this request are no longer in your keychain — please re-enter them under the Authorization tab.",
+        "Stored credentials for this request are no longer in your keychain — please re-enter them under the Authorization section.",
       );
       window.setTimeout(() => setReplayWarning(null), 8000);
     }

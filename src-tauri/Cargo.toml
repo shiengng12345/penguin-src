@@ -1,6 +1,6 @@
 [package]
 name = "penguin"
-version = "1.12.0"
+version = "1.12.1"
 description = "gRPC/gRPC-Web API Client"
 authors = ["Penguin"]
 edition = "2021"
@@ -36,6 +36,9 @@ dirs = "6"
 reqwest = { version = "0.12", features = ["json", "stream"] }
 tokio = { version = "1", features = ["full"] }
 base64 = "0.22"
+# Set-Cookie `Expires=` HTTP-date parsing (zero-dep; many servers send only
+# Expires, no Max-Age — without this those cookies never expire in our store).
+httpdate = "1"
 notify = "6.1"
 
 # QR scan: native (Rust-side) decoding via rqrr — far more robust than

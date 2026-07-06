@@ -610,9 +610,11 @@ test("RestRequestEditor — Send passes auth-derived secretRefs (no more empty a
   // the user filled the Authorization tab. The fix wires authToSecretRefs.
   const editor = await loadSource("../src/components/rest/RestRequestEditor.tsx");
   assert.match(editor, /authToSecretRefs\(req\.auth\)/);
-  // RestAuthorizationPanel is no longer imported (simplified layout — auth
-  // lives in the data model, managed via curl import / history replay).
-  assert.doesNotMatch(editor, /RestAuthorizationPanel/);
+  // RestAuthorizationPanel is rendered again (collapsible section): the
+  // simplify refactor had orphaned it, leaving saved credentials silently
+  // injected on every send with no way to view/rotate/remove them.
+  assert.match(editor, /import \{ RestAuthorizationPanel \} from "\.\/RestAuthorizationPanel"/);
+  assert.match(editor, /<RestAuthorizationPanel request=\{request\} onChange=\{onChange\} \/>/);
 });
 
 test("cookie_store — Phase 10B SQLite persistence replaces empty stubs", async () => {

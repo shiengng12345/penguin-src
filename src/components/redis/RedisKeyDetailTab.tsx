@@ -3,6 +3,7 @@ import { Copy, Plus, RefreshCw, Save, Search, Trash2 } from "lucide-react";
 import {
   useCallback,
   useEffect,
+  useRef,
   useState,
   type ReactElement,
 } from "react";
@@ -60,8 +61,13 @@ export function RedisKeyDetailTab({ connectionId }: { connectionId: string }): R
   // during the in-flight scan made it look broken/empty.
   const [scanning, setScanning] = useState(false);
 
+  // WHY: monotonic scan id — a slow scan for the previous db/connection must
+  // not overwrite the list after the user has already switched (stale response).
+  const scanSeqRef = useRef(0);
+
   const scan = useCallback(
     async (fresh: boolean) => {
+      const seq = ++scanSeqRef.current;
       setScanning(true);
       const startCursor = fresh ? 0 : cursor;
       const page = await invoke<EnrichedScanPage>("reg_scan", {
@@ -71,9 +77,12 @@ export function RedisKeyDetailTab({ connectionId }: { connectionId: string }): R
         cursor: startCursor,
         count: 200,
       }).catch((error) => {
-        setScanError(String(error));
+        if (seq === scanSeqRef.current) setScanError(String(error));
         return null;
       });
+      if (seq !== scanSeqRef.current) {
+        return; // superseded by a newer scan — drop this response
+      }
       setScanning(false);
       if (page === null) {
         return;
@@ -359,6 +368,9 @@ function StringEditor({ base, onChanged }: { base: Base; onChanged: () => void }
   const [value, setValue] = useState("");
   const [totalBytes, setTotalBytes] = useState(0);
   const [loaded, setLoaded] = useState(false);
+  // WHY: the backend returns a 4KB preview for large values — saving that
+  // preview back would overwrite the full value with its truncation.
+  const [truncated, setTruncated] = useState(false);
   const [format, setFormat] = useState<ViewFormat>("raw");
 
   useEffect(() => {
@@ -367,6 +379,7 @@ function StringEditor({ base, onChanged }: { base: Base; onChanged: () => void }
         const loadedValue = result?.value ?? "";
         setValue(loadedValue);
         setTotalBytes(result?.total_bytes ?? 0);
+        setTruncated(result?.truncated ?? false);
         // WHY: auto-pick JSON view for JSON-shaped values, like Tiny RDM.
         setFormat(looksLikeJson(loadedValue) ? "json" : "raw");
         setLoaded(true);
@@ -376,9 +389,10 @@ function StringEditor({ base, onChanged }: { base: Base; onChanged: () => void }
   }, [base.id, base.db, base.key]);
 
   const save = useCallback(async () => {
+    if (truncated) return;
     await invoke("reg_string_set", { ...base, value, ttlSecs: null }).catch(() => {});
     onChanged();
-  }, [base, value, onChanged]);
+  }, [base, value, truncated, onChanged]);
 
   return (
     <div className="flex h-full flex-col gap-2">
@@ -405,18 +419,25 @@ function StringEditor({ base, onChanged }: { base: Base; onChanged: () => void }
           <button
             type="button"
             onClick={() => void save()}
-            className="flex h-7 items-center gap-1.5 rounded bg-primary px-3 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+            disabled={truncated}
+            title={truncated ? "值超过预览上限，已截断显示 — 保存会截毁原值，故禁用" : undefined}
+            className="flex h-7 items-center gap-1.5 rounded bg-primary px-3 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-40"
           >
             <Save className="h-3.5 w-3.5" />
             Save
           </button>
         </div>
       </div>
+      {truncated && (
+        <div className="rounded border border-amber-500/40 bg-amber-500/10 px-2 py-1 text-[11px] text-amber-600">
+          ⚠️ 值过大（{totalBytes} bytes），仅显示前 4KB 预览 — 为防止数据丢失已禁用保存
+        </div>
+      )}
       {format === "raw" ? (
         <textarea
           value={value}
           onChange={(event) => setValue(event.target.value)}
-          disabled={!loaded}
+          disabled={!loaded || truncated}
           className="min-h-[200px] flex-1 resize-none rounded border border-border bg-background p-2 font-mono text-xs"
         />
       ) : (
@@ -427,7 +448,9 @@ function StringEditor({ base, onChanged }: { base: Base; onChanged: () => void }
       )}
       <div className="flex justify-between border-t border-border/40 pt-1 text-[11px] text-muted-foreground">
         <span>Length: {totalBytes}</span>
-        <span>{format === "raw" ? "Raw（可编辑）" : `${format} · 只读`}</span>
+        <span>
+          {truncated ? "截断预览 · 只读" : format === "raw" ? "Raw（可编辑）" : `${format} · 只读`}
+        </span>
       </div>
     </div>
   );
@@ -586,7 +609,10 @@ function ListEditor({ base, onChanged }: { base: Base; onChanged: () => void }):
       <div className="text-xs text-muted-foreground">共 {total} 项（显示前 {items.length}）</div>
       <div className="space-y-1">
         {items.map((item, index) => (
-          <div key={index} className="flex items-center gap-2">
+          // WHY: key includes the server value — after LPUSH shifts the list,
+          // an index-only key kept stale defaultValues on screen and a blur
+          // would LSET the wrong content over the freshly pushed element.
+          <div key={`${index}:${item}`} className="flex items-center gap-2">
             <span className="w-10 shrink-0 text-right text-[10px] text-muted-foreground">{index}</span>
             <input
               defaultValue={item}

@@ -4,6 +4,7 @@ import { Radio, Send, Square, Trash2 } from "lucide-react";
 import {
   useCallback,
   useEffect,
+  useRef,
   useState,
   type ReactElement,
 } from "react";
@@ -27,6 +28,21 @@ export function RedisPubSubTab({ connectionId }: { connectionId: string }): Reac
   const [rows, setRows] = useState<Row[]>([]);
   const [pubChannel, setPubChannel] = useState("");
   const [pubMessage, setPubMessage] = useState("");
+  // WHY: the subscription belongs to the connection it was started on —
+  // switching connections (or unmounting) must stop THAT stream and reset
+  // the button, or "取消订阅" would target the wrong connection.
+  const subscribedIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    setSubscribed(false);
+    return () => {
+      const startedId = subscribedIdRef.current;
+      if (startedId !== null) {
+        subscribedIdRef.current = null;
+        void invoke("reg_pubsub_stop", { id: startedId }).catch(() => {});
+      }
+    };
+  }, [connectionId]);
 
   useEffect(() => {
     let unlisten: UnlistenFn | null = null;
@@ -60,14 +76,23 @@ export function RedisPubSubTab({ connectionId }: { connectionId: string }): Reac
   const toggle = useCallback(async () => {
     if (subscribed) {
       await invoke("reg_pubsub_stop", { id: connectionId }).catch(() => {});
+      subscribedIdRef.current = null;
       setSubscribed(false);
       return;
     }
     if (channel.trim() === "") {
       return;
     }
-    await invoke("reg_pubsub_start", { id: connectionId, channel: channel.trim() }).catch(() => {});
-    setSubscribed(true);
+    try {
+      await invoke("reg_pubsub_start", { id: connectionId, channel: channel.trim() });
+      subscribedIdRef.current = connectionId;
+      setSubscribed(true);
+    } catch (error) {
+      setRows((previous) => [
+        ...previous,
+        { time: new Date().toLocaleTimeString(), channel: "—", message: `订阅失败: ${String(error)}` },
+      ]);
+    }
   }, [subscribed, channel, connectionId]);
 
   const publish = useCallback(async () => {

@@ -45,19 +45,9 @@ export function inferBody(parsed: ParsedCurl): RestBody | undefined {
   if (contentType.includes("application/json")) {
     return { mode: "json", content: parsed.body };
   }
-  if (contentType.includes("application/x-www-form-urlencoded")) {
-    const fields: RestHeader[] = [];
-    for (const pair of parsed.body.split("&")) {
-      const eq = pair.indexOf("=");
-      if (eq < 0) continue;
-      fields.push({
-        key: decodeURIComponent(pair.slice(0, eq)),
-        value: decodeURIComponent(pair.slice(eq + 1)),
-        enabled: true,
-      });
-    }
-    return { mode: "form-urlencoded", fields };
-  }
+  // WHY: form-urlencoded imports stay raw — the simplified editor renders
+  // json/raw only, so a fields-based body would be invisible in the UI.
+  // Raw + the preserved Content-Type header sends byte-identical form data.
   return { mode: "raw", content: parsed.body };
 }
 
@@ -176,9 +166,10 @@ export async function applyCurlToRequest(
       method,
       url: parsed.url,
       headers,
-      // queryParams stay separate — the curl URL already encodes them.
-      // We don't split them out into the dedicated queryParams list
-      // because that would double-encode on send.
+      // WHY: the curl URL already encodes its own query string, and the
+      // simplified editor has no Params tab — leftover queryParams from the
+      // previous request would be appended invisibly on send. Clear them.
+      queryParams: [],
       body,
       auth,
     },

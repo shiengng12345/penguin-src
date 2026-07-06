@@ -82,7 +82,7 @@ test("Database module routes Redis as its first database type", async () => {
   assertNearby(app, "const selectDocsFromHome", /setDatabaseOpen\(false\)/, "Docs selector must close Database");
   assertNearby(app, "const selectRest", /setDatabaseOpen\(false\)/, "REST selector must close Database");
   assertNearby(app, "const handleGoHome", /setDatabaseOpen\(false\)/, "Go-home event must close Database");
-  assert.match(app, /isSuperAdmin=\{canAccessDocs\s*\|\|\s*canAccessRest\s*\|\|\s*canAccessDatabase\s*\|\|\s*canAccessBrowser\}/);
+  assert.match(app, /isSuperAdmin=\{canAccessDocs\s*\|\|\s*canAccessDatabase\s*\|\|\s*canAccessBrowser\}/);
 
   const sidebar = await loadSource("../src/components/layout/MainSidebar.tsx");
   assert.match(sidebar, /"browser"\s*\|\s*"database"/);

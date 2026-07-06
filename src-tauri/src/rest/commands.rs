@@ -127,6 +127,10 @@ pub async fn rest_send_request(payload: SendRequestPayload) -> Result<RestRespon
         }
     }
 
+    // Host/path snapshot — cookie matching now + Set-Cookie persistence later.
+    let request_host = url.host_str().unwrap_or("").to_string();
+    let request_path = url.path().to_string();
+
     // 5) Build request — headers (secret-aware) + body.
     let mut rb = client.request(method, url);
     for h in &req.headers {
@@ -139,6 +143,24 @@ pub async fn rest_send_request(payload: SendRequestPayload) -> Result<RestRespon
             .cloned()
             .unwrap_or_else(|| h.value.clone());
         rb = rb.header(&h.key, &value);
+    }
+
+    // Attach stored cookies so session flows work (server Set-Cookie →
+    // next request carries Cookie). A user-provided Cookie header wins —
+    // we never merge into an explicit one.
+    let user_set_cookie = req
+        .headers
+        .iter()
+        .any(|h| h.enabled && h.key.eq_ignore_ascii_case("cookie"));
+    if !user_set_cookie {
+        if let Some(collection_id) = payload.collection_id.as_deref() {
+            if let Ok(cookies) = super::cookie_store::list_cookies(collection_id) {
+                let header = build_cookie_header(&cookies, &request_host, &request_path);
+                if !header.is_empty() {
+                    rb = rb.header("Cookie", header);
+                }
+            }
+        }
     }
 
     if let Some(body) = &req.body {
@@ -176,10 +198,6 @@ pub async fn rest_send_request(payload: SendRequestPayload) -> Result<RestRespon
     // store. Failures are swallowed (the request itself succeeded; we don't
     // want a cookie write hiccup to nullify the response on the FE).
     if let Some(collection_id) = payload.collection_id.as_deref() {
-        let request_host = reqwest::Url::parse(&req.url)
-            .ok()
-            .and_then(|u| u.host_str().map(String::from))
-            .unwrap_or_default();
         for h in &resp_headers {
             if !h.key.eq_ignore_ascii_case("set-cookie") {
                 continue;
@@ -447,6 +465,39 @@ pub async fn rest_delete_cookie(payload: DeleteCookiePayload) -> Result<(), Rest
         })
 }
 
+/// RFC-6265-lite request matching: the host equals the cookie domain or is a
+/// subdomain of it (leading dot tolerated), and the request path sits under
+/// the cookie path (default "/"). Expired cookies never reach here —
+/// list_cookies filters them.
+pub fn build_cookie_header(
+    cookies: &[super::RestCookie],
+    host: &str,
+    path: &str,
+) -> String {
+    if host.is_empty() {
+        return String::new();
+    }
+    let host_lc = host.to_ascii_lowercase();
+    let mut parts: Vec<String> = Vec::new();
+    for cookie in cookies {
+        let domain = cookie.domain.trim_start_matches('.').to_ascii_lowercase();
+        if domain.is_empty() {
+            continue;
+        }
+        let domain_matches =
+            host_lc == domain || host_lc.ends_with(&format!(".{domain}"));
+        if !domain_matches {
+            continue;
+        }
+        let cookie_path = cookie.path.as_deref().unwrap_or("/");
+        if !path.starts_with(cookie_path) {
+            continue;
+        }
+        parts.push(format!("{}={}", cookie.name, cookie.value));
+    }
+    parts.join("; ")
+}
+
 /// Parse a Set-Cookie header value into a RestCookie. Format:
 ///   <name>=<value>[; Domain=<d>][; Path=<p>][; Expires=<http-date>][; Max-Age=<sec>]
 /// We extract name/value/Domain/Path/Expires (or Max-Age). Domain falls back
@@ -477,11 +528,19 @@ pub fn parse_set_cookie(value: &str, fallback_domain: &str) -> Option<super::Res
             path = Some(original.trim().to_string());
         } else if let Some(rest) = lc.strip_prefix("max-age=") {
             max_age = rest.trim().parse::<i64>().ok();
-        } else if let Some(rest) = lc.strip_prefix("expires=") {
-            // RFC 6265 IMF-fixdate. Parse via httpdate; fallback: leave None.
-            // We avoid pulling a date dep — instead callers can interpret a
-            // missing expires_at as "session cookie" (forever-ish for now).
-            let _ = rest;
+        } else if lc.starts_with("expires=") {
+            // RFC 6265 HTTP-date (case preserved from the original attr).
+            // Max-Age still wins below per RFC precedence. Unparseable dates
+            // leave None (treated as session cookie).
+            let original = attr["expires=".len()..].trim();
+            if let Ok(when) = httpdate::parse_http_date(original) {
+                expires_at = Some(
+                    when.duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        // pre-epoch date = "expire immediately" convention
+                        .unwrap_or(1),
+                );
+            }
         }
     }
     if let Some(secs) = max_age {
@@ -574,6 +633,65 @@ mod tests {
         assert!(parse_set_cookie("no-equals-sign", "api.example.com").is_none());
         assert!(parse_set_cookie("=novalue", "api.example.com").is_none());
         assert!(parse_set_cookie("", "api.example.com").is_none());
+    }
+
+    #[test]
+    fn parse_set_cookie_expires_http_date() {
+        // Servers that send only Expires (no Max-Age) must still get a real
+        // expiry — this was previously discarded, storing them as immortal.
+        let c = parse_set_cookie(
+            "sid=e1; Expires=Wed, 21 Oct 2015 07:28:00 GMT",
+            "api.example.com",
+        )
+        .unwrap();
+        assert_eq!(c.expires_at, Some(1_445_412_480_000));
+    }
+
+    #[test]
+    fn parse_set_cookie_max_age_wins_over_expires() {
+        // RFC 6265 §4.1.2.2: Max-Age has precedence when both are present.
+        let c = parse_set_cookie(
+            "sid=e1; Expires=Wed, 21 Oct 2015 07:28:00 GMT; Max-Age=3600",
+            "api.example.com",
+        )
+        .unwrap();
+        assert!(c.expires_at.unwrap() > 1_700_000_000_000);
+    }
+
+    fn cookie(domain: &str, path: Option<&str>, name: &str, value: &str) -> crate::rest::RestCookie {
+        crate::rest::RestCookie {
+            domain: domain.to_string(),
+            name: name.to_string(),
+            value: value.to_string(),
+            path: path.map(String::from),
+            expires_at: None,
+        }
+    }
+
+    #[test]
+    fn cookie_header_matches_domain_and_subdomain() {
+        let cookies = vec![
+            cookie(".example.com", None, "root", "1"),
+            cookie("api.example.com", None, "exact", "2"),
+            cookie("other.com", None, "foreign", "3"),
+        ];
+        let header = build_cookie_header(&cookies, "api.example.com", "/v1/users");
+        assert_eq!(header, "root=1; exact=2");
+        // "notexample.com" must NOT match ".example.com" (suffix needs a dot)
+        assert_eq!(build_cookie_header(&cookies, "notexample.com", "/"), "");
+    }
+
+    #[test]
+    fn cookie_header_respects_path_scope() {
+        let cookies = vec![
+            cookie("api.example.com", Some("/admin"), "adm", "1"),
+            cookie("api.example.com", Some("/"), "all", "2"),
+        ];
+        assert_eq!(build_cookie_header(&cookies, "api.example.com", "/v1"), "all=2");
+        assert_eq!(
+            build_cookie_header(&cookies, "api.example.com", "/admin/x"),
+            "adm=1; all=2"
+        );
     }
 
     #[test]

@@ -529,6 +529,22 @@ function MonitorTab({ connectionId }: { connectionId: string }): ReactElement {
   const [running, setRunning] = useState(false);
   const [search, setSearch] = useState("");
   const endRef = useRef<HTMLDivElement | null>(null);
+  // WHY: the stream belongs to the connection it was started on. Switching
+  // connections (or unmounting) must stop THAT stream and reset the button —
+  // otherwise the UI shows "Stop" for connection B while A's stream leaks.
+  const runningIdRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    setRunning(false);
+    setLines([]);
+    return () => {
+      const startedId = runningIdRef.current;
+      if (startedId !== null) {
+        runningIdRef.current = null;
+        void invoke("redis_reg_monitor_stop", { id: startedId }).catch(() => {});
+      }
+    };
+  }, [connectionId]);
 
   useEffect(() => {
     let unlisten: UnlistenFn | null = null;
@@ -563,12 +579,18 @@ function MonitorTab({ connectionId }: { connectionId: string }): ReactElement {
   const toggle = useCallback(async () => {
     if (running) {
       await invoke("redis_reg_monitor_stop", { id: connectionId }).catch(() => {});
+      runningIdRef.current = null;
       setRunning(false);
       return;
     }
     setLines([]);
-    await invoke("redis_reg_monitor_start", { id: connectionId }).catch(() => {});
-    setRunning(true);
+    try {
+      await invoke("redis_reg_monitor_start", { id: connectionId });
+      runningIdRef.current = connectionId;
+      setRunning(true);
+    } catch (error) {
+      setLines([`MONITOR start failed: ${String(error)}`]);
+    }
   }, [running, connectionId]);
 
   const filtered =

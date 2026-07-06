@@ -26,7 +26,10 @@ interface Line {
 }
 
 export function RedisConsoleTab({ connectionId }: { connectionId: string }): ReactElement {
-  const [db] = useState(0);
+  // WHY: the backend routes every command by the db passed in (it keeps no
+  // session state), so a user's successful SELECT must update this local db
+  // or every later command silently runs on db0.
+  const [db, setDb] = useState(0);
   const [input, setInput] = useState("");
   const [history, setHistory] = useState<Line[]>([]);
   const [pendingConfirm, setPendingConfirm] = useState<string | null>(null);
@@ -36,6 +39,11 @@ export function RedisConsoleTab({ connectionId }: { connectionId: string }): Rea
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [history]);
+
+  // New connection starts back on db0, like a fresh redis-cli session.
+  useEffect(() => {
+    setDb(0);
+  }, [connectionId]);
 
   const exec = useCallback(
     async (line: string, confirmed: boolean) => {
@@ -51,6 +59,15 @@ export function RedisConsoleTab({ connectionId }: { connectionId: string }): Rea
         setPendingConfirm(line);
         setHistory((previous) => [...previous, { prompt: line, output: result.output, ok: false }]);
         return;
+      }
+      if (result.ok) {
+        const tokens = line.trim().split(/\s+/);
+        if (tokens.length === 2 && tokens[0].toUpperCase() === "SELECT") {
+          const target = Number(tokens[1]);
+          if (Number.isInteger(target) && target >= 0 && target <= 255) {
+            setDb(target);
+          }
+        }
       }
       setPendingConfirm(null);
       setHistory((previous) => [...previous, { prompt: line, output: result.output, ok: result.ok }]);
@@ -114,7 +131,7 @@ export function RedisConsoleTab({ connectionId }: { connectionId: string }): Rea
       ) : null}
 
       <div className="flex items-center gap-2 border-t border-border/60 p-2">
-        <span className="font-mono text-xs text-sky-400">&gt;</span>
+        <span className="font-mono text-xs text-sky-400">{db === 0 ? ">" : `[db${db}]>`}</span>
         <input
           value={input}
           onChange={(event) => setInput(event.target.value)}
