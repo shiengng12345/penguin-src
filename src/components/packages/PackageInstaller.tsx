@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Package, X, Download, CheckCircle2, XCircle, Loader2, Search, RefreshCw } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { isAllowedSnsoftPackageSpec, normalizePackageSpec, protocolFromSnsoftPackageSpec } from "@penguin/core";
-import { filterPackages, prioritizeTags, protocolOfPackage, tagMatchesQuery, type PackageProtocol, type RegistryPackage } from "@/lib/registry-search-core";
+import { filterPackages, packagesWithTag, prioritizeTags, protocolOfPackage, tagMatchesQuery, type PackageProtocol, type RegistryPackage } from "@/lib/registry-search-core";
 import { fetchPackageVersions, fetchRegistryPackages, loadCachedRegistryPackages, type PackageVersions } from "@/lib/registry-search";
 
 function detectProtocol(spec: string): "grpc-web" | "grpc" | "sdk" | null {
@@ -78,9 +78,22 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
 
   // —— Sonatype 模糊搜索状态 ——
   const [searchQuery, setSearchQuery] = useState("");
-  // 默认全部协议：团队按项目 tag 成对装 -grpc-web / -grpc，且 js-sdk 要能被
-  // 任何页签搜到；勾选后才收窄到当前页签。
-  const [allProtocols, setAllProtocols] = useState(true);
+  // 协议三段开关：各自独立 on/off，默认全开（成对装 -grpc-web/-grpc、js-sdk
+  // 任何页签可搜）。全开 = 不过滤（未知后缀的包也显示）。
+  const [protoFilter, setProtoFilter] = useState<Set<PackageProtocol>>(
+    () => new Set(["grpc", "grpc-web", "sdk"]),
+  );
+  const toggleProto = (pr: PackageProtocol) => {
+    setProtoFilter((cur) => {
+      const next = new Set(cur);
+      if (next.has(pr)) next.delete(pr);
+      else next.add(pr);
+      return next;
+    });
+  };
+  // 安装器页签：搜索 / master（硬编码——团队日常批量装 @master）
+  const [installerTab, setInstallerTab] = useState<"search" | "master">("search");
+  const [masterProto, setMasterProto] = useState<"grpc" | "grpc-web">("grpc");
   const [registryList, setRegistryList] = useState<RegistryPackage[] | null>(null);
   const [listLoading, setListLoading] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
@@ -143,11 +156,9 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
 
   const searchResults = useMemo(() => {
     if (!registryList) return [];
-    const protocol = allProtocols
-      ? null
-      : ((protocolTab === "rest" ? null : protocolTab) as PackageProtocol | null);
-    return filterPackages(registryList, searchQuery, protocol);
-  }, [registryList, searchQuery, allProtocols, protocolTab]);
+    const protocols = protoFilter.size === 3 ? null : Array.from(protoFilter);
+    return filterPackages(registryList, searchQuery, protocols);
+  }, [registryList, searchQuery, protoFilter]);
 
   const selectPackage = (name: string) => {
     if (selectedPkg === name) {
@@ -290,6 +301,102 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
         <div className="mt-4 space-y-4">
           {protocolTab !== "rest" && (
             <div>
+              <div className="mb-2 flex gap-1 border-b border-border">
+                {([["search", "Search / 搜索"], ["master", "master"]] as const).map(([key, label]) => (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => setInstallerTab(key)}
+                    className={cn(
+                      "-mb-px rounded-t px-3 py-1 text-xs",
+                      installerTab === key
+                        ? "border-b-2 border-primary font-medium text-foreground"
+                        : "text-muted-foreground hover:text-foreground"
+                    )}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+              {installerTab === "master" && (
+                <div>
+                  <div className="mb-1.5 flex items-center gap-1">
+                    {(["grpc", "grpc-web"] as const).map((pr) => (
+                      <button
+                        key={pr}
+                        type="button"
+                        onClick={() => setMasterProto(pr)}
+                        className={cn(
+                          "rounded px-2 py-0.5 text-[10px] font-medium",
+                          masterProto === pr
+                            ? pr === "grpc"
+                              ? "bg-blue-500/20 text-blue-600 ring-1 ring-blue-500/40 dark:text-blue-400"
+                              : "bg-green-500/20 text-green-600 ring-1 ring-green-500/40 dark:text-green-400"
+                            : "bg-muted text-muted-foreground hover:text-foreground"
+                        )}
+                      >
+                        {PROTOCOL_LABELS[pr]}
+                      </button>
+                    ))}
+                    <span className="ml-auto text-[10px] text-muted-foreground">
+                      点击行填入 @master
+                    </span>
+                  </div>
+                  {registryList === null ? (
+                    <div className="flex items-center gap-2 rounded-md border border-border bg-muted/30 p-2 text-[11px] text-muted-foreground">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      正在拉取包列表…
+                    </div>
+                  ) : (() => {
+                    const rows = packagesWithTag(registryList, "master", masterProto);
+                    if (rows.length === 0) {
+                      return (
+                        <div className="rounded-md border border-border bg-muted/30 p-2 text-[11px] text-muted-foreground">
+                          没有带 master tag 的 {PROTOCOL_LABELS[masterProto]} 包
+                        </div>
+                      );
+                    }
+                    return (
+                      <div className="max-h-64 divide-y divide-border/50 overflow-y-auto rounded-md border border-border">
+                        {rows.map((pkg) => {
+                          const installed = packages.find((p) => p.name === pkg.name);
+                          const stamp = stampFromVersion(pkg.latest_version);
+                          const isPicked = spec === `${pkg.name}@master`;
+                          return (
+                            <button
+                              key={pkg.name}
+                              type="button"
+                              disabled={isInstalling}
+                              onClick={() => pickVersion(pkg.name, "master")}
+                              className={cn(
+                                "flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-accent/60",
+                                isPicked && "bg-primary/10"
+                              )}
+                            >
+                              <span className="min-w-0 flex-1 truncate font-mono text-xs text-foreground">
+                                {pkg.name}
+                              </span>
+                              {installed && (
+                                <span className="shrink-0 rounded bg-primary/15 px-1 py-0.5 text-[9px] text-primary">
+                                  installed
+                                </span>
+                              )}
+                              <span
+                                className="shrink-0 font-mono text-[10px] text-muted-foreground"
+                                title={pkg.latest_version}
+                              >
+                                {stamp ? fmtStamp(stamp) : pkg.latest_version}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
+              {installerTab === "search" && (
+              <>
               <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
                 Search registry / 搜索 Sonatype
               </label>
@@ -311,15 +418,32 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                     autoFocus
                   />
                 </div>
-                <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-[10px] text-muted-foreground">
-                  <input
-                    type="checkbox"
-                    checked={!allProtocols}
-                    onChange={(e) => setAllProtocols(!e.target.checked)}
-                    className="h-3 w-3 accent-primary"
-                  />
-                  仅当前协议 / {PROTOCOL_LABELS[protocolTab] ?? protocolTab}
-                </label>
+                <div className="flex shrink-0 items-center overflow-hidden rounded-md border border-border">
+                  {(["grpc", "grpc-web", "sdk"] as const).map((pr, i) => {
+                    const active = protoFilter.has(pr);
+                    return (
+                      <button
+                        key={pr}
+                        type="button"
+                        onClick={() => toggleProto(pr)}
+                        title={active ? `隐藏 ${PROTOCOL_LABELS[pr]}` : `显示 ${PROTOCOL_LABELS[pr]}`}
+                        className={cn(
+                          "px-2 py-1.5 text-[10px] font-medium transition-colors",
+                          i > 0 && "border-l border-border",
+                          active
+                            ? pr === "grpc"
+                              ? "bg-blue-500/20 text-blue-600 dark:text-blue-400"
+                              : pr === "grpc-web"
+                                ? "bg-green-500/20 text-green-600 dark:text-green-400"
+                                : "bg-purple-500/20 text-purple-600 dark:text-purple-400"
+                            : "text-muted-foreground/40 hover:text-muted-foreground"
+                        )}
+                      >
+                        {PROTOCOL_LABELS[pr]}
+                      </button>
+                    );
+                  })}
+                </div>
                 <button
                   type="button"
                   title="Refresh list / 刷新列表"
@@ -345,7 +469,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                 </div>
               ) : registryList && searchResults.length === 0 ? (
                 <div className="mt-2 rounded-md border border-border bg-muted/30 p-2 text-[11px] text-muted-foreground">
-                  No match / 无匹配{!allProtocols ? " — 试试取消「仅当前协议」" : ""} — 也可直接在下方手动输入
+                  No match / 无匹配{protoFilter.size < 3 ? " — 试试打开更多协议开关" : ""} — 也可直接在下方手动输入
                 </div>
               ) : registryList ? (
                 <div className="mt-2 max-h-56 divide-y divide-border/50 overflow-y-auto rounded-md border border-border">
@@ -523,6 +647,8 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                   })}
                 </div>
               ) : null}
+              </>
+              )}
             </div>
           )}
 
