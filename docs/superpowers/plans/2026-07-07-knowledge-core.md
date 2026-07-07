@@ -248,7 +248,7 @@ git commit -m "feat(knowledge): canonical JSON serialization + sha256"
 - Produces:
   - 类型：`LedgerOrigin`（`"parser"|"user"|"ai"|"import"|"system"|` plugin:xxx 模板串）、`LedgerMethod`（`"EXTRACTED"|"INFERRED"|"ASSERTED"`）、`LedgerTarget`、`LedgerEventInput`、`LedgerEvent`
   - `eventChecksum(body: Omit<LedgerEvent, "checksum">): string`
-  - `class Ledger`：`Ledger.open(path)` → `{ ledger, read }`；`ledger.append(input, now?)` → `LedgerEvent`（seq 自增、id=`led_<uuid>`、单行写入 + fsync）
+  - `class Ledger`：`Ledger.open(path)` → `{ ledger, read }`；`ledger.append(input, now?)` → `LedgerEvent`（seq 自增、id=`led_<uuid>`、单行写入 + fsync；**整体持跨进程文件锁**——app 与 CLI 同机并发追加不分叉，spec §8.3）
   - Task 4 实现 `readLedgerFile`；本 Task 先给 `Ledger.open` 一个只算 lastSeq 的最小实现
 
 - [ ] **Step 1: 写失败测试**
@@ -313,6 +313,16 @@ test("re-open continues seq from existing file", () => {
   const e = second.ledger.append(INPUT, () => "2026-07-07T10:00:02.000Z");
   assert.equal(e.seq, 2);
 });
+
+test("two Ledger instances on the same file never collide on seq", () => {
+  const path = tempLedgerPath();
+  const a = Ledger.open(path).ledger;
+  const b = Ledger.open(path).ledger; // 模拟第二个进程（app vs CLI）
+  const e1 = a.append(INPUT, () => "2026-07-07T10:00:00.000Z");
+  const e2 = b.append(INPUT, () => "2026-07-07T10:00:01.000Z");
+  const e3 = a.append(INPUT, () => "2026-07-07T10:00:02.000Z");
+  assert.deepEqual([e1.seq, e2.seq, e3.seq], [1, 2, 3]);
+});
 ```
 
 - [ ] **Step 2: 运行测试确认失败**
@@ -332,6 +342,8 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  statSync,
+  unlinkSync,
   writeSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -397,49 +409,99 @@ export function readLedgerFile(path: string): LedgerReadResult {
   return { events, truncatedAtLine: null, truncatedReason: null };
 }
 
-export class Ledger {
-  private lastSeq: number;
-
-  private constructor(readonly path: string, lastSeq: number) {
-    this.lastSeq = lastSeq;
+// 跨进程文件锁（spec §8.3）：app 和 CLI 可能同时追加账本。
+// 「读 lastSeq → 写行 → fsync」必须整体在锁内，否则 seq 会分叉。
+function acquireLock(lockPath: string, timeoutMs = 5000): void {
+  const start = Date.now();
+  for (;;) {
+    try {
+      closeSync(openSync(lockPath, "wx"));
+      return;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      try {
+        // 持锁进程崩溃的残留锁：超过 30s 视为死锁残骸，清掉重试
+        if (Date.now() - statSync(lockPath).mtimeMs > 30_000) {
+          unlinkSync(lockPath);
+          continue;
+        }
+      } catch {
+        continue; // 锁文件在检查间隙被释放，直接重试
+      }
+      if (Date.now() - start > timeoutMs) {
+        throw new Error(`ledger lock timeout: ${lockPath}`);
+      }
+      const spinUntil = Date.now() + 5;
+      while (Date.now() < spinUntil) {
+        // 自旋 5ms：append 是毫秒级操作，不值得为它引入异步 API
+      }
+    }
   }
+}
+
+// 锁内快速读末行 seq——其他进程可能刚追加过，任何内存缓存都不可信。
+// 末尾残行（写一半崩溃）跳过取上一行，与 readLedgerFile 的截断语义一致。
+function readLastSeqUnderLock(path: string): number {
+  if (!existsSync(path)) return 0;
+  const lines = readFileSync(path, "utf8").split("\n");
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    try {
+      const seq = (JSON.parse(line) as { seq?: number }).seq;
+      if (typeof seq === "number") return seq;
+    } catch {
+      continue;
+    }
+  }
+  return 0;
+}
+
+export class Ledger {
+  private constructor(readonly path: string) {}
 
   static open(path: string): { ledger: Ledger; read: LedgerReadResult } {
     const read = readLedgerFile(path);
-    const lastSeq =
-      read.events.length > 0 ? read.events[read.events.length - 1].seq : 0;
-    return { ledger: new Ledger(path, lastSeq), read };
+    return { ledger: new Ledger(path), read };
   }
 
-  // §2.2：单行完整写入 + fsync。写入失败时 lastSeq 不前进。
+  // §2.2：单行完整写入 + fsync，整体持跨进程锁。
   append(
     input: LedgerEventInput,
     now: () => string = () => new Date().toISOString(),
   ): LedgerEvent {
-    const body: Omit<LedgerEvent, "checksum"> = {
-      seq: this.lastSeq + 1,
-      id: `led_${randomUUID()}`,
-      ts: now(),
-      type: input.type,
-      origin: input.origin,
-      method: input.method,
-      actor: input.actor,
-      target: input.target ?? {},
-      payload: input.payload ?? {},
-      provenance: input.provenance ?? {},
-    };
-    const event: LedgerEvent = { ...body, checksum: eventChecksum(body) };
-
     mkdirSync(dirname(this.path), { recursive: true });
-    const fd = openSync(this.path, "a");
+    const lockPath = this.path + ".lock";
+    acquireLock(lockPath);
     try {
-      writeSync(fd, JSON.stringify(event) + "\n", null, "utf8");
-      fsyncSync(fd);
+      const body: Omit<LedgerEvent, "checksum"> = {
+        seq: readLastSeqUnderLock(this.path) + 1,
+        id: `led_${randomUUID()}`,
+        ts: now(),
+        type: input.type,
+        origin: input.origin,
+        method: input.method,
+        actor: input.actor,
+        target: input.target ?? {},
+        payload: input.payload ?? {},
+        provenance: input.provenance ?? {},
+      };
+      const event: LedgerEvent = { ...body, checksum: eventChecksum(body) };
+      const fd = openSync(this.path, "a");
+      try {
+        writeSync(fd, JSON.stringify(event) + "\n", null, "utf8");
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+      return event;
     } finally {
-      closeSync(fd);
+      try {
+        unlinkSync(lockPath);
+      } catch {
+        // 锁已被 stale 清理逻辑移除——无害
+      }
     }
-    this.lastSeq = event.seq;
-    return event;
   }
 }
 ```
@@ -463,13 +525,13 @@ export {
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `pnpm -F @penguin/knowledge-core build && node --test tests/knowledge-core-ledger.test.mjs`
-Expected: `pass 3`
+Expected: `pass 4`
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add packages/knowledge-core/src tests/knowledge-core-ledger.test.mjs
-git commit -m "feat(knowledge): ledger append-only writer with checksum + fsync"
+git commit -m "feat(knowledge): ledger append-only writer with checksum, fsync + cross-process lock"
 ```
 
 ---
@@ -613,7 +675,7 @@ export function readLedgerFile(path: string): LedgerReadResult {
 - [ ] **Step 4: 运行测试确认通过**
 
 Run: `pnpm -F @penguin/knowledge-core build && node --test tests/knowledge-core-ledger.test.mjs`
-Expected: `pass 7`
+Expected: `pass 8`
 
 - [ ] **Step 5: Commit**
 
@@ -2068,7 +2130,7 @@ Expected: `pass 3`
 - [ ] **Step 5: 全量回归 + Commit**
 
 Run: `pnpm -F @penguin/knowledge-core build && node --test tests/knowledge-core-scaffold.test.mjs tests/knowledge-core-canonical.test.mjs tests/knowledge-core-ledger.test.mjs tests/knowledge-core-schema.test.mjs tests/knowledge-core-materializer.test.mjs tests/knowledge-core-store.test.mjs tests/knowledge-core-search.test.mjs tests/knowledge-core-recovery.test.mjs`
-Expected: 全部 pass（33 个用例：1+4+7+4+4+6+4+3）
+Expected: 全部 pass（34 个用例：1+4+8+4+4+6+4+3）
 
 Run: `pnpm test`
 Expected: 原有测试无回归
@@ -2094,3 +2156,4 @@ git commit -m "feat(knowledge): consistency check + rebuild-from-ledger recovery
 - MCP 六件套 → 计划 4（只依赖本计划的公开 API + 计划 2/3 的数据）
 - UI / Tauri 命令 → 计划 5
 - symbol_versions 的 upsert 辅助方法：计划 3 需要时在 KnowledgeStore 上按同模式追加（直写合法：解析衍生）
+- CLI 薄壳（`penguin init/search/callers/...`，spec §8.3）→ 计划 6——直接消费本计划的公开 API；跨进程账本锁已在本计划 Task 3 落地，CLI 无需额外并发处理

@@ -3,7 +3,7 @@
 # Penguin Knowledge —— 统一知识图谱（笔记 Vault + 代码图谱）设计
 
 > 日期：2026-07-07
-> 状态：设计稿 v2.2（2026-07-07 终审一致性修订：架构图 MCP 工具名对齐六件套、events 补 method、ledger_state 表定义、write_note 命名决定、Parser/Ledger 边界规则；§6 索引管线与 §7 UI 范围仍待确认）
+> 状态：设计稿 v2.3（2026-07-07 三次修订：D2 改判——CLI 升级为第三入口（薄壳、与 MCP 同语义）；新增 §8.3 CLI 形态与跨进程账本锁；§6 索引管线与 §7 UI 范围仍待确认）
 > 上游文档：[graph.md](graph.md)（四工具能力手册 + 命令生态北极星）、[../docs/ai-knowledge-vault.md](../docs/ai-knowledge-vault.md)（笔记 Vault 产品蓝图）
 > 参考实现（不依赖、只参考）：[codegraph](https://github.com/colbymchenry/codegraph) · [graphify](https://github.com/Graphify-Labs/graphify) · [Understand-Anything](https://github.com/Egonex-AI/Understand-Anything) · Obsidian（对标物）
 
@@ -18,7 +18,7 @@ Penguin 内建一张**统一知识图谱**：Obsidian 式笔记 vault 和多 rep
 | # | 决策 | 说明 |
 |---|------|------|
 | D1 | 笔记 vault 和代码图谱**一起做，不分期** | 一次交付完整形态，无 Phase 1/2 |
-| D2 | **全部内建于 Penguin app，经 MCP 暴露** | 无独立 CLI；扩展现有 `packages/mcp` server |
+| D2 | **内建于 Penguin app，三个入口同一语义**：桌面 UI（人点）+ MCP（AI 调）+ **薄 CLI（终端用，2026-07-07 改判加入）** | MCP 扩展现有 `packages/mcp`；CLI 是 `knowledge-core` 查询层上的薄壳，动词集与 MCP 六件套一一对应（§8.3），不做 115 命令全集 |
 | D3 | **不依赖 codegraph/graphify**，仅作参考实现 | 自研引擎；它们仍是开发期给 AI 用的工具 |
 | D4 | **SQLite 优先**，线上存储库以后再考虑 | 核心关系模型不用 SQLite 专有特性；FTS 等加速索引隔离在 `KnowledgeStore` 检索层后面，将来换库=换实现 |
 | D5 | tree-sitter **全语言**，不局限少数几门 | 走官方 `tags.scm` 标准查询，首发打包一批常用 grammar，加语言=加包 |
@@ -39,8 +39,7 @@ Penguin 内建一张**统一知识图谱**：Obsidian 式笔记 vault 和多 rep
 - 跨分支**内容级**时间旅行（`--as-of` 查询未检出分支的代码内容）——需按 blob SHA 存全量解析缓存，属「线上存储库」阶段
 - **双时态图（永不做）**：不给每条边加 `valid_from/valid_to`——复杂度乘数打在每条查询/写入/UI 上，存储无界增长。时间维度由 append-only 事件账本承担（D12）
 - **公开插件 API（V3）**：先做内部注册表（语言/实体/Git provider/存储），接缝被内部实现磨过两轮再公开
-- graph.md 的 115 条命令生态（❄️ 冻结北极星，只落地其中少数动词为 MCP 工具）
-- CLI 形态（Penguin 是桌面 app，入口 = 桌面 UI + MCP）
+- graph.md 的 115 条命令生态**全集**（❄️ 仍冻结北极星）——V1 只落地与 MCP 六件套同语义的薄 CLI 动词集（§8.3）；why/replay/scar/graveyard 等依赖捕获层的命令不做
 - 凭据页加密（沿用 vault 蓝图的 sensitive 标记 + 排除机制；加密另行立项）
 
 ## 2. 总体架构
@@ -200,6 +199,8 @@ ai_suggestion_rejected  snapshot_manifest_created  alias_merge_undone
 #### 2.2.5 多设备限制（V1 单写者假设）
 
 ledger 随 vault 被 iCloud/git 同步是把双刃剑：**两台机器同时追加会产生 seq 分叉和同步冲突文件**（iCloud 会生成 "conflicted copy"）。V1 显式假定**单写者**；启动时若检测到外来 seq 分叉或冲突副本，进入只读模式并提示人工合并，绝不静默择一丢弃。真正的多设备方案（per-device 段文件 / 合并协议）属「线上存储库」阶段。
+
+**同机多进程另论**：app 与 CLI（§8.3）在同一台机器上并发追加是**允许**的——`Ledger.append()` 内部持跨进程文件锁，「读 lastSeq → 写行 → fsync」在锁内完成，seq 不会分叉。单写者假设针对的是**跨设备**（同步通道无法提供锁）。
 
 ## 3. 数据模型（v2，Identity/State 分层）
 
@@ -500,6 +501,38 @@ AI 时代**信任就是产品**：agent 拿到一条边，「解析出来的」�
 - `suggest_links` / `accept_suggestion` / `reject_suggestion`：AI 建议边确认流（`origin=ai, method=INFERRED` 进队列；采纳/拒绝都写 Ledger）——V2 唯一可能独立成工具的一组，因为它是写路径
 - `timeline` / `recent_changes` / `impact` / `backlinks` / `graph_path`：已是 `explore_graph` 的 mode，V1 即可用，V2 只是补 UI
 
+### 8.3 CLI 形态（V1 第三入口，2026-07-07 改判）
+
+**定位**：给「人在终端」用的薄壳——`packages/knowledge-cli` 新包，bin 名 `penguin`。**CLI 不长自己的逻辑**：查询动词直接调 `knowledge-core` 查询层（与 MCP 六件套同一实现、同一语义），写动词走同一个 `recordKnowledge()` 铁律。
+
+**V1 动词集（与 MCP 一一对应 + 系统动词）：**
+
+```text
+penguin init [path]          登记当前/指定目录为 repo（探测 git/分支）+ 一次性首建索引
+penguin status               各 repo/分支索引状态、staleness（= index_status）
+penguin sync [path]          手动一次增量索引（headless，一次性进程）
+penguin search <query>       统一检索（= knowledge_search；--type --repo --workspace --branch）
+penguin node <id|name>       节点详情 + 版本 + alias 历史（= get_node）
+penguin callers <symbol>     谁调用它（= explore_graph mode=who_calls；--branch）
+penguin calls <symbol>       它调用谁（= explore_graph mode=calls_of）
+penguin impact <symbol>      爆炸半径（= explore_graph mode=impact）
+penguin backlinks <node>     谁链接了它（= explore_graph mode=backlinks）
+penguin path <a> <b>         两节点最短路径（= explore_graph mode=path）
+penguin recent [--since]     最近重要变化（= explore_graph mode=recent_changes）
+penguin compare <symbol> <branch_a> <branch_b>   跨分支差异（= compare_branches）
+penguin note new|append|link 写笔记（= write_note 三个 action，遵守 Ledger 铁律）
+penguin doctor               环境 + 知识库自检（DB/账本一致性、watcher 状态）
+penguin install              把 penguin CLI 软链到 PATH + 确认 MCP 已接线
+```
+
+全局旗标（graph.md §6 继承，砍到 V1 能兑现的）：`--json`（机器可读）、`--branch <b>`；每条输出必带 `origin/method/confidence/staleness/branch/commit`（适用时）——与 MCP 返回契约一致。
+
+**分发**：CLI 随 app 捆绑（Tauri resources，同 MCP server 模式），设置页/`penguin install` 把启动脚本软链到 `/usr/local/bin/penguin`（学 VS Code 的 `code` 命令）；运行时用系统 Node（同 sidecar 机制）。
+
+**headless 行为**：查询动词只读 `knowledge.db`（app 不在跑也能查，秒回）；`init/sync` 在 CLI 进程内跑一次性索引（复用 indexer 模块）；常驻 watcher 仍归 app（CLI 不起 daemon，V1）。
+
+**跨进程并发（新增硬规则）**：app 和 CLI 可能同时写账本——`ledger.jsonl` 的 append 必须持**跨进程文件锁**（lock 文件 + O_EXCL 或 flock），锁内完成「读 lastSeq → 写行 → fsync」；SQLite 侧靠 WAL + busy_timeout 已安全。此规则落在 `knowledge-core` 的 `Ledger.append()` 内部，所有入口自动继承。
+
 ## 9. 错误处理 / 性能 / 降级
 
 | 情形 | 行为 |
@@ -549,7 +582,7 @@ AI 时代**信任就是产品**：agent 拿到一条边，「解析出来的」�
 
 | 波次 | 内容 |
 |------|------|
-| **V1（本设计交付）** | 全量 schema（含 node_aliases / events / workspaces / 双轴 provenance）、Ledger/Index 双层存储与写入铁律（§2.2）、事件开始记录（无 UI）、content_hash 全等 rename 检测、Workspace 分组与查询作用域、MCP 六件套（`explore_graph` 的 timeline/recent_changes mode 即查即得） |
+| **V1（本设计交付）** | 全量 schema（含 node_aliases / events / workspaces / 双轴 provenance）、Ledger/Index 双层存储与写入铁律（§2.2，含跨进程账本锁）、事件开始记录（无 UI）、content_hash 全等 rename 检测、Workspace 分组与查询作用域、MCP 六件套（`explore_graph` 的 timeline/recent_changes mode 即查即得）、**薄 CLI 动词集（§8.3）** |
 | **V2** | timeline/replay 视图与 UI、相似度 rename 检测、AI 建议边确认流（suggest/accept/reject）、snapshot manifest、本地 git 对象（commit/tag/merge 拓扑）入图、远端 PR/Issue（走 GitProvider 注册表，存引用+缓存摘要，不整库镜像）、信任策略 |
 | **V3** | 公开插件 API（语言/实体/provider/集成）、线上存储库、多人协作 |
 
