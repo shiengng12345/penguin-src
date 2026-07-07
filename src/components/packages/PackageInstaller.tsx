@@ -125,7 +125,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
         setRegistryList((cur) => {
           const seen = new Set((cur ?? []).map((p) => p.name));
           const additions = event.payload
-            .filter((n) => !seen.has(n))
+            .filter((n) => !seen.has(n) && !n.endsWith("-coco"))
             .map((name) => ({ name, latest_version: "…", description: null, tags: [] }));
           if (additions.length === 0) return cur;
           return [...(cur ?? []), ...additions].sort((a, b) => a.name.localeCompare(b.name));
@@ -360,47 +360,61 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                           onClick={() => selectPackage(pkg.name)}
                           disabled={isInstalling}
                           className={cn(
-                            "flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-accent/60",
+                            "flex w-full flex-col gap-0.5 px-2.5 py-1.5 text-left hover:bg-accent/60",
                             isSelected && "bg-accent/40"
                           )}
                         >
-                          <span className="min-w-0 flex-1 truncate font-mono text-xs text-foreground">
-                            {pkg.name}
-                          </span>
-                          {pkg.tags.slice(0, 2).map((t) => (
+                          {/* 第一行：包名完整优先，协议/版本靠右——tag 不许挤名字 */}
+                          <div className="flex w-full items-center gap-2">
+                            <span className="min-w-0 flex-1 truncate font-mono text-xs text-foreground">
+                              {pkg.name}
+                            </span>
+                            {installed && (
+                              <span className="shrink-0 rounded bg-primary/15 px-1 py-0.5 text-[9px] text-primary">
+                                installed
+                              </span>
+                            )}
+                            {pkgProtocol && (
+                              <span
+                                className={cn(
+                                  "shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium",
+                                  pkgProtocol === "grpc-web" && "bg-green-500/20 text-green-600 dark:text-green-400",
+                                  pkgProtocol === "grpc" && "bg-blue-500/20 text-blue-600 dark:text-blue-400",
+                                  pkgProtocol === "sdk" && "bg-purple-500/20 text-purple-600 dark:text-purple-400"
+                                )}
+                              >
+                                {PROTOCOL_LABELS[pkgProtocol] ?? pkgProtocol}
+                              </span>
+                            )}
                             <span
-                              key={t}
-                              className="max-w-32 shrink-0 truncate rounded bg-amber-500/15 px-1 py-0.5 text-[9px] text-amber-600 dark:text-amber-400"
-                              title={t}
+                              className="shrink-0 font-mono text-[10px] text-muted-foreground"
+                              title={pkg.latest_version}
                             >
-                              {t}
+                              {(() => {
+                                const d = stampFromVersion(pkg.latest_version);
+                                return d ? fmtStamp(d) : pkg.latest_version;
+                              })()}
                             </span>
-                          ))}
-                          {pkg.tags.length > 2 && (
-                            <span className="shrink-0 text-[9px] text-muted-foreground/70">
-                              +{pkg.tags.length - 2}
-                            </span>
-                          )}
-                          {installed && (
-                            <span className="shrink-0 rounded bg-primary/15 px-1 py-0.5 text-[9px] text-primary">
-                              installed
-                            </span>
-                          )}
-                          {pkgProtocol && (
-                            <span
-                              className={cn(
-                                "shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium",
-                                pkgProtocol === "grpc-web" && "bg-green-500/20 text-green-600 dark:text-green-400",
-                                pkgProtocol === "grpc" && "bg-blue-500/20 text-blue-600 dark:text-blue-400",
-                                pkgProtocol === "sdk" && "bg-purple-500/20 text-purple-600 dark:text-purple-400"
+                          </div>
+                          {/* 第二行：项目 tag，超出裁切 */}
+                          {pkg.tags.length > 0 && (
+                            <div className="flex w-full items-center gap-1 overflow-hidden">
+                              {pkg.tags.slice(0, 3).map((t) => (
+                                <span
+                                  key={t}
+                                  className="max-w-44 shrink-0 truncate rounded bg-amber-500/15 px-1 py-px text-[9px] text-amber-600 dark:text-amber-400"
+                                  title={t}
+                                >
+                                  {t}
+                                </span>
+                              ))}
+                              {pkg.tags.length > 3 && (
+                                <span className="shrink-0 text-[9px] text-muted-foreground/70">
+                                  +{pkg.tags.length - 3}
+                                </span>
                               )}
-                            >
-                              {PROTOCOL_LABELS[pkgProtocol] ?? pkgProtocol}
-                            </span>
+                            </div>
                           )}
-                          <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
-                            {pkg.latest_version}
-                          </span>
                         </button>
                         {isSelected && (
                           <div className="border-t border-border/50 bg-muted/30">

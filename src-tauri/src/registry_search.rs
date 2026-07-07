@@ -397,6 +397,8 @@ pub(crate) async fn registry_search_packages(
         }
     };
     let mut list = result?;
+    // 产品规则：-coco 后缀的包不对用户展示（也省下它们的 packument 拉取）
+    list.retain(|p| !p.name.ends_with("-coco"));
     list.sort_by(|a, b| a.name.cmp(&b.name));
     enrich_with_packuments(&client, &registry_url, &auth, &mut list).await;
     eprintln!(
