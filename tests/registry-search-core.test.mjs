@@ -30,7 +30,14 @@ async function loadCore() {
 }
 
 const core = await loadCore();
-const { filterPackages, protocolOfPackage } = core;
+const {
+  buildPackageSpec,
+  completePackageSpec,
+  filterPackageRows,
+  filterPackages,
+  isPackageRowInstalled,
+  protocolOfPackage,
+} = core;
 
 const PKGS = [
   { name: "@snsoft/auth-grpc-web", latest_version: "2.1.1-20260624172317", newest_version: "2.1.1-20260624172317", description: "auth service stubs", tags: ["cicd-master"] },
@@ -162,4 +169,204 @@ test("protocolOfPackage detects suffixes on bare names", () => {
   assert.equal(protocolOfPackage("@snsoft/auth-grpc-web"), "grpc-web");
   assert.equal(protocolOfPackage("@snsoft/auth-grpc"), "grpc");
   assert.equal(protocolOfPackage("@snsoft/js-sdk"), "sdk");
+});
+
+test("filterPackageRows annotates published branch without grouping package types", () => {
+  const rows = filterPackageRows(
+    [
+      { name: "@snsoft/player-grpc-web", latest_version: "3.1.0", newest_version: "3.2.0-20260707121048", description: null, tags: ["new-zealand", "master"], dist_tags: { "new-zealand": "3.2.0-20260707121048", master: "3.1.0-20260706101010", latest: "3.1.0" } },
+      { name: "@snsoft/player-grpc", latest_version: "3.0.0", newest_version: "3.2.0-20260707121047", description: null, tags: ["flow"], dist_tags: { flow: "3.2.0-20260707121047", latest: "3.0.0" } },
+      { name: "@snsoft/admin-grpc", latest_version: "1.0.30", newest_version: "1.0.30-20260706115118", description: null, tags: ["develop"] },
+      { name: "@snsoft/auth-grpc", latest_version: "2.0.0", newest_version: "2.0.0-20260706115118", description: null, tags: ["master"] },
+      { name: "@snsoft/js-sdk", latest_version: "1.0.0-2026-07-07T01-29-43-799Z", newest_version: "1.0.0-2026-07-07T01-29-43-799Z", description: "sdk", tags: [] },
+      { name: "@snsoft/player-coco-grpc", latest_version: "1.0.0-20241021175727", newest_version: "1.0.0-20241021175727", description: null, tags: ["master"] },
+      { name: "@snsoft/player-grpc-json", latest_version: "1.0.32", newest_version: "1.0.32-20260707115122", description: null, tags: ["master"] },
+    ],
+    { query: "player", protocol: "all" },
+  );
+
+  assert.deepEqual(
+    rows.map((row) => [row.name, row.protocol, row.branch, row.version]),
+    [
+      ["@snsoft/player-grpc-web", "grpc-web", "new-zealand", "3.2.0-20260707121048"],
+      ["@snsoft/player-grpc", "grpc", "flow", "3.2.0-20260707121047"],
+      ["@snsoft/player-grpc-web", "grpc-web", "master", "3.1.0-20260706101010"],
+    ],
+  );
+});
+
+test("filterPackageRows supports fuzzy branch plus package searches in either order", () => {
+  const list = [
+    { name: "@snsoft/player-grpc-web", latest_version: "3.1.0", newest_version: "3.2.0-20260707121048", description: null, tags: ["new-zealand", "master"], dist_tags: { "new-zealand": "3.2.0-20260707121048", master: "3.1.0-20260706101010", latest: "3.1.0" } },
+    { name: "@snsoft/player-grpc", latest_version: "3.1.0", newest_version: "3.2.0-20260707121047", description: null, tags: ["new-zealand", "master"], dist_tags: { "new-zealand": "3.2.0-20260707121047", master: "3.1.0-20260706101009", latest: "3.1.0" } },
+    { name: "@snsoft/player-admin-grpc", latest_version: "1.0.30", newest_version: "1.0.30-20260706115118", description: null, tags: ["new-zealand"], dist_tags: { "new-zealand": "1.0.30-20260706115118" } },
+    { name: "@snsoft/auth-grpc", latest_version: "2.0.0", newest_version: "2.0.0-20260706115118", description: null, tags: ["master"] },
+  ];
+
+  for (const query of ["masterplayer", "playermaster", "master player", "plyrmaster"]) {
+    const rows = filterPackageRows(list, { query, protocol: "all" });
+
+    assert.deepEqual(
+      rows.map((row) => [row.name, row.protocol, row.branch, row.version]),
+      [
+        ["@snsoft/player-grpc-web", "grpc-web", "master", "3.1.0-20260706101010"],
+        ["@snsoft/player-grpc", "grpc", "master", "3.1.0-20260706101009"],
+      ],
+      query,
+    );
+  }
+});
+
+test("filterPackageRows returns only the selected package type", () => {
+  const rows = filterPackageRows(
+    [
+      { name: "@snsoft/player-grpc-web", latest_version: "1.0.32", newest_version: "1.0.32-20260707115119", description: null, tags: ["master"] },
+      { name: "@snsoft/player-grpc", latest_version: "1.0.32", newest_version: "1.0.32-20260707115118", description: null, tags: ["master"] },
+    ],
+    { query: "", protocol: "grpc-web" },
+  );
+
+  assert.deepEqual(rows.map((row) => row.name), ["@snsoft/player-grpc-web"]);
+});
+
+test("filterPackageRows does not show branch for js-sdk", () => {
+  const rows = filterPackageRows(
+    [
+      { name: "@snsoft/js-sdk", latest_version: "1.0.0-2026-07-07T01-29-43-799Z", newest_version: "1.0.0-2026-07-07T01-29-43-799Z", description: "sdk", tags: [], versions: ["1.0.0-2026-07-07T01-29-43-799Z"], dist_tags: { latest: "1.0.0-2026-07-07T01-29-43-799Z" } },
+      { name: "@snsoft/player-grpc", latest_version: "1.0.32", newest_version: "1.0.32-20260707115118", description: null, tags: ["master"] },
+    ],
+    { query: "", protocol: "sdk" },
+  );
+
+  assert.deepEqual(
+    rows.map((row) => [row.name, row.protocol, row.branch, row.version]),
+    [["@snsoft/js-sdk", "sdk", "", "1.0.0-2026-07-07T01-29-43-799Z"]],
+  );
+});
+
+test("filterPackageRows expands js-sdk versions as separate installable rows", () => {
+  const rows = filterPackageRows(
+    [
+      {
+        name: "@snsoft/js-sdk",
+        latest_version: "1.0.0-2026-07-07T01-29-43-799Z",
+        newest_version: "1.0.0-2026-07-07T02-00-00-000Z",
+        description: "sdk",
+        tags: [],
+        versions: [
+          "1.0.0-2026-07-07T01-29-43-799Z",
+          "1.0.0-2026-07-07T02-00-00-000Z",
+          "1.0.0-2026-07-06T23-59-59-000Z",
+        ],
+        dist_tags: { latest: "1.0.0-2026-07-07T01-29-43-799Z" },
+      },
+    ],
+    { query: "", protocol: "sdk" },
+  );
+
+  assert.deepEqual(
+    rows.map((row) => [row.name, row.branch, row.version, row.install_tag]),
+    [
+      ["@snsoft/js-sdk", "", "1.0.0-2026-07-07T02-00-00-000Z", "1.0.0-2026-07-07T02-00-00-000Z"],
+      ["@snsoft/js-sdk", "", "1.0.0-2026-07-07T01-29-43-799Z", "1.0.0-2026-07-07T01-29-43-799Z"],
+      ["@snsoft/js-sdk", "", "1.0.0-2026-07-06T23-59-59-000Z", "1.0.0-2026-07-06T23-59-59-000Z"],
+    ],
+  );
+});
+
+test("filterPackageRows hides unresolved streaming placeholders", () => {
+  const rows = filterPackageRows(
+    [
+      { name: "@snsoft/admin-grpc", latest_version: "...", newest_version: "...", description: null, tags: [] },
+      { name: "@snsoft/admin-grpc-web", latest_version: "...", newest_version: "...", description: null, tags: [] },
+      { name: "@snsoft/player-grpc", latest_version: "3.2.0", newest_version: "3.2.0-20260707121047", description: null, tags: ["new-zealand"], dist_tags: { "new-zealand": "3.2.0-20260707121047" } },
+    ],
+    { query: "", protocol: "all" },
+  );
+
+  assert.deepEqual(rows.map((row) => row.name), ["@snsoft/player-grpc"]);
+});
+
+test("isPackageRowInstalled matches package name and resolved version", () => {
+  const [row] = filterPackageRows(
+    [
+      { name: "@snsoft/player-grpc-web", latest_version: "3.1.0", newest_version: "3.2.0-20260707121048", description: null, tags: ["new-zealand"], dist_tags: { "new-zealand": "3.2.0-20260707121048" } },
+    ],
+    { query: "player", protocol: "grpc-web" },
+  );
+
+  assert.equal(
+    isPackageRowInstalled(row, [{ name: "@snsoft/player-grpc-web", version: "3.1.0" }]),
+    false,
+  );
+  assert.equal(
+    isPackageRowInstalled(row, [{ name: "@snsoft/player-grpc-web", version: "3.2.0-20260707121048" }]),
+    true,
+  );
+});
+
+test("buildPackageSpec appends branch or defaults to latest", () => {
+  assert.equal(
+    buildPackageSpec("@snsoft/player-grpc-web", "master"),
+    "@snsoft/player-grpc-web@master",
+  );
+  assert.equal(
+    buildPackageSpec("@snsoft/player-grpc", ""),
+    "@snsoft/player-grpc@latest",
+  );
+});
+
+test("completePackageSpec keeps versioned specs and defaults bare names to latest", () => {
+  assert.equal(
+    completePackageSpec("@snsoft/player-grpc-web@1.0.0"),
+    "@snsoft/player-grpc-web@1.0.0",
+  );
+  assert.equal(
+    completePackageSpec("@snsoft/player-grpc-web"),
+    "@snsoft/player-grpc-web@latest",
+  );
+});
+
+const BRANCH_LIST = [
+  { name: "@snsoft/player-grpc-web", latest_version: "3.2.0", newest_version: "3.2.0-20260707125835", description: null, tags: ["brazil-v2", "master"], dist_tags: { "brazil-v2": "3.2.0-20260707125835", master: "3.1.0-20260706101010" } },
+  { name: "@snsoft/player-grpc", latest_version: "3.2.0", newest_version: "3.2.0-20260707125833", description: null, tags: ["brazil-v2"], dist_tags: { "brazil-v2": "3.2.0-20260707125833" } },
+  { name: "@snsoft/ccms-grpc-web", latest_version: "2.0.2", newest_version: "2.0.2-20260707154342", description: null, tags: ["quick-action-guide"], dist_tags: { "quick-action-guide": "2.0.2-20260707154342" } },
+  { name: "@snsoft/ccms-grpc", latest_version: "2.0.2", newest_version: "2.0.2-20260707154341", description: null, tags: ["quick-action-guide"], dist_tags: { "quick-action-guide": "2.0.2-20260707154341" } },
+  { name: "@snsoft/js-sdk", latest_version: "1.0.0", newest_version: "1.0.0-2026-07-07T01-29-43-799Z", description: "sdk", tags: [], versions: ["1.0.0-2026-07-07T01-29-43-799Z"] },
+];
+
+test("branch filter: 'brazil' returns only brazil-v2 rows across package types", () => {
+  const rows = filterPackageRows(BRANCH_LIST, { query: "", branch: "brazil", protocol: "all" });
+  assert.deepEqual(
+    rows.map((r) => [r.name, r.branch]),
+    [
+      ["@snsoft/player-grpc-web", "brazil-v2"],
+      ["@snsoft/player-grpc", "brazil-v2"],
+    ],
+  );
+});
+
+test("branch filter: 'quick' returns only quick-action-guide rows", () => {
+  const rows = filterPackageRows(BRANCH_LIST, { query: "", branch: "quick", protocol: "all" });
+  assert.deepEqual(
+    rows.map((r) => [r.name, r.branch]),
+    [
+      ["@snsoft/ccms-grpc-web", "quick-action-guide"],
+      ["@snsoft/ccms-grpc", "quick-action-guide"],
+    ],
+  );
+});
+
+test("branch filter combines with name query and type filter (AND)", () => {
+  const byName = filterPackageRows(BRANCH_LIST, { query: "player", branch: "brazil", protocol: "all" });
+  assert.deepEqual(byName.map((r) => r.name), ["@snsoft/player-grpc-web", "@snsoft/player-grpc"]);
+
+  const byType = filterPackageRows(BRANCH_LIST, { query: "", branch: "brazil", protocol: "grpc-web" });
+  assert.deepEqual(byType.map((r) => r.name), ["@snsoft/player-grpc-web"]);
+});
+
+test("branch filter excludes js-sdk (no branch)", () => {
+  const rows = filterPackageRows(BRANCH_LIST, { query: "", branch: "master", protocol: "all" });
+  assert.ok(!rows.some((r) => r.name === "@snsoft/js-sdk"));
+  assert.deepEqual(rows.map((r) => [r.name, r.branch]), [["@snsoft/player-grpc-web", "master"]]);
 });
