@@ -571,6 +571,9 @@ async fn fetch_packument(
     let resp = client
         .get(&url)
         .header("authorization", auth)
+        // 精简 packument（corgi）：只含 versions + dist-tags，无 README/全量元数据，
+        // 体积小很多、传输解析都更快。Nexus 不支持时会退回完整文档，仍能反序列化。
+        .header("accept", "application/vnd.npm.install-v1+json")
         .send()
         .await
         .map_err(|e| format!("packument 请求失败: {e}"))?;
@@ -584,6 +587,8 @@ async fn fetch_packument(
 }
 
 const PACKUMENT_CONCURRENCY: usize = 24;
+// 直连已知包（~55 个候选，含小写兜底变体）：一轮全部并发打完，最少 round-trip。
+const DIRECT_FETCH_CONCURRENCY: usize = 64;
 
 fn recent_packument_indexes(list: &[RegistryPackage], limit: usize) -> Vec<usize> {
     let mut indexes: Vec<usize> = (0..list.len()).collect();
@@ -631,7 +636,7 @@ async fn fetch_known_client_packages(
 ) -> Vec<RegistryPackage> {
     let names = client_package_candidates();
     let mut out: Vec<RegistryPackage> = Vec::new();
-    for chunk in names.chunks(PACKUMENT_CONCURRENCY) {
+    for chunk in names.chunks(DIRECT_FETCH_CONCURRENCY) {
         let mut set = tokio::task::JoinSet::new();
         for name in chunk.iter().cloned() {
             let client = client.clone();
