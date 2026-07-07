@@ -452,7 +452,9 @@ AI 时代**信任就是产品**：agent 拿到一条边，「解析出来的」�
 - **敏感规则**（wiki 蓝图继承）：`sensitive=1` 或 `mcp_access=denied` 的笔记默认排除在 MCP 结果外，只返回「存在一个敏感关联页」占位
 - **凭据存储（2026-07-07 拍板 C 案）**：凭据类内容正文**不落 .md 文件**，存 `knowledge.db` 专表（`credential_entries`，与现有 REST 凭据同取向：SQLite、Postman 式）。图谱中仍有凭据节点（node_type=credential，只含标题/安全元数据）可被笔记链接；正文仅 app 内查看，永不进 FTS/MCP/AI，不随 wiki 同步。加密不做（与既有取向一致）。
 
-## 6. 索引引擎管线（提案，待确认）
+## 6. 索引引擎管线（2026-07-07 拍板：web-tree-sitter WASM sidecar）
+
+> 解析架构已锁：**web-tree-sitter（WASM grammar）+ 官方 tags.scm** 一套管线吃所有语言，跑在 knowledge-indexer sidecar 里（WASM 免各平台原生编译）。分 Plan 2a–2f 执行：2a=存储层扩展（files_index + repo/branch 登记 + symbol_versions API）、2b=sidecar+符号提取、2c=引用解析+rename、2d=增量管线+分支模型、2e=笔记索引、2f=文件监听+对账。
 
 ### 6.1 全语言符号提取
 
