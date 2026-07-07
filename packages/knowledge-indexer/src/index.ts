@@ -9,3 +9,6 @@ export {
 } from "./extract.js";
 export { resolveRefs, type SymbolIndex, type ResolvedEdges } from "./resolve.js";
 export { detectRenames, type RenameAliasEvent } from "./rename.js";
+export { readGitContext, type GitContext } from "./git.js";
+export { walkRepoFiles, type WalkedFile } from "./walk.js";
+export { indexRepo, reconcileOnStartup, IndexTaskLock, type IndexReport } from "./pipeline.js";
