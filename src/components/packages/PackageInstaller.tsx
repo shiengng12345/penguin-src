@@ -347,7 +347,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
       <div
         role="dialog"
         aria-modal="true"
-        className="relative z-50 flex max-h-[84vh] w-full max-w-[960px] flex-col overflow-hidden rounded-lg border border-slate-700/70 bg-[#071016]/95 shadow-[0_22px_70px_rgba(0,0,0,0.5)]"
+        className="relative z-50 flex max-h-[86vh] w-full max-w-[1040px] flex-col overflow-hidden rounded-xl border border-slate-700/70 bg-[#071016]/95 shadow-[0_22px_70px_rgba(0,0,0,0.5)]"
         onClick={(e) => e.stopPropagation()}
       >
         <header className="flex items-start justify-between border-b border-slate-800/90 px-5 py-4">
@@ -511,51 +511,53 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                         onClick={() => selectPackage(key)}
                         disabled={isInstalling}
                         className={cn(
-                          "flex min-h-[64px] w-full items-center gap-3 border px-3 py-2.5 text-left transition-colors",
+                          "grid min-h-[68px] w-full grid-cols-[minmax(0,1fr)_190px_168px_84px] items-center gap-4 border px-4 py-2.5 text-left transition-colors",
                           selected
                             ? "border-cyan-400/70 bg-cyan-500/10"
                             : "border-transparent hover:bg-slate-900/55",
                         )}
                       >
-                        <RowRadio selected={selected} />
-                        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-cyan-400/20 bg-cyan-400/10 text-cyan-300">
-                          <Package className="h-4 w-4" />
-                        </div>
-                        {/* 名称块：包名在上，类型 chip + 版本在下 */}
-                        <div className="min-w-0 flex-1">
-                          <div
-                            title={pkg.name}
-                            className="truncate font-mono text-[13px] font-semibold text-slate-50"
-                          >
-                            {pkg.name}
+                        {/* 名称列：单选 + 图标块 + （包名 / 类型 chip + 版本） */}
+                        <div className="flex min-w-0 items-center gap-3">
+                          <RowRadio selected={selected} />
+                          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-cyan-400/20 bg-cyan-400/10 text-cyan-300">
+                            <Package className="h-[18px] w-[18px]" />
                           </div>
-                          <div className="mt-1 flex min-w-0 items-center gap-2">
-                            <TypeChip protocol={pkg.protocol} />
-                            <span
-                              title={pkg.version}
-                              className="min-w-0 truncate font-mono text-[12px] text-slate-400"
+                          <div className="min-w-0">
+                            <div
+                              title={pkg.name}
+                              className="truncate font-mono text-sm font-semibold text-slate-50"
                             >
-                              {pkg.version}
-                            </span>
+                              {pkg.name}
+                            </div>
+                            <div className="mt-1 flex min-w-0 items-center gap-2">
+                              <TypeChip protocol={pkg.protocol} />
+                              <span
+                                title={pkg.version}
+                                className="min-w-0 truncate font-mono text-[12px] text-slate-400"
+                              >
+                                {pkg.version}
+                              </span>
+                            </div>
                           </div>
                         </div>
-                        {/* 右侧：构建时间 · 分支 · 状态，右对齐固定列宽保持稳定 */}
-                        <div className="flex shrink-0 items-center gap-3">
-                          <span className="hidden items-center gap-1.5 whitespace-nowrap font-mono text-[12px] tabular-nums text-slate-400 sm:flex">
-                            <Clock className="h-3.5 w-3.5 text-slate-500" />
-                            {stamp ? fmtStamp(stamp) : "-"}
-                          </span>
-                          <div className="hidden w-[150px] justify-start md:flex">
-                            {pkg.branch ? <BranchChip branch={pkg.branch} /> : null}
-                          </div>
-                          <div className="flex w-[72px] justify-end">
-                            {installed && (
-                              <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md bg-emerald-500/15 px-2 py-0.5 text-[11px] font-medium text-emerald-300">
-                                <CheckCircle2 className="h-3 w-3" />
-                                已安装
-                              </span>
-                            )}
-                          </div>
+                        {/* 构建时间列 */}
+                        <span className="flex items-center gap-1.5 whitespace-nowrap font-mono text-[12px] tabular-nums text-slate-400">
+                          <Clock className="h-3.5 w-3.5 shrink-0 text-slate-500" />
+                          {stamp ? fmtStamp(stamp) : "-"}
+                        </span>
+                        {/* 分支列 */}
+                        <div className="min-w-0">
+                          {pkg.branch ? <BranchChip branch={pkg.branch} /> : null}
+                        </div>
+                        {/* 状态列 */}
+                        <div className="flex justify-end">
+                          {installed && (
+                            <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md bg-emerald-500/15 px-2 py-0.5 text-[11px] font-medium text-emerald-300">
+                              <CheckCircle2 className="h-3 w-3" />
+                              已安装
+                            </span>
+                          )}
                         </div>
                       </button>
                     );
