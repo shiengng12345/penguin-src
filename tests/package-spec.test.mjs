@@ -113,6 +113,58 @@ test("PackageInstaller routes input through normalizePackageSpec", async () => {
   assert.match(source, /onChange=\{[^}]*normalizePackageSpec[^}]*\}/);
 });
 
+test("PackageInstaller package search disables browser autocomplete", async () => {
+  const source = await readFile(
+    new URL("../src/components/packages/PackageInstaller.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /placeholder="搜索 \/ 勾选产品线，例如：player, auth, ccms"[\s\S]*autoComplete="off"/);
+  assert.match(source, /placeholder="搜索 \/ 勾选产品线，例如：player, auth, ccms"[\s\S]*spellCheck=\{false\}/);
+});
+
+test("PackageInstaller refresh streams enriched registry rows into the list", async () => {
+  const source = await readFile(
+    new URL("../src/components/packages/PackageInstaller.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /registry-search:enriched/);
+  assert.match(source, /mergeRegistryPackages/);
+  assert.match(source, /fetchRegistryPackages\(\{ force: true \}\)/);
+});
+
+test("PackageInstaller installs the selected row by exact displayed version", async () => {
+  const source = await readFile(
+    new URL("../src/components/packages/PackageInstaller.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /function packageInstallSpec/);
+  assert.match(source, /return `\$\{pkg\.name\}@\$\{pkg\.version\}`/);
+  // 多选批量安装：勾选的行按其精确显示版本生成规格
+  assert.match(source, /selectedRows\.map\(packageInstallSpec\)/);
+  // 旧的单选 selectedPackage / 按 tag 安装的路径已移除
+  assert.doesNotMatch(source, /selectedPackage/);
+  assert.doesNotMatch(source, /buildPackageSpec\([^)]*install_tag\)/);
+});
+
+test("PackageInstaller renders compact rows with branch chip after build time", async () => {
+  const source = await readFile(
+    new URL("../src/components/packages/PackageInstaller.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.doesNotMatch(source, />Version</);
+  assert.doesNotMatch(source, />Build</);
+  assert.match(source, /function BranchChip/);
+  assert.match(source, /GitBranch/);
+  assert.match(source, /max-w-\[(?:1[4-6]0px|10rem)\]/);
+  // 分支全名改为 hover 自定义 tooltip（portal），不再用原生 title={branch}
+  assert.match(source, /function BranchChip[\s\S]*createPortal/);
+  assert.match(source, /title=\{pkg\.version\}/);
+  assert.match(source, /font-mono[\s\S]*\{pkg\.version\}/);
+  // 时间列在分支列之前
+  assert.match(source, /fmtStamp\(stamp\)[\s\S]*<BranchChip branch=\{pkg\.branch\}/);
+  assert.match(source, /共 \{searchResults\.length\} 个结果/);
+});
+
 test("extracts package name from allowed snsoft package specs", async () => {
   const { snsoftPackageNameFromSpec } = await loadPackageSpecModule();
 
