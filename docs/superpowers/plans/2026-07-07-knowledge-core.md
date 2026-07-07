@@ -59,7 +59,7 @@
     "dev": "tsc -p tsconfig.json --watch"
   },
   "dependencies": {
-    "better-sqlite3": "^12.2.0"
+    "better-sqlite3": "^11.10.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",
