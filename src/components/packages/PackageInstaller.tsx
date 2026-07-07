@@ -112,7 +112,8 @@ function TypeChip({ protocol }: { protocol: PackageProtocol }) {
   return (
     <span
       className={cn(
-        "inline-flex h-5 shrink-0 items-center whitespace-nowrap rounded px-2 text-[11px] font-medium leading-none",
+        // 固定宽度：gRPC / gRPC-Web / JS-SDK 占同宽，后面的版本号才能列对齐
+        "inline-flex h-5 w-[68px] shrink-0 items-center justify-center whitespace-nowrap rounded px-1 text-[11px] font-medium leading-none",
         protocol === "sdk"
           ? "border border-purple-400/25 bg-purple-500/15 text-purple-200"
           : "border border-cyan-400/20 bg-cyan-400/10 text-cyan-200",
@@ -128,7 +129,8 @@ function BranchChip({ branch }: { branch: string }) {
   return (
     <span
       title={branch}
-      className="inline-flex h-5 max-w-full shrink-0 items-center gap-1 whitespace-nowrap rounded-md border border-slate-700/70 bg-slate-800/70 px-2 text-[11px] leading-none text-slate-300"
+      // 填满分支列：无论分支名长短，chip 统一成同宽的框，过长截断
+      className="inline-flex h-5 w-full items-center gap-1 whitespace-nowrap rounded-md border border-slate-700/70 bg-slate-800/70 px-2 text-[11px] leading-none text-slate-300"
     >
       <GitBranch className="h-3 w-3 shrink-0 text-slate-400" />
       <span className="truncate">{branch}</span>
