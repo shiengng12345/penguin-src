@@ -35,8 +35,10 @@ const {
   completePackageSpec,
   filterPackageRows,
   filterPackages,
+  isAllowedClientPackage,
   isPackageRowInstalled,
   protocolOfPackage,
+  suggestPackageStems,
 } = core;
 
 const PKGS = [
@@ -410,4 +412,60 @@ test("suggestPackageStems extracts unique family prefixes, prefix-ranked", () =>
     { name: "@snsoft/player-grpc", latest_version: "1", newest_version: "1", description: null, tags: [] },
   ];
   assert.deepEqual(suggestPackageStems(list2, "play"), ["player", "xplayer"]);
+});
+
+test("isAllowedClientPackage keeps whitelisted grpc/grpc-web families", () => {
+  for (const name of [
+    "@snsoft/admin-grpc",
+    "@snsoft/auth-grpc-web",
+    "@snsoft/payment-grpc",
+    "@snsoft/player-grpc-web",
+    "@snsoft/ccms-grpc",
+    "@snsoft/cms-grpc", // ccms 与 cms 是两个不同 family，都要保留
+  ]) {
+    assert.equal(isAllowedClientPackage(name), true, name);
+  }
+});
+
+test("isAllowedClientPackage matches camelCase list against kebab-case names", () => {
+  // 用户名单是 camelCase（aiChat/offlineCasino/...），实际包名是 kebab；
+  // 归一化后应对上。
+  for (const name of [
+    "@snsoft/ai-chat-grpc",
+    "@snsoft/offline-casino-grpc",
+    "@snsoft/risk-control-grpc-web",
+    "@snsoft/social-engagement-grpc",
+    "@snsoft/user-engagement-grpc-web",
+  ]) {
+    assert.equal(isAllowedClientPackage(name), true, name);
+  }
+});
+
+test("isAllowedClientPackage keeps @snsoft/js-sdk regardless of family list", () => {
+  assert.equal(isAllowedClientPackage("@snsoft/js-sdk"), true);
+});
+
+test("isAllowedClientPackage drops backend and off-list packages", () => {
+  for (const name of [
+    "@snsoft/order-service-grpc", // 名单外的后端 grpc
+    "@snsoft/gateway-grpc-web", // 名单外
+    "@snsoft/player-account-grpc", // player 的子包，family=playeraccount，精确匹配不命中
+    "@snsoft/some-backend", // 裸包，非客户端
+    "@snsoft/player-grpc-json", // grpc-json 不是可安装客户端协议
+    "@snsoft/player-coco-grpc", // family=playercoco
+    "express", // 非 @snsoft
+  ]) {
+    assert.equal(isAllowedClientPackage(name), false, name);
+  }
+});
+
+test("component-boundary filter strips backend before search", () => {
+  // 复现组件里的 allowedList 过滤：后端包进不了结果。
+  const raw = [
+    { name: "@snsoft/player-grpc", latest_version: "1.0.0", newest_version: "1.0.0-20260707121047", description: null, tags: ["master"], dist_tags: { master: "1.0.0-20260707121047" } },
+    { name: "@snsoft/order-service-grpc", latest_version: "9.9.9", newest_version: "9.9.9-20260707999999", description: null, tags: ["master"], dist_tags: { master: "9.9.9-20260707999999" } },
+  ];
+  const allowed = raw.filter((p) => isAllowedClientPackage(p.name));
+  const rows = filterPackageRows(allowed, { query: "", protocol: "all" });
+  assert.deepEqual(rows.map((r) => r.name), ["@snsoft/player-grpc"]);
 });

@@ -25,6 +25,7 @@ import { useAppStore, type InstalledPackage } from "@/lib/store";
 import {
   completePackageSpec,
   filterPackageRows,
+  isAllowedClientPackage,
   isPackageRowInstalled,
   suggestPackageStems,
   type PackageProtocol,
@@ -169,7 +170,8 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
   // 「仅 master」勾选框：默认勾上 → 按 master 分支过滤；在分支框输入即自动
   // 取消勾选、改按输入框的值走（空=全部分支）。
   const [branchQuery, setBranchQuery] = useState("");
-  const [masterOnly, setMasterOnly] = useState(true);
+  // 默认关闭：默认显示全部分支（用户要能看到最新发布，不被 master 挡住）。
+  const [masterOnly, setMasterOnly] = useState(false);
   const effectiveBranch = masterOnly ? "master" : branchQuery;
   const [manualSpec, setManualSpec] = useState("");
   // 多选：勾选多个包一次批量安装（对齐一次装一整批的工作流）
@@ -285,18 +287,25 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
     };
   }, [isInstalling]);
 
+  // 只展示白名单客户端包（Rust 首拉已过滤；此处再挡一次，防旧磁盘缓存把
+  // 后端 xxx-grpc 漏进来）。
+  const allowedList = useMemo(
+    () => (registryList ?? []).filter((p) => isAllowedClientPackage(p.name)),
+    [registryList],
+  );
+
   const searchResults = useMemo(() => {
     if (!registryList) return [];
-    return filterPackageRows(registryList, {
+    return filterPackageRows(allowedList, {
       query: searchQuery,
       branch: effectiveBranch,
       protocol: typeFilter,
     });
-  }, [registryList, searchQuery, effectiveBranch, typeFilter]);
+  }, [registryList, allowedList, searchQuery, effectiveBranch, typeFilter]);
 
   const nameSuggestions = useMemo(
-    () => (registryList ? suggestPackageStems(registryList, searchQuery) : []),
-    [registryList, searchQuery],
+    () => suggestPackageStems(allowedList, searchQuery),
+    [allowedList, searchQuery],
   );
 
   const pickSuggestion = (stem: string) => {

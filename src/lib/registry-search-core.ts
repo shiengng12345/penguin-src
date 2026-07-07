@@ -41,6 +41,26 @@ export function protocolOfPackage(name: string): PackageProtocol | null {
   return protocolFromSnsoftPackageName(name);
 }
 
+// 客户端包白名单（产品线 family）：只展示这些产品线的 grpc / grpc-web 客户端
+// 包；@snsoft/js-sdk 作为单独的客户端始终保留。后端服务包同样叫 xxx-grpc，
+// 靠这个名单挡掉。归一化后（小写、仅字母数字）精确匹配，兼容 camelCase↔
+// kebab-case（aiChat ↔ ai-chat、offlineCasino ↔ offline-casino）。
+// 权威副本在 Rust 侧 registry_search.rs::ALLOWED_CLIENT_FAMILIES（首拉即过滤，
+// 顺带把 packument 补全压到 ~43 个）；此处是防御性二次过滤，也用于自动补全下拉。
+const ALLOWED_CLIENT_FAMILIES = new Set([
+  "admin", "aichat", "auth", "biztreats", "ccms", "cms", "internal",
+  "livechat", "offlinecasino", "packet", "payment", "player", "promotion",
+  "proposal", "provider", "push", "recommend", "riskcontrol",
+  "socialengagement", "telesales", "userengagement",
+]);
+
+export function isAllowedClientPackage(name: string): boolean {
+  const protocol = protocolOfPackage(name);
+  if (protocol === null) return false;
+  if (protocol === "sdk") return true; // @snsoft/js-sdk 始终允许
+  return ALLOWED_CLIENT_FAMILIES.has(normalizeSearchText(familyOf(name)));
+}
+
 function newestFirst(a: RegistryPackage, b: RegistryPackage): number {
   return (
     buildStampOf(b.newest_version) - buildStampOf(a.newest_version) ||

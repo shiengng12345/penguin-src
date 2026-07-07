@@ -22,6 +22,46 @@ const SNSOFT_SCOPE: &str = "@snsoft";
 const NEXUS_GROUP: &str = "snsoft";
 const AUTH_HINT: &str = "请到 Settings → Package Registry 检查凭据";
 
+// 客户端包白名单（产品线 family）：只保留这些产品线的 grpc / grpc-web 客户端
+// 包，外加 @snsoft/js-sdk。后端服务包也叫 xxx-grpc，靠这个名单挡在结果之外；
+// 更关键的是把 packument 补全的目标从「整个 registry（数百个）」压到 ~43 个，
+// 让最新发布的包在首屏几秒内可见（否则要等全量 enrich，约 1 分钟）。
+// 比对方式：去掉 @snsoft/ 前缀与 -grpc/-grpc-web 后缀得到 family，归一化
+// （小写、仅保留字母数字）后与名单精确匹配，兼容 camelCase↔kebab-case
+// （aiChat ↔ ai-chat、offlineCasino ↔ offline-casino）。
+const ALLOWED_CLIENT_FAMILIES: &[&str] = &[
+    "admin", "aichat", "auth", "biztreats", "ccms", "cms", "internal",
+    "livechat", "offlinecasino", "packet", "payment", "player", "promotion",
+    "proposal", "provider", "push", "recommend", "riskcontrol",
+    "socialengagement", "telesales", "userengagement",
+];
+
+fn normalize_family_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+fn is_allowed_client_package(name: &str) -> bool {
+    let Some(bare) = name.strip_prefix("@snsoft/") else {
+        return false;
+    };
+    if bare == "js-sdk" {
+        return true;
+    }
+    // 只认 grpc-web / grpc 客户端后缀（先试更长的 -grpc-web）；其它后缀或裸包
+    // （多为后端）一律排除。
+    let Some(stem) = bare
+        .strip_suffix("-grpc-web")
+        .or_else(|| bare.strip_suffix("-grpc"))
+    else {
+        return false;
+    };
+    ALLOWED_CLIENT_FAMILIES.contains(&normalize_family_key(stem).as_str())
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct RegistryPackage {
     pub name: String,
@@ -467,8 +507,9 @@ pub(crate) async fn registry_search_packages(
         }
     };
     let mut list = result?;
-    // 产品规则：-coco 后缀的包不对用户展示（也省下它们的 packument 拉取）
-    list.retain(|p| !p.name.ends_with("-coco"));
+    // 只保留白名单客户端包：挡掉后端 xxx-grpc / -coco 等噪音，同时把 packument
+    // 补全量降到 ~43 个，最新包首屏秒级可见（详见 is_allowed_client_package）。
+    list.retain(|p| is_allowed_client_package(&p.name));
     enrich_recent_packuments(&client, &registry_url, &auth, &mut list, Some(&app)).await;
     list.sort_by(|a, b| a.name.cmp(&b.name));
     eprintln!("INFO registry_search_packages - exit count={}", list.len());

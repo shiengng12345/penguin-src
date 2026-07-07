@@ -13,7 +13,7 @@ export interface PackageVersions {
 
 // 团队高频 publish：缓存只做「秒开第一屏」，每次打开都后台实时重爬替换；
 // 版本/tag（点包之后）永远实时拉、绝不缓存——刚 publish 的立刻可见。
-const DISK_CACHE_KEY = "registry:pkg-list:v3"; // v3: 增加 newest_version 字段
+const DISK_CACHE_KEY = "registry:pkg-list:v5"; // v5: 客户端包白名单过滤（丢弃含后端包的旧缓存）
 let memoryList: RegistryPackage[] | null = null;
 let inflight: Promise<RegistryPackage[]> | null = null;
 
@@ -32,10 +32,12 @@ export async function loadCachedRegistryPackages(): Promise<RegistryPackage[] | 
   }
 }
 
-// 永远走网络（唯一的合并是「进行中的同一请求」——重复打开不叠加重爬）。
-export async function fetchRegistryPackages(): Promise<RegistryPackage[]> {
-  if (inflight) return inflight;
-  inflight = invoke<RegistryPackage[]>("registry_search_packages")
+// 永远走网络；普通打开会复用进行中的同一请求，手动刷新可强制开新请求。
+export async function fetchRegistryPackages(
+  options: { force?: boolean } = {},
+): Promise<RegistryPackage[]> {
+  if (inflight && !options.force) return inflight;
+  const request = invoke<RegistryPackage[]>("registry_search_packages")
     .then((list) => {
       memoryList = list;
       void invoke("db_set_app_value", {
@@ -47,9 +49,10 @@ export async function fetchRegistryPackages(): Promise<RegistryPackage[]> {
       return list;
     })
     .finally(() => {
-      inflight = null;
+      if (inflight === request) inflight = null;
     });
-  return inflight;
+  if (!options.force) inflight = request;
+  return request;
 }
 
 // 不缓存：版本/tag 必须是 publish 后立刻可见的实时数据。
