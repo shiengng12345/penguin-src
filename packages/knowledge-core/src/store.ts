@@ -55,6 +55,25 @@ export interface BranchRow {
   status: string;
 }
 
+export type SymbolStatus = "fresh" | "stale";
+
+export interface SymbolVersionRow {
+  id: string;
+  node_id: string;
+  branch_id: string;
+  commit_sha: string;
+  file_path: string;
+  lang: string;
+  kind: string;
+  signature: string | null;
+  start_line: number | null;
+  end_line: number | null;
+  content_hash: string;
+  status: string;
+  first_seen_at: string | null;
+  last_seen_at: string | null;
+}
+
 // 存储核心唯一对外 API（D4 隔离层）。
 // §2.2 铁律在代码层的收口点：不可再生知识只有 recordKnowledge() 一个入口，
 // 本类不提供任何绕过账本写 events/node_aliases/非 parser 边的方法。
@@ -211,6 +230,77 @@ export class KnowledgeStore {
          WHERE id = @branchId`,
       )
       .run({ branchId: p.branchId, commit: p.commit ?? null, at: new Date().toISOString() });
+  }
+
+  // —— symbol_versions（分支作用域的实现快照，可再生直写）——
+  // first_seen_at 在插入时定；更新只刷新 last_seen_at 与内容字段，不动 first_seen_at。
+  upsertSymbolVersion(v: {
+    nodeId: string;
+    branchId: string;
+    commitSha: string;
+    filePath: string;
+    lang: string;
+    kind: string;
+    signature?: string | null;
+    startLine?: number | null;
+    endLine?: number | null;
+    contentHash: string;
+    status?: SymbolStatus;
+  }): string {
+    const now = new Date().toISOString();
+    const row = this.db
+      .prepare(
+        `INSERT INTO symbol_versions
+           (id, node_id, branch_id, commit_sha, file_path, lang, kind, signature,
+            start_line, end_line, content_hash, status, first_seen_at, last_seen_at)
+         VALUES (@id, @nodeId, @branchId, @commitSha, @filePath, @lang, @kind, @signature,
+            @startLine, @endLine, @contentHash, @status, @now, @now)
+         ON CONFLICT (node_id, branch_id) DO UPDATE SET
+           commit_sha = excluded.commit_sha,
+           file_path = excluded.file_path,
+           lang = excluded.lang,
+           kind = excluded.kind,
+           signature = excluded.signature,
+           start_line = excluded.start_line,
+           end_line = excluded.end_line,
+           content_hash = excluded.content_hash,
+           status = excluded.status,
+           last_seen_at = excluded.last_seen_at
+         RETURNING id`,
+      )
+      .get({
+        id: `symver_${randomUUID()}`,
+        nodeId: v.nodeId,
+        branchId: v.branchId,
+        commitSha: v.commitSha,
+        filePath: v.filePath,
+        lang: v.lang,
+        kind: v.kind,
+        signature: v.signature ?? null,
+        startLine: v.startLine ?? null,
+        endLine: v.endLine ?? null,
+        contentHash: v.contentHash,
+        status: v.status ?? "fresh",
+        now,
+      }) as { id: string };
+    return row.id;
+  }
+
+  getSymbolVersion(nodeId: string, branchId: string): SymbolVersionRow | null {
+    return (
+      (this.db
+        .prepare("SELECT * FROM symbol_versions WHERE node_id = ? AND branch_id = ?")
+        .get(nodeId, branchId) as SymbolVersionRow | undefined) ?? null
+    );
+  }
+
+  markFileSymbolsStale(p: { branchId: string; filePath: string }): number {
+    const info = this.db
+      .prepare(
+        "UPDATE symbol_versions SET status = 'stale' WHERE branch_id = ? AND file_path = ?",
+      )
+      .run(p.branchId, p.filePath);
+    return info.changes;
   }
 
   // 解析产出的代码边：同 file+branch 全量替换（§6.3 增量语义）。
