@@ -11,3 +11,4 @@ export {
   type LedgerReadResult,
   type LedgerTarget,
 } from "./ledger.js";
+export { SCHEMA_VERSION, openDatabase } from "./schema.js";
