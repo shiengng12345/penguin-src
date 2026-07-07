@@ -240,21 +240,38 @@ export function filterPackageRows(
     .filter((pkg) => filters.protocol === "all" || pkg.protocol === filters.protocol)
     .filter((pkg) => !branchQuery || pkg.branch.toLowerCase().includes(branchQuery));
 
+  // 分支匹配精度：精确 > 前缀 > 子串。避免 `origin-edmond-replace-...`
+  // 这类「包含」命中盖过精确的 `replace-pulsar-with-temporal`。
+  const branchRank = (branch: string): number => {
+    if (!branchQuery) return 0;
+    const b = branch.toLowerCase();
+    if (b === branchQuery) return 0;
+    if (b.startsWith(branchQuery)) return 1;
+    return 2;
+  };
+  const withBranchRank = (
+    rows: PackageResultRow[],
+    cmp: (a: PackageResultRow, b: PackageResultRow) => number,
+  ): PackageResultRow[] =>
+    branchQuery
+      ? [...rows].sort((a, b) => branchRank(a.branch) - branchRank(b.branch) || cmp(a, b))
+      : [...rows].sort(cmp);
+
   const query = filters.query.trim();
   if (!query) {
-    return [...scoped].sort(rowNewestFirst).slice(0, RESULT_LIMIT);
+    return withBranchRank(scoped, rowNewestFirst).slice(0, RESULT_LIMIT);
   }
 
   const queryKey = normalizeSearchText(query);
   const structuredHits = scoped.filter((row) => branchPackageMatches(row, queryKey));
   if (structuredHits.length > 0) {
-    return structuredHits.sort(rowNewestFirst).slice(0, RESULT_LIMIT);
+    return withBranchRank(structuredHits, rowNewestFirst).slice(0, RESULT_LIMIT);
   }
 
-  return scoped
-    .filter((row) => packageMatches(row, queryKey))
-    .sort(rowNewestFirst)
-    .slice(0, RESULT_LIMIT);
+  return withBranchRank(
+    scoped.filter((row) => packageMatches(row, queryKey)),
+    rowNewestFirst,
+  ).slice(0, RESULT_LIMIT);
 }
 
 export function isPackageRowInstalled(

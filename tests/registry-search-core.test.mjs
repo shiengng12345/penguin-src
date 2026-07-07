@@ -370,3 +370,16 @@ test("branch filter excludes js-sdk (no branch)", () => {
   assert.ok(!rows.some((r) => r.name === "@snsoft/js-sdk"));
   assert.deepEqual(rows.map((r) => [r.name, r.branch]), [["@snsoft/player-grpc-web", "master"]]);
 });
+
+test("branch filter ranks exact/prefix branch above mere substring", () => {
+  const list = [
+    { name: "@snsoft/a-grpc", latest_version: "1.0.0", newest_version: "1.0.0-20260101000000", description: null, tags: ["origin-edmond-replace-pulsar-with-temporal"], dist_tags: { "origin-edmond-replace-pulsar-with-temporal": "1.0.0-20260101000000" } },
+    { name: "@snsoft/b-grpc", latest_version: "1.0.0", newest_version: "1.0.0-20260202000000", description: null, tags: ["replace-pulsar-with-temporal"], dist_tags: { "replace-pulsar-with-temporal": "1.0.0-20260202000000" } },
+  ];
+  const rows = filterPackageRows(list, { query: "", branch: "replace-pulsar-with-temporal", protocol: "all" });
+  // 精确分支的包排最前，尽管它构建时间更早
+  assert.equal(rows[0].name, "@snsoft/b-grpc");
+  assert.equal(rows[0].branch, "replace-pulsar-with-temporal");
+  // 子串命中的仍在结果里（不丢），只是排后面
+  assert.ok(rows.some((r) => r.name === "@snsoft/a-grpc"));
+});
