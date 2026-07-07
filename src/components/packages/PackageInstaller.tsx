@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Box,
+  Braces,
   CheckCircle2,
   Clock,
   Download,
@@ -108,24 +109,26 @@ function RowRadio({ selected }: { selected: boolean }) {
   );
 }
 
-// 克制的类型徽标：只用极淡底色 + 细 ring，不像按钮。gRPC-Web 淡青、
-// gRPC 灰蓝、JS-SDK 淡紫；始终不换行。
-const TYPE_CHIP_CLASS: Record<PackageProtocol, string> = {
-  "grpc-web": "bg-cyan-500/[0.08] text-cyan-300 ring-1 ring-cyan-400/10",
-  grpc: "bg-slate-700/35 text-slate-300 ring-1 ring-white/5",
-  sdk: "bg-violet-500/10 text-violet-300 ring-1 ring-violet-400/15",
+// 协议 = 左侧图标区分（不再用文字标签，包名已可辨识）：
+// gRPC 立方(青) / gRPC-Web 地球(绿) / JS-SDK 花括号(紫)。
+const PROTOCOL_ICON: Record<PackageProtocol, { Icon: LucideIcon; box: string; icon: string }> = {
+  grpc: { Icon: Box, box: "border-cyan-400/20 bg-cyan-400/10", icon: "text-cyan-300" },
+  "grpc-web": { Icon: Globe, box: "border-emerald-400/20 bg-emerald-400/10", icon: "text-emerald-300" },
+  sdk: { Icon: Braces, box: "border-violet-400/20 bg-violet-400/10", icon: "text-violet-300" },
 };
 
-function TypeChip({ protocol }: { protocol: PackageProtocol }) {
+function ProtocolIcon({ protocol }: { protocol: PackageProtocol }) {
+  const meta = PROTOCOL_ICON[protocol];
   return (
-    <span
+    <div
+      title={PROTOCOL_LABELS[protocol]}
       className={cn(
-        "inline-flex shrink-0 items-center whitespace-nowrap rounded-md px-1.5 py-0.5 text-[11px] font-medium",
-        TYPE_CHIP_CLASS[protocol],
+        "flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border",
+        meta.box,
       )}
     >
-      {PROTOCOL_LABELS[protocol]}
-    </span>
+      <meta.Icon className={cn("h-[18px] w-[18px]", meta.icon)} />
+    </div>
   );
 }
 
@@ -527,9 +530,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                         {/* 名称列：单选 + 图标块 + （包名 / 类型 chip + 版本） */}
                         <div className="flex min-w-0 items-center gap-3">
                           <RowRadio selected={selected} />
-                          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-cyan-400/20 bg-cyan-400/10 text-cyan-300">
-                            <Package className="h-[18px] w-[18px]" />
-                          </div>
+                          <ProtocolIcon protocol={pkg.protocol} />
                           <div className="min-w-0">
                             <div
                               title={pkg.name}
@@ -537,15 +538,11 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                             >
                               {pkg.name}
                             </div>
-                            {/* mini-grid：chip 自然宽度居左，版本号固定从 70px 起对齐 */}
-                            <div className="mt-1 grid grid-cols-[70px_minmax(0,1fr)] items-center gap-2">
-                              <TypeChip protocol={pkg.protocol} />
-                              <span
-                                title={pkg.version}
-                                className="min-w-0 truncate font-mono text-[12px] text-slate-400"
-                              >
-                                {pkg.version}
-                              </span>
+                            <div
+                              title={pkg.version}
+                              className="mt-1 truncate font-mono text-[12px] text-slate-400"
+                            >
+                              {pkg.version}
                             </div>
                           </div>
                         </div>
