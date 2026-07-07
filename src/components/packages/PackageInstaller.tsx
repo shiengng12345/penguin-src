@@ -114,6 +114,33 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
     if (protocolTab !== "rest") void loadRegistryList();
   }, []);
 
+  // 首拉流式：Nexus 每翻一页就推来新发现的包名——先以占位行入列表
+  // （版本列 "…"），全量爬完 loadRegistryList 的最终结果整体替换。
+  useEffect(() => {
+    if (protocolTab === "rest") return;
+    let unlisten: (() => void) | undefined;
+    let disposed = false;
+    void import("@tauri-apps/api/event").then(({ listen }) =>
+      listen<string[]>("registry-search:discovered", (event) => {
+        setRegistryList((cur) => {
+          const seen = new Set((cur ?? []).map((p) => p.name));
+          const additions = event.payload
+            .filter((n) => !seen.has(n))
+            .map((name) => ({ name, latest_version: "…", description: null, tags: [] }));
+          if (additions.length === 0) return cur;
+          return [...(cur ?? []), ...additions].sort((a, b) => a.name.localeCompare(b.name));
+        });
+      }).then((u) => {
+        if (disposed) u();
+        else unlisten = u;
+      }),
+    );
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
   const searchResults = useMemo(() => {
     if (!registryList) return [];
     const protocol = allProtocols
@@ -314,7 +341,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
               ) : listLoading && !registryList ? (
                 <div className="mt-2 flex items-center gap-2 rounded-md border border-border bg-muted/30 p-2 text-[11px] text-muted-foreground">
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  首次拉取需遍历 Nexus 全部版本，可能 10-30 秒；之后秒开（本地缓存）
+                  正在从 registry 实时拉取——结果边到边显示…
                 </div>
               ) : registryList && searchResults.length === 0 ? (
                 <div className="mt-2 rounded-md border border-border bg-muted/30 p-2 text-[11px] text-muted-foreground">

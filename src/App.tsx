@@ -282,6 +282,22 @@ export default function App() {
     })();
   }, []);
 
+  // Registry 包列表预热：启动即后台爬一轮 + 每 5 分钟静默刷新——用户按
+  // Cmd+S 打开安装器时永远是热缓存（秒开），新 publish 的包名最多 5 分钟
+  // 进列表；版本/tag 层始终点开实时拉，不受此间隔影响。registry 未配置时
+  // fetch 静默失败，无副作用。
+  useEffect(() => {
+    let interval: ReturnType<typeof setInterval> | null = null;
+    void import("@/lib/registry-search").then((m) => {
+      const warm = () => void m.fetchRegistryPackages().catch(() => {});
+      warm();
+      interval = setInterval(warm, 5 * 60_000);
+    });
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, []);
+
   // One-time cleanup of a residual full Lark doc URL persisted by an earlier
   // build — the passphrase flow ("PENGUIN") is the intended path now.
   useEffect(() => {
