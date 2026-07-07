@@ -896,4 +896,67 @@ mod tests {
         assert_eq!(repository_of(url).as_deref(), Some("npm_hosted"));
         assert_eq!(repository_of("http://host/npm/"), None);
     }
+
+    #[test]
+    fn normalize_family_key_lowercases_and_strips_separators() {
+        assert_eq!(normalize_family_key("riskControl"), "riskcontrol");
+        assert_eq!(normalize_family_key("offline-casino"), "offlinecasino");
+        assert_eq!(normalize_family_key("CMS"), "cms");
+    }
+
+    #[test]
+    fn is_allowed_client_package_keeps_whitelisted_and_js_sdk() {
+        for name in [
+            "@snsoft/admin-grpc",
+            "@snsoft/auth-grpc-web",
+            "@snsoft/player-grpc-web",
+            "@snsoft/ccms-grpc",
+            "@snsoft/cms-grpc",
+            "@snsoft/js-sdk",
+        ] {
+            assert!(is_allowed_client_package(name), "should keep {name}");
+        }
+        // camelCase 名单对上真实 camelCase 包名（归一化后匹配）
+        for name in [
+            "@snsoft/aiChat-grpc",
+            "@snsoft/riskControl-grpc-web",
+            "@snsoft/offlineCasino-grpc",
+            "@snsoft/userEngagement-grpc",
+        ] {
+            assert!(is_allowed_client_package(name), "should keep {name}");
+        }
+    }
+
+    #[test]
+    fn is_allowed_client_package_rejects_backend_and_off_list() {
+        for name in [
+            "@snsoft/order-service-grpc", // 名单外后端
+            "@snsoft/gateway-grpc-web",   // 名单外
+            "@snsoft/player-account-grpc", // 子包，family=playeraccount
+            "@snsoft/some-backend",       // 裸包
+            "@snsoft/player-grpc-json",   // 非客户端协议
+            "@snsoft/player-coco-grpc",   // coco
+            "express",                     // 非 @snsoft
+        ] {
+            assert!(!is_allowed_client_package(name), "should reject {name}");
+        }
+    }
+
+    #[test]
+    fn client_package_candidates_cover_suffixes_variants_and_js_sdk() {
+        let candidates = client_package_candidates();
+        // js-sdk 恒在
+        assert!(candidates.contains(&"@snsoft/js-sdk".to_string()));
+        // 每个 family 都有 grpc + grpc-web
+        assert!(candidates.contains(&"@snsoft/player-grpc".to_string()));
+        assert!(candidates.contains(&"@snsoft/player-grpc-web".to_string()));
+        // camelCase family 额外带全小写兜底变体
+        assert!(candidates.contains(&"@snsoft/aiChat-grpc".to_string()));
+        assert!(candidates.contains(&"@snsoft/aichat-grpc".to_string()));
+        // 每个候选都能通过白名单校验（不会误带后端）
+        assert!(candidates.iter().all(|n| is_allowed_client_package(n)));
+        // 无重复
+        let unique: std::collections::HashSet<_> = candidates.iter().collect();
+        assert_eq!(unique.len(), candidates.len());
+    }
 }
