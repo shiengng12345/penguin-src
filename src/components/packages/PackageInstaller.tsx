@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Box,
   Braces,
+  Check,
   CheckCircle2,
   Clock,
   Download,
@@ -96,16 +97,17 @@ function formatElapsed(s: number): string {
   return m > 0 ? `${m}m ${sec}s` : `${sec}s`;
 }
 
-function RowRadio({ selected }: { selected: boolean }) {
+// 多选勾选框：选中为实心 cyan + 勾
+function RowCheck({ selected }: { selected: boolean }) {
   return (
     <span
       className={cn(
-        "flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full border-2 transition-colors",
-        selected ? "border-cyan-400" : "border-slate-600",
+        "flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-[5px] border-2 transition-colors",
+        selected ? "border-cyan-400 bg-cyan-400 text-slate-950" : "border-slate-600",
       )}
       aria-hidden="true"
     >
-      {selected && <span className="h-2 w-2 rounded-full bg-cyan-400" />}
+      {selected && <Check className="h-3 w-3" strokeWidth={3} />}
     </span>
   );
 }
@@ -170,7 +172,9 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
   const [masterOnly, setMasterOnly] = useState(true);
   const effectiveBranch = masterOnly ? "master" : branchQuery;
   const [manualSpec, setManualSpec] = useState("");
-  const [selectedRowKey, setSelectedRowKey] = useState<string | null>(null);
+  // 多选：勾选多个包一次批量安装（对齐一次装一整批的工作流）
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+  const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null);
   const [nameSuggestOpen, setNameSuggestOpen] = useState(false);
   const [nameSuggestIdx, setNameSuggestIdx] = useState(-1);
   const nameBlurTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -261,7 +265,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
     const unsub = useAppStore.subscribe((state, prev) => {
       if (state.installerPrefill && state.installerPrefill !== prev.installerPrefill) {
         setManualSpec(state.installerPrefill);
-        setSelectedRowKey(null);
+        setSelectedKeys(new Set());
         useAppStore.getState().setInstallerPrefill("");
       }
     });
@@ -305,23 +309,27 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
     if (nameBlurTimer.current) clearTimeout(nameBlurTimer.current);
   }, []);
 
+  // 结果集变化时，剔除已不在列表里的勾选项
   useEffect(() => {
-    if (selectedRowKey && !searchResults.some((pkg) => packageRowKey(pkg) === selectedRowKey)) {
-      setSelectedRowKey(null);
-    }
-  }, [searchResults, selectedRowKey]);
+    setSelectedKeys((cur) => {
+      if (cur.size === 0) return cur;
+      const visible = new Set(searchResults.map((pkg) => packageRowKey(pkg)));
+      const next = new Set([...cur].filter((k) => visible.has(k)));
+      return next.size === cur.size ? cur : next;
+    });
+  }, [searchResults]);
 
   const manualCompletedSpec = completePackageSpec(manualSpec);
   const hasManualSpec = manualSpec.trim().length > 0;
-  const selectedPackage = selectedRowKey
-    ? searchResults.find((pkg) => packageRowKey(pkg) === selectedRowKey)
-    : null;
-  const selectedSpec = selectedPackage
-    ? packageInstallSpec(selectedPackage)
-    : "";
-  const installSpec = hasManualSpec ? manualCompletedSpec : selectedSpec;
+  // 勾选的包（按列表显示顺序 = 时间新→旧，批量安装即按此序）
+  const selectedRows = searchResults.filter((pkg) => selectedKeys.has(packageRowKey(pkg)));
+  const selectedSpecs = selectedRows.map(packageInstallSpec);
+  const installSpecs = hasManualSpec ? [manualCompletedSpec] : selectedSpecs;
   const manualProtocol = hasManualSpec ? protocolFromSnsoftPackageSpec(manualCompletedSpec) : null;
-  const canInstall = installSpec.length > 0 && isAllowedSnsoftPackageSpec(installSpec) && !isInstalling;
+  const canInstall =
+    !isInstalling &&
+    installSpecs.length > 0 &&
+    installSpecs.every((s) => isAllowedSnsoftPackageSpec(s));
 
   const lastLog = installLog[installLog.length - 1] ?? "";
   const installDone =
@@ -347,20 +355,33 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
 
   const handleInstall = async () => {
     if (!canInstall) return;
+    const specs = installSpecs;
     setIsInstalling(true);
+    setBatchProgress(specs.length > 1 ? { done: 0, total: specs.length } : null);
+    let okCount = 0;
     try {
-      const ok = await onInstall(installSpec);
-      if (ok) {
+      for (let i = 0; i < specs.length; i++) {
+        if (specs.length > 1) setBatchProgress({ done: i, total: specs.length });
+        const ok = await onInstall(specs[i]);
+        if (ok) okCount += 1;
+      }
+      if (okCount === specs.length) {
         setManualSpec("");
-        setSelectedRowKey(null);
+        setSelectedKeys(new Set());
       }
     } finally {
       setIsInstalling(false);
+      setBatchProgress(null);
     }
   };
 
-  const selectPackage = (key: string) => {
-    setSelectedRowKey((cur) => (cur === key ? null : key));
+  const toggleRow = (key: string) => {
+    setSelectedKeys((cur) => {
+      const next = new Set(cur);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
     setManualSpec("");
   };
 
@@ -486,7 +507,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                       if (open && nameSuggestIdx >= 0) {
                         pickSuggestion(nameSuggestions[nameSuggestIdx]);
                       } else if (searchResults.length > 0) {
-                        selectPackage(packageRowKey(searchResults[0]));
+                        toggleRow(packageRowKey(searchResults[0]));
                       }
                     }
                   }}
@@ -581,10 +602,27 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
 
           <section className="flex min-h-0 flex-1 flex-col" style={{ minHeight: 336 }}>
             <div className="mb-1.5 flex shrink-0 items-center justify-between gap-3">
-              <label className="block text-[11px] font-medium text-slate-300">搜索结果</label>
-              {registryList && (
-                <span className="text-[11px] text-slate-400">共 {searchResults.length} 个结果</span>
-              )}
+              <div className="flex items-center gap-2">
+                <label className="block text-[11px] font-medium text-slate-300">搜索结果</label>
+                {selectedKeys.size > 0 && (
+                  <span className="rounded bg-cyan-500/15 px-1.5 py-0.5 text-[11px] font-medium text-cyan-200">
+                    已选 {selectedKeys.size}
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-3 text-[11px] text-slate-400">
+                {selectedKeys.size > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedKeys(new Set())}
+                    disabled={isInstalling}
+                    className="text-slate-400 hover:text-slate-200 disabled:opacity-50"
+                  >
+                    清除勾选
+                  </button>
+                )}
+                {registryList && <span>共 {searchResults.length} 个结果</span>}
+              </div>
             </div>
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-slate-800/80 bg-slate-950/25">
               {listError ? (
@@ -604,14 +642,14 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                 <div className="min-h-0 flex-1 divide-y divide-slate-800/70 overflow-y-auto pb-1">
                   {searchResults.map((pkg) => {
                     const key = packageRowKey(pkg);
-                    const selected = selectedRowKey === key && !hasManualSpec;
+                    const selected = selectedKeys.has(key) && !hasManualSpec;
                     const installed = isPackageRowInstalled(pkg, packages);
                     const stamp = stampFromVersion(pkg.version);
                     return (
                       <button
                         key={key}
                         type="button"
-                        onClick={() => selectPackage(key)}
+                        onClick={() => toggleRow(key)}
                         disabled={isInstalling}
                         className={cn(
                           "grid min-h-[63px] w-full grid-cols-[minmax(0,1fr)_190px_168px_84px] items-center gap-4 border px-4 py-2 text-left transition-colors",
@@ -622,7 +660,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                       >
                         {/* 名称列：单选 + 图标块 + （包名 / 类型 chip + 版本） */}
                         <div className="flex min-w-0 items-center gap-3">
-                          <RowRadio selected={selected} />
+                          <RowCheck selected={selected} />
                           <ProtocolIcon protocol={pkg.protocol} />
                           <div className="min-w-0">
                             <div
@@ -677,7 +715,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                 value={manualSpec}
                 onChange={(e) => {
                   setManualSpec(normalizePackageSpec(e.target.value));
-                  setSelectedRowKey(null);
+                  setSelectedKeys(new Set());
                 }}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") {
@@ -761,7 +799,13 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
             className="h-10 bg-cyan-500 px-6 font-medium text-slate-950 hover:bg-cyan-400 disabled:cursor-not-allowed disabled:bg-cyan-500/30 disabled:text-cyan-50/70"
           >
             <Download className="h-4 w-4" />
-            {isInstalling ? "安装中" : "安装"}
+            {isInstalling
+              ? batchProgress
+                ? `安装中 ${batchProgress.done + 1}/${batchProgress.total}`
+                : "安装中"
+              : !hasManualSpec && selectedSpecs.length > 1
+                ? `安装 ${selectedSpecs.length} 个`
+                : "安装"}
           </Button>
         </footer>
       </div>
