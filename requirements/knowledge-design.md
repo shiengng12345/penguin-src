@@ -3,7 +3,7 @@
 # Penguin Knowledge —— 统一知识图谱（笔记 Vault + 代码图谱）设计
 
 > 日期：2026-07-07
-> 状态：设计稿 v2.3-final（2026-07-07 四次修订：架构图补 CLI、CLI 六条不变量、读写命令分类、sync 非 daemon、`--json` 稳定契约、CLI/app 并发规则与测试补全、新增 `penguin index`；§6 索引管线与 §7 UI 范围仍待确认）
+> 状态：设计稿 v2.4（2026-07-07 五次修订：索引动词对调 `index`=增量/`rebuild`=全量、`files_index` 文件级检查点表、增量算法与逐文件替换事务、手动改动/切分支感知行为、CLI 进度输出规范；§6 索引管线细则已定，§7 UI 范围仍待确认）
 > 上游文档：[graph.md](graph.md)（四工具能力手册 + 命令生态北极星）、[../docs/ai-knowledge-vault.md](../docs/ai-knowledge-vault.md)（笔记 Vault 产品蓝图）
 > 参考实现（不依赖、只参考）：[codegraph](https://github.com/colbymchenry/codegraph) · [graphify](https://github.com/Graphify-Labs/graphify) · [Understand-Anything](https://github.com/Egonex-AI/Understand-Anything) · Obsidian（对标物）
 
@@ -287,6 +287,23 @@ symbol_versions (
   UNIQUE (node_id, branch_id)       -- 每分支保留该符号最后一份快照
 );
 
+-- 文件级索引检查点（Index 层，可再生）：增量索引的「上次到哪」记在这里——
+-- 不是行号游标，是逐文件指纹。mtime/size 是快筛，content_hash 是内容是否变化的最终判断。
+files_index (
+  id TEXT PRIMARY KEY,
+  repo_id TEXT NOT NULL REFERENCES repos(id),
+  branch_id TEXT NOT NULL REFERENCES branches(id),
+  file_path TEXT NOT NULL,
+  lang TEXT,
+  mtime_ms INTEGER,
+  size_bytes INTEGER,
+  content_hash TEXT,
+  indexed_at TEXT,
+  status TEXT NOT NULL,             -- indexed|deleted|error|skipped
+  error TEXT,
+  UNIQUE (repo_id, branch_id, file_path)
+);
+
 -- 统一边
 edges (
   id TEXT PRIMARY KEY,
@@ -460,6 +477,65 @@ AI 时代**信任就是产品**：agent 拿到一条边，「解析出来的」�
   → 对账：扫描 mtime/size 找出错过的变更（参考 codegraph 重连对账）
 ```
 
+#### 6.3.1 增量算法（files_index 文件级检查点）
+
+「上次索引到哪」**不是游标/行号进度，是逐文件指纹检查点**（repo_id + branch_id + file_path + hash）——比游标安全：不依赖顺序、不怕中断、谁改的文件都一视同仁。
+
+```text
+对 repo 中每个文件（app watcher 事件与 penguin index 全扫共用同一判定）：
+  1. 读 mtime + size
+  2. 与 files_index 比对
+  3. mtime + size 未变 → 跳过（不算 hash）
+  4. 变了 → 算 content_hash
+  5. hash 未变（如 touch/格式化回滚）→ 只更新 mtime/size，跳过解析
+  6. hash 变了 → 重解析该文件（走 6.3.2 逐文件替换事务）
+  另：files_index.status=error 的文件无条件重试
+
+删除检测（penguin index / 全扫时）：
+  1. files_index 里有、磁盘上没有 → status=deleted
+  2. 该文件的 symbol_versions 标 stale
+  3. 删该文件产出的 parser 代码边
+  4. 删该文件的 FTS 行
+```
+
+**手动改动如何被感知**：VS Code/Cursor/vim 编辑、git pull、git checkout、脚本覆盖、手动删文件/改名——全部殊途同归：
+
+- **app 开着**：watcher 收到文件事件 → 防抖 → 入队该文件的索引任务
+- **app 没开**：下次 `penguin index` 全扫比对 mtime/size/hash → 捕获一切差异
+
+不存在「Penguin 不知道有人动过」——最多是「还没跑 index 所以暂时 stale」，且 status/查询结果显式标注。极端情形（改内容但保留 mtime+size）由 `penguin doctor --verify` 提供强制全量 hash 扫描兜底。
+
+#### 6.3.2 逐文件替换事务（防半新半旧）
+
+每个变化文件的索引更新是**一个 SQLite 事务**：
+
+```text
+BEGIN
+  删除该文件在该分支产出的旧 parser 代码边
+  该文件旧 symbol_versions 标 stale 或更新
+  插/更 nodes（新身份才插）
+  插/更 symbol_versions
+  插入新代码边
+  更新 FTS 行
+  更新 files_index（hash/mtime/size/status/indexed_at）
+COMMIT
+```
+
+- 进程中途被杀 → 事务回滚，图不会出现半新半旧状态
+- 下次 index 时该文件 hash 仍判「变化/未成功」→ 自动重试，天然收敛
+- 可以放心整替，因为这里全是**解析衍生（可再生）**数据
+- **本事务绝不删除账本物化数据**（events/aliases/手工边/AI 断言）——rename 检测产生的 alias 走 `recordKnowledge()`，在事务外先行落账本（§2.2.4 边界）
+
+#### 6.3.3 切分支时的索引行为
+
+`penguin index` / watcher 感知 `.git/HEAD` 变化（如 main → feature/login）时：
+
+1. 建/更 `branches` 行：新分支升 live，旧分支转 snapshot
+2. `files_index` 按 branch_id 隔离——该分支**索引过** → 只重解析与上次该分支检查点不同的文件（两分支 95% 文件相同，快）；**新分支** → 走首建（可从旧分支检查点预热：hash 相同的文件直接复制检查点行）
+3. 符号 nodes 身份稳定不动；只有 symbol_versions 是分支作用域的（D6/D7）
+
+非 git 目录（§4.8）：隐式分支 `(workdir)`，增量照常按文件 hash 工作，只是没有 compare_branches。
+
 - 解析/索引在 sidecar 有界并发池后台跑，前台查询永远优先
 - 索引落后时查询照常返回 + 「⚠️ 可能略旧」staleness 标记，绝不阻塞
 
@@ -516,8 +592,8 @@ AI 时代**信任就是产品**：agent 拿到一条边，「解析出来的」�
 ```text
 penguin init [path]          登记当前/指定目录为 repo（探测 git/分支）+ 一次性首建索引
 penguin status               各 repo/分支索引状态、staleness（= index_status）
-penguin sync [path]          手动一次增量索引（headless，一次性进程，非 watcher）
-penguin index [path]         全量重建该 repo 的解析衍生数据（推倒重来的显式动词；--all 全部 repo）
+penguin index [path]         手动一次增量索引（headless，一次性进程；非 watcher，非云同步）
+penguin rebuild [path]       全量重建该 repo 的解析衍生数据（推倒重来的显式动词；--all 全部 repo）
 penguin search <query>       统一检索（= knowledge_search；--type --repo --workspace --branch）
 penguin node <id|name>       节点详情 + 版本 + alias 历史（= get_node）
 penguin callers <symbol>     谁调用它（= explore_graph mode=who_calls；--branch）
@@ -530,6 +606,26 @@ penguin compare <symbol> <branch_a> <branch_b>   跨分支差异（= compare_bra
 penguin note new|append|link 写笔记（= write_note 三个 action，遵守 Ledger 铁律）
 penguin doctor               环境 + 知识库自检（DB/账本一致性、watcher 状态）
 penguin install              把 penguin CLI 软链到 PATH + 确认 MCP 已接线
+```
+
+**索引生命周期（命名拍板 2026-07-07：`sync` 弃用——听着像云同步；`index` = 增量，`rebuild` = 全量）：**
+
+```text
+penguin init（每 repo 一次）
+  → 登记当前/指定目录为 repo
+  → 探测 git / 分支 / commit（非 git 走 §4.8 降级）
+  → 建 repos + branches 行
+  → 首次全量索引（写满 files_index 检查点）
+
+penguin index（改完代码、app 没开时手动跑）
+  → 读当前 repo + 分支 + commit（发现切分支先走分支切换流程）
+  → 与 files_index 上次状态比对（mtime/size 快筛 → content_hash 终判）
+  → 只重解析 变化/删除/上次出错 的文件
+  → 更新 nodes / symbol_versions / edges / FTS / files_index
+  → 跑完即退出（非 watcher；app 开着时通常不需要它——watcher 自动增量）
+
+penguin rebuild（修复动词，很少用）
+  → 丢弃该 repo 解析衍生数据后全量重扫（账本及其物化视图不动）
 ```
 
 **CLI 六条不变量（防止 CLI 长成第二个产品）：**
@@ -549,19 +645,19 @@ penguin install              把 penguin CLI 软链到 PATH + 确认 MCP 已接�
   recent · compare · status · doctor（不带 --fix）
 
 写命令（可能获取账本锁 / 索引任务锁 / SQLite 写事务 / 文件系统写）：
-  init · sync · index · note · install · doctor --fix
+  init · index · rebuild · note · install · doctor --fix
 ```
 
 全局旗标（graph.md §6 继承，砍到 V1 能兑现的）：`--json`（机器可读）、`--branch <b>`；每条输出必带 `origin/method/confidence/staleness/branch/commit/source_path/node_id`（适用时）——与 MCP 返回契约一致，`--json` 中作为顶层结构化字段出现。
 
 **分发**：CLI 随 app 捆绑（Tauri resources，同 MCP server 模式），设置页/`penguin install` 把启动脚本软链到 `/usr/local/bin/penguin`（学 VS Code 的 `code` 命令）；运行时用系统 Node（同 sidecar 机制）。
 
-**headless 行为**：查询动词只读 `knowledge.db`（app 不在跑也能查，秒回）；`init/sync/index` 在 CLI 进程内跑**一次性**索引任务（复用 indexer 模块）——`sync` 是增量索引，**不是 watcher**，跑完即退出，不长期监听文件变化；长期监听请打开 Penguin app。
+**headless 行为**：查询动词只读 `knowledge.db`（app 不在跑也能查，秒回）；`init/index/rebuild` 在 CLI 进程内跑**一次性**索引任务（复用 indexer 模块）——`index` 是增量索引，**不是 watcher、不是云同步**，跑完即退出，不长期监听文件变化；长期监听请打开 Penguin app。
 
 **CLI / App 并发规则：**
 
 1. **账本追加锁**：所有 Ledger 写入经 `knowledge-core` 的 `Ledger.append()`——跨进程文件锁内完成「读 lastSeq → 算 checksum → 写行 → fsync」，同机 app + CLI 并发追加不产生重复 seq。所有入口自动继承，CLI 无需额外处理。
-2. **索引任务锁**：同一 repo + 同一分支 + 同一 checkout 目录**只允许一个活跃索引任务**。app watcher 与 `penguin sync/index` 通过索引任务锁协调；发现已有任务时 CLI 的行为必须确定性：缺省**等待**（stderr 提示等谁），`--no-wait` 则跳过并以专属退出码 4 退出——具体见 cli-commands.md。
+2. **索引任务锁**：同一 repo + 同一分支 + 同一 checkout 目录**只允许一个活跃索引任务**。app watcher 与 `penguin index/rebuild` 通过索引任务锁协调；发现已有任务时 CLI 的行为必须确定性：缺省**等待**（stderr 提示等谁），`--no-wait` 则跳过并以专属退出码 4 退出——绝不对同一作用域启动第二个索引任务。具体见 cli-commands.md。
 3. **SQLite 并发**：WAL + busy_timeout。只读命令事务保持短；长索引写入分批提交，不阻塞查询。
 4. **无独立 daemon**：CLI 在 V1 永不启动后台 watcher；常驻索引属于 app sidecar。
 
@@ -593,7 +689,11 @@ penguin install              把 penguin CLI 软链到 PATH + 确认 MCP 已接�
 | CLI 与 app watcher 同 repo 同分支撞索引 | 索引任务锁只允许一个任务；CLI 按文档策略等待/跳过/明确失败（退出码 4），**不启动第二个索引任务** |
 | CLI 写 Ledger 时 app 同时写 | `Ledger.append()` 跨进程锁串行化；seq 在锁内分配，不分叉 |
 | CLI 读取时 app 正在物化 | SQLite WAL + busy_timeout；超时 CLI 输出明确错误码，不静默失败 |
-| `penguin sync` 被误当 watcher | 文档与输出明示：sync 是一次性索引；长期监听请打开 Penguin app |
+| `penguin index` 被误当 watcher/云同步 | 文档与输出明示：index 是一次性增量索引；长期监听请打开 Penguin app |
+| `penguin index` 中途崩溃 | 逐文件事务回滚（§6.3.2）；下次 index 按 files_index 的 status/hash 重新处理未完成文件 |
+| 用户手动删除文件 | 下次 index：files_index 标 deleted、symbol_versions 标 stale、删该文件的 parser 边与 FTS 行 |
+| 改内容但 mtime/size 未变（极端） | content_hash 是最终判断，但快筛会漏过——`penguin doctor --verify` 强制全量 hash 扫描兜底 |
+| 切分支后没开 app 直接查询 | 查询结果按 last_indexed_commit 判 stale 并标注；`penguin index` 读 `.git/HEAD` 走分支切换流程（§6.3.3）追平 |
 | `--json` 结构破坏兼容 | 视为契约破坏；字段改名/删除需版本化或保留兼容字段，不允许随意改 |
 
 ## 10. 测试策略
@@ -603,6 +703,7 @@ penguin install              把 penguin CLI 软链到 PATH + 确认 MCP 已接�
 - **Ledger**：事件 JSON 规范化（键序稳定）与 checksum 校验；按 seq 顺序 replay；末尾残行恢复；`ledger_state.materialized_seq` 追踪与对账；**SQLite-first 写入防护**（运行时断言 + 代码层无绕过账本的写入口）；从 Markdown + Git + Ledger 三源重建 knowledge.db；events 表可完全由 Ledger 重建；alias 合并与撤销回归
 - **MCP 写路径**：`write_note` 每种 action 断言「先出现账本行、后出现物化行」，顺序颠倒即失败
 - **CLI**：每个命令覆盖普通文本与 `--json` 双输出；`--json` schema snapshot 测试（字段增删即红）；只读命令跑完断言账本零新行；写命令断言先 appendLedger 后物化；CLI 与 MCP 对同一查询返回等价结果（同实现对拍）；退出码矩阵测试（0/1/2/3/4）；索引任务锁冲突时 wait/`--no-wait` 两种行为各一例
+- **增量索引**：files_index 的 mtime/size 快筛与 hash 终判各一例（touch 不重解析、真改重解析）；逐文件事务中途 kill → 重跑收敛且无半新半旧；删除文件 → deleted/stale/边清理断言；切分支 → 检查点按 branch 隔离、复切回免重扫；**逐文件替换事务不删除任何账本物化行**（events/aliases/手工边计数前后一致）
 - **MCP**：每个工具契约测试（含敏感页排除、staleness 戳存在、origin/method 字段完整）
 - **UI 冒烟**：vault 建页 → 写 `[[链接]]` → backlinks 出现 → 上下文面板正确
 

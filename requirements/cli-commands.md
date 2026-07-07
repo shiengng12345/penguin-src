@@ -6,7 +6,8 @@
 > 上游：[knowledge-design.md](knowledge-design.md) §8.3（CLI 形态与铁律）
 > 定位：`packages/knowledge-cli`，bin 名 `penguin`。**薄壳**：查询动词直接调 `knowledge-core` 查询层（与 MCP 六件套同一实现），写动词走 `recordKnowledge()` 铁律。CLI 不长自己的逻辑。
 > graph.md 的 115 命令全集仍冻结；本文只规格 V1 的 16 个动词。
-> 读写分类与 CLI 六条不变量见 knowledge-design.md §8.3——只读命令绝不写账本；写命令（init/sync/index/note/install/doctor --fix）可能获取账本锁/索引任务锁。
+> 读写分类与 CLI 六条不变量见 knowledge-design.md §8.3——只读命令绝不写账本；写命令（init/index/rebuild/note/install/doctor --fix）可能获取账本锁/索引任务锁。
+> 命名拍板（2026-07-07）：`index` = 增量（日常动词），`rebuild` = 全量重建（修复动词）；`sync` 弃用——听着像云同步。
 
 ---
 
@@ -42,7 +43,24 @@ staleness 取值：`fresh`（watcher 已追平）/ `stale`（索引落后，附�
 | 3 | 数据完整性警告态（账本截断/Index 落后但已自动修复——结果仍输出，供脚本感知） |
 | 4 | 索引任务锁冲突且 `--no-wait`（同 repo+分支+目录已有活跃索引任务，本次跳过） |
 
-### 0.4 通用错误情形（所有命令）
+### 0.4 进度输出（init / index / rebuild）
+
+索引类命令在 **TTY** 下输出分阶段实时进度（spinner + 进度条 + 百分比）：
+
+```text
+  Indexing project
+
+  ◆ Scanning files — 261 found
+  ✦ Parsing code   ━━━━━━╺╺╺╺╺╺╺╺╺╺  38%
+    Linking refs   （待进入）
+```
+
+- 阶段：`Scanning files`（文件清单 + files_index 比对，显示发现数）→ `Parsing code`（逐文件解析，按文件数计百分比）→ `Linking refs`（引用解析/FTS）；完成后各阶段折叠为一行摘要
+- **非 TTY**（管道/CI）：降级为普通行日志（每阶段一行开始/结束）
+- **`--json`**：进度全部走 stderr，stdout 只留最终 JSON 文档——机器消费永不被进度污染
+- 进度条只是展示，**不是** `--json` 稳定契约的一部分，样式可随时调整
+
+### 0.5 通用错误情形（所有命令）
 
 - `knowledge.db` 不存在：查询类命令自动触发三源重建（提示进度到 stderr），重建后继续执行；重建失败退 2
 - 账本尾部截断：照常执行（有效前缀），stderr 警告 + 退出码 3
@@ -62,7 +80,7 @@ staleness 取值：`fresh`（watcher 已追平）/ `stale`（索引落后，附�
 1. 解析 path（缺省 cwd）→ 向上找 `.git`（纯文件解析 `.git/HEAD`/`.git/config`，gitlink/worktree 跟过去；不依赖 git 命令）
 2. **是 git**：repo 根 = `.git` 所在目录；读出当前分支、HEAD commit、remote_url
    **非 git**：repo 根 = path 本身；插隐式分支 `(workdir)`（见 knowledge-design §4.8）；stderr 提示 `⚠ 不是 git 仓库——已按无版本目录索引，分支对比等功能不可用`
-3. 查重：`root_path` 已登记 → 幂等，报「已登记」+ 当前状态后退 0（不重复索引；想强制重建用 `penguin index`）
+3. 查重：`root_path` 已登记 → 幂等，报「已登记」+ 当前状态后退 0（不重复索引；增量用 `penguin index`，强制重建用 `penguin rebuild`）
 4. 写 `repos` 行 + `branches` 行（status=live, checkout_path=repo 根）
 5. 首次全量索引（进程内跑 indexer，进度条到 stderr：文件数/符号数/耗时）
 6. 若 Penguin app 正在跑：通知其 watcher 接管该 repo（本地 IPC，V1 可降级为「app 下次启动自动发现」）
@@ -103,13 +121,13 @@ vault           —             synced   0 符号（纯笔记）
 
 ---
 
-## 3. `penguin sync [path]` / `penguin index [path]`
+## 3. `penguin index [path]` / `penguin rebuild [path]`
 
-一对索引动词，共用索引任务锁与协调规则（见 3.3）。**都是一次性进程，跑完即退出——不是 watcher，不启动 daemon，不长期监听文件变化**；长期监听请打开 Penguin app。
+一对索引动词，共用索引任务锁与协调规则（见 3.3）。**都是一次性进程，跑完即退出——不是 watcher，不是云同步，不启动 daemon，不长期监听文件变化**；长期监听请打开 Penguin app。
 
-### 3.1 `penguin sync [path]` —— 增量
+### 3.1 `penguin index [path]` —— 增量（日常动词）
 
-**用途**：手动触发一次**增量**索引（app 不在跑、或不想等 watcher 时）。
+**用途**：改完代码后手动触发一次**增量**索引（app 不在跑、或不想等 watcher 时）。增量依据 = `files_index` 文件级检查点（mtime/size 快筛 → content_hash 终判，spec §6.3.1）——不是游标进度，手动改/git pull/切分支/脚本覆盖全部被 hash 比对捕获。
 
 **旗标**：`--all`（所有已登记 repo）、`--no-wait`（撞锁不等待，退 4）
 
@@ -117,8 +135,8 @@ vault           —             synced   0 符号（纯笔记）
 
 1. 定位 repo（path/cwd → 已登记 repo；`--all` 遍历）
 2. 获取索引任务锁（见 3.3；撞锁缺省等待）
-3. 读 `.git/HEAD`——发现分支切换先走分支切换流程（旧分支转 snapshot、新分支建/升 live）
-4. content_hash 扫描 → 只重解析变化文件 → 更新 nodes/versions/edges/FTS
+3. 读 `.git/HEAD`——发现分支切换先走分支切换流程（旧分支转 snapshot、新分支建/升 live，检查点按 branch 隔离，spec §6.3.3）
+4. files_index 比对（mtime/size 快筛 → hash 终判）→ 只重解析 变化/删除/上次 error 的文件；每个文件一个替换事务（spec §6.3.2，中途崩溃回滚、下次自动重试）
 5. rename 检测（hash 全等）命中 → 经 `recordKnowledge()` 写 alias 事件（账本锁自动处理与 app 的并发）
 6. 结束打印 diff 摘要
 
@@ -132,9 +150,9 @@ vault           —             synced   0 符号（纯笔记）
 
 **错误**：repo 未登记 → 退 2 提示 init；索引中途单文件解析失败 → 该文件标 Error 继续（出现在摘要里），整体退 0。
 
-### 3.2 `penguin index [path]` —— 全量重建
+### 3.2 `penguin rebuild [path]` —— 全量重建（修复动词）
 
-**用途**：推倒重来的显式动词——丢弃该 repo 的**解析衍生数据**（符号/versions/parser 边/FTS/实体缓存）后全量重扫重建。用于：怀疑索引坏了、语言 grammar 升级后、`doctor` 建议重建时。
+**用途**：推倒重来的显式动词——丢弃该 repo 的**解析衍生数据**（符号/versions/parser 边/FTS/实体缓存/files_index）后全量重扫重建。用于：怀疑索引坏了、语言 grammar 升级后、`doctor` 建议重建时。
 
 **旗标**：`--all`（所有已登记 repo，逐个执行）、`--no-wait`（同上）
 
@@ -154,9 +172,9 @@ vault           —             synced   0 符号（纯笔记）
 
 `--json`：`{ repo, files, symbols, edges, duration_ms, ledger: {seq, materialized_seq} }`
 
-**错误**：同 sync。**注**：`index` 不重放账本（物化视图本来就不属于解析衍生数据、未被删除）；需要「删库级」重建时直接删 `knowledge.db` 后跑任意命令触发三源重建。
+**错误**：同 index。**注**：`rebuild` 不重放账本（物化视图本来就不属于解析衍生数据、未被删除）；需要「删库级」重建时直接删 `knowledge.db` 后跑任意命令触发三源重建。
 
-### 3.3 索引任务锁（sync/index/app watcher 共用）
+### 3.3 索引任务锁（index/rebuild/app watcher 共用）
 
 同一 **repo + 分支 + checkout 目录** 只允许一个活跃索引任务：
 
@@ -381,7 +399,7 @@ GetLoginURL: main@abc123 ↔ feat/new-login@def456
 ✓ vault 路径可读写 (~/.penguin/vault) · 在 iCloud 同步下
 ⚠ vault 不在任何 git/同步管理下 → 建议备份（spec §9）
 ✓ repos: 3 个已登记 · 2 synced · 1 stale
-⚠ fpms-provider 落后 2 commits → 运行 penguin sync
+⚠ fpms-provider 落后 2 commits → 运行 penguin index
 ✓ 残留锁: 无
 ✓ MCP 接线: claude_desktop ✓ · claude_code ✓ · codex ✗ (penguin install 修复)
 ```
