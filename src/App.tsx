@@ -16,6 +16,7 @@ import { BrowserPage } from "@/components/browser/BrowserPage";
 import { ApiDocsPage } from "@/components/docs/ApiDocsPage";
 import { RestPage } from "@/components/rest/RestPage";
 import { DatabasePage } from "@/components/database/DatabasePage";
+import { WikiPage } from "@/components/wiki/WikiPage";
 import { MainSidebar, type MainModule } from "@/components/layout/MainSidebar";
 import { getPersistedValue, setPersistedValue } from "@/lib/app-persistence";
 import { APP_VALUE_KEYS } from "@/lib/persistence-keys";
@@ -32,6 +33,7 @@ const VALID_MODULES: ReadonlySet<MainModule> = new Set([
   "docs",
   "browser",
   "database",
+  "wiki",
 ]);
 function loadInitialActiveModule(): MainModule | null {
   if (typeof window === "undefined") return null;
@@ -128,10 +130,12 @@ export default function App() {
   const [restOpen, setRestOpen] = useState(initialModule === "rest");
   const [browserOpen, setBrowserOpen] = useState(initialModule === "browser");
   const [databaseOpen, setDatabaseOpen] = useState(initialModule === "database");
+  const [wikiOpen, setWikiOpen] = useState(initialModule === "wiki");
   const openSettings = useCallback(() => setSettingsOpen(true), []);
   const closeVault = useCallback(() => setVaultOpen(false), []);
   const closeBrowser = useCallback(() => setBrowserOpen(false), []);
   const closeDatabase = useCallback(() => setDatabaseOpen(false), []);
+  const closeWiki = useCallback(() => setWikiOpen(false), []);
   // Vault → Browser deeplink dispatcher. Vault cards call this when
   // the user clicks the "Open in Browser" button; we push the deeplink
   // into the store (so BrowserPage's mount-effect consumes it) and
@@ -146,6 +150,7 @@ export default function App() {
       setDocsOpen(false);
       setRestOpen(false);
       setDatabaseOpen(false);
+      setWikiOpen(false);
     },
     [requestBrowserDeeplink],
   );
@@ -158,12 +163,14 @@ export default function App() {
     setRestOpen(false);
     setBrowserOpen(false);
     setDatabaseOpen(false);
+    setWikiOpen(false);
   }, []);
   const selectVaultFromHome = useCallback(() => {
     setDocsOpen(false);
     setRestOpen(false);
     setBrowserOpen(false);
     setDatabaseOpen(false);
+    setWikiOpen(false);
     setVaultOpen(true);
   }, []);
   const selectDocsFromHome = useCallback(() => {
@@ -171,6 +178,7 @@ export default function App() {
     setRestOpen(false);
     setBrowserOpen(false);
     setDatabaseOpen(false);
+    setWikiOpen(false);
     setDocsOpen(true);
   }, []);
   // Sprint 10 — REST module entry. Mirrors vault/docs pattern + new in 10A.
@@ -179,6 +187,7 @@ export default function App() {
     setDocsOpen(false);
     setBrowserOpen(false);
     setDatabaseOpen(false);
+    setWikiOpen(false);
     setRestOpen(true);
   }, []);
   const selectBrowser = useCallback(() => {
@@ -186,6 +195,7 @@ export default function App() {
     setDocsOpen(false);
     setRestOpen(false);
     setDatabaseOpen(false);
+    setWikiOpen(false);
     setBrowserOpen(true);
   }, []);
   const selectDatabase = useCallback(() => {
@@ -193,7 +203,16 @@ export default function App() {
     setDocsOpen(false);
     setRestOpen(false);
     setBrowserOpen(false);
+    setWikiOpen(false);
     setDatabaseOpen(true);
+  }, []);
+  const selectWiki = useCallback(() => {
+    setVaultOpen(false);
+    setDocsOpen(false);
+    setRestOpen(false);
+    setBrowserOpen(false);
+    setDatabaseOpen(false);
+    setWikiOpen(true);
   }, []);
   // Sidebar derives a single "active module" enum from the boolean page
   // flags. Clicking a rail item dispatches to the matching selector.
@@ -207,6 +226,8 @@ export default function App() {
     ? "browser"
     : databaseOpen
     ? "database"
+    : wikiOpen
+    ? "wiki"
     : "client";
   // Three-tier gating (Sprint 8.5):
   //   - Vault requires any valid dev token (enabled && hasValidToken)
@@ -231,6 +252,7 @@ export default function App() {
   // Only Vault stays at the token tier.
   const canAccessBrowser = devModeEnabled && isSuperAdmin;
   const canAccessDatabase = devModeEnabled && isSuperAdmin;
+  const canAccessWiki = devModeEnabled && isSuperAdmin;
   useEffect(() => {
     // Wait for the dev-mode token to finish loading before deciding to
     // revoke access. Pre-hydration, hasValidToken / isSuperAdmin are
@@ -242,7 +264,8 @@ export default function App() {
     if (restOpen && !canAccessRest) setRestOpen(false);
     if (browserOpen && !canAccessBrowser) setBrowserOpen(false);
     if (databaseOpen && !canAccessDatabase) setDatabaseOpen(false);
-  }, [devModeHydrated, canAccessVault, canAccessDocs, canAccessRest, canAccessBrowser, canAccessDatabase, vaultOpen, docsOpen, restOpen, browserOpen, databaseOpen]);
+    if (wikiOpen && !canAccessWiki) setWikiOpen(false);
+  }, [devModeHydrated, canAccessVault, canAccessDocs, canAccessRest, canAccessBrowser, canAccessDatabase, canAccessWiki, vaultOpen, docsOpen, restOpen, browserOpen, databaseOpen, wikiOpen]);
   const handleModuleSelect = useCallback(
     (m: MainModule) => {
       if (m === "client") selectApiClient();
@@ -251,9 +274,10 @@ export default function App() {
       else if (m === "rest") selectRest();
       else if (m === "browser") selectBrowser();
       else if (m === "database") selectDatabase();
+      else if (m === "wiki") selectWiki();
       else selectApiClient();
     },
-    [selectApiClient, selectVaultFromHome, selectDocsFromHome, selectRest, selectBrowser, selectDatabase],
+    [selectApiClient, selectVaultFromHome, selectDocsFromHome, selectRest, selectBrowser, selectDatabase, selectWiki],
   );
   const appUpdate = useAppUpdateScheduler(openSettings);
   const handlePackagesCleared = useCallback(async () => {
@@ -731,6 +755,8 @@ export default function App() {
               <BrowserPage onClose={closeBrowser} />
             ) : databaseOpen ? (
               <DatabasePage onClose={closeDatabase} />
+            ) : wikiOpen ? (
+              <WikiPage onClose={closeWiki} />
             ) : (
               <>
                 <TabBar

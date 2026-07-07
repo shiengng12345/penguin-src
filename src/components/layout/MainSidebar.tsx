@@ -9,10 +9,10 @@
 //   "super-admin" — needs Dev Mode + super-admin token (Home / REST / Docs / Database)
 // Super-admin implies token, so super-admin users see everything.
 
-import { BookOpen, Compass, Database, Globe, Home, Lock, Zap } from "lucide-react";
+import { BookOpen, Compass, Database, Globe, Home, Lock, Network, Zap } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-export type MainModule = "client" | "rest" | "vault" | "docs" | "browser" | "database";
+export type MainModule = "client" | "rest" | "vault" | "docs" | "browser" | "database" | "wiki";
 
 export interface MainSidebarProps {
   active: MainModule;
@@ -48,6 +48,8 @@ const ITEMS: RailItem[] = [
   { kind: "rest", icon: Globe, label: "REST", longLabel: "REST API / 接口客户端", requires: "none" },
   { kind: "docs", icon: BookOpen, label: "Docs", longLabel: "Knowledge Base / 知识库 (Super Admin)", requires: "super-admin" },
   { kind: "database", icon: Database, label: "Database", longLabel: "Database / 数据库 (Super Admin)", requires: "super-admin" },
+  // Penguin Knowledge Wiki — notes + code graph. Super-admin (dev-token) tier.
+  { kind: "wiki", icon: Network, label: "Wiki", longLabel: "Knowledge Wiki / 知识图谱 (Super Admin)", requires: "super-admin" },
 ];
 
 export function MainSidebar({ active, onSelect, hasValidToken, isSuperAdmin }: MainSidebarProps) {
