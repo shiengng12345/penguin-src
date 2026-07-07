@@ -277,4 +277,34 @@ export class KnowledgeStore {
       validTo: string | null;
     }>;
   }
+
+  // §9：启动/定期对账。账本领先 → 自动 replay 追平；
+  // 账本尾部损坏 → 报告截断行（有效前缀照常使用），不阻塞。
+  consistencyCheck(): {
+    ledgerSeq: number;
+    materializedSeq: number;
+    status: "ok" | "index_behind";
+    ledgerTruncatedAtLine: number | null;
+  } {
+    const read = readLedgerFile(this.ledgerPath);
+    const ledgerSeq =
+      read.events.length > 0 ? read.events[read.events.length - 1].seq : 0;
+    let state = this.db
+      .prepare("SELECT materialized_seq FROM ledger_state WHERE id='main'")
+      .get() as { materialized_seq: number };
+
+    if (state.materialized_seq < ledgerSeq) {
+      materialize(this.db, read.events);
+      state = this.db
+        .prepare("SELECT materialized_seq FROM ledger_state WHERE id='main'")
+        .get() as { materialized_seq: number };
+    }
+
+    return {
+      ledgerSeq,
+      materializedSeq: state.materialized_seq,
+      status: state.materialized_seq >= ledgerSeq ? "ok" : "index_behind",
+      ledgerTruncatedAtLine: read.truncatedAtLine,
+    };
+  }
 }
