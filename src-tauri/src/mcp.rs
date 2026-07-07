@@ -96,7 +96,7 @@ fn nvm_latest_node(home: &Path) -> Option<PathBuf> {
 // inherit the user's interactive PATH, so we have to look in the common
 // homebrew / nvm / volta / fnm / asdf / system locations explicitly, then fall
 // back to asking a login shell.
-fn detect_node_path() -> Option<PathBuf> {
+pub(crate) fn detect_node_path() -> Option<PathBuf> {
     let candidates = [
         "/opt/homebrew/bin/node",
         "/usr/local/bin/node",

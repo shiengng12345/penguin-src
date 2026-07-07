@@ -5,6 +5,7 @@ use tauri::Manager;
 mod auth_popover;
 mod db;
 mod inline_webview;
+mod knowledge;
 mod mcp;
 mod packages;
 mod proxy;
@@ -146,6 +147,9 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            knowledge::knowledge_query,
+            knowledge::knowledge_reindex,
+            knowledge::knowledge_db_status,
             packages::ensure_packages_dir,
             packages::get_packages_dir,
             packages::list_installed_packages,
