@@ -86,6 +86,22 @@ CREATE TABLE IF NOT EXISTS edges (
 CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src);
 CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst);
 
+CREATE TABLE IF NOT EXISTS files_index (
+  id TEXT PRIMARY KEY,
+  repo_id TEXT NOT NULL REFERENCES repos(id),
+  branch_id TEXT NOT NULL REFERENCES branches(id),
+  file_path TEXT NOT NULL,
+  lang TEXT,
+  mtime_ms INTEGER,
+  size_bytes INTEGER,
+  content_hash TEXT,
+  indexed_at TEXT,
+  status TEXT NOT NULL,
+  error TEXT,
+  UNIQUE (repo_id, branch_id, file_path)
+);
+CREATE INDEX IF NOT EXISTS idx_files_index_scope ON files_index(repo_id, branch_id);
+
 CREATE TABLE IF NOT EXISTS events (
   id TEXT PRIMARY KEY,
   ledger_seq INTEGER,
@@ -148,7 +164,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts_symbols USING fts5(
 );
 `;
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 export function openDatabase(path: string): Database.Database {
   const db = new Database(path);
