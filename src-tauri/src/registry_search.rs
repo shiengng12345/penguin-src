@@ -12,6 +12,7 @@ use tauri::Emitter;
 // 首拉流式事件：Nexus 每翻一页，把该页新出现的包名推给前端先行展示，
 // 用户不必等整个爬取结束才能开始搜索。
 const DISCOVERED_EVENT: &str = "registry-search:discovered";
+const ENRICHED_EVENT: &str = "registry-search:enriched";
 
 const SEARCH_TIMEOUT_SECS: u64 = 15;
 const NPM_SEARCH_PAGE_SIZE: usize = 250;
@@ -32,6 +33,10 @@ pub(crate) struct RegistryPackage {
     // dist-tags（去掉 latest）——团队按项目打 tag 发布
     // （如 kyc-merge-account / freespin-every-day-v3），搜索要能按它命中。
     pub tags: Vec<String>,
+    // 全版本列表（新到旧）。JS-SDK 没有 branch，前端按版本展开。
+    pub versions: Vec<String>,
+    // tag -> resolved version（含 latest），前端按 branch/tag 展开成多行并做安装状态匹配。
+    pub dist_tags: HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -67,12 +72,7 @@ fn iso_stamp(version: &str) -> Option<u64> {
         let rest = &version[i + 1..];
         let db = date.as_bytes();
         let rb = rest.as_bytes();
-        if db[4] == b'-'
-            && db[7] == b'-'
-            && rb.len() >= 8
-            && rb[2] == b'-'
-            && rb[5] == b'-'
-        {
+        if db[4] == b'-' && db[7] == b'-' && rb.len() >= 8 && rb[2] == b'-' && rb[5] == b'-' {
             let parts = [
                 &date[0..4],
                 &date[5..7],
@@ -81,10 +81,7 @@ fn iso_stamp(version: &str) -> Option<u64> {
                 &rest[3..5],
                 &rest[6..8],
             ];
-            if parts
-                .iter()
-                .all(|s| s.bytes().all(|b| b.is_ascii_digit()))
-            {
+            if parts.iter().all(|s| s.bytes().all(|b| b.is_ascii_digit())) {
                 return parts.concat().parse().ok();
             }
         }
@@ -131,6 +128,26 @@ pub(crate) fn sort_versions_desc(mut versions: Vec<String>) -> Vec<String> {
         sb.cmp(&sa).then_with(|| b.cmp(a))
     });
     versions
+}
+
+fn sort_dist_tags_by_version_desc(tags: &HashMap<String, String>) -> Vec<String> {
+    let mut out: Vec<String> = tags
+        .keys()
+        .filter(|k| k.as_str() != "latest")
+        .cloned()
+        .collect();
+    out.sort_by(|a, b| {
+        let va = tags
+            .get(a)
+            .and_then(|version| version_stamp(version))
+            .unwrap_or(0);
+        let vb = tags
+            .get(b)
+            .and_then(|version| version_stamp(version))
+            .unwrap_or(0);
+        vb.cmp(&va).then_with(|| a.cmp(b))
+    });
+    out
 }
 
 // "http://host:8081/repository/npm_hosted/" → "http://host:8081"
@@ -209,12 +226,15 @@ async fn npm_search_all(
         let batch = parsed.objects.len();
         for obj in parsed.objects {
             if obj.package.name.starts_with(SNSOFT_SCOPE) {
+                let version = obj.package.version;
                 out.push(RegistryPackage {
                     name: obj.package.name,
-                    newest_version: obj.package.version.clone(),
-                    latest_version: obj.package.version,
+                    newest_version: version.clone(),
+                    latest_version: version.clone(),
                     description: obj.package.description,
                     tags: Vec::new(), // enrich_with_packuments 统一补
+                    versions: vec![version],
+                    dist_tags: HashMap::new(),
                 });
             }
         }
@@ -365,9 +385,7 @@ async fn nexus_search_all(
         }
     }
     if merged.is_empty() {
-        eprintln!(
-            "WARN nexus_search_all - 分片无结果（errors={shard_errors}），回退全量串行"
-        );
+        eprintln!("WARN nexus_search_all - 分片无结果（errors={shard_errors}），回退全量串行");
         merged = nexus_crawl(
             client.clone(),
             origin,
@@ -390,6 +408,8 @@ async fn nexus_search_all(
                 latest_version: newest,
                 description: None,
                 tags: Vec::new(), // enrich_with_packuments 统一补
+                versions: sorted,
+                dist_tags: HashMap::new(),
             }
         })
         .collect();
@@ -419,37 +439,39 @@ pub(crate) async fn registry_search_packages(
     let result = if NPM_SEARCH_UNSUPPORTED.load(Ordering::Relaxed) {
         nexus_search_all(&client, &registry_url, &auth, Some(&app)).await
     } else {
-        // 两个端点并行发起：npm 命中就用（快路径），否则用 Nexus 结果——
-        // 串行「先试 npm 再回退」会把 npm 的等待时间白白加在总时长上。
-        let (npm_res, nexus_res) = tokio::join!(
-            npm_search_all(&client, &registry_url, &auth),
-            nexus_search_all(&client, &registry_url, &auth, Some(&app)),
-        );
-        match npm_res {
+        // Nexus REST 能拿到全版本列表，是正常路径；npm search 只作为 Nexus
+        // 不可用时的 fallback，避免正常刷新被慢 fallback 拖住。
+        match nexus_search_all(&client, &registry_url, &auth, Some(&app)).await {
             Ok(list) if !list.is_empty() => Ok(list),
             other => {
                 match &other {
                     Ok(_) => eprintln!(
-                        "WARN registry_search_packages - npm search 返回空，本进程内后续直走 Nexus"
+                        "WARN registry_search_packages - Nexus search 返回空，回退 npm search"
                     ),
-                    Err(err) => eprintln!(
-                        "WARN registry_search_packages - npm search 失败 ({err})，本进程内后续直走 Nexus"
-                    ),
+                    Err(err) => {
+                        eprintln!("WARN registry_search_packages - Nexus search 失败 ({err})，回退 npm search")
+                    }
                 }
-                NPM_SEARCH_UNSUPPORTED.store(true, Ordering::Relaxed);
-                nexus_res
+                match npm_search_all(&client, &registry_url, &auth).await {
+                    Ok(list) if !list.is_empty() => Ok(list),
+                    Ok(_) => {
+                        NPM_SEARCH_UNSUPPORTED.store(true, Ordering::Relaxed);
+                        other
+                    }
+                    Err(err) => {
+                        NPM_SEARCH_UNSUPPORTED.store(true, Ordering::Relaxed);
+                        Err(err)
+                    }
+                }
             }
         }
     };
     let mut list = result?;
     // 产品规则：-coco 后缀的包不对用户展示（也省下它们的 packument 拉取）
     list.retain(|p| !p.name.ends_with("-coco"));
+    enrich_recent_packuments(&client, &registry_url, &auth, &mut list, Some(&app)).await;
     list.sort_by(|a, b| a.name.cmp(&b.name));
-    enrich_with_packuments(&client, &registry_url, &auth, &mut list).await;
-    eprintln!(
-        "INFO registry_search_packages - exit count={}",
-        list.len()
-    );
+    eprintln!("INFO registry_search_packages - exit count={}", list.len());
     Ok(list)
 }
 
@@ -487,51 +509,76 @@ async fn fetch_packument(
         .map_err(|e| format!("packument 解析失败: {e}"))
 }
 
-const PACKUMENT_CONCURRENCY: usize = 12;
+const PACKUMENT_CONCURRENCY: usize = 24;
 
-// 列表补全：并发拉全部包的 packument，把 dist-tags（项目标签，如
-// kyc-merge-account）灌进搜索索引，并用 dist-tags.latest 修正展示版本。
-// 单包失败不影响整体——该包 tags 留空，仍可按名搜索。
-async fn enrich_with_packuments(
+fn recent_packument_indexes(list: &[RegistryPackage], limit: usize) -> Vec<usize> {
+    let mut indexes: Vec<usize> = (0..list.len()).collect();
+    indexes.sort_by(|a, b| {
+        let pa = &list[*a];
+        let pb = &list[*b];
+        let va = version_stamp(&pa.newest_version).unwrap_or(0);
+        let vb = version_stamp(&pb.newest_version).unwrap_or(0);
+        vb.cmp(&va).then_with(|| pa.name.cmp(&pb.name))
+    });
+    indexes.truncate(limit.min(indexes.len()));
+    indexes
+}
+
+fn apply_packument(pkg: &mut RegistryPackage, packument: Packument) {
+    pkg.tags = sort_dist_tags_by_version_desc(&packument.dist_tags);
+    pkg.dist_tags = packument.dist_tags;
+    if let Some(latest) = pkg.dist_tags.get("latest") {
+        pkg.latest_version = latest.clone();
+    }
+    // 「最近发布」= 全版本最大构建戳——发到任意 tag（不只 latest）都算。
+    let versions = sort_versions_desc(packument.versions.into_keys().collect());
+    if let Some(newest) = versions.first() {
+        pkg.newest_version = newest.clone();
+    }
+    if !versions.is_empty() {
+        pkg.versions = versions;
+    }
+    if pkg.description.is_none() {
+        pkg.description = packument.description;
+    }
+}
+
+// 列表补全：拉取【全部】包的 packument，把 dist-tags（项目标签，如
+// kyc-merge-account）灌进搜索索引——分支搜索完全依赖它，必须全覆盖，否则
+// 未 enrich 的包在分支搜索里不可见。按最近发布排序 + 并发分批 + 流式
+// ENRICHED_EVENT：列表秒开不变，dist-tags 在后台几秒内逐批补全（可见的新
+// 包最先到）。单包失败不影响整体——该包 tags 留空，仍可按名搜索。
+async fn enrich_recent_packuments(
     client: &reqwest::Client,
     registry_url: &str,
     auth: &str,
     list: &mut [RegistryPackage],
+    app: Option<&tauri::AppHandle>,
 ) {
-    for chunk in list.chunks_mut(PACKUMENT_CONCURRENCY) {
+    let indexes = recent_packument_indexes(list, list.len());
+    for chunk in indexes.chunks(PACKUMENT_CONCURRENCY) {
         let mut set = tokio::task::JoinSet::new();
-        for (i, pkg) in chunk.iter().enumerate() {
+        for idx in chunk.iter().copied() {
             let client = client.clone();
             let registry_url = registry_url.to_string();
             let auth = auth.to_string();
-            let name = pkg.name.clone();
+            let name = list[idx].name.clone();
             set.spawn(async move {
                 let result = fetch_packument(&client, &registry_url, &auth, &name).await;
-                (i, result)
+                (idx, result)
             });
         }
+        let mut enriched: Vec<RegistryPackage> = Vec::new();
         while let Some(joined) = set.join_next().await {
-            let Ok((i, result)) = joined else { continue };
+            let Ok((idx, result)) = joined else { continue };
             let Ok(packument) = result else { continue };
-            let pkg = &mut chunk[i];
-            let mut tags: Vec<String> = packument
-                .dist_tags
-                .keys()
-                .filter(|k| k.as_str() != "latest")
-                .cloned()
-                .collect();
-            tags.sort();
-            pkg.tags = tags;
-            if let Some(latest) = packument.dist_tags.get("latest") {
-                pkg.latest_version = latest.clone();
-            }
-            // 「最近发布」= 全版本最大构建戳——发到任意 tag（不只 latest）都算
-            let all_versions: Vec<String> = packument.versions.keys().cloned().collect();
-            if let Some(newest) = sort_versions_desc(all_versions).into_iter().next() {
-                pkg.newest_version = newest;
-            }
-            if pkg.description.is_none() {
-                pkg.description = packument.description.clone();
+            apply_packument(&mut list[idx], packument);
+            enriched.push(list[idx].clone());
+        }
+        if !enriched.is_empty() {
+            if let Some(app) = app {
+                let _ = app.emit(ENRICHED_EVENT, &enriched);
+                // UI 不在时忽略；搜索结果本身仍会随 command 返回。
             }
         }
     }
@@ -582,10 +629,7 @@ mod tests {
 
     #[test]
     fn version_stamp_extracts_14_digit_build_time() {
-        assert_eq!(
-            version_stamp("2.1.1-20260624172317"),
-            Some(20260624172317)
-        );
+        assert_eq!(version_stamp("2.1.1-20260624172317"), Some(20260624172317));
         assert_eq!(version_stamp("1.0.0"), None);
         // 15 位数字段不是构建戳
         assert_eq!(version_stamp("1.0.0-202606241723170"), None);
@@ -607,6 +651,86 @@ mod tests {
                 "1.2.0",
                 "1.0.0",
             ]
+        );
+    }
+
+    #[test]
+    fn sort_dist_tags_prefers_newer_target_version() {
+        let tags = HashMap::from([
+            (
+                "accumulative-bet-v3-1".to_string(),
+                "3.2.0-20260601000000".to_string(),
+            ),
+            (
+                "ai-disable-account".to_string(),
+                "3.2.0-20260501000000".to_string(),
+            ),
+            (
+                "kyc-optimization".to_string(),
+                "3.2.0-20260707115119".to_string(),
+            ),
+            ("latest".to_string(), "3.2.0-20260101000000".to_string()),
+        ]);
+
+        assert_eq!(
+            sort_dist_tags_by_version_desc(&tags),
+            vec![
+                "kyc-optimization",
+                "accumulative-bet-v3-1",
+                "ai-disable-account",
+            ]
+        );
+    }
+
+    #[test]
+    fn recent_packument_indexes_prioritize_newest_builds() {
+        let list = vec![
+            RegistryPackage {
+                name: "@snsoft/old-grpc".to_string(),
+                latest_version: "1.0.0-20260101000000".to_string(),
+                newest_version: "1.0.0-20260101000000".to_string(),
+                description: None,
+                tags: Vec::new(),
+                versions: vec!["1.0.0-20260101000000".to_string()],
+                dist_tags: HashMap::new(),
+            },
+            RegistryPackage {
+                name: "@snsoft/newer-grpc".to_string(),
+                latest_version: "1.0.0-20260707125835".to_string(),
+                newest_version: "1.0.0-20260707125835".to_string(),
+                description: None,
+                tags: Vec::new(),
+                versions: vec!["1.0.0-20260707125835".to_string()],
+                dist_tags: HashMap::new(),
+            },
+            RegistryPackage {
+                name: "@snsoft/middle-grpc".to_string(),
+                latest_version: "1.0.0-20260707124025".to_string(),
+                newest_version: "1.0.0-20260707124025".to_string(),
+                description: None,
+                tags: Vec::new(),
+                versions: vec!["1.0.0-20260707124025".to_string()],
+                dist_tags: HashMap::new(),
+            },
+        ];
+
+        assert_eq!(recent_packument_indexes(&list, 2), vec![1, 2]);
+    }
+
+    #[test]
+    fn registry_search_prefers_nexus_without_waiting_for_npm_fallback() {
+        let source = include_str!("registry_search.rs");
+        let start = source
+            .find("pub(crate) async fn registry_search_packages")
+            .expect("registry_search_packages exists");
+        let end = source[start..]
+            .find("async fn fetch_packument")
+            .expect("fetch_packument follows registry_search_packages");
+        let body = &source[start..start + end];
+
+        assert!(
+            !body.contains("tokio::join!("),
+            "normal registry search should not wait for npm fallback when Nexus can return package versions"
         );
     }
 
