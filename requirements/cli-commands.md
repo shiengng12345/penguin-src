@@ -5,7 +5,7 @@
 > 日期：2026-07-07
 > 上游：[knowledge-design.md](knowledge-design.md) §8.3（CLI 形态与铁律）
 > 定位：`packages/knowledge-cli`，bin 名 `penguin`。**薄壳**：查询动词直接调 `knowledge-core` 查询层（与 MCP 六件套同一实现），写动词走 `recordKnowledge()` 铁律。CLI 不长自己的逻辑。
-> graph.md 的 115 命令全集仍冻结；本文只规格 V1 的 16 个动词。
+> graph.md 的 115 命令全集仍冻结；本文只规格 V1 的 17 个动词。
 > 读写分类与 CLI 六条不变量见 knowledge-design.md §8.3——只读命令绝不写账本；写命令（init/index/rebuild/note/install/doctor --fix）可能获取账本锁/索引任务锁。
 > 命名拍板（2026-07-07）：`index` = 增量（日常动词），`rebuild` = 全量重建（修复动词）；`sync` 弃用——听着像云同步。
 
@@ -444,7 +444,51 @@ GetLoginURL: main@abc123 ↔ feat/new-login@def456
 
 ---
 
-## 16. V1 明确不做（引导话术）
+## 16. `penguin help [command]` / `--version`
+
+**用途**：CLI 的门面。三种触达方式语义相同：`penguin help`、裸敲 `penguin`、`penguin <cmd> --help`（= `penguin help <cmd>`）。
+
+**`penguin help`（总览）**——按场景分组，不按字母序（用户按「我想干什么」找命令）：
+
+```text
+  penguin — 你和你的 AI agents 共用的工程知识库
+
+  索引
+    init [path]        登记 repo + 首次索引
+    index [path]       增量索引（改完代码后跑；app 开着时自动）
+    rebuild [path]     全量重建（修复用）
+    status             索引状态一览
+    doctor [--fix]     自检与修复
+
+  查询
+    search <query>     统一检索（笔记+符号+实体）
+    node <id|name>     节点详情（版本/曾用名/关联）
+    callers <symbol>   谁调用它          calls <symbol>    它调用谁
+    impact <symbol>    改动爆炸半径      backlinks <node>  谁链接了它
+    path <a> <b>       两点关系路径      recent [--since]  最近重要变化
+    compare <sym> <b1> <b2>   同一符号跨分支差异
+
+  笔记
+    note new|append|link      建页 / 追加 / 建链
+
+  系统
+    install            接入 PATH + MCP    help [command]    本帮助
+
+  全局旗标: --json  --branch <b>  --repo <r>  --quiet
+  详细: penguin help <command>
+```
+
+**`penguin help <command>`（单命令）**：用途一句话 + 用法 + 全部旗标 + 2~3 个真实示例 + 退出码——内容即本文档对应章节的浓缩，实现上从同一份命令元数据生成（描述文案单一来源，help 与文档不漂移）。
+
+**行为细节**：
+
+- 输出到 stdout（用户主动求助，不是错误）、退 0；**用错命令时**打印的简短用法提示走 stderr、退 1
+- 未知命令：did-you-mean（编辑距离）+ `penguin help` 提示，退 1；冻结命令（why/replay/scar…）走 §17 的引导话术
+- 语言：跟随 `LANG`/`PENGUIN_LANG`（zh → 中文描述，其余英文）——与 app 双语一致
+- `penguin --version` / `-v`：输出 CLI 版本 + knowledge-core 版本 + knowledge.db schema 版本，一行；`--json` 给结构化三元组
+- clack 风格渲染（§0.4 同一套视觉），非 TTY 降级纯文本
+
+## 17. V1 明确不做（引导话术）
 
 用户敲了冻结命令时给一句话引导而非裸报错：
 

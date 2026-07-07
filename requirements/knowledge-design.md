@@ -606,6 +606,7 @@ penguin compare <symbol> <branch_a> <branch_b>   跨分支差异（= compare_bra
 penguin note new|append|link 写笔记（= write_note 三个 action，遵守 Ledger 铁律）
 penguin doctor               环境 + 知识库自检（DB/账本一致性、watcher 状态）
 penguin install              把 penguin CLI 软链到 PATH + 确认 MCP 已接线
+penguin help [command]       命令总览 / 单命令详细帮助（裸敲 penguin 同 help）
 ```
 
 **索引生命周期（命名拍板 2026-07-07：`sync` 弃用——听着像云同步；`index` = 增量，`rebuild` = 全量）：**
