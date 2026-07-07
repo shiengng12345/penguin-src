@@ -58,7 +58,13 @@ export function isAllowedClientPackage(name: string): boolean {
   const protocol = protocolOfPackage(name);
   if (protocol === null) return false;
   if (protocol === "sdk") return true; // @snsoft/js-sdk 始终允许
-  return ALLOWED_CLIENT_FAMILIES.has(normalizeSearchText(familyOf(name)));
+  return ALLOWED_CLIENT_FAMILIES.has(familyKeyOf(name));
+}
+
+// 包家族的归一化键（去协议后缀 + 小写 + 仅字母数字）——family 多选筛选器按它
+// 比对，兼容传入的是 stem（player / ai-chat）还是包名。
+export function familyKeyOf(name: string): string {
+  return normalizeSearchText(familyOf(name));
 }
 
 function newestFirst(a: RegistryPackage, b: RegistryPackage): number {
@@ -252,12 +258,20 @@ export function filterPackageRows(
     // 一旦有 branch 过滤即被排除。
     branch?: string;
     protocol: PackageProtocolFilter;
+    // family 多选筛选：勾选的产品线家族（stem 或包名皆可，内部归一化）。
+    // 空/缺省 → 不按家族过滤；非空 → 只留家族在集合内的行（与其它条件 AND）。
+    families?: string[];
   },
 ): PackageResultRow[] {
   const branchQuery = (filters.branch ?? "").trim().toLowerCase();
+  // familyKeyOf 兼容传入 stem（player / ai-chat）或完整包名（@snsoft/player-grpc）。
+  const familyKeys = new Set(
+    (filters.families ?? []).map((f) => familyKeyOf(f)).filter(Boolean),
+  );
   const scoped = list
     .flatMap(rowsForPackage)
     .filter((pkg) => filters.protocol === "all" || pkg.protocol === filters.protocol)
+    .filter((pkg) => familyKeys.size === 0 || familyKeys.has(familyKeyOf(pkg.name)))
     // 分支匹配 = 前缀（拍板）：`replace-pulsar-with-temporal` 只命中以它
     // 开头的分支；`origin-edmond-replace-...` 不以它开头，排除。部分输入
     // （mast → master）仍可用。命中后纯按构建时间新→旧排，最新在最上面。

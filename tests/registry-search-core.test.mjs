@@ -459,6 +459,36 @@ test("isAllowedClientPackage drops backend and off-list packages", () => {
   }
 });
 
+test("filterPackageRows families multi-select restricts to selected families", () => {
+  const list = [
+    { name: "@snsoft/player-grpc-web", latest_version: "1", newest_version: "1.0.0-20260707121048", description: null, tags: ["master"], dist_tags: { master: "1.0.0-20260707121048" } },
+    { name: "@snsoft/payment-grpc", latest_version: "1", newest_version: "1.0.0-20260707121047", description: null, tags: ["master"], dist_tags: { master: "1.0.0-20260707121047" } },
+    { name: "@snsoft/auth-grpc", latest_version: "1", newest_version: "1.0.0-20260707121046", description: null, tags: ["master"], dist_tags: { master: "1.0.0-20260707121046" } },
+  ];
+  // 空 families → 不过滤
+  assert.equal(filterPackageRows(list, { query: "", protocol: "all", families: [] }).length, 3);
+  // 勾选 player + payment → 只留这两家族
+  const rows = filterPackageRows(list, { query: "", protocol: "all", families: ["player", "payment"] });
+  assert.deepEqual(rows.map((r) => r.name), ["@snsoft/player-grpc-web", "@snsoft/payment-grpc"]);
+});
+
+test("filterPackageRows families accepts stem or full package name, normalized", () => {
+  const list = [
+    { name: "@snsoft/ai-chat-grpc", latest_version: "1", newest_version: "1.0.0-20260707121048", description: null, tags: ["master"], dist_tags: { master: "1.0.0-20260707121048" } },
+    { name: "@snsoft/player-grpc", latest_version: "1", newest_version: "1.0.0-20260707121047", description: null, tags: ["master"], dist_tags: { master: "1.0.0-20260707121047" } },
+  ];
+  // camelCase stem 也能对上 kebab 包名
+  assert.deepEqual(
+    filterPackageRows(list, { query: "", protocol: "all", families: ["aiChat"] }).map((r) => r.name),
+    ["@snsoft/ai-chat-grpc"],
+  );
+  // 传完整包名同样命中该家族
+  assert.deepEqual(
+    filterPackageRows(list, { query: "", protocol: "all", families: ["@snsoft/player-grpc"] }).map((r) => r.name),
+    ["@snsoft/player-grpc"],
+  );
+});
+
 test("component-boundary filter strips backend before search", () => {
   // 复现组件里的 allowedList 过滤：后端包进不了结果。
   const raw = [

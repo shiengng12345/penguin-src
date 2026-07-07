@@ -4,6 +4,7 @@ import {
   Braces,
   Check,
   CheckCircle2,
+  ChevronDown,
   Clock,
   Download,
   GitBranch,
@@ -167,6 +168,8 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
 
   const [typeFilter, setTypeFilter] = useState<PackageProtocolFilter>("all");
   const [searchQuery, setSearchQuery] = useState("");
+  // family 多选筛选：勾选的产品线家族（存 stem，如 player / ai-chat）。空=全部。
+  const [selectedFamilies, setSelectedFamilies] = useState<Set<string>>(new Set());
   // 「仅 master」勾选框：默认勾上 → 按 master 分支过滤；在分支框输入即自动
   // 取消勾选、改按输入框的值走（空=全部分支）。
   const [branchQuery, setBranchQuery] = useState("");
@@ -294,25 +297,34 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
     [registryList],
   );
 
+  const familyFilter = useMemo(() => [...selectedFamilies], [selectedFamilies]);
+
   const searchResults = useMemo(() => {
     if (!registryList) return [];
     return filterPackageRows(allowedList, {
       query: searchQuery,
       branch: effectiveBranch,
       protocol: typeFilter,
+      families: familyFilter,
     });
-  }, [registryList, allowedList, searchQuery, effectiveBranch, typeFilter]);
+  }, [registryList, allowedList, searchQuery, effectiveBranch, typeFilter, familyFilter]);
 
+  // 多选下拉展示全部家族（21 个 + js-sdk），所以放开条数上限。
   const nameSuggestions = useMemo(
-    () => suggestPackageStems(allowedList, searchQuery),
+    () => suggestPackageStems(allowedList, searchQuery, 50),
     [allowedList, searchQuery],
   );
 
-  const pickSuggestion = (stem: string) => {
-    setSearchQuery(stem);
-    setNameSuggestOpen(false);
-    setNameSuggestIdx(-1);
+  const toggleFamily = (stem: string) => {
+    setSelectedFamilies((cur) => {
+      const next = new Set(cur);
+      if (next.has(stem)) next.delete(stem);
+      else next.add(stem);
+      return next;
+    });
   };
+
+  const clearFamilies = () => setSelectedFamilies(new Set());
 
   useEffect(() => () => {
     if (nameBlurTimer.current) clearTimeout(nameBlurTimer.current);
@@ -490,6 +502,8 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                   onFocus={() => {
                     if (searchQuery.trim()) setNameSuggestOpen(true);
                   }}
+                  // 点击输入框显式打开家族多选清单（Cmd+S 只聚焦不点击 → 不弹）
+                  onClick={() => setNameSuggestOpen(true)}
                   onBlur={() => {
                     // 延迟关闭，让下拉项的 mousedown 先触发
                     nameBlurTimer.current = setTimeout(() => setNameSuggestOpen(false), 120);
@@ -514,13 +528,14 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                     if (e.key === "Enter") {
                       e.preventDefault();
                       if (open && nameSuggestIdx >= 0) {
-                        pickSuggestion(nameSuggestions[nameSuggestIdx]);
+                        // 高亮的家族 → 勾选/取消（多选，下拉保持打开）
+                        toggleFamily(nameSuggestions[nameSuggestIdx]);
                       } else if (searchResults.length > 0) {
                         toggleRow(packageRowKey(searchResults[0]));
                       }
                     }
                   }}
-                  placeholder="搜索包名，例如：player, auth, ccms"
+                  placeholder="搜索 / 勾选产品线，例如：player, auth, ccms"
                   name="penguin-package-search"
                   disabled={isInstalling}
                   autoFocus
@@ -528,32 +543,95 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                   autoCorrect="off"
                   autoCapitalize="none"
                   spellCheck={false}
-                  className="h-9 rounded-md border-cyan-400/55 bg-slate-950/35 pl-10 text-sm text-slate-100 placeholder:text-slate-600 focus-visible:ring-cyan-400/70"
+                  className="h-9 rounded-md border-cyan-400/55 bg-slate-950/35 pl-10 pr-9 text-sm text-slate-100 placeholder:text-slate-600 focus-visible:ring-cyan-400/70"
                 />
+                <button
+                  type="button"
+                  aria-label="展开产品线清单"
+                  // mousedown 早于 input blur，避免先关再开
+                  onMouseDown={(e) => {
+                    e.preventDefault();
+                    setNameSuggestOpen((o) => !o);
+                  }}
+                  disabled={isInstalling}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-slate-500 hover:text-slate-300"
+                >
+                  <ChevronDown
+                    className={cn("h-4 w-4 transition-transform", nameSuggestOpen && "rotate-180")}
+                  />
+                </button>
                 {nameSuggestOpen && nameSuggestions.length > 0 && (
-                  <div className="absolute left-0 right-0 top-[calc(100%+4px)] z-20 max-h-56 overflow-y-auto rounded-lg border border-slate-700/80 bg-[#0d1420] py-1 shadow-[0_16px_40px_rgba(0,0,0,0.5)]">
-                    {nameSuggestions.map((stem, i) => (
-                      <button
-                        key={stem}
-                        type="button"
-                        // mousedown 早于 input 的 blur，避免下拉先被关掉
-                        onMouseDown={(e) => {
-                          e.preventDefault();
-                          pickSuggestion(stem);
-                        }}
-                        onMouseEnter={() => setNameSuggestIdx(i)}
-                        className={cn(
-                          "flex w-full items-center gap-2 px-3 py-1.5 text-left font-mono text-[13px] text-slate-200",
-                          i === nameSuggestIdx ? "bg-cyan-500/15 text-cyan-100" : "hover:bg-white/5",
-                        )}
-                      >
-                        <Search className="h-3.5 w-3.5 shrink-0 text-slate-500" />
-                        {stem}
-                      </button>
-                    ))}
+                  <div className="absolute left-0 right-0 top-[calc(100%+4px)] z-20 max-h-64 overflow-y-auto rounded-lg border border-slate-700/80 bg-[#0d1420] py-1 shadow-[0_16px_40px_rgba(0,0,0,0.5)]">
+                    {nameSuggestions.map((stem, i) => {
+                      const checked = selectedFamilies.has(stem);
+                      return (
+                        <button
+                          key={stem}
+                          type="button"
+                          // mousedown 早于 input 的 blur，避免下拉先被关掉；勾选后保持打开
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            toggleFamily(stem);
+                          }}
+                          onMouseEnter={() => setNameSuggestIdx(i)}
+                          className={cn(
+                            "flex w-full items-center gap-2.5 px-3 py-1.5 text-left font-mono text-[13px]",
+                            i === nameSuggestIdx
+                              ? "bg-cyan-500/15 text-cyan-100"
+                              : "text-slate-200 hover:bg-white/5",
+                          )}
+                        >
+                          <span
+                            className={cn(
+                              "flex h-4 w-4 shrink-0 items-center justify-center rounded-[4px] border transition-colors",
+                              checked
+                                ? "border-cyan-400 bg-cyan-400 text-slate-950"
+                                : "border-slate-600",
+                            )}
+                          >
+                            {checked && <Check className="h-2.5 w-2.5" strokeWidth={3} />}
+                          </span>
+                          {stem}
+                        </button>
+                      );
+                    })}
+                    {selectedFamilies.size > 0 && (
+                      <div className="mt-1 border-t border-slate-800 px-3 pb-0.5 pt-1.5">
+                        <button
+                          type="button"
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            clearFamilies();
+                          }}
+                          className="text-[11px] text-slate-400 hover:text-cyan-300"
+                        >
+                          清除筛选（已选 {selectedFamilies.size}）
+                        </button>
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
+              {selectedFamilies.size > 0 && (
+                <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                  {[...selectedFamilies].map((stem) => (
+                    <span
+                      key={stem}
+                      className="inline-flex items-center gap-1 rounded-md bg-cyan-500/12 px-2 py-0.5 font-mono text-[11px] text-cyan-200 ring-1 ring-cyan-400/25"
+                    >
+                      {stem}
+                      <button
+                        type="button"
+                        aria-label={`移除 ${stem}`}
+                        onClick={() => toggleFamily(stem)}
+                        className="text-cyan-300/70 hover:text-cyan-100"
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
             </div>
             <div className="min-w-0 sm:flex-[35_1_0%]">
               <div className="mb-1 flex items-center justify-between gap-2">
