@@ -204,6 +204,9 @@ importers:
       '@penguin/core':
         specifier: workspace:*
         version: link:../core
+      '@penguin/knowledge-core':
+        specifier: workspace:*
+        version: link:../knowledge-core
     devDependencies:
       '@types/node':
         specifier: ^22.0.0

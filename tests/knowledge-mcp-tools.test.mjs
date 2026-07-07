@@ -1,0 +1,95 @@
+import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { readFile as readFileP, writeFile as writeFileP, unlink as unlinkP } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import ts from "typescript";
+import { KnowledgeStore } from "../packages/knowledge-core/dist/index.js";
+
+// knowledge-tools.ts is bundled into the MCP server (esbuild → single file), so
+// it isn't separately importable. Transpile it to a temp .mjs and import (same
+// pattern as registry-search-core.test.mjs); its only import is
+// @penguin/knowledge-core, resolvable from the repo root.
+async function loadModule(relTsPath, tag) {
+  const source = await readFileP(new URL(relTsPath, import.meta.url), "utf8");
+  const { outputText } = ts.transpileModule(source, {
+    compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
+  });
+  const coreUrl = new URL("../packages/knowledge-core/dist/index.js", import.meta.url).href;
+  const defsUrl = new URL(`./.tmp-ktdefs-${process.pid}.mjs`, import.meta.url).href;
+  const rewritten = outputText
+    .replaceAll("@penguin/knowledge-core", coreUrl)
+    .replaceAll("./knowledge-tool-defs.js", defsUrl);
+  const tmpUrl = new URL(`./.tmp-${tag}-${process.pid}.mjs`, import.meta.url);
+  await writeFileP(tmpUrl, rewritten);
+  return tmpUrl;
+}
+
+async function loadTools() {
+  // defs first (handler imports it as ./knowledge-tool-defs.js → rewritten to this)
+  const defsTmp = await loadModule("../packages/mcp/src/knowledge-tool-defs.ts", "ktdefs");
+  const handlerTmp = await loadModule("../packages/mcp/src/knowledge-tools.ts", "kt");
+  try {
+    const defs = await import(defsTmp.href);
+    const handler = await import(handlerTmp.href);
+    return { ...defs, ...handler };
+  } finally {
+    await unlinkP(defsTmp);
+    await unlinkP(handlerTmp);
+  }
+}
+const { KNOWLEDGE_TOOL_DEFS, isKnowledgeTool, handleKnowledgeTool } = await loadTools();
+
+function seed() {
+  const dir = mkdtempSync(join(tmpdir(), "pk-mcp-"));
+  const store = KnowledgeStore.open({ dbPath: join(dir, "k.db"), ledgerPath: join(dir, "l.jsonl") });
+  const repoId = store.registerRepo({ name: "r", rootPath: "/r" });
+  const branch = store.registerBranch({ repoId, name: "main", status: "live" });
+  const login = store.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::login`, title: "login", repoId });
+  const caller = store.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::caller`, title: "caller", repoId });
+  store.indexSymbolText({ nodeId: login, name: "login", signature: "(req)" });
+  store.replaceFileEdges({ branchId: branch, filePath: "a.ts", edges: [
+    { src: caller, dst: login, edgeType: "calls", origin: "parser", method: "EXTRACTED" },
+  ] });
+  return { store, repoId, login, caller };
+}
+
+test("the 6-pack is registered", () => {
+  const names = KNOWLEDGE_TOOL_DEFS.map((t) => t.name).sort();
+  assert.deepEqual(names, ["compare_branches", "explore_graph", "get_node", "index_status", "knowledge_search", "write_note"]);
+  assert.ok(isKnowledgeTool("knowledge_search"));
+  assert.ok(!isKnowledgeTool("mcp_health"));
+});
+
+test("null store → not-initialized hint (no crash)", () => {
+  const r = handleKnowledgeTool("knowledge_search", { query: "x" }, null);
+  assert.match(r.error, /not initialized/);
+});
+
+test("knowledge_search / get_node / explore_graph adapt the query layer", () => {
+  const { store, login, caller } = seed();
+  const s = handleKnowledgeTool("knowledge_search", { query: "login" }, store);
+  assert.ok(s.results.some((h) => h.nodeId === login));
+
+  const n = handleKnowledgeTool("get_node", { id: login }, store);
+  assert.equal(n.node.title, "login");
+
+  const g = handleKnowledgeTool("explore_graph", { mode: "who_calls", node: "login" }, store);
+  assert.ok(g.nodes.some((x) => x.nodeId === caller));
+  store.close();
+});
+
+test("write_note link_pages records a ledger event; refuses sensitive", () => {
+  const { store, login, caller } = seed();
+  const ok = handleKnowledgeTool("write_note", { action: "link_pages", src: caller, dst: login, edge_type: "wikilink" }, store);
+  assert.equal(ok.ok, true);
+  assert.ok(ok.eventId);
+
+  // mark caller sensitive → refuse
+  const noteId = store.upsertNode({ nodeType: "note", identityKey: "cred.md", title: "Cred" });
+  store.indexNoteText({ nodeId: noteId, path: "cred.md", title: "Cred", body: "x", sensitive: true, mcpAccess: "denied", contentHash: "h" });
+  const refused = handleKnowledgeTool("write_note", { action: "link_pages", src: noteId, dst: login }, store);
+  assert.match(refused.error, /sensitive/);
+  store.close();
+});

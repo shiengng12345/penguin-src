@@ -12,7 +12,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
-    "@penguin/core": "workspace:*"
+    "@penguin/core": "workspace:*",
+    "@penguin/knowledge-core": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

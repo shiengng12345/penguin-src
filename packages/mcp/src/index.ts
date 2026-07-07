@@ -7,6 +7,10 @@
 // you installed via Penguin UI work here automatically. No duplicate install.
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+// Only the pure tool DEFS are imported statically (no knowledge-core / native
+// deps). The handler is dynamically imported on first knowledge-tool call so
+// the release-bundled server initializes without those deps present.
+import { KNOWLEDGE_TOOL_DEFS, isKnowledgeTool } from "./knowledge-tool-defs.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -337,6 +341,7 @@ const server = new Server(
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
+    ...KNOWLEDGE_TOOL_DEFS,
     {
       name: "mcp_health",
       description:
@@ -579,6 +584,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const a = args as Record<string, unknown>;
 
   try {
+    if (isKnowledgeTool(name)) {
+      // Lazy import keeps knowledge-core (native better-sqlite3) out of the
+      // server's top-level load — only paid when a knowledge tool is called.
+      const { runKnowledgeTool } = await import("./knowledge-tools.js");
+      return jsonResult(runKnowledgeTool(name, a));
+    }
     if (name === "mcp_health") {
       const cfg = readConfig();
       const protocols = Object.fromEntries(
