@@ -466,7 +466,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
           </button>
         </header>
 
-        <div className="flex min-h-0 flex-1 flex-col gap-3.5 px-6 py-4">
+        <div className="flex min-h-0 flex-1 flex-col gap-3.5 overflow-y-auto px-6 py-4">
           <section className="shrink-0">
             <label className="mb-1 block text-[11px] font-medium text-slate-300">包类型</label>
             <div className="flex flex-wrap gap-2">
@@ -704,9 +704,9 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
             </button>
           </section>
 
-          {/* flex-1 让结果区吃掉剩余空间（正常窗口 5-6+ 行）；min-h-0 允许在窗口
-              变矮时收缩，避免把手动输入/底部按钮挤出去、盖在一起 */}
-          <section className="flex min-h-0 flex-1 flex-col">
+          {/* flex-1 吃掉剩余空间（正常窗口 5-6+ 行）；min-h 给个下限，安装日志出现时
+              结果区不会被挤成 1 行——放不下时由 body 整体滚动（footer 在 body 外，不重叠） */}
+          <section className="flex min-h-[220px] flex-1 flex-col">
             <div className="mb-1.5 flex shrink-0 items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <label className="block text-[11px] font-medium text-slate-300">搜索结果</label>
