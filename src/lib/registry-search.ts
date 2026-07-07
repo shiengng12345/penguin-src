@@ -1,8 +1,9 @@
 // Tauri-invoke wrappers + caches for the installer's Sonatype search.
 // The Rust side (registry_search.rs) owns credentials and endpoint fallback;
-// this module only caches: the full package list is refetched at most every
-// 5 minutes, packuments are cached per name for the session.
+// this module only caches: every open still refetches the full list, while
+// Rust's streamed packument events warm the in-memory list as soon as they land.
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type { RegistryPackage } from "./registry-search-core";
 
 export interface PackageVersions {
@@ -16,19 +17,52 @@ export interface PackageVersions {
 const DISK_CACHE_KEY = "registry:pkg-list:v5"; // v5: 客户端包白名单过滤（丢弃含后端包的旧缓存）
 let memoryList: RegistryPackage[] | null = null;
 let inflight: Promise<RegistryPackage[]> | null = null;
+let diskCacheLoaded = false;
+let eventBridgeStarted = false;
+
+function mergeRegistryPackages(
+  current: RegistryPackage[] | null,
+  incoming: RegistryPackage[] | null | undefined,
+): RegistryPackage[] {
+  const byName = new Map((current ?? []).map((pkg) => [pkg.name, pkg] as const));
+  for (const pkg of incoming ?? []) {
+    byName.set(pkg.name, pkg);
+  }
+  return Array.from(byName.values()).sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function rememberStreamedRegistryPackages(list: RegistryPackage[]): void {
+  if (list.length === 0) return;
+  memoryList = mergeRegistryPackages(memoryList, list);
+}
+
+function startRegistrySearchEventBridge(): void {
+  if (eventBridgeStarted) return;
+  eventBridgeStarted = true;
+  void listen<RegistryPackage[]>("registry-search:enriched", (event) => {
+    rememberStreamedRegistryPackages(event.payload);
+  }).catch(() => {
+    eventBridgeStarted = false;
+  });
+}
+
+startRegistrySearchEventBridge();
 
 // 读缓存（内存 → 磁盘，不管多旧）——调用方先展示它，再等实时结果替换。
 export async function loadCachedRegistryPackages(): Promise<RegistryPackage[] | null> {
-  if (memoryList) return memoryList;
+  startRegistrySearchEventBridge();
+  if (memoryList && diskCacheLoaded) return memoryList;
   try {
     const raw = await invoke<string | null>("db_get_app_value", { key: DISK_CACHE_KEY });
-    if (!raw) return null;
+    diskCacheLoaded = true;
+    if (!raw) return memoryList;
     const parsed = JSON.parse(raw) as { list?: RegistryPackage[] };
-    if (!Array.isArray(parsed.list)) return null;
-    memoryList = parsed.list;
-    return parsed.list;
+    if (!Array.isArray(parsed.list)) return memoryList;
+    memoryList = mergeRegistryPackages(parsed.list, memoryList);
+    return memoryList;
   } catch {
-    return null;
+    diskCacheLoaded = true;
+    return memoryList;
   }
 }
 
@@ -36,10 +70,12 @@ export async function loadCachedRegistryPackages(): Promise<RegistryPackage[] | 
 export async function fetchRegistryPackages(
   options: { force?: boolean } = {},
 ): Promise<RegistryPackage[]> {
+  startRegistrySearchEventBridge();
   if (inflight && !options.force) return inflight;
   const request = invoke<RegistryPackage[]>("registry_search_packages")
     .then((list) => {
       memoryList = list;
+      diskCacheLoaded = true;
       void invoke("db_set_app_value", {
         key: DISK_CACHE_KEY,
         value: JSON.stringify({ at: Date.now(), list }),
