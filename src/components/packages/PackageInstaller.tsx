@@ -545,20 +545,18 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                   spellCheck={false}
                   className="h-9 rounded-md border-cyan-400/55 bg-slate-950/35 pl-10 pr-14 text-sm text-slate-100 placeholder:text-slate-600 focus-visible:ring-cyan-400/70"
                 />
-                {searchQuery && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSearchQuery("");
-                      setNameSuggestIdx(-1);
-                    }}
-                    disabled={isInstalling}
-                    className="absolute right-8 top-1/2 -translate-y-1/2 rounded p-0.5 text-slate-500 hover:text-slate-200"
-                    aria-label="清除包名搜索"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSearchQuery("");
+                    setNameSuggestIdx(-1);
+                  }}
+                  disabled={isInstalling}
+                  className="absolute right-8 top-1/2 -translate-y-1/2 rounded p-0.5 text-slate-500 hover:text-slate-200"
+                  aria-label="清除包名搜索"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
                 <button
                   type="button"
                   aria-label="展开产品线清单"
@@ -656,18 +654,17 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                   autoCorrect="off"
                   autoCapitalize="none"
                   spellCheck={false}
-                  className="h-9 rounded-md border-slate-700/80 bg-slate-950/35 pl-10 text-sm text-slate-100 placeholder:text-slate-600 focus-visible:ring-cyan-400/70 disabled:opacity-50"
+                  className="h-9 rounded-md border-slate-700/80 bg-slate-950/35 pl-10 pr-9 text-sm text-slate-100 placeholder:text-slate-600 focus-visible:ring-cyan-400/70 disabled:opacity-50"
                 />
-                {branchQuery && !masterOnly && (
-                  <button
-                    type="button"
-                    onClick={() => setBranchQuery("")}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-slate-500 hover:text-slate-200"
-                    aria-label="清除分支筛选"
-                  >
-                    <X className="h-3.5 w-3.5" />
-                  </button>
-                )}
+                <button
+                  type="button"
+                  onClick={() => setBranchQuery("")}
+                  disabled={isInstalling || masterOnly}
+                  className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-slate-500 hover:text-slate-200 disabled:opacity-40"
+                  aria-label="清除分支筛选"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
               </div>
             </div>
             <button
