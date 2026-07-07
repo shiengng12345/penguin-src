@@ -104,7 +104,7 @@ function TypeChip({ protocol }: { protocol: PackageProtocol }) {
   return (
     <span
       className={cn(
-        "inline-flex h-5 shrink-0 items-center rounded px-2 text-[11px] font-medium leading-none",
+        "inline-flex h-5 shrink-0 items-center whitespace-nowrap rounded px-2 text-[11px] font-medium leading-none",
         protocol === "sdk"
           ? "border border-purple-400/25 bg-purple-500/15 text-purple-200"
           : "border border-cyan-400/20 bg-cyan-400/10 text-cyan-200",
@@ -120,7 +120,7 @@ function BranchChip({ branch }: { branch: string }) {
   return (
     <span
       title={branch}
-      className="inline-flex h-5 max-w-[150px] shrink-0 items-center gap-1 rounded-md border border-slate-700/70 bg-slate-800/70 px-2 text-[11px] leading-none text-slate-300"
+      className="inline-flex h-5 max-w-full shrink-0 items-center gap-1 whitespace-nowrap rounded-md border border-slate-700/70 bg-slate-800/70 px-2 text-[11px] leading-none text-slate-300"
     >
       <GitBranch className="h-3 w-3 shrink-0 text-slate-400" />
       <span className="truncate">{branch}</span>
@@ -365,8 +365,8 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
           </button>
         </header>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-          <section>
+        <div className="flex min-h-0 flex-1 flex-col px-5 py-4">
+          <section className="shrink-0">
             <label className="mb-1.5 block text-[11px] font-medium text-slate-300">包类型</label>
             <div className="inline-flex rounded-md border border-slate-700/80 bg-slate-950/35 p-0.5">
               {TYPE_FILTERS.map((item) => {
@@ -391,8 +391,8 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
             </div>
           </section>
 
-          <section className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-end">
-            <div className="min-w-0 flex-1">
+          <section className="mt-4 flex shrink-0 flex-col gap-3 sm:flex-row sm:items-end">
+            <div className="min-w-0 sm:flex-[65_1_0%]">
               <label className="mb-1.5 block text-[11px] font-medium text-slate-300">搜索包名</label>
               <div className="relative">
                 <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
@@ -417,14 +417,14 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                 />
               </div>
             </div>
-            <div className="min-w-0 flex-1 sm:max-w-[300px]">
+            <div className="min-w-0 sm:flex-[35_1_0%]">
               <label className="mb-1.5 block text-[11px] font-medium text-slate-300">搜索分支</label>
               <div className="relative">
                 <GitBranch className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
                 <Input
                   value={branchQuery}
                   onChange={(e) => setBranchQuery(e.target.value)}
-                  placeholder="搜索分支，例如：master, brazil-v2, quick-action-guide"
+                  placeholder="搜索分支，例如：brazil-v2"
                   name="penguin-branch-search"
                   disabled={isInstalling}
                   autoComplete="off"
@@ -456,16 +456,24 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
             </button>
           </section>
 
-          <section className="mt-4">
-            <div className="mb-1.5 flex items-center justify-between gap-3">
+          <section className="mt-4 flex min-h-0 flex-1 flex-col">
+            <div className="mb-1.5 flex shrink-0 items-center justify-between gap-3">
               <label className="block text-[11px] font-medium text-slate-300">搜索结果</label>
               {registryList && (
                 <span className="text-[11px] text-slate-400">共 {searchResults.length} 个结果</span>
               )}
             </div>
-            <div className="max-h-[380px] overflow-y-auto rounded-md border border-cyan-400/45 bg-slate-950/20">
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-slate-700/70 bg-slate-950/20">
+              {/* 列头 */}
+              <div className="grid shrink-0 grid-cols-[minmax(0,1fr)_168px_178px_150px_84px] items-center gap-3 border-b border-slate-800/80 bg-slate-950/50 px-3 py-1.5 text-[10px] font-medium uppercase tracking-wide text-slate-500">
+                <span className="pl-[68px]">包名</span>
+                <span>版本</span>
+                <span>构建时间</span>
+                <span>分支</span>
+                <span className="text-right">状态</span>
+              </div>
               {listError ? (
-                <div className="rounded-md border border-yellow-500/25 bg-yellow-500/10 px-3 py-3 text-sm text-yellow-200">
+                <div className="m-2 rounded-md border border-yellow-500/25 bg-yellow-500/10 px-3 py-3 text-sm text-yellow-200">
                   搜索不可用：{listError}
                 </div>
               ) : listLoading && !registryList ? (
@@ -478,7 +486,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                   没有匹配的包 / 分支{branchQuery ? "（试试放宽分支关键字）" : ""}
                 </div>
               ) : registryList ? (
-                <div className="divide-y divide-slate-800/80">
+                <div className="min-h-0 flex-1 divide-y divide-slate-800/70 overflow-y-auto pb-1">
                   {searchResults.map((pkg) => {
                     const key = packageRowKey(pkg);
                     const selected = selectedRowKey === key && !hasManualSpec;
@@ -491,44 +499,44 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                         onClick={() => selectPackage(key)}
                         disabled={isInstalling}
                         className={cn(
-                          "flex min-h-[68px] w-full items-center gap-3 border px-3 py-2 text-left transition-colors",
+                          "grid min-h-[60px] w-full grid-cols-[minmax(0,1fr)_168px_178px_150px_84px] items-center gap-3 border-l-2 px-3 py-2 text-left transition-colors",
                           selected
-                            ? "border-cyan-400/80 bg-cyan-400/10"
-                            : "border-transparent bg-slate-900/25 hover:border-slate-700/80 hover:bg-slate-900/55",
+                            ? "border-l-cyan-400 bg-cyan-400/10"
+                            : "border-l-transparent hover:bg-slate-900/55",
                         )}
                       >
-                        <RowRadio selected={selected} />
-                        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-cyan-400/10 text-cyan-300">
-                          <Package className="h-4 w-4" />
+                        {/* 包名列：单选 + 图标 + 名称 + 类型 chip */}
+                        <div className="flex min-w-0 items-center gap-2.5">
+                          <RowRadio selected={selected} />
+                          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-cyan-400/10 text-cyan-300">
+                            <Package className="h-4 w-4" />
+                          </div>
+                          <span
+                            title={pkg.name}
+                            className="min-w-0 truncate font-mono text-[13px] font-semibold text-slate-50"
+                          >
+                            {pkg.name}
+                          </span>
+                          <TypeChip protocol={pkg.protocol} />
                         </div>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex min-w-0 items-center justify-between gap-3">
-                            <div className="min-w-0 truncate font-mono text-[13px] font-semibold text-slate-50">
-                              {pkg.name}
-                            </div>
-                            {installed && (
-                              <span className="shrink-0 rounded bg-emerald-500/14 px-2 py-0.5 text-[11px] font-medium text-emerald-300">
-                                已安装
-                              </span>
-                            )}
-                          </div>
-                          <div className="mt-1.5 grid grid-cols-[76px_190px_170px_1fr] items-center gap-x-3 text-xs text-slate-400">
-                            <div className="min-w-0">
-                              <TypeChip protocol={pkg.protocol} />
-                            </div>
-                            <span
-                              title={pkg.version}
-                              className="min-w-0 truncate font-mono text-[12px] text-slate-300"
-                            >
-                              {pkg.version}
+                        <span
+                          title={pkg.version}
+                          className="min-w-0 truncate font-mono text-[12px] text-slate-300"
+                        >
+                          {pkg.version}
+                        </span>
+                        <span className="whitespace-nowrap font-mono text-[12px] tabular-nums text-slate-400">
+                          {stamp ? fmtStamp(stamp) : "-"}
+                        </span>
+                        <div className="min-w-0">
+                          {pkg.branch ? <BranchChip branch={pkg.branch} /> : null}
+                        </div>
+                        <div className="flex justify-end">
+                          {installed && (
+                            <span className="shrink-0 whitespace-nowrap rounded bg-emerald-500/14 px-2 py-0.5 text-[11px] font-medium text-emerald-300">
+                              已安装
                             </span>
-                            <span className="font-mono text-[12px] tabular-nums text-slate-400">
-                              {stamp ? fmtStamp(stamp) : "-"}
-                            </span>
-                            <div className="min-w-0">
-                              {pkg.branch ? <BranchChip branch={pkg.branch} /> : null}
-                            </div>
-                          </div>
+                          )}
                         </div>
                       </button>
                     );
@@ -538,7 +546,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
             </div>
           </section>
 
-          <section className="mt-4">
+          <section className="mt-4 shrink-0">
             <label className="mb-1.5 block text-[11px] font-medium text-slate-300">
               手动输入包规格（可选）
             </label>
@@ -575,7 +583,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
           </section>
 
           {(installLog.length > 0 || isInstalling) && (
-            <section className="mt-4 space-y-2">
+            <section className="mt-4 shrink-0 space-y-2">
               {logStatus.logLines.length > 0 && (
                 <div className="max-h-24 overflow-y-auto rounded-lg border border-slate-800 bg-slate-950/50 p-2 font-mono text-[10px] text-slate-400">
                   {logStatus.logLines.map((line, i) => (
