@@ -699,7 +699,8 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                   : "border-slate-700/80 bg-slate-950/40 text-slate-300 hover:border-cyan-400/50 hover:bg-cyan-400/10 hover:text-cyan-200",
               )}
             >
-              <RefreshCw className={cn("h-4 w-4", listLoading && "animate-spin")} />
+              {/* 不转圈：绿色=开已足够表意，加载状态由结果区提示，避免一直转 */}
+              <RefreshCw className="h-4 w-4" />
             </button>
           </section>
 
