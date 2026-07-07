@@ -36,6 +36,30 @@ const ALLOWED_CLIENT_FAMILIES: &[&str] = &[
     "socialengagement", "telesales", "userengagement",
 ];
 
+// 同一批 family 的「真实包名 casing」——用来直连拉 packument（最快路径）。
+// registry 里的包名大小写就是这里的写法（如 @snsoft/riskControl-grpc-web）；
+// 直连时还会额外试一遍全小写变体，兜住个别 casing 记不准的情况。
+const CLIENT_FAMILY_NAMES: &[&str] = &[
+    "admin", "aiChat", "auth", "biztreats", "ccms", "CMS", "internal",
+    "livechat", "offlineCasino", "packet", "payment", "player", "promotion",
+    "proposal", "provider", "push", "recommend", "riskControl",
+    "socialEngagement", "telesales", "userEngagement",
+];
+
+// 由 family 名单推导出要直连的完整包名：每个 family × {-grpc, -grpc-web} ×
+// {原样, 全小写}，外加 @snsoft/js-sdk。去重后并发拉 packument，404 的跳过。
+fn client_package_candidates() -> Vec<String> {
+    let mut set: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for fam in CLIENT_FAMILY_NAMES {
+        for variant in [fam.to_string(), fam.to_lowercase()] {
+            set.insert(format!("@snsoft/{variant}-grpc"));
+            set.insert(format!("@snsoft/{variant}-grpc-web"));
+        }
+    }
+    set.insert("@snsoft/js-sdk".to_string());
+    set.into_iter().collect()
+}
+
 fn normalize_family_key(value: &str) -> String {
     value
         .chars()
@@ -476,41 +500,50 @@ pub(crate) async fn registry_search_packages(
     let client = http_client()?;
     let auth = format!("Basic {auth_b64}");
 
-    let result = if NPM_SEARCH_UNSUPPORTED.load(Ordering::Relaxed) {
-        nexus_search_all(&client, &registry_url, &auth, Some(&app)).await
-    } else {
-        // Nexus REST 能拿到全版本列表，是正常路径；npm search 只作为 Nexus
-        // 不可用时的 fallback，避免正常刷新被慢 fallback 拖住。
-        match nexus_search_all(&client, &registry_url, &auth, Some(&app)).await {
-            Ok(list) if !list.is_empty() => Ok(list),
-            other => {
-                match &other {
-                    Ok(_) => eprintln!(
-                        "WARN registry_search_packages - Nexus search 返回空，回退 npm search"
-                    ),
-                    Err(err) => {
-                        eprintln!("WARN registry_search_packages - Nexus search 失败 ({err})，回退 npm search")
+    // 快路径：按已知客户端包名直连 packument——最快也最新（packument 不像搜索
+    // 索引会滞后），并发拉取 + 逐批流式 ENRICHED，秒级出最新版本。
+    let mut list = fetch_known_client_packages(&client, &registry_url, &auth, Some(&app)).await;
+
+    // 兜底：直连一个都没拿到（endpoint 形态异常，或包名 casing 整体变化）→ 回退
+    // 到原来的全量爬取 + 白名单过滤 + packument 补全。
+    if list.is_empty() {
+        eprintln!("WARN registry_search_packages - 直连 packument 无结果，回退全量爬取");
+        let result = if NPM_SEARCH_UNSUPPORTED.load(Ordering::Relaxed) {
+            nexus_search_all(&client, &registry_url, &auth, Some(&app)).await
+        } else {
+            // Nexus REST 能拿到全版本列表，是正常路径；npm search 只作为 Nexus
+            // 不可用时的 fallback，避免正常刷新被慢 fallback 拖住。
+            match nexus_search_all(&client, &registry_url, &auth, Some(&app)).await {
+                Ok(l) if !l.is_empty() => Ok(l),
+                other => {
+                    match &other {
+                        Ok(_) => eprintln!(
+                            "WARN registry_search_packages - Nexus search 返回空，回退 npm search"
+                        ),
+                        Err(err) => {
+                            eprintln!("WARN registry_search_packages - Nexus search 失败 ({err})，回退 npm search")
+                        }
                     }
-                }
-                match npm_search_all(&client, &registry_url, &auth).await {
-                    Ok(list) if !list.is_empty() => Ok(list),
-                    Ok(_) => {
-                        NPM_SEARCH_UNSUPPORTED.store(true, Ordering::Relaxed);
-                        other
-                    }
-                    Err(err) => {
-                        NPM_SEARCH_UNSUPPORTED.store(true, Ordering::Relaxed);
-                        Err(err)
+                    match npm_search_all(&client, &registry_url, &auth).await {
+                        Ok(l) if !l.is_empty() => Ok(l),
+                        Ok(_) => {
+                            NPM_SEARCH_UNSUPPORTED.store(true, Ordering::Relaxed);
+                            other
+                        }
+                        Err(err) => {
+                            NPM_SEARCH_UNSUPPORTED.store(true, Ordering::Relaxed);
+                            Err(err)
+                        }
                     }
                 }
             }
-        }
-    };
-    let mut list = result?;
-    // 只保留白名单客户端包：挡掉后端 xxx-grpc / -coco 等噪音，同时把 packument
-    // 补全量降到 ~43 个，最新包首屏秒级可见（详见 is_allowed_client_package）。
-    list.retain(|p| is_allowed_client_package(&p.name));
-    enrich_recent_packuments(&client, &registry_url, &auth, &mut list, Some(&app)).await;
+        };
+        let mut crawled = result?;
+        crawled.retain(|p| is_allowed_client_package(&p.name));
+        enrich_recent_packuments(&client, &registry_url, &auth, &mut crawled, Some(&app)).await;
+        list = crawled;
+    }
+
     list.sort_by(|a, b| a.name.cmp(&b.name));
     eprintln!("INFO registry_search_packages - exit count={}", list.len());
     Ok(list)
@@ -582,6 +615,65 @@ fn apply_packument(pkg: &mut RegistryPackage, packument: Packument) {
     if pkg.description.is_none() {
         pkg.description = packument.description;
     }
+    if pkg.latest_version.is_empty() {
+        pkg.latest_version = pkg.newest_version.clone();
+    }
+}
+
+// 快路径：不爬取整个 registry，直接按已知客户端包名并发拉 packument。packument
+// 是最新数据（不像 Nexus 搜索索引会滞后），且只需 ~43 个包 → 秒级出结果。每批
+// 完成即 emit ENRICHED，前端逐批渲染；404（该 family 无此协议/casing 不符）跳过。
+async fn fetch_known_client_packages(
+    client: &reqwest::Client,
+    registry_url: &str,
+    auth: &str,
+    app: Option<&tauri::AppHandle>,
+) -> Vec<RegistryPackage> {
+    let names = client_package_candidates();
+    let mut out: Vec<RegistryPackage> = Vec::new();
+    for chunk in names.chunks(PACKUMENT_CONCURRENCY) {
+        let mut set = tokio::task::JoinSet::new();
+        for name in chunk.iter().cloned() {
+            let client = client.clone();
+            let registry_url = registry_url.to_string();
+            let auth = auth.to_string();
+            set.spawn(async move {
+                let result = fetch_packument(&client, &registry_url, &auth, &name).await;
+                (name, result)
+            });
+        }
+        let mut enriched: Vec<RegistryPackage> = Vec::new();
+        while let Some(joined) = set.join_next().await {
+            let Ok((name, Ok(packument))) = joined else { continue };
+            let mut pkg = RegistryPackage {
+                name,
+                latest_version: String::new(),
+                newest_version: String::new(),
+                description: None,
+                tags: Vec::new(),
+                versions: Vec::new(),
+                dist_tags: HashMap::new(),
+            };
+            apply_packument(&mut pkg, packument);
+            // 无任何版本（空/已弃用包）→ 不展示
+            if pkg.newest_version.is_empty() {
+                continue;
+            }
+            out.push(pkg.clone());
+            enriched.push(pkg);
+        }
+        if !enriched.is_empty() {
+            if let Some(app) = app {
+                let _ = app.emit(ENRICHED_EVENT, &enriched);
+            }
+        }
+    }
+    eprintln!(
+        "INFO fetch_known_client_packages - resolved {} of {} candidates",
+        out.len(),
+        names.len()
+    );
+    out
 }
 
 // 列表补全：拉取【全部】包的 packument，把 dist-tags（项目标签，如
