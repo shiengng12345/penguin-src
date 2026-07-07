@@ -818,11 +818,16 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                         tabIndex={0}
                         aria-label={`复制 ${packageInstallSpec(pkg)}`}
                         // 整行点击 = 复制安装规格；勾选用左侧的勾选框（独立点击）
-                        onClick={() => void copySpec(key, packageInstallSpec(pkg))}
+                        // 点击整行 = 复制规格 + 同时勾选（下方勾选框仍可单独勾选/取消）
+                        onClick={() => {
+                          void copySpec(key, packageInstallSpec(pkg));
+                          if (!isInstalling) toggleRow(key);
+                        }}
                         onKeyDown={(e) => {
                           if (e.key === "Enter" || e.key === " ") {
                             e.preventDefault();
                             void copySpec(key, packageInstallSpec(pkg));
+                            if (!isInstalling) toggleRow(key);
                           }
                         }}
                         className={cn(
