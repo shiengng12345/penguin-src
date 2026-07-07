@@ -5,11 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "pnpm -F @penguin/core build && pnpm -F @penguin/mcp build && tsc -b && vite build",
+    "build": "pnpm -F @penguin/core build && pnpm -F @penguin/mcp build && pnpm -F @penguin/knowledge-core build && tsc -b && vite build",
     "preview": "vite preview",
     "test": "node --test tests/",
     "test:coverage": "node --test --experimental-test-coverage tests/",
-    "typecheck": "pnpm -F @penguin/core build && pnpm -F @penguin/mcp build && tsc -b",
+    "typecheck": "pnpm -F @penguin/core build && pnpm -F @penguin/mcp build && pnpm -F @penguin/knowledge-core build && tsc -b",
     "tauri": "tauri",
     "set-version": "node scripts/set-version.mjs"
   },
@@ -66,7 +66,8 @@
     },
     "onlyBuiltDependencies": [
       "esbuild",
-      "protobufjs"
+      "protobufjs",
+      "better-sqlite3"
     ]
   }
 }
