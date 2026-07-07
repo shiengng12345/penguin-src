@@ -74,7 +74,9 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
 
   // —— Sonatype 模糊搜索状态 ——
   const [searchQuery, setSearchQuery] = useState("");
-  const [allProtocols, setAllProtocols] = useState(false);
+  // 默认全部协议：团队按项目 tag 成对装 -grpc-web / -grpc，且 js-sdk 要能被
+  // 任何页签搜到；勾选后才收窄到当前页签。
+  const [allProtocols, setAllProtocols] = useState(true);
   const [registryList, setRegistryList] = useState<RegistryPackage[] | null>(null);
   const [listLoading, setListLoading] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
@@ -83,9 +85,9 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
   const [versionsLoading, setVersionsLoading] = useState(false);
   const [versionsError, setVersionsError] = useState<string | null>(null);
 
-  // stale-while-revalidate：磁盘缓存先秒出，后台刷新完替换。
+  // stale-while-revalidate：缓存先秒出，同时永远实时重爬、完成后替换。
   // 有缓存在展示时，刷新失败保持静默（旧列表仍可用）。
-  const loadRegistryList = async (force = false) => {
+  const loadRegistryList = async () => {
     setListLoading(true);
     setListError(null);
     let showedCache = false;
@@ -95,7 +97,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
       showedCache = true;
     }
     try {
-      const list = await fetchRegistryPackages(force);
+      const list = await fetchRegistryPackages();
       setRegistryList(list);
     } catch (err) {
       if (!showedCache) setListError(String(err));
@@ -281,16 +283,16 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                 <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-[10px] text-muted-foreground">
                   <input
                     type="checkbox"
-                    checked={allProtocols}
-                    onChange={(e) => setAllProtocols(e.target.checked)}
+                    checked={!allProtocols}
+                    onChange={(e) => setAllProtocols(!e.target.checked)}
                     className="h-3 w-3 accent-primary"
                   />
-                  All protocols / 全部
+                  仅当前协议 / {PROTOCOL_LABELS[protocolTab] ?? protocolTab}
                 </label>
                 <button
                   type="button"
                   title="Refresh list / 刷新列表"
-                  onClick={() => void loadRegistryList(true)}
+                  onClick={() => void loadRegistryList()}
                   disabled={listLoading || isInstalling}
                   className="rounded p-1.5 text-muted-foreground hover:bg-accent disabled:opacity-40"
                 >
@@ -312,7 +314,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                 </div>
               ) : registryList && searchResults.length === 0 ? (
                 <div className="mt-2 rounded-md border border-border bg-muted/30 p-2 text-[11px] text-muted-foreground">
-                  No match / 无匹配 — 可直接在下方手动输入
+                  No match / 无匹配{!allProtocols ? " — 试试取消「仅当前协议」" : ""} — 也可直接在下方手动输入
                 </div>
               ) : registryList ? (
                 <div className="mt-2 max-h-56 divide-y divide-border/50 overflow-y-auto rounded-md border border-border">
@@ -334,6 +336,20 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                           <span className="min-w-0 flex-1 truncate font-mono text-xs text-foreground">
                             {pkg.name}
                           </span>
+                          {pkg.tags.slice(0, 2).map((t) => (
+                            <span
+                              key={t}
+                              className="max-w-32 shrink-0 truncate rounded bg-amber-500/15 px-1 py-0.5 text-[9px] text-amber-600 dark:text-amber-400"
+                              title={t}
+                            >
+                              {t}
+                            </span>
+                          ))}
+                          {pkg.tags.length > 2 && (
+                            <span className="shrink-0 text-[9px] text-muted-foreground/70">
+                              +{pkg.tags.length - 2}
+                            </span>
+                          )}
                           {installed && (
                             <span className="shrink-0 rounded bg-primary/15 px-1 py-0.5 text-[9px] text-primary">
                               installed
@@ -367,7 +383,42 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                                 {versionsError}
                               </div>
                             ) : versionsInfo ? (
-                              <div className="max-h-40 overflow-y-auto">
+                              <div className="max-h-48 overflow-y-auto">
+                                {Object.keys(versionsInfo.tags).filter((t) => t !== "latest").length > 0 && (
+                                  <>
+                                    <div className="px-3 pb-0.5 pt-1.5 text-[9px] font-medium uppercase tracking-wide text-muted-foreground/60">
+                                      Project tags / 项目标签
+                                    </div>
+                                    {Object.entries(versionsInfo.tags)
+                                      .filter(([t]) => t !== "latest")
+                                      .sort(([a], [b]) => a.localeCompare(b))
+                                      .map(([tag, resolved]) => {
+                                        const isPicked = spec === `${pkg.name}@${tag}`;
+                                        return (
+                                          <button
+                                            key={tag}
+                                            type="button"
+                                            onClick={() => pickVersion(pkg.name, tag)}
+                                            disabled={isInstalling}
+                                            className={cn(
+                                              "flex w-full items-center gap-2 px-3 py-1 text-left hover:bg-accent/60",
+                                              isPicked && "bg-primary/10"
+                                            )}
+                                          >
+                                            <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-amber-600 dark:text-amber-400">
+                                              @{tag}
+                                            </span>
+                                            <span className="shrink-0 font-mono text-[9px] text-muted-foreground/70">
+                                              → {resolved}
+                                            </span>
+                                          </button>
+                                        );
+                                      })}
+                                    <div className="px-3 pb-0.5 pt-1.5 text-[9px] font-medium uppercase tracking-wide text-muted-foreground/60">
+                                      Versions / 版本
+                                    </div>
+                                  </>
+                                )}
                                 {versionsInfo.versions.map((v) => {
                                   const stamp = stampFromVersion(v);
                                   const isLatest = v === versionsInfo.latest;

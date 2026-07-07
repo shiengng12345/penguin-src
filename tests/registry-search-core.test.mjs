@@ -33,10 +33,12 @@ const core = await loadCore();
 const { filterPackages, protocolOfPackage } = core;
 
 const PKGS = [
-  { name: "@snsoft/auth-grpc-web", latest_version: "2.1.1-20260624172317", description: "auth service stubs" },
-  { name: "@snsoft/auth-grpc", latest_version: "2.1.1-20260624172317", description: null },
-  { name: "@snsoft/payment-grpc-web", latest_version: "1.0.0-20260101000000", description: "payment flows" },
-  { name: "@snsoft/js-sdk", latest_version: "3.0.0", description: "browser sdk" },
+  { name: "@snsoft/auth-grpc-web", latest_version: "2.1.1-20260624172317", description: "auth service stubs", tags: [] },
+  { name: "@snsoft/auth-grpc", latest_version: "2.1.1-20260624172317", description: null, tags: [] },
+  { name: "@snsoft/payment-grpc-web", latest_version: "1.0.0-20260101000000", description: "payment flows", tags: ["kyc-merge-account"] },
+  { name: "@snsoft/payment-grpc", latest_version: "1.0.0-20260101000000", description: null, tags: ["kyc-merge-account"] },
+  { name: "@snsoft/promotion-grpc", latest_version: "2.0.0", description: null, tags: ["freespin-every-day-v3"] },
+  { name: "@snsoft/js-sdk", latest_version: "3.0.0", description: "browser sdk", tags: [] },
 ];
 
 test("protocol scoping: grpc-web keeps only -grpc-web packages", () => {
@@ -49,7 +51,25 @@ test("protocol scoping: grpc-web keeps only -grpc-web packages", () => {
 
 test("protocol scoping: grpc does not swallow grpc-web", () => {
   const hits = filterPackages(PKGS, "", "grpc").map((p) => p.name);
-  assert.deepEqual(hits, ["@snsoft/auth-grpc"]);
+  assert.deepEqual(hits.sort(), [
+    "@snsoft/auth-grpc",
+    "@snsoft/payment-grpc",
+    "@snsoft/promotion-grpc",
+  ]);
+});
+
+test("project tag search finds every package carrying the tag", () => {
+  const hits = filterPackages(PKGS, "kyc-merge-account", null).map((p) => p.name);
+  assert.ok(hits.includes("@snsoft/payment-grpc-web"));
+  assert.ok(hits.includes("@snsoft/payment-grpc"));
+  assert.ok(!hits.includes("@snsoft/promotion-grpc"));
+});
+
+test("js-sdk is findable by fuzzy sdk-ish queries with no protocol filter", () => {
+  for (const q of ["js-sdk", "jssdk", "sdk"]) {
+    const hits = filterPackages(PKGS, q, null).map((p) => p.name);
+    assert.ok(hits.includes("@snsoft/js-sdk"), `query "${q}" should find js-sdk`);
+  }
 });
 
 test("fuzzy: exact-ish term ranks the right package first", () => {

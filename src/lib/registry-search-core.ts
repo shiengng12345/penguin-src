@@ -7,6 +7,8 @@ export interface RegistryPackage {
   name: string;
   latest_version: string;
   description: string | null;
+  // dist-tags（项目标签，如 kyc-merge-account）——搜索按它命中
+  tags: string[];
 }
 
 export type PackageProtocol = "grpc-web" | "grpc" | "sdk";
@@ -32,8 +34,9 @@ export function filterPackages(
   if (!q) return scoped.slice(0, RESULT_LIMIT);
   const fuse = new Fuse(scoped, {
     keys: [
-      { name: "name", weight: 0.8 },
-      { name: "description", weight: 0.2 },
+      { name: "name", weight: 0.7 },
+      { name: "tags", weight: 0.5 },
+      { name: "description", weight: 0.15 },
     ],
     threshold: 0.4,
     ignoreLocation: true,

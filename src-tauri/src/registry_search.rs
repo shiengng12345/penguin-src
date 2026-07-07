@@ -21,12 +21,17 @@ pub(crate) struct RegistryPackage {
     pub name: String,
     pub latest_version: String,
     pub description: Option<String>,
+    // dist-tags（去掉 latest）——团队按项目打 tag 发布
+    // （如 kyc-merge-account / freespin-every-day-v3），搜索要能按它命中。
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct PackageVersions {
     pub versions: Vec<String>,
     pub latest: Option<String>,
+    // tag → 解析到的版本号（含 latest），版本选择器把 tag 放在最上面
+    pub tags: HashMap<String, String>,
 }
 
 fn http_client() -> Result<reqwest::Client, String> {
@@ -161,6 +166,7 @@ async fn npm_search_all(
                     name: obj.package.name,
                     latest_version: obj.package.version,
                     description: obj.package.description,
+                    tags: Vec::new(), // enrich_with_packuments 统一补
                 });
             }
         }
@@ -262,6 +268,7 @@ async fn nexus_search_all(
                 name,
                 latest_version: sorted.first().cloned().unwrap_or_default(),
                 description: None,
+                tags: Vec::new(), // enrich_with_packuments 统一补
             }
         })
         .collect();
@@ -313,6 +320,7 @@ pub(crate) async fn registry_search_packages() -> Result<Vec<RegistryPackage>, S
     };
     let mut list = result?;
     list.sort_by(|a, b| a.name.cmp(&b.name));
+    enrich_with_packuments(&client, &registry_url, &auth, &mut list).await;
     eprintln!(
         "INFO registry_search_packages - exit count={}",
         list.len()
@@ -326,6 +334,77 @@ struct Packument {
     versions: HashMap<String, serde_json::Value>,
     #[serde(rename = "dist-tags", default)]
     dist_tags: HashMap<String, String>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+async fn fetch_packument(
+    client: &reqwest::Client,
+    registry_url: &str,
+    auth: &str,
+    name: &str,
+) -> Result<Packument, String> {
+    // scope 斜线必须编码，与 npm 客户端行为一致
+    let encoded = name.replacen('/', "%2F", 1);
+    let url = format!("{registry_url}{encoded}");
+    let resp = client
+        .get(&url)
+        .header("authorization", auth)
+        .send()
+        .await
+        .map_err(|e| format!("packument 请求失败: {e}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(status_error("packument", status));
+    }
+    resp.json()
+        .await
+        .map_err(|e| format!("packument 解析失败: {e}"))
+}
+
+const PACKUMENT_CONCURRENCY: usize = 12;
+
+// 列表补全：并发拉全部包的 packument，把 dist-tags（项目标签，如
+// kyc-merge-account）灌进搜索索引，并用 dist-tags.latest 修正展示版本。
+// 单包失败不影响整体——该包 tags 留空，仍可按名搜索。
+async fn enrich_with_packuments(
+    client: &reqwest::Client,
+    registry_url: &str,
+    auth: &str,
+    list: &mut [RegistryPackage],
+) {
+    for chunk in list.chunks_mut(PACKUMENT_CONCURRENCY) {
+        let mut set = tokio::task::JoinSet::new();
+        for (i, pkg) in chunk.iter().enumerate() {
+            let client = client.clone();
+            let registry_url = registry_url.to_string();
+            let auth = auth.to_string();
+            let name = pkg.name.clone();
+            set.spawn(async move {
+                let result = fetch_packument(&client, &registry_url, &auth, &name).await;
+                (i, result)
+            });
+        }
+        while let Some(joined) = set.join_next().await {
+            let Ok((i, result)) = joined else { continue };
+            let Ok(packument) = result else { continue };
+            let pkg = &mut chunk[i];
+            let mut tags: Vec<String> = packument
+                .dist_tags
+                .keys()
+                .filter(|k| k.as_str() != "latest")
+                .cloned()
+                .collect();
+            tags.sort();
+            pkg.tags = tags;
+            if let Some(latest) = packument.dist_tags.get("latest") {
+                pkg.latest_version = latest.clone();
+            }
+            if pkg.description.is_none() {
+                pkg.description = packument.description.clone();
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -337,30 +416,20 @@ pub(crate) async fn registry_package_versions(name: String) -> Result<PackageVer
     let (registry_url, auth_b64) = crate::registry::read_registry_connection()
         .ok_or_else(|| format!("registry 未配置 — {AUTH_HINT}"))?;
     let client = http_client()?;
-    // scope 斜线必须编码，与 npm 客户端行为一致
-    let encoded = name.replacen('/', "%2F", 1);
-    let url = format!("{registry_url}{encoded}");
-    let resp = client
-        .get(&url)
-        .header("authorization", format!("Basic {auth_b64}"))
-        .send()
-        .await
-        .map_err(|e| format!("packument 请求失败: {e}"))?;
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(status_error("packument", status));
-    }
-    let parsed: Packument = resp
-        .json()
-        .await
-        .map_err(|e| format!("packument 解析失败: {e}"))?;
+    let auth = format!("Basic {auth_b64}");
+    let parsed = fetch_packument(&client, &registry_url, &auth, &name).await?;
     let versions = sort_versions_desc(parsed.versions.into_keys().collect());
     let latest = parsed.dist_tags.get("latest").cloned();
     eprintln!(
-        "INFO registry_package_versions - exit versions={}",
-        versions.len()
+        "INFO registry_package_versions - exit versions={} tags={}",
+        versions.len(),
+        parsed.dist_tags.len()
     );
-    Ok(PackageVersions { versions, latest })
+    Ok(PackageVersions {
+        versions,
+        latest,
+        tags: parsed.dist_tags,
+    })
 }
 
 #[cfg(test)]

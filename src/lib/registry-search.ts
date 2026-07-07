@@ -8,49 +8,51 @@ import type { RegistryPackage } from "./registry-search-core";
 export interface PackageVersions {
   versions: string[]; // Rust 侧已按构建时间戳新→旧排序
   latest: string | null;
+  tags: Record<string, string>; // tag → 解析版本（含 latest）
 }
 
-const LIST_TTL_MS = 5 * 60_000;
-// Nexus 逐页爬列表首拉可达 10-30s——把结果落盘（app_kv），下次打开安装器
-// 先秒出旧列表、后台刷新替换（stale-while-revalidate）。
-const DISK_CACHE_KEY = "registry:pkg-list:v1";
-let listCache: { at: number; list: RegistryPackage[] } | null = null;
-const versionsCache = new Map<string, PackageVersions>();
+// 团队高频 publish：缓存只做「秒开第一屏」，每次打开都后台实时重爬替换；
+// 版本/tag（点包之后）永远实时拉、绝不缓存——刚 publish 的立刻可见。
+const DISK_CACHE_KEY = "registry:pkg-list:v2"; // v2: 增加 tags 字段
+let memoryList: RegistryPackage[] | null = null;
+let inflight: Promise<RegistryPackage[]> | null = null;
 
-// 读磁盘缓存（不管多旧）——调用方先展示它，再等 fetch 的新结果。
+// 读缓存（内存 → 磁盘，不管多旧）——调用方先展示它，再等实时结果替换。
 export async function loadCachedRegistryPackages(): Promise<RegistryPackage[] | null> {
-  if (listCache) return listCache.list;
+  if (memoryList) return memoryList;
   try {
     const raw = await invoke<string | null>("db_get_app_value", { key: DISK_CACHE_KEY });
     if (!raw) return null;
-    const parsed = JSON.parse(raw) as { at?: number; list?: RegistryPackage[] };
+    const parsed = JSON.parse(raw) as { list?: RegistryPackage[] };
     if (!Array.isArray(parsed.list)) return null;
-    listCache = { at: parsed.at ?? 0, list: parsed.list };
+    memoryList = parsed.list;
     return parsed.list;
   } catch {
     return null;
   }
 }
 
-export async function fetchRegistryPackages(force = false): Promise<RegistryPackage[]> {
-  if (!force && listCache && Date.now() - listCache.at < LIST_TTL_MS) {
-    return listCache.list;
-  }
-  const list = await invoke<RegistryPackage[]>("registry_search_packages");
-  listCache = { at: Date.now(), list };
-  void invoke("db_set_app_value", {
-    key: DISK_CACHE_KEY,
-    value: JSON.stringify({ at: listCache.at, list }),
-  }).catch(() => {
-    // 落盘失败只是丢缓存加速，不影响功能
-  });
-  return list;
+// 永远走网络（唯一的合并是「进行中的同一请求」——重复打开不叠加重爬）。
+export async function fetchRegistryPackages(): Promise<RegistryPackage[]> {
+  if (inflight) return inflight;
+  inflight = invoke<RegistryPackage[]>("registry_search_packages")
+    .then((list) => {
+      memoryList = list;
+      void invoke("db_set_app_value", {
+        key: DISK_CACHE_KEY,
+        value: JSON.stringify({ at: Date.now(), list }),
+      }).catch(() => {
+        // 落盘失败只是丢缓存加速，不影响功能
+      });
+      return list;
+    })
+    .finally(() => {
+      inflight = null;
+    });
+  return inflight;
 }
 
+// 不缓存：版本/tag 必须是 publish 后立刻可见的实时数据。
 export async function fetchPackageVersions(name: string): Promise<PackageVersions> {
-  const cached = versionsCache.get(name);
-  if (cached) return cached;
-  const result = await invoke<PackageVersions>("registry_package_versions", { name });
-  versionsCache.set(name, result);
-  return result;
+  return invoke<PackageVersions>("registry_package_versions", { name });
 }
