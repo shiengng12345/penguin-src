@@ -70,31 +70,28 @@ export class KnowledgeStore {
     title: string;
     meta?: Record<string, unknown>;
   }): string {
-    const existing = this.db
-      .prepare("SELECT id FROM nodes WHERE node_type = ? AND identity_key = ?")
-      .get(n.nodeType, n.identityKey) as { id: string } | undefined;
-    if (existing) {
-      this.db
-        .prepare("UPDATE nodes SET title = ?, meta = ? WHERE id = ?")
-        .run(n.title, JSON.stringify(n.meta ?? {}), existing.id);
-      return existing.id;
-    }
-    const id = `node_${randomUUID()}`;
-    this.db
+    // 原子 upsert：app 与 CLI 可能并发索引同一符号，SELECT-then-INSERT 有竞态。
+    // meta 省略时保留已有值——部分负载（只碰 title）不得清空既有元数据。
+    const row = this.db
       .prepare(
         `INSERT INTO nodes (id, node_type, identity_key, repo_id, title, meta, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (@id, @nodeType, @identityKey, @repoId, @title, @meta, @createdAt)
+         ON CONFLICT (node_type, identity_key) DO UPDATE SET
+           title = excluded.title,
+           meta = CASE WHEN @metaProvided = 1 THEN excluded.meta ELSE nodes.meta END
+         RETURNING id`,
       )
-      .run(
-        id,
-        n.nodeType,
-        n.identityKey,
-        n.repoId ?? null,
-        n.title,
-        JSON.stringify(n.meta ?? {}),
-        new Date().toISOString(),
-      );
-    return id;
+      .get({
+        id: `node_${randomUUID()}`,
+        nodeType: n.nodeType,
+        identityKey: n.identityKey,
+        repoId: n.repoId ?? null,
+        title: n.title,
+        meta: JSON.stringify(n.meta ?? {}),
+        createdAt: new Date().toISOString(),
+        metaProvided: n.meta === undefined ? 0 : 1,
+      }) as { id: string };
+    return row.id;
   }
 
   getNode(id: string): NodeRow | null {

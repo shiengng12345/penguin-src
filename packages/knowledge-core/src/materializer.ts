@@ -32,8 +32,10 @@ export function materialize(
     ON CONFLICT (node_id, alias_key, alias_type) DO UPDATE SET
       valid_to = NULL, reason = @reason, confidence = @confidence
   `);
+  // 与 events 一致 fail-loud：重放已物化事件只会发生在 ledger_state 被人为破坏时，
+  // 此时应报错回滚（spec §9 绝不静默），而不是静默跳过。
   const insertEdge = db.prepare(`
-    INSERT OR IGNORE INTO edges (id, src, dst, raw_target, edge_type,
+    INSERT INTO edges (id, src, dst, raw_target, edge_type,
       branch_id, origin, method, confidence, provenance)
     VALUES (@id, @src, @dst, @raw_target, @edge_type,
       @branch_id, @origin, @method, @confidence, @provenance)

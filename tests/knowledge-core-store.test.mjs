@@ -160,3 +160,23 @@ test("undone alias no longer resolves", () => {
   assert.equal(store.resolveIdentity("repo:A.old"), null);
   store.close();
 });
+
+test("upsertNode preserves existing meta when meta is omitted", () => {
+  const { store } = openTemp();
+  const id1 = store.upsertNode({
+    nodeType: "symbol",
+    identityKey: "r:keepmeta",
+    title: "keepmeta",
+    meta: { kind: "function" },
+  });
+  const id2 = store.upsertNode({
+    nodeType: "symbol",
+    identityKey: "r:keepmeta",
+    title: "keepmeta (touched)",
+  });
+  assert.equal(id1, id2);
+  const node = store.getNode(id1);
+  assert.equal(node.title, "keepmeta (touched)");
+  assert.deepEqual(JSON.parse(node.meta), { kind: "function" });
+  store.close();
+});
