@@ -163,7 +163,11 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
 
   const [typeFilter, setTypeFilter] = useState<PackageProtocolFilter>("all");
   const [searchQuery, setSearchQuery] = useState("");
+  // 分支搜索：输入框默认空（不显示 master），但未手动编辑前默认按 master 过滤。
+  // 一旦用户输入/清空（branchTouched=true）就按输入框实际值走（空=全部分支）。
   const [branchQuery, setBranchQuery] = useState("");
+  const [branchTouched, setBranchTouched] = useState(false);
+  const effectiveBranch = branchTouched ? branchQuery : "master";
   const [manualSpec, setManualSpec] = useState("");
   const [selectedRowKey, setSelectedRowKey] = useState<string | null>(null);
   const [registryList, setRegistryList] = useState<RegistryPackage[] | null>(null);
@@ -277,10 +281,10 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
     if (!registryList) return [];
     return filterPackageRows(registryList, {
       query: searchQuery,
-      branch: branchQuery,
+      branch: effectiveBranch,
       protocol: typeFilter,
     });
-  }, [registryList, searchQuery, branchQuery, typeFilter]);
+  }, [registryList, searchQuery, effectiveBranch, typeFilter]);
 
   useEffect(() => {
     if (selectedRowKey && !searchResults.some((pkg) => packageRowKey(pkg) === selectedRowKey)) {
@@ -453,7 +457,10 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                 <GitBranch className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
                 <Input
                   value={branchQuery}
-                  onChange={(e) => setBranchQuery(e.target.value)}
+                  onChange={(e) => {
+                    setBranchQuery(e.target.value);
+                    setBranchTouched(true);
+                  }}
                   placeholder="搜索分支，例如：brazil-v2"
                   name="penguin-branch-search"
                   disabled={isInstalling}
@@ -466,7 +473,10 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                 {branchQuery && (
                   <button
                     type="button"
-                    onClick={() => setBranchQuery("")}
+                    onClick={() => {
+                      setBranchQuery("");
+                      setBranchTouched(true);
+                    }}
                     className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-slate-500 hover:text-slate-200"
                     aria-label="清除分支筛选"
                   >
