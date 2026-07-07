@@ -236,4 +236,45 @@ export class KnowledgeStore {
     }
     return hits.slice(0, limit);
   }
+
+  resolveIdentity(
+    key: string,
+  ): { nodeId: string; via: "identity" | "alias" } | null {
+    const direct = this.db
+      .prepare("SELECT id FROM nodes WHERE identity_key = ?")
+      .get(key) as { id: string } | undefined;
+    if (direct) return { nodeId: direct.id, via: "identity" };
+
+    const alias = this.db
+      .prepare(
+        `SELECT node_id FROM node_aliases
+         WHERE alias_key = ? AND valid_to IS NULL
+         ORDER BY created_at DESC LIMIT 1`,
+      )
+      .get(key) as { node_id: string } | undefined;
+    if (alias) return { nodeId: alias.node_id, via: "alias" };
+    return null;
+  }
+
+  getAliases(nodeId: string): Array<{
+    aliasKey: string;
+    aliasType: string;
+    reason: string | null;
+    validFrom: string | null;
+    validTo: string | null;
+  }> {
+    return this.db
+      .prepare(
+        `SELECT alias_key AS aliasKey, alias_type AS aliasType, reason,
+                valid_from AS validFrom, valid_to AS validTo
+         FROM node_aliases WHERE node_id = ? ORDER BY created_at`,
+      )
+      .all(nodeId) as Array<{
+      aliasKey: string;
+      aliasType: string;
+      reason: string | null;
+      validFrom: string | null;
+      validTo: string | null;
+    }>;
+  }
 }

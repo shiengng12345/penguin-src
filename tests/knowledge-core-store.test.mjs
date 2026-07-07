@@ -105,3 +105,58 @@ test("replaceFileEdges replaces edges for the same file+branch", () => {
   assert.equal(rows[0].dst, c);
   store.close();
 });
+
+test("resolveIdentity falls back to alias after rename (D13)", () => {
+  const { store } = openTemp();
+  const nodeId = store.upsertNode({
+    nodeType: "symbol",
+    identityKey: "repo:UserService.signIn",
+    title: "UserService.signIn",
+  });
+  // rename 检测产生的 alias：旧名 login → 同一节点
+  store.recordKnowledge({
+    type: "node_alias_added",
+    origin: "system",
+    method: "EXTRACTED",
+    actor: { type: "system", id: "knowledge-indexer" },
+    target: { node_id: nodeId },
+    payload: { alias_key: "repo:UserService.login", alias_type: "qualified_name", reason: "rename" },
+  });
+
+  assert.deepEqual(store.resolveIdentity("repo:UserService.signIn"), {
+    nodeId, via: "identity",
+  });
+  assert.deepEqual(store.resolveIdentity("repo:UserService.login"), {
+    nodeId, via: "alias",
+  });
+  assert.equal(store.resolveIdentity("repo:NoSuch"), null);
+
+  const aliases = store.getAliases(nodeId);
+  assert.equal(aliases.length, 1);
+  assert.equal(aliases[0].aliasKey, "repo:UserService.login");
+  assert.equal(aliases[0].reason, "rename");
+  store.close();
+});
+
+test("undone alias no longer resolves", () => {
+  const { store } = openTemp();
+  const nodeId = store.upsertNode({
+    nodeType: "symbol", identityKey: "repo:A.b", title: "A.b",
+  });
+  store.recordKnowledge({
+    type: "node_alias_added",
+    origin: "system", method: "EXTRACTED",
+    actor: { type: "system", id: "knowledge-indexer" },
+    target: { node_id: nodeId },
+    payload: { alias_key: "repo:A.old", alias_type: "qualified_name", reason: "rename" },
+  });
+  store.recordKnowledge({
+    type: "alias_merge_undone",
+    origin: "user", method: "ASSERTED",
+    actor: { type: "user", id: "shieng" },
+    target: { node_id: nodeId },
+    payload: { alias_key: "repo:A.old", alias_type: "qualified_name" },
+  });
+  assert.equal(store.resolveIdentity("repo:A.old"), null);
+  store.close();
+});
