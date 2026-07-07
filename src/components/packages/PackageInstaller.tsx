@@ -512,24 +512,22 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                               </span>
                             )}
                           </div>
-                          <div className="mt-1.5 flex min-w-0 items-center gap-2 overflow-hidden text-xs text-slate-400">
-                            <TypeChip protocol={pkg.protocol} />
+                          <div className="mt-1.5 grid grid-cols-[76px_190px_170px_1fr] items-center gap-x-3 text-xs text-slate-400">
+                            <div className="min-w-0">
+                              <TypeChip protocol={pkg.protocol} />
+                            </div>
                             <span
                               title={pkg.version}
-                              className="min-w-0 max-w-[260px] truncate font-mono text-[12px] text-slate-300"
+                              className="min-w-0 truncate font-mono text-[12px] text-slate-300"
                             >
                               {pkg.version}
                             </span>
-                            <span className="shrink-0 text-slate-600">·</span>
-                            <span className="shrink-0 font-mono text-[12px] text-slate-400">
+                            <span className="font-mono text-[12px] tabular-nums text-slate-400">
                               {stamp ? fmtStamp(stamp) : "-"}
                             </span>
-                            {pkg.branch ? (
-                              <>
-                                <span className="shrink-0 text-slate-600">·</span>
-                                <BranchChip branch={pkg.branch} />
-                              </>
-                            ) : null}
+                            <div className="min-w-0">
+                              {pkg.branch ? <BranchChip branch={pkg.branch} /> : null}
+                            </div>
                           </div>
                         </div>
                       </button>
