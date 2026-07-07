@@ -424,23 +424,45 @@ GetLoginURL: main@abc123 ↔ feat/new-login@def456
 
 ## 15. `penguin install`
 
-**用途**：把 CLI 接进 PATH + 确认 MCP 接线（= codegraph install 的对应物）。
+**用途**：交互式 TUI 安装器（clack 风格）——接入 PATH、选择 AI provider 接 MCP、可选安装同伴工具。
 
-**行为**：
+**行为**（交互模式，TTY 下）：
 
-1. 定位 app 内捆绑的 CLI 入口（Tauri resources，同 MCP server 的 bundled path 探测逻辑）
-2. 软链 `/usr/local/bin/penguin`（无权限 → 提示 sudo 或输出手动命令；已存在且指向自己 → 幂等跳过）
-3. 复用现有 `src-tauri/src/mcp.rs` 的接线检查：Claude Desktop / Claude Code / Codex 配置里 penguin MCP 是否在位，缺的补上（合并不覆盖其他 server）
+1. 定位 app 内捆绑的 CLI 入口（Tauri resources，同 MCP server 的 bundled path 探测逻辑），软链 `/usr/local/bin/penguin`（无权限 → 提示 sudo 或输出手动命令；已存在且指向自己 → 幂等跳过）
+2. **AI provider 多选**（探测已安装的 agent，已接线的预勾选）：
+
+```text
+  ◆ 把 Penguin MCP 接入哪些 AI？
+  │  ◉ Claude Code        （已探测到 ~/.claude.json）
+  │  ◉ Codex              （已探测到 ~/.codex/config.toml）
+  │  ◯ Claude Desktop     （未安装）
+  │  更多 provider 后续版本加入
+```
+
+   接线复用现有 `src-tauri/src/mcp.rs` 逻辑：合并进各家配置、不覆盖其他 server。**首发 provider：Claude Code、Codex**；Claude Desktop 探测到即列出。
+3. **同伴工具可选安装**（外部工具，非依赖——D3 不变；走各自官方安装器，装完即独立于 Penguin）：
+
+```text
+  ◆ 顺手装点同伴工具？（可跳过）
+  │  ◯ codegraph            开发期给 AI 的代码索引（curl 官方脚本）
+  │  ◯ graphify             文档/语料知识图（uv tool install）
+  │  ◯ understand-anything  AI 架构导览 skills（plugin marketplace）
+```
+
+   每项显示将执行的安装命令，确认后才跑；失败单项报告不中断其余。
 4. 报告汇总
+
+**非交互**：`--yes` 全默认（PATH + 已探测到的 agent 全接，不装同伴工具）；`--agents claude-code,codex` 显式指定；CI/非 TTY 自动走非交互。
 
 **输出**：
 
 ```text
 ✓ CLI: /usr/local/bin/penguin → …/Penguin.app/…/knowledge-cli/index.js
-✓ MCP: claude_desktop 已接 · claude_code 已接 · codex 本次补上
+✓ MCP: claude_code 已接 · codex 本次补上
+✓ 同伴工具: codegraph 已安装 (v1.2.0) · 其余跳过
 ```
 
-**错误**：找不到捆绑资源（开发模式走 workspace fallback）→ 退 2。
+**错误**：找不到捆绑资源（开发模式走 workspace fallback）→ 退 2；同伴工具安装失败 → 单项 ⚠ 报告，整体按其余结果定。
 
 ---
 

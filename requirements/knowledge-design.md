@@ -3,7 +3,7 @@
 # Penguin Knowledge —— 统一知识图谱（笔记 Vault + 代码图谱）设计
 
 > 日期：2026-07-07
-> 状态：设计稿 v2.4（2026-07-07 五次修订：索引动词对调 `index`=增量/`rebuild`=全量、`files_index` 文件级检查点表、增量算法与逐文件替换事务、手动改动/切分支感知行为、CLI 进度输出规范；§6 索引管线细则已定，§7 UI 范围仍待确认）
+> 状态：设计稿 v2.5（2026-07-07 六次修订：**上线门拍板——完整交付不分批发布**（§11 重写为完整范围清单）、原 V2 产品项全部并入范围、`penguin install` 升级为 provider 选择 TUI、events 双类行缝合；§7 UI 细则随计划 5 定稿）
 > 上游文档：[graph.md](graph.md)（四工具能力手册 + 命令生态北极星）、[../docs/ai-knowledge-vault.md](../docs/ai-knowledge-vault.md)（笔记 Vault 产品蓝图）
 > 参考实现（不依赖、只参考）：[codegraph](https://github.com/colbymchenry/codegraph) · [graphify](https://github.com/Graphify-Labs/graphify) · [Understand-Anything](https://github.com/Egonex-AI/Understand-Anything) · Obsidian（对标物）
 
@@ -728,15 +728,28 @@ penguin rebuild（修复动词，很少用）
 3. **每条断言带 provenance**：`origin × method × confidence`，事实与推断永不混淆（§3.3）
 4. **扩展点皆注册表**：语言（grammar+tags.scm）、实体提取（正则包）、Git provider、存储（KnowledgeStore）先做**内部注册表**（in-tree），公开插件 API 是 V3
 
-**能力波次**（架构现在定，实现分波交付）：
+**完整交付范围与上线门（2026-07-07 拍板：没有 V1/V2 分期上线——范围内的一切做完才上线）**
 
-| 波次 | 内容 |
-|------|------|
-| **V1（本设计交付）** | 全量 schema（含 node_aliases / events / workspaces / 双轴 provenance）、Ledger/Index 双层存储与写入铁律（§2.2，含跨进程账本锁）、事件开始记录（无 UI）、content_hash 全等 rename 检测、Workspace 分组与查询作用域、MCP 六件套（`explore_graph` 的 timeline/recent_changes mode 即查即得）、**薄 CLI 动词集（§8.3）** |
-| **V2** | timeline/replay 视图与 UI、相似度 rename 检测、AI 建议边确认流（suggest/accept/reject）、snapshot manifest、本地 git 对象（commit/tag/merge 拓扑）入图、远端 PR/Issue（走 GitProvider 注册表，存引用+缓存摘要，不整库镜像）、信任策略 |
-| **V3** | 公开插件 API（语言/实体/provider/集成）、线上存储库、多人协作 |
+产品定义（全部完成 = 上线条件，执行顺序由实现计划安排，但**不存在分批发布**）：
 
-**范围收缩预案（2026-07-07 评审共识）**：V1 交付量偏大是首要执行风险。若计划推进中需要砍，按此顺序：局部图视图 → Penguin slash 块（本已推迟）→ CLI 的 note 写动词（查询动词保留）→ 语言 grammar 首发 20 门缩到 6 门（TS/JS/Rust/Go/Java/Python）。**不可砍**：存储核心（Ledger/Index）、MCP 六件套、基本 vault 编辑（文件树+编辑器+backlinks）。Vault UI 整体不砍——它是产品的壳。
+- 全量 schema（node_aliases / events 双类行 / workspaces / files_index / 双轴 provenance）、Ledger/Index 双层存储与写入铁律（含跨进程账本锁、索引任务锁）
+- 全语言 tree-sitter 索引引擎：增量管线、watcher、切分支感知、rename 检测（hash 全等自动 + **相似度检测进确认队列**）
+- 笔记 Vault 完整形态：文件树、编辑器、`[[]]`/`#` 补全、backlinks、上下文面板、局部图视图、敏感页机制
+- **timeline / replay / recent_changes 视图与 UI**（事件账本之上）
+- **AI 建议边确认流**（suggest / accept / reject + 信任策略：未确认的 AI 断言不进默认检索）
+- **snapshot manifest**（case 钉住世界状态）
+- **本地 git 对象入图**（commit / tag / merge 拓扑——按需读 git，不复制历史进 SQLite）
+- MCP 六件套 + CLI 17 动词（含进度/帮助 UI 全部验收标准）
+
+**明确范围外（不是分期，是被否决或前置条件未满足）：**
+
+- 公开插件 API——内部注册表接缝未被第二个实现磨过，公开即焊死（时机问题）
+- 线上存储库、多设备/多人协作——用户拍板 SQLite 优先；多设备合并依赖线上库
+- 双时态图——架构否决（永不做），时间维度由事件账本承担
+- 远端 PR/Issue 集成——独立的认证+多平台 provider 工程，另行立项
+- app 内语义层（Ollama embedding / LLM 摘要）——职责划分：语义理解由连接的宿主 AI（**Codex、Claude Code 优先**）经 MCP 完成，Penguin 做结构层与检索地基；schema 留位不变
+
+**范围变更规则**：若推进中确需收缩，收缩 = 从产品定义中正式移除（需用户拍板并记录），**不是「先上线再补」**——不完整不上线。
 
 ## 12. 待确认（下一轮讨论）
 
