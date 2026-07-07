@@ -99,6 +99,29 @@ fn derive_registry_url_from_auth_line(line: &str) -> Option<String> {
     Some(reconstructed)
 }
 
+// 包搜索/版本查询需要「registry 地址 + 原始 base64 凭据」发请求；status 接口
+// 只回用户名不回凭据，故单独提供。返回 (带尾斜线的 registry url, base64 _auth 值)。
+pub(crate) fn read_registry_connection() -> Option<(String, String)> {
+    eprintln!("INFO read_registry_connection - entry");
+    let home = dirs::home_dir()?;
+    let content = fs::read_to_string(home.join(REGISTRY_NPMRC_FILE)).ok()?;
+    let auth_line = content
+        .lines()
+        .find(|line| line.starts_with("//") && line.contains(REGISTRY_AUTH_SUFFIX))?;
+    let registry_url = derive_registry_url_from_auth_line(auth_line)?;
+    let auth_suffix_position = auth_line.find(REGISTRY_AUTH_SUFFIX)?;
+    let encoded_auth = auth_line[auth_suffix_position + REGISTRY_AUTH_SUFFIX.len()..]
+        .trim()
+        .trim_matches(REGISTRY_AUTH_QUOTE)
+        .to_string();
+    if encoded_auth.is_empty() {
+        eprintln!("WARN read_registry_connection - auth 值为空");
+        return None;
+    }
+    eprintln!("INFO read_registry_connection - exit");
+    Some((normalize_registry_url(&registry_url), encoded_auth))
+}
+
 fn registry_credential_has_invalid_character(value: &str) -> bool {
     eprintln!("INFO registry_credential_has_invalid_character - entry");
     let has_invalid_character = value

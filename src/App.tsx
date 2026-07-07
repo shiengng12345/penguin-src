@@ -19,6 +19,7 @@ import { DatabasePage } from "@/components/database/DatabasePage";
 import { MainSidebar, type MainModule } from "@/components/layout/MainSidebar";
 import { getPersistedValue, setPersistedValue } from "@/lib/app-persistence";
 import { APP_VALUE_KEYS } from "@/lib/persistence-keys";
+import { fetchRegistryPackages } from "@/lib/registry-search";
 
 // Restore activeModule across main-webview reloads. The OS context
 // menu "Reload" entry refreshes Penguin itself — every module's
@@ -93,6 +94,12 @@ export default function App() {
     clearInstallLog,
     theme,
   } = useAppStore();
+
+  // 启动即预热包列表：后台拉一次 registry（顺带握好 TCP 连接、灌热内存缓存），
+  // 用户点开安装弹窗时即开即最新。registry 未配置/网络失败静默忽略。
+  useEffect(() => {
+    void fetchRegistryPackages().catch(() => {});
+  }, []);
 
   const { packages, refresh, uninstall } = usePackages();
   const { activeEnv } = useEnvironments();
@@ -280,6 +287,22 @@ export default function App() {
         // best-effort — Vault module's own mount will retry if needed
       }
     })();
+  }, []);
+
+  // Registry 包列表预热：启动即后台爬一轮 + 每 5 分钟静默刷新——用户按
+  // Cmd+S 打开安装器时永远是热缓存（秒开），新 publish 的包名最多 5 分钟
+  // 进列表；版本/tag 层始终点开实时拉，不受此间隔影响。registry 未配置时
+  // fetch 静默失败，无副作用。
+  useEffect(() => {
+    let interval: ReturnType<typeof setInterval> | null = null;
+    void import("@/lib/registry-search").then((m) => {
+      const warm = () => void m.fetchRegistryPackages().catch(() => {});
+      warm();
+      interval = setInterval(warm, 5 * 60_000);
+    });
+    return () => {
+      if (interval) clearInterval(interval);
+    };
   }, []);
 
   // One-time cleanup of a residual full Lark doc URL persisted by an earlier

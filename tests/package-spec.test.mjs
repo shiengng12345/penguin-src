@@ -113,6 +113,97 @@ test("PackageInstaller routes input through normalizePackageSpec", async () => {
   assert.match(source, /onChange=\{[^}]*normalizePackageSpec[^}]*\}/);
 });
 
+test("PackageInstaller package search disables browser autocomplete", async () => {
+  const source = await readFile(
+    new URL("../src/components/packages/PackageInstaller.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /placeholder="搜索 \/ 勾选产品线，例如：player, auth, ccms"[\s\S]*autoComplete="off"/);
+  assert.match(source, /placeholder="搜索 \/ 勾选产品线，例如：player, auth, ccms"[\s\S]*spellCheck=\{false\}/);
+});
+
+test("PackageInstaller refresh streams enriched registry rows into the list", async () => {
+  const source = await readFile(
+    new URL("../src/components/packages/PackageInstaller.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /registry-search:enriched/);
+  assert.match(source, /mergeRegistryPackages/);
+  assert.match(source, /fetchRegistryPackages\(\{ force: true \}\)/);
+});
+
+test("PackageInstaller installs the selected row by exact displayed version", async () => {
+  const source = await readFile(
+    new URL("../src/components/packages/PackageInstaller.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /function packageInstallSpec/);
+  assert.match(source, /return `\$\{pkg\.name\}@\$\{pkg\.version\}`/);
+  // 多选批量安装：勾选的行按其精确显示版本生成规格
+  assert.match(source, /selectedRows\.map\(packageInstallSpec\)/);
+  // 旧的单选 selectedPackage / 按 tag 安装的路径已移除
+  assert.doesNotMatch(source, /selectedPackage/);
+  assert.doesNotMatch(source, /buildPackageSpec\([^)]*install_tag\)/);
+});
+
+test("PackageInstaller renders compact rows with branch chip after build time", async () => {
+  const source = await readFile(
+    new URL("../src/components/packages/PackageInstaller.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.doesNotMatch(source, />Version</);
+  assert.doesNotMatch(source, />Build</);
+  assert.match(source, /function BranchChip/);
+  assert.match(source, /GitBranch/);
+  assert.match(source, /max-w-\[(?:1[4-6]0px|10rem)\]/);
+  // 分支全名改为 hover 自定义 tooltip（portal），不再用原生 title={branch}
+  assert.match(source, /function BranchChip[\s\S]*createPortal/);
+  assert.match(source, /title=\{pkg\.version\}/);
+  assert.match(source, /font-mono[\s\S]*\{pkg\.version\}/);
+  // 时间列在分支列之前
+  assert.match(source, /fmtStamp\(stamp\)[\s\S]*<BranchChip branch=\{pkg\.branch\}/);
+  assert.match(source, /共 \{searchResults\.length\} 个结果/);
+});
+
+test("App prewarms the registry list on startup", async () => {
+  const source = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
+  // 启动即后台拉一次（预热连接 + 内存缓存），失败静默
+  assert.match(source, /fetchRegistryPackages\(\)\.catch\(/);
+});
+
+test("registry-search bridges streamed enriched events into memory cache", async () => {
+  const source = await readFile(
+    new URL("../src/lib/registry-search.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /listen<RegistryPackage\[\]>\("registry-search:enriched"/);
+  assert.match(source, /mergeRegistryPackages/);
+});
+
+test("PackageInstaller auto-refresh is silent and paused while installing", async () => {
+  const source = await readFile(
+    new URL("../src/components/packages/PackageInstaller.tsx", import.meta.url),
+    "utf8",
+  );
+  // 30s 后台静默重拉；不打扰筛选/勾选；安装中暂停；仅 admin 可自动
+  assert.match(source, /if \(!autoRefresh \|\| !canAutoRefresh \|\| isInstalling\) return;/);
+  assert.match(source, /\{ useCache: false, force: true, silent: true \}/);
+  assert.match(source, /30_000/);
+});
+
+test("PackageInstaller auto-refresh is gated to admin tokens; normal users one-shot", async () => {
+  const source = await readFile(
+    new URL("../src/components/packages/PackageInstaller.tsx", import.meta.url),
+    "utf8",
+  );
+  // admin/super-admin = 有效 dev token；普通用户点击 = 单次强制刷新
+  assert.match(source, /const canAutoRefresh = devModeEnabled && hasValidToken;/);
+  assert.match(source, /if \(canAutoRefresh\) setAutoRefresh\(\(v\) => !v\);/);
+  assert.match(source, /else void loadRegistryList\(\{ useCache: false, force: true \}\);/);
+  // 绿灯常转（admin 开启时）；普通用户仅加载中转
+  assert.match(source, /canAutoRefresh && autoRefresh\) \|\| \(!canAutoRefresh && listLoading\)/);
+});
+
 test("extracts package name from allowed snsoft package specs", async () => {
   const { snsoftPackageNameFromSpec } = await loadPackageSpecModule();
 

@@ -10,6 +10,7 @@ mod packages;
 mod proxy;
 mod redis;
 mod registry;
+mod registry_search;
 mod rest;
 
 pub use packages::{InstalledPackage, ProtoFile};
@@ -174,6 +175,8 @@ pub fn run() {
             mcp::mcp_install_to_local_clients,
             registry::write_registry_npmrc,
             registry::read_registry_npmrc_status,
+            registry_search::registry_search_packages,
+            registry_search::registry_package_versions,
             rest::commands::rest_send_request,
             rest::commands::rest_save_secret,
             rest::commands::rest_resolve_secret_masked,
