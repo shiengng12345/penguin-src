@@ -25,6 +25,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { useAppStore, type InstalledPackage } from "@/lib/store";
+import { useDeveloperMode } from "@/hooks/useDeveloperMode";
 import {
   completePackageSpec,
   filterPackageRows,
@@ -226,7 +227,11 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // 自动刷新开关（绿色=开）：开启即静默重拉一次最新列表，之后每 30s 后台重拉。
   // 后台刷新只替换底层列表，不触碰搜索/勾选/loading UI，不打断用户操作。
+  // 权限：仅 admin / super-admin（有效 dev token）可用自动刷新；普通用户该按钮
+  // 退化为「点一下刷新一次」。
   const [autoRefresh, setAutoRefresh] = useState(false);
+  const { enabled: devModeEnabled, hasValidToken } = useDeveloperMode();
+  const canAutoRefresh = devModeEnabled && hasValidToken;
 
   const loadRegistryList = async (
     // silent：后台自动刷新用——不动 loading/error UI，只在拿到新列表后静默替换，
@@ -265,13 +270,13 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
   // 自动刷新开启：立刻静默重拉一次，之后每 30s 后台重拉最新（安装中暂停，
   // 避免与安装流程抢刷新）。关闭或卸载即停。
   useEffect(() => {
-    if (!autoRefresh || isInstalling) return;
+    if (!autoRefresh || !canAutoRefresh || isInstalling) return;
     void loadRegistryList({ useCache: false, force: true, silent: true });
     const id = setInterval(() => {
       void loadRegistryList({ useCache: false, force: true, silent: true });
     }, 30_000);
     return () => clearInterval(id);
-  }, [autoRefresh, isInstalling]);
+  }, [autoRefresh, canAutoRefresh, isInstalling]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -747,20 +752,36 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
             </div>
             <button
               type="button"
-              // 自动刷新开关：绿色=开，开启即刻拉一次并每 30s 后台重拉最新。
-              title={autoRefresh ? "自动刷新：开（每 30s 拉取最新，点击关闭）" : "自动刷新：关（点击开启）"}
-              aria-pressed={autoRefresh}
-              onClick={() => setAutoRefresh((v) => !v)}
-              disabled={isInstalling}
+              // admin/super-admin：自动刷新开关（绿色=开，每 30s 后台拉最新）；
+              // 普通用户：点一下刷新一次，无自动。
+              title={
+                canAutoRefresh
+                  ? autoRefresh
+                    ? "自动刷新：开（每 30s 拉取最新，点击关闭）"
+                    : "自动刷新：关（点击开启）"
+                  : "刷新"
+              }
+              aria-pressed={canAutoRefresh ? autoRefresh : undefined}
+              onClick={() => {
+                if (canAutoRefresh) setAutoRefresh((v) => !v);
+                else void loadRegistryList({ useCache: false, force: true });
+              }}
+              disabled={isInstalling || (!canAutoRefresh && listLoading)}
               className={cn(
                 "flex h-9 w-9 shrink-0 items-center justify-center rounded-md border transition-colors disabled:opacity-45",
-                autoRefresh
+                canAutoRefresh && autoRefresh
                   ? "border-emerald-400/60 bg-emerald-400/15 text-emerald-300 hover:bg-emerald-400/25"
                   : "border-slate-700/80 bg-slate-950/40 text-slate-300 hover:border-cyan-400/50 hover:bg-cyan-400/10 hover:text-cyan-200",
               )}
             >
-              {/* 绿色（自动刷新开）时持续旋转，表示正在持续拉取最新 */}
-              <RefreshCw className={cn("h-4 w-4", autoRefresh && "animate-spin")} />
+              {/* 绿灯（自动刷新开）持续旋转；普通用户单次刷新时转到加载完成 */}
+              <RefreshCw
+                className={cn(
+                  "h-4 w-4",
+                  ((canAutoRefresh && autoRefresh) || (!canAutoRefresh && listLoading)) &&
+                    "animate-spin",
+                )}
+              />
             </button>
           </section>
 

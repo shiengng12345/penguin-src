@@ -185,12 +185,23 @@ test("PackageInstaller auto-refresh is silent and paused while installing", asyn
     new URL("../src/components/packages/PackageInstaller.tsx", import.meta.url),
     "utf8",
   );
-  // 30s 后台静默重拉；不打扰筛选/勾选；安装中暂停
-  assert.match(source, /if \(!autoRefresh \|\| isInstalling\) return;/);
+  // 30s 后台静默重拉；不打扰筛选/勾选；安装中暂停；仅 admin 可自动
+  assert.match(source, /if \(!autoRefresh \|\| !canAutoRefresh \|\| isInstalling\) return;/);
   assert.match(source, /\{ useCache: false, force: true, silent: true \}/);
   assert.match(source, /30_000/);
-  // 绿灯开着时图标持续旋转
-  assert.match(source, /autoRefresh && "animate-spin"/);
+});
+
+test("PackageInstaller auto-refresh is gated to admin tokens; normal users one-shot", async () => {
+  const source = await readFile(
+    new URL("../src/components/packages/PackageInstaller.tsx", import.meta.url),
+    "utf8",
+  );
+  // admin/super-admin = 有效 dev token；普通用户点击 = 单次强制刷新
+  assert.match(source, /const canAutoRefresh = devModeEnabled && hasValidToken;/);
+  assert.match(source, /if \(canAutoRefresh\) setAutoRefresh\(\(v\) => !v\);/);
+  assert.match(source, /else void loadRegistryList\(\{ useCache: false, force: true \}\);/);
+  // 绿灯常转（admin 开启时）；普通用户仅加载中转
+  assert.match(source, /canAutoRefresh && autoRefresh\) \|\| \(!canAutoRefresh && listLoading\)/);
 });
 
 test("extracts package name from allowed snsoft package specs", async () => {
