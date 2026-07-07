@@ -465,8 +465,9 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
             </div>
             <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-slate-700/70 bg-slate-950/20">
               {/* 列头 */}
-              <div className="grid shrink-0 grid-cols-[minmax(0,1fr)_168px_178px_150px_84px] items-center gap-3 border-b border-slate-800/80 bg-slate-950/50 px-3 py-1.5 text-[10px] font-medium uppercase tracking-wide text-slate-500">
+              <div className="grid shrink-0 grid-cols-[minmax(0,1fr)_84px_162px_156px_146px_78px] items-center gap-3 border-b border-slate-800/80 bg-slate-950/50 px-3 py-1.5 text-[10px] font-medium uppercase tracking-wide text-slate-500">
                 <span className="pl-[68px]">包名</span>
+                <span>类型</span>
                 <span>版本</span>
                 <span>构建时间</span>
                 <span>分支</span>
@@ -499,13 +500,13 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                         onClick={() => selectPackage(key)}
                         disabled={isInstalling}
                         className={cn(
-                          "grid min-h-[60px] w-full grid-cols-[minmax(0,1fr)_168px_178px_150px_84px] items-center gap-3 border-l-2 px-3 py-2 text-left transition-colors",
+                          "grid min-h-[60px] w-full grid-cols-[minmax(0,1fr)_84px_162px_156px_146px_78px] items-center gap-3 border-l-2 px-3 py-2 text-left transition-colors",
                           selected
                             ? "border-l-cyan-400 bg-cyan-400/10"
                             : "border-l-transparent hover:bg-slate-900/55",
                         )}
                       >
-                        {/* 包名列：单选 + 图标 + 名称 + 类型 chip */}
+                        {/* 包名列：单选 + 图标 + 名称（类型 chip 独立成列） */}
                         <div className="flex min-w-0 items-center gap-2.5">
                           <RowRadio selected={selected} />
                           <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-cyan-400/10 text-cyan-300">
@@ -517,6 +518,8 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                           >
                             {pkg.name}
                           </span>
+                        </div>
+                        <div className="min-w-0">
                           <TypeChip protocol={pkg.protocol} />
                         </div>
                         <span
