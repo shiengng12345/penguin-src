@@ -88,44 +88,34 @@ staleness 取值：`fresh`（watcher 已追平）/ `stale`（索引落后，附�
 
 **旗标**：`--name <n>`（显示名，缺省 = 目录名）、`--workspace <w>`（顺手加入 workspace，不存在则创建）
 
-**交互流程（TTY，clack TUI；2026-07-07 拍板）**：
+**流程原则（2026-07-07 拍板：提问归 install，init 永远零提问、永不纠缠）**：
 
 ```text
-$ penguin init
+$ penguin init          ← 已设置过的机器：敲下去直接跑，没有任何问题
 
   penguin init — fpms-provider
 
   ◇ 探测  git ✓ main@abc123 · remote github.com/x/fpms-provider · TS / Go
-
-  ◆ 接入哪些 AI？（空格多选，回车确认）
-  │  ◉ Claude Code      已装 · 全局 MCP 已接
-  │  ◉ Codex            已装 · 全局 MCP 未接 → 选中将自动接线
-  │  ◯ Claude Desktop   未检测到（置灰）
-
-  ◆ 为此 repo 安装知识自动注入 hook？（Claude Code）
-  │  ● 是，并记住选择（以后 init 不再问）
-  │  ○ 仅此 repo
-  │  ○ 否
+  ◇ AI    沿用偏好：Claude Code ✓ hook ✓ · Codex ✓
 
   ✔ Scanning files — 412 found
   ✔ Parsing code — 3,801 符号
   ✔ Linking refs — 9,214 边
 
   ✓ fpms-provider 已就绪 (main@abc123 · 6.2s)
-    AI: Claude Code ✓ hook ✓ · Codex ✓（MCP 本次接线）
     下一步: penguin search "..." 或直接问你的 AI 项目问题
 ```
 
 **流程规则**：
 
-1. **探测**：解析 path（缺省 cwd）→ 向上找 `.git`（纯文件解析 `.git/HEAD`/`.git/config`，gitlink/worktree 跟过去，不依赖 git 命令）。是 git → repo 根 = `.git` 所在目录，读分支/HEAD/remote；非 git → 隐式分支 `(workdir)`（knowledge-design §4.8）+ 显式提示
-2. **查重**：`root_path` 已登记 → 幂等报状态退 0（增量用 `index`，重建用 `rebuild`）
-3. **AI 多选**：列出探测到的 agent（Claude Code / Codex 首发；未安装的置灰）；已全局接线的预勾选。**选中但机器级 MCP 未接的 → init 顺手完成接线**（install 的机器级动作按需自动补——用户永远不需要先跑 install）
-4. **Hook 同意**：三选一（记住 / 仅此 repo / 否）。「记住」写入 app 配置 → **TUI 问题只在首次 init 出现；此后任何 repo 跑 `penguin init` 不再有任何交互——探测 → 静默沿用偏好（自动接线+装 hook）→ 直接开始索引**，仅在进度上方显示一行 `AI: 沿用偏好 Claude Code + Codex（penguin init --interactive 可重选）`。hook = 该 repo `.claude/settings.json` 合并一条 UserPromptSubmit → `penguin search --json --repo <此repo>`（直读 knowledge.db 毫秒级，app 不必在跑）；合并不覆盖已有 hooks、幂等带标记。Codex 侧等其 hook 机制可用后同策略跟进
-5. 写 `repos` + `branches` 行（status=live）→ 首次全量索引（§0.4 三阶段进度）→ 摘要 + 下一步提示
-6. 若 Penguin app 正在跑：通知 watcher 接管该 repo（本地 IPC，可降级为 app 下次启动自动发现）
+1. **自举（一生一次，唯一会出现 TUI 的情形）**：机器从未设置过（无偏好记录）→ 自动先走一遍 §15 install 的设置流程（AI 多选 + hook 偏好 + 全局规则），完成后接着索引。之后所有 init 永远直接跑。
+2. **反纠缠规则**：偏好按 agent 三态记录——`已接入 / 明确拒绝 / 未见过`。「明确拒绝」的 agent 永不再问、永不再提。**事后新装**的 agent（如后来才装 Codex）：init 不提问，只在结束摘要给**一次性**一行提示 `检测到 Codex 未接入 → penguin install 可接入`，提示过即记标记、下次连提示都没有。所有变更入口唯一：`penguin install`。
+3. **探测**：解析 path（缺省 cwd）→ 向上找 `.git`（纯文件解析 `.git/HEAD`/`.git/config`，gitlink/worktree 跟过去，不依赖 git 命令）。是 git → repo 根 = `.git` 所在目录，读分支/HEAD/remote；非 git → 隐式分支 `(workdir)`（knowledge-design §4.8）+ 显式提示
+4. **查重**：`root_path` 已登记 → 幂等报状态退 0（增量用 `index`，重建用 `rebuild`）
+5. **按偏好静默执行**：hook 偏好开启 → 该 repo `.claude/settings.json` 合并一条 UserPromptSubmit hook（`penguin search --json --repo <此repo>`，直读 knowledge.db 毫秒级、app 不必在跑；合并不覆盖已有 hooks、幂等带标记；Codex 侧等其 hook 机制可用后同策略跟进）；偏好中有未接线 agent → 顺手补接线。`--hooks`/`--no-hooks`/`--agents` 显式覆盖。
+6. 写 `repos` + `branches` 行（status=live）→ 首次全量索引（§0.4 三阶段进度）→ 摘要 + 下一步提示；Penguin app 在跑则通知 watcher 接管（本地 IPC，可降级为 app 下次启动自动发现）
 
-**非交互**（`--yes` / CI / 非 TTY）：跳过 TUI——AI 接入沿用已记偏好（无偏好则只索引不接线），hook 沿用偏好；`--agents claude-code,codex`、`--hooks`/`--no-hooks` 显式覆盖。
+**非交互**（`--yes` / CI / 非 TTY）：自举场景也不弹 TUI——无偏好则只索引不接线，其余同上。
 
 **输出**（人类）：
 
@@ -471,7 +461,7 @@ GetLoginURL: main@abc123 ↔ feat/new-login@def456
    接线复用现有 `src-tauri/src/mcp.rs` 逻辑：合并进各家配置、不覆盖其他 server。**首发 provider：Claude Code、Codex**；Claude Desktop 探测到即列出。
 3. **AI 使用规则注入（可选，缺省勾选）**——只装 MCP 不保证 AI 主动查，需三级杠杆：MCP server instructions（计划 4 内置，免费）＋ agent 规则 ＋ hook。install 在此步征求同意后：
    - 往 `~/.claude/CLAUDE.md` / `~/.codex/AGENTS.md` **追加**一段使用规则（幂等：已有标记段则更新不重复）：「回答项目相关问题前先调 penguin MCP 的 knowledge_search / explore_graph；调查结论用 write_note 存回」
-   - hook 归 `penguin init`（项目级，见 §1 行为 6）：install 只负责全局规则与 MCP 接线，不装 hook——机器级/项目级分工清晰
+   - **hook 偏好在此设定**（「以后 init 时自动给 repo 装知识注入 hook？」是/否，记住）；实际安装动作发生在各 repo 的 `init`（§1 规则 4）。分工：install = 所有提问 + 机器级接线，init = 零提问执行
 4. **同伴工具可选安装**（外部工具，非依赖——D3 不变；走各自官方安装器，装完即独立于 Penguin）：
 
 ```text
