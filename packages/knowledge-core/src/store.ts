@@ -34,6 +34,27 @@ export interface SearchHit {
   snippet: string | null;
 }
 
+export type BranchStatus = "live" | "snapshot" | "gone";
+
+export interface RepoRow {
+  id: string;
+  name: string;
+  root_path: string;
+  remote_url: string | null;
+  created_at: string;
+}
+
+export interface BranchRow {
+  id: string;
+  repo_id: string;
+  name: string;
+  head_commit: string | null;
+  last_indexed_commit: string | null;
+  last_indexed_at: string | null;
+  checkout_path: string | null;
+  status: string;
+}
+
 // 存储核心唯一对外 API（D4 隔离层）。
 // §2.2 铁律在代码层的收口点：不可再生知识只有 recordKnowledge() 一个入口，
 // 本类不提供任何绕过账本写 events/node_aliases/非 parser 边的方法。
@@ -110,6 +131,86 @@ export class KnowledgeStore {
         | NodeRow
         | undefined) ?? null
     );
+  }
+
+  // —— repo / branch 登记（可再生 Index 层，直写）——
+  registerRepo(p: { name: string; rootPath: string; remoteUrl?: string | null }): string {
+    const row = this.db
+      .prepare(
+        `INSERT INTO repos (id, name, root_path, remote_url, created_at)
+         VALUES (@id, @name, @rootPath, @remoteUrl, @createdAt)
+         ON CONFLICT (root_path) DO UPDATE SET
+           name = excluded.name,
+           remote_url = excluded.remote_url
+         RETURNING id`,
+      )
+      .get({
+        id: `repo_${randomUUID()}`,
+        name: p.name,
+        rootPath: p.rootPath,
+        remoteUrl: p.remoteUrl ?? null,
+        createdAt: new Date().toISOString(),
+      }) as { id: string };
+    return row.id;
+  }
+
+  getRepoByRoot(rootPath: string): RepoRow | null {
+    return (
+      (this.db.prepare("SELECT * FROM repos WHERE root_path = ?").get(rootPath) as
+        | RepoRow
+        | undefined) ?? null
+    );
+  }
+
+  registerBranch(p: {
+    repoId: string;
+    name: string;
+    headCommit?: string | null;
+    checkoutPath?: string | null;
+    status: BranchStatus;
+  }): string {
+    const row = this.db
+      .prepare(
+        `INSERT INTO branches (id, repo_id, name, head_commit, checkout_path, status)
+         VALUES (@id, @repoId, @name, @headCommit, @checkoutPath, @status)
+         ON CONFLICT (repo_id, name) DO UPDATE SET
+           head_commit = excluded.head_commit,
+           checkout_path = excluded.checkout_path,
+           status = excluded.status
+         RETURNING id`,
+      )
+      .get({
+        id: `branch_${randomUUID()}`,
+        repoId: p.repoId,
+        name: p.name,
+        headCommit: p.headCommit ?? null,
+        checkoutPath: p.checkoutPath ?? null,
+        status: p.status,
+      }) as { id: string };
+    return row.id;
+  }
+
+  getBranch(repoId: string, name: string): BranchRow | null {
+    return (
+      (this.db
+        .prepare("SELECT * FROM branches WHERE repo_id = ? AND name = ?")
+        .get(repoId, name) as BranchRow | undefined) ?? null
+    );
+  }
+
+  setBranchStatus(branchId: string, status: BranchStatus): void {
+    this.db.prepare("UPDATE branches SET status = ? WHERE id = ?").run(status, branchId);
+  }
+
+  recordBranchIndexed(p: { branchId: string; commit?: string | null }): void {
+    this.db
+      .prepare(
+        `UPDATE branches
+         SET last_indexed_at = @at,
+             last_indexed_commit = COALESCE(@commit, last_indexed_commit)
+         WHERE id = @branchId`,
+      )
+      .run({ branchId: p.branchId, commit: p.commit ?? null, at: new Date().toISOString() });
   }
 
   // 解析产出的代码边：同 file+branch 全量替换（§6.3 增量语义）。
