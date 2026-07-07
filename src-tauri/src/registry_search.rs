@@ -637,6 +637,135 @@ fn apply_packument(pkg: &mut RegistryPackage, packument: Packument) {
     }
 }
 
+// —— 直连快路径的会话级缓存 ——
+// RESOLVED_NAMES：探测过确实存在的真实包名。非全量轮只拉这些，省掉小写兜底
+// 变体的固定 404（约 12 个/轮，也消掉 Nexus 日志里的 404 噪音）；每
+// FULL_PROBE_EVERY 轮做一次全量探测，兜住会话中途新上的产品线包。
+// DIRECT_CACHE：per-包 ETag + 上次解析结果。带 If-None-Match 条件请求，内容
+// 没变时 Nexus 回 304 空响应——带宽/解析全省，数据仍然实时（一有新 publish
+// ETag 即变，立刻回 200 新内容）。
+struct CachedPackument {
+    etag: String,
+    pkg: RegistryPackage,
+}
+
+fn direct_cache() -> &'static std::sync::Mutex<HashMap<String, CachedPackument>> {
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<HashMap<String, CachedPackument>>> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn resolved_names() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static NAMES: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    NAMES.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+static DIRECT_ROUND: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+const FULL_PROBE_EVERY: usize = 10;
+
+// 本轮要拉的名单（纯函数，便于测试）：已有解析结果且非全量轮 → 只拉已解析的
+// 真实包名；否则全量探测（首轮 round=0 必全量）。
+fn names_for_round(
+    candidates: Vec<String>,
+    resolved: &std::collections::HashSet<String>,
+    round: usize,
+) -> Vec<String> {
+    if resolved.is_empty() || round % FULL_PROBE_EVERY == 0 {
+        return candidates;
+    }
+    candidates
+        .into_iter()
+        .filter(|n| resolved.contains(n))
+        .collect()
+}
+
+// 拉单个已知包，带 ETag 条件请求。
+// Ok(Some) = 拿到包；Ok(None) = 确认不存在/无版本（从 resolved 移除）；
+// Err = 网络类失败（保留 resolved 状态，下轮重试）。
+async fn fetch_client_package(
+    client: &reqwest::Client,
+    registry_url: &str,
+    auth: &str,
+    name: &str,
+) -> Result<Option<RegistryPackage>, String> {
+    let encoded = name.replacen('/', "%2F", 1);
+    let url = format!("{registry_url}{encoded}");
+    let etag = direct_cache()
+        .lock()
+        .ok()
+        .and_then(|c| c.get(name).map(|e| e.etag.clone()));
+    let mut req = client
+        .get(&url)
+        .header("authorization", auth)
+        // corgi 精简 packument：只含 versions/dist-tags，体积小解析快
+        .header("accept", "application/vnd.npm.install-v1+json");
+    if let Some(ref tag) = etag {
+        req = req.header("if-none-match", tag.clone());
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("packument 请求失败: {e}"))?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::NOT_MODIFIED {
+        if let Ok(cache) = direct_cache().lock() {
+            if let Some(hit) = cache.get(name) {
+                return Ok(Some(hit.pkg.clone()));
+            }
+        }
+        // 304 但本地缓存缺失（理论不该发生）：清掉 ETag，下轮全新重拉
+        if let Ok(mut cache) = direct_cache().lock() {
+            cache.remove(name);
+        }
+        return Err("304 但本地缓存缺失".to_string());
+    }
+    if status == reqwest::StatusCode::NOT_FOUND {
+        if let Ok(mut cache) = direct_cache().lock() {
+            cache.remove(name);
+        }
+        return Ok(None);
+    }
+    if !status.is_success() {
+        return Err(status_error("packument", status));
+    }
+    let etag_header = resp
+        .headers()
+        .get(reqwest::header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+    let packument: Packument = resp
+        .json()
+        .await
+        .map_err(|e| format!("packument 解析失败: {e}"))?;
+    let mut pkg = RegistryPackage {
+        name: name.to_string(),
+        latest_version: String::new(),
+        newest_version: String::new(),
+        description: None,
+        tags: Vec::new(),
+        versions: Vec::new(),
+        dist_tags: HashMap::new(),
+    };
+    apply_packument(&mut pkg, packument);
+    // 无任何版本（空/已弃用包）→ 视为不存在
+    if pkg.newest_version.is_empty() {
+        return Ok(None);
+    }
+    if let Some(tag) = etag_header {
+        if let Ok(mut cache) = direct_cache().lock() {
+            cache.insert(
+                name.to_string(),
+                CachedPackument {
+                    etag: tag,
+                    pkg: pkg.clone(),
+                },
+            );
+        }
+    }
+    Ok(Some(pkg))
+}
+
 // 快路径：不爬取整个 registry，直接按已知客户端包名并发拉 packument。packument
 // 是最新数据（不像 Nexus 搜索索引会滞后），且只需 ~43 个包 → 秒级出结果。每批
 // 完成即 emit ENRICHED，前端逐批渲染；404（该 family 无此协议/casing 不符）跳过。
@@ -646,45 +775,52 @@ async fn fetch_known_client_packages(
     auth: &str,
     app: Option<&tauri::AppHandle>,
 ) -> Vec<RegistryPackage> {
-    let names = client_package_candidates();
+    let round = DIRECT_ROUND.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let resolved_snapshot = resolved_names()
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_default();
+    let names = names_for_round(client_package_candidates(), &resolved_snapshot, round);
+    let total = names.len();
     let mut out: Vec<RegistryPackage> = Vec::new();
     let mut set = tokio::task::JoinSet::new();
-    for name in names.iter().cloned() {
+    for name in names {
         let client = client.clone();
         let registry_url = registry_url.to_string();
         let auth = auth.to_string();
         set.spawn(async move {
-            let result = fetch_packument(&client, &registry_url, &auth, &name).await;
+            let result = fetch_client_package(&client, &registry_url, &auth, &name).await;
             (name, result)
         });
     }
     // 谁先回来先推谁：不等整波里最慢的请求，最快的包几百毫秒即上屏；
     // 慢尾巴（个别慢响应/404）只影响它自己。
     while let Some(joined) = set.join_next().await {
-        let Ok((name, Ok(packument))) = joined else { continue };
-        let mut pkg = RegistryPackage {
-            name,
-            latest_version: String::new(),
-            newest_version: String::new(),
-            description: None,
-            tags: Vec::new(),
-            versions: Vec::new(),
-            dist_tags: HashMap::new(),
-        };
-        apply_packument(&mut pkg, packument);
-        // 无任何版本（空/已弃用包）→ 不展示
-        if pkg.newest_version.is_empty() {
-            continue;
+        let Ok((name, result)) = joined else { continue };
+        match result {
+            Ok(Some(pkg)) => {
+                if let Ok(mut resolved) = resolved_names().lock() {
+                    resolved.insert(name);
+                }
+                if let Some(app) = app {
+                    let _ = app.emit(ENRICHED_EVENT, std::slice::from_ref(&pkg));
+                }
+                out.push(pkg);
+            }
+            // 确认不存在/无版本：移出 resolved，非全量轮不再拉它
+            Ok(None) => {
+                if let Ok(mut resolved) = resolved_names().lock() {
+                    resolved.remove(&name);
+                }
+            }
+            // 网络类失败：保留 resolved 状态，下轮重试
+            Err(_) => {}
         }
-        if let Some(app) = app {
-            let _ = app.emit(ENRICHED_EVENT, std::slice::from_ref(&pkg));
-        }
-        out.push(pkg);
     }
     eprintln!(
-        "INFO fetch_known_client_packages - resolved {} of {} candidates",
+        "INFO fetch_known_client_packages - resolved {} of {} (round {round})",
         out.len(),
-        names.len()
+        total
     );
     out
 }
@@ -952,5 +1088,36 @@ mod tests {
         // 无重复
         let unique: std::collections::HashSet<_> = candidates.iter().collect();
         assert_eq!(unique.len(), candidates.len());
+    }
+
+    #[test]
+    fn names_for_round_probes_full_then_only_resolved() {
+        let candidates = || {
+            vec![
+                "@snsoft/player-grpc".to_string(),
+                "@snsoft/aiChat-grpc".to_string(),
+                "@snsoft/aichat-grpc".to_string(), // 小写兜底变体（实际 404）
+            ]
+        };
+        let resolved: std::collections::HashSet<String> = [
+            "@snsoft/player-grpc".to_string(),
+            "@snsoft/aiChat-grpc".to_string(),
+        ]
+        .into();
+
+        // 首轮（round 0）必全量探测
+        assert_eq!(names_for_round(candidates(), &resolved, 0).len(), 3);
+        // resolved 为空 → 也全量
+        let empty = std::collections::HashSet::new();
+        assert_eq!(names_for_round(candidates(), &empty, 3).len(), 3);
+        // 非全量轮 → 只拉已解析的，404 变体被跳过
+        let filtered = names_for_round(candidates(), &resolved, 3);
+        assert_eq!(filtered.len(), 2);
+        assert!(!filtered.contains(&"@snsoft/aichat-grpc".to_string()));
+        // 每 FULL_PROBE_EVERY 轮回到全量，兜住中途新上的包
+        assert_eq!(
+            names_for_round(candidates(), &resolved, FULL_PROBE_EVERY).len(),
+            3
+        );
     }
 }
