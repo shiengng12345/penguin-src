@@ -450,6 +450,7 @@ AI 时代**信任就是产品**：agent 拿到一条边，「解析出来的」�
 - 一名多中 → 存候选、UI 展示歧义，不瞎猜
 - 实体提取（正则，零 LLM）：trace_id、reqid、playerId、proposalId、API method、config key、repo/文件路径、环境名 → `entity_mention` 边
 - **敏感规则**（vault 蓝图继承）：`sensitive=1` 或 `mcp_access=denied` 的笔记默认排除在 MCP 结果外，只返回「存在一个敏感关联页」占位
+- **凭据存储（2026-07-07 拍板 C 案）**：凭据类内容正文**不落 .md 文件**，存 `knowledge.db` 专表（`credential_entries`，与现有 REST 凭据同取向：SQLite、Postman 式）。图谱中仍有凭据节点（node_type=credential，只含标题/安全元数据）可被笔记链接；正文仅 app 内查看，永不进 FTS/MCP/AI，不随 vault 同步。加密不做（与既有取向一致）。
 
 ## 6. 索引引擎管线（提案，待确认）
 
