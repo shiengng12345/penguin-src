@@ -7,3 +7,5 @@ export {
   type ExtractedSymbol,
   type ExtractedRef,
 } from "./extract.js";
+export { resolveRefs, type SymbolIndex, type ResolvedEdges } from "./resolve.js";
+export { detectRenames, type RenameAliasEvent } from "./rename.js";

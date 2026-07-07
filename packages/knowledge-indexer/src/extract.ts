@@ -18,6 +18,9 @@ export interface ExtractedRef {
   kind: "call" | "import";
   rawName: string;
   startLine: number;
+  // Qualified name of the innermost symbol containing this ref — the `src` of a
+  // resolved edge (2c). null for top-level refs with no enclosing symbol.
+  enclosingQualifiedName: string | null;
 }
 
 export interface ExtractedFile {
@@ -117,12 +120,35 @@ export async function extractSymbols(input: {
         contentHash: sha256(def.node.text),
       });
     } else if (callCap) {
-      refs.push({ kind: "call", rawName: callCap.node.text, startLine: callCap.node.startPosition.row + 1 });
+      refs.push({
+        kind: "call",
+        rawName: callCap.node.text,
+        startLine: callCap.node.startPosition.row + 1,
+        enclosingQualifiedName: null,
+      });
     } else if (importCap) {
       const raw = importCap.node.text.replace(/^['"]|['"]$/g, "");
       fileImports.push(raw);
-      refs.push({ kind: "import", rawName: raw, startLine: importCap.node.startPosition.row + 1 });
+      refs.push({
+        kind: "import",
+        rawName: raw,
+        startLine: importCap.node.startPosition.row + 1,
+        enclosingQualifiedName: null,
+      });
     }
+  }
+
+  // Attribute each ref to the innermost symbol whose line range contains it.
+  for (const ref of refs) {
+    let best: ExtractedSymbol | null = null;
+    for (const sym of symbols) {
+      if (sym.startLine <= ref.startLine && ref.startLine <= sym.endLine) {
+        if (!best || sym.endLine - sym.startLine < best.endLine - best.startLine) {
+          best = sym;
+        }
+      }
+    }
+    ref.enclosingQualifiedName = best ? best.qualifiedName : null;
   }
 
   return { lang, symbols, refs, fileImports, parseError: null };
