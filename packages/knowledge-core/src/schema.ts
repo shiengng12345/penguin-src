@@ -157,6 +157,7 @@ export function openDatabase(path: string): Database.Database {
   // 有意不开 foreign_keys：删库后 Ledger 先重放（§2.1 三源重建），
   // 此时被引用的 nodes 尚未由上层索引器重建——引用完整性由
   // 「账本 + 全量重建流程」保证，不靠 SQLite 外键（D4）。
+  db.pragma("foreign_keys = OFF");
   db.exec(DDL);
   db.prepare(
     "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)",

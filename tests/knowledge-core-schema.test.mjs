@@ -52,3 +52,13 @@ test("events table has origin, method, ledger_seq, workspace_id columns", () => 
   }
   db.close();
 });
+
+test("foreign_keys is explicitly OFF — ledger replay may write edges before nodes exist", () => {
+  const db = openDatabase(tempDbPath());
+  assert.equal(db.pragma("foreign_keys", { simple: true }), 0);
+  db.prepare(
+    "INSERT INTO edges (id, src, dst, edge_type, origin, method) VALUES ('e1','no-such-node',NULL,'wikilink','user','ASSERTED')",
+  ).run();
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM edges").get().n, 1);
+  db.close();
+});
