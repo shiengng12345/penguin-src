@@ -19,3 +19,16 @@ export {
   type ParsedEdge,
   type SearchHit,
 } from "./store.js";
+export {
+  search,
+  getNodeDetail,
+  exploreGraph,
+  compareBranches,
+  indexStatus,
+  type GraphMode,
+  type GraphResult,
+  type NodeDetail,
+  type BranchDiff,
+  type IndexStatus,
+  type SearchResultRow,
+} from "./query.js";
