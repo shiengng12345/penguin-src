@@ -456,7 +456,10 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                     setNameSuggestOpen(true);
                     setNameSuggestIdx(-1);
                   }}
-                  onFocus={() => setNameSuggestOpen(true)}
+                  // 只在已有输入时聚焦才重开下拉；空 query（含 Cmd+S 自动聚焦）不弹
+                  onFocus={() => {
+                    if (searchQuery.trim()) setNameSuggestOpen(true);
+                  }}
                   onBlur={() => {
                     // 延迟关闭，让下拉项的 mousedown 先触发
                     nameBlurTimer.current = setTimeout(() => setNameSuggestOpen(false), 120);
