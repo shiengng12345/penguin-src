@@ -2,9 +2,11 @@ import { useState, useEffect, useRef, useMemo } from "react";
 import { useAppStore, useActiveTab, type InstalledPackage } from "@/lib/store";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Package, X, Download, CheckCircle2, XCircle, Loader2 } from "lucide-react";
+import { Package, X, Download, CheckCircle2, XCircle, Loader2, Search, RefreshCw } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { isAllowedSnsoftPackageSpec, normalizePackageSpec, protocolFromSnsoftPackageSpec } from "@penguin/core";
+import { filterPackages, protocolOfPackage, type PackageProtocol, type RegistryPackage } from "@/lib/registry-search-core";
+import { fetchPackageVersions, fetchRegistryPackages, type PackageVersions } from "@/lib/registry-search";
 
 function detectProtocol(spec: string): "grpc-web" | "grpc" | "sdk" | null {
   return protocolFromSnsoftPackageSpec(spec);
@@ -69,6 +71,57 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
   const [isInstalling, setIsInstalling] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // —— Sonatype 模糊搜索状态 ——
+  const [searchQuery, setSearchQuery] = useState("");
+  const [allProtocols, setAllProtocols] = useState(false);
+  const [registryList, setRegistryList] = useState<RegistryPackage[] | null>(null);
+  const [listLoading, setListLoading] = useState(false);
+  const [listError, setListError] = useState<string | null>(null);
+  const [selectedPkg, setSelectedPkg] = useState<string | null>(null);
+  const [versionsInfo, setVersionsInfo] = useState<PackageVersions | null>(null);
+  const [versionsLoading, setVersionsLoading] = useState(false);
+  const [versionsError, setVersionsError] = useState<string | null>(null);
+
+  const loadRegistryList = (force = false) => {
+    setListLoading(true);
+    setListError(null);
+    fetchRegistryPackages(force)
+      .then((list) => setRegistryList(list))
+      .catch((err) => setListError(String(err)))
+      .finally(() => setListLoading(false));
+  };
+
+  useEffect(() => {
+    if (protocolTab !== "rest") loadRegistryList();
+  }, []);
+
+  const searchResults = useMemo(() => {
+    if (!registryList) return [];
+    const protocol = allProtocols
+      ? null
+      : ((protocolTab === "rest" ? null : protocolTab) as PackageProtocol | null);
+    return filterPackages(registryList, searchQuery, protocol);
+  }, [registryList, searchQuery, allProtocols, protocolTab]);
+
+  const selectPackage = (name: string) => {
+    if (selectedPkg === name) {
+      setSelectedPkg(null);
+      return;
+    }
+    setSelectedPkg(name);
+    setVersionsInfo(null);
+    setVersionsError(null);
+    setVersionsLoading(true);
+    fetchPackageVersions(name)
+      .then((info) => setVersionsInfo(info))
+      .catch((err) => setVersionsError(String(err)))
+      .finally(() => setVersionsLoading(false));
+  };
+
+  const pickVersion = (name: string, version: string) => {
+    setSpec(`${name}@${version}`);
+  };
 
   useEffect(() => { clearInstallLog(); }, []);
 
@@ -170,7 +223,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
       />
       <div
         role="dialog"
-        className="relative z-50 w-full max-w-lg rounded-lg border border-border bg-popover p-4 shadow-xl"
+        className="relative z-50 w-full max-w-xl rounded-lg border border-border bg-popover p-4 shadow-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between border-b border-border pb-4">
@@ -190,6 +243,168 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
         </div>
 
         <div className="mt-4 space-y-4">
+          {protocolTab !== "rest" && (
+            <div>
+              <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
+                Search registry / 搜索 Sonatype
+              </label>
+              <div className="flex items-center gap-2">
+                <div className="relative flex-1">
+                  <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+                  <Input
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && searchResults.length > 0) {
+                        e.preventDefault();
+                        selectPackage(searchResults[0].name);
+                      }
+                    }}
+                    placeholder="fuzzy search, e.g. auth grpc / 模糊搜索"
+                    className="pl-8 text-sm"
+                    disabled={isInstalling}
+                    autoFocus
+                  />
+                </div>
+                <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-[10px] text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    checked={allProtocols}
+                    onChange={(e) => setAllProtocols(e.target.checked)}
+                    className="h-3 w-3 accent-primary"
+                  />
+                  All protocols / 全部
+                </label>
+                <button
+                  type="button"
+                  title="Refresh list / 刷新列表"
+                  onClick={() => loadRegistryList(true)}
+                  disabled={listLoading || isInstalling}
+                  className="rounded p-1.5 text-muted-foreground hover:bg-accent disabled:opacity-40"
+                >
+                  <RefreshCw className={cn("h-3.5 w-3.5", listLoading && "animate-spin")} />
+                </button>
+              </div>
+
+              {listError ? (
+                <div className="mt-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-[11px] text-amber-600 dark:text-amber-400">
+                  搜索不可用：{listError}
+                  <div className="mt-0.5 text-[10px] opacity-80">
+                    手动输入安装不受影响 / Manual install below still works
+                  </div>
+                </div>
+              ) : listLoading && !registryList ? (
+                <div className="mt-2 flex items-center gap-2 rounded-md border border-border bg-muted/30 p-2 text-[11px] text-muted-foreground">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  Loading package list from registry… / 正在拉取包列表…
+                </div>
+              ) : registryList && searchResults.length === 0 ? (
+                <div className="mt-2 rounded-md border border-border bg-muted/30 p-2 text-[11px] text-muted-foreground">
+                  No match / 无匹配 — 可直接在下方手动输入
+                </div>
+              ) : registryList ? (
+                <div className="mt-2 max-h-56 divide-y divide-border/50 overflow-y-auto rounded-md border border-border">
+                  {searchResults.map((pkg) => {
+                    const pkgProtocol = protocolOfPackage(pkg.name);
+                    const isSelected = selectedPkg === pkg.name;
+                    const installed = packages.find((p) => p.name === pkg.name);
+                    return (
+                      <div key={pkg.name}>
+                        <button
+                          type="button"
+                          onClick={() => selectPackage(pkg.name)}
+                          disabled={isInstalling}
+                          className={cn(
+                            "flex w-full items-center gap-2 px-2.5 py-1.5 text-left hover:bg-accent/60",
+                            isSelected && "bg-accent/40"
+                          )}
+                        >
+                          <span className="min-w-0 flex-1 truncate font-mono text-xs text-foreground">
+                            {pkg.name}
+                          </span>
+                          {installed && (
+                            <span className="shrink-0 rounded bg-primary/15 px-1 py-0.5 text-[9px] text-primary">
+                              installed
+                            </span>
+                          )}
+                          {pkgProtocol && (
+                            <span
+                              className={cn(
+                                "shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium",
+                                pkgProtocol === "grpc-web" && "bg-green-500/20 text-green-600 dark:text-green-400",
+                                pkgProtocol === "grpc" && "bg-blue-500/20 text-blue-600 dark:text-blue-400",
+                                pkgProtocol === "sdk" && "bg-purple-500/20 text-purple-600 dark:text-purple-400"
+                              )}
+                            >
+                              {PROTOCOL_LABELS[pkgProtocol] ?? pkgProtocol}
+                            </span>
+                          )}
+                          <span className="shrink-0 font-mono text-[10px] text-muted-foreground">
+                            {pkg.latest_version}
+                          </span>
+                        </button>
+                        {isSelected && (
+                          <div className="border-t border-border/50 bg-muted/30">
+                            {versionsLoading ? (
+                              <div className="flex items-center gap-2 px-3 py-1.5 text-[10px] text-muted-foreground">
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                                Loading versions… / 拉取版本中…
+                              </div>
+                            ) : versionsError ? (
+                              <div className="px-3 py-1.5 text-[10px] text-amber-600 dark:text-amber-400">
+                                {versionsError}
+                              </div>
+                            ) : versionsInfo ? (
+                              <div className="max-h-40 overflow-y-auto">
+                                {versionsInfo.versions.map((v) => {
+                                  const stamp = stampFromVersion(v);
+                                  const isLatest = v === versionsInfo.latest;
+                                  const isInstalled = installed?.version === v;
+                                  const isPicked = spec === `${pkg.name}@${v}`;
+                                  return (
+                                    <button
+                                      key={v}
+                                      type="button"
+                                      onClick={() => pickVersion(pkg.name, v)}
+                                      disabled={isInstalling}
+                                      className={cn(
+                                        "flex w-full items-center gap-2 px-3 py-1 text-left hover:bg-accent/60",
+                                        isPicked && "bg-primary/10"
+                                      )}
+                                    >
+                                      <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-foreground">
+                                        {v}
+                                      </span>
+                                      {isLatest && (
+                                        <span className="shrink-0 rounded bg-green-500/15 px-1 py-0.5 text-[9px] text-green-500">
+                                          latest
+                                        </span>
+                                      )}
+                                      {isInstalled && (
+                                        <span className="shrink-0 rounded bg-primary/15 px-1 py-0.5 text-[9px] text-primary">
+                                          installed
+                                        </span>
+                                      )}
+                                      {stamp && (
+                                        <span className="shrink-0 font-mono text-[9px] text-muted-foreground/70">
+                                          {fmtStamp(stamp)}
+                                        </span>
+                                      )}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            ) : null}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
+            </div>
+          )}
+
           <div>
             <label className="mb-1.5 block text-xs font-medium text-muted-foreground">
               Package spec / 包规格
@@ -207,7 +422,6 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                 placeholder={PLACEHOLDERS[protocolTab] ?? PLACEHOLDERS["grpc-web"]}
                 className="font-mono text-sm"
                 disabled={isInstalling}
-                autoFocus
               />
               {detectedProtocol && (
                 <span

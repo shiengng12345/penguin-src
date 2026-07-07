@@ -18,6 +18,7 @@ export { normalizeGrpcJsonBody, type GrpcJsonRequestType } from "./grpc-json.js"
 export {
   isAllowedSnsoftPackageSpec,
   normalizePackageSpec,
+  protocolFromSnsoftPackageName,
   protocolFromSnsoftPackageSpec,
   snsoftPackageNameFromSpec,
   type SnsoftPackageProtocol,

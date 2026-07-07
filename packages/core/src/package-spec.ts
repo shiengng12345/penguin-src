@@ -57,11 +57,18 @@ export function snsoftPackageNameFromSpec(spec: string): string | null {
   return atIdx > 0 ? trimmed.slice(0, atIdx) : null;
 }
 
+// Bare package NAME (no @version) → protocol. Registry search results carry
+// names only, so this variant skips the full-spec validation.
+export function protocolFromSnsoftPackageName(name: string): SnsoftPackageProtocol | null {
+  const trimmed = name.trim();
+  if (trimmed === "@snsoft/js-sdk") return "sdk";
+  if (/^@snsoft\/[\w-]+-grpc-web$/.test(trimmed)) return "grpc-web";
+  if (/^@snsoft\/[\w-]+-grpc$/.test(trimmed)) return "grpc";
+  return null;
+}
+
 export function protocolFromSnsoftPackageSpec(spec: string): SnsoftPackageProtocol | null {
   const name = snsoftPackageNameFromSpec(spec);
   if (!name) return null;
-  if (name === "@snsoft/js-sdk") return "sdk";
-  if (name.endsWith("-grpc-web")) return "grpc-web";
-  if (name.endsWith("-grpc")) return "grpc";
-  return null;
+  return protocolFromSnsoftPackageName(name);
 }
