@@ -112,10 +112,24 @@ pub(crate) struct PackageVersions {
 }
 
 fn http_client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
+    // 进程内复用同一个 Client：它持有连接池，复用即保持 TCP/TLS 连接热着——
+    // 每次搜索（尤其 30s 自动刷新、重开弹窗）不再为 ~55 个并发请求重做 DNS+TLS
+    // 握手；支持 HTTP/2 时这些请求还会在少数连接上多路复用。之前每次调用都新建
+    // Client（冷连接池），是重复加载慢的一大主因。
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client.clone());
+    }
+    let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(SEARCH_TIMEOUT_SECS))
+        .pool_idle_timeout(Duration::from_secs(90)) // 跨刷新周期保活连接
+        .tcp_keepalive(Duration::from_secs(60))
+        .tcp_nodelay(true) // 小请求关掉 Nagle，降延迟
         .build()
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // 并发首次构造时可能多建一个，set 失败即丢弃，最终都返回同一个实例。
+    let _ = CLIENT.set(client);
+    Ok(CLIENT.get().expect("client just set").clone())
 }
 
 fn status_error(context: &str, status: reqwest::StatusCode) -> String {
