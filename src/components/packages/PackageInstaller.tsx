@@ -189,12 +189,19 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
   const [isInstalling, setIsInstalling] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // 自动刷新开关（绿色=开）：开启即静默重拉一次最新列表，之后每 30s 后台重拉。
+  // 后台刷新只替换底层列表，不触碰搜索/勾选/loading UI，不打断用户操作。
+  const [autoRefresh, setAutoRefresh] = useState(false);
 
   const loadRegistryList = async (
-    options: { useCache?: boolean; force?: boolean } = {},
+    // silent：后台自动刷新用——不动 loading/error UI，只在拿到新列表后静默替换，
+    // 不打断用户当前的搜索/勾选/滚动。
+    options: { useCache?: boolean; force?: boolean; silent?: boolean } = {},
   ) => {
-    setListLoading(true);
-    setListError(null);
+    if (!options.silent) {
+      setListLoading(true);
+      setListError(null);
+    }
     let showedCache = false;
     if (options.useCache !== false) {
       const cached = await loadCachedRegistryPackages();
@@ -209,9 +216,9 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
         : await fetchRegistryPackages();
       setRegistryList(list);
     } catch (err) {
-      if (!showedCache) setListError(String(err));
+      if (!showedCache && !options.silent) setListError(String(err));
     } finally {
-      setListLoading(false);
+      if (!options.silent) setListLoading(false);
     }
   };
 
@@ -219,6 +226,17 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
     void loadRegistryList();
     clearInstallLog();
   }, []);
+
+  // 自动刷新开启：立刻静默重拉一次，之后每 30s 后台重拉最新（安装中暂停，
+  // 避免与安装流程抢刷新）。关闭或卸载即停。
+  useEffect(() => {
+    if (!autoRefresh || isInstalling) return;
+    void loadRegistryList({ useCache: false, force: true, silent: true });
+    const id = setInterval(() => {
+      void loadRegistryList({ useCache: false, force: true, silent: true });
+    }, 30_000);
+    return () => clearInterval(id);
+  }, [autoRefresh, isInstalling]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -669,10 +687,17 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
             </div>
             <button
               type="button"
-              title="刷新"
-              onClick={() => void loadRegistryList({ useCache: false, force: true })}
-              disabled={listLoading || isInstalling}
-              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-slate-700/80 bg-slate-950/40 text-slate-300 transition-colors hover:border-cyan-400/50 hover:bg-cyan-400/10 hover:text-cyan-200 disabled:opacity-45"
+              // 自动刷新开关：绿色=开，开启即刻拉一次并每 30s 后台重拉最新。
+              title={autoRefresh ? "自动刷新：开（每 30s 拉取最新，点击关闭）" : "自动刷新：关（点击开启）"}
+              aria-pressed={autoRefresh}
+              onClick={() => setAutoRefresh((v) => !v)}
+              disabled={isInstalling}
+              className={cn(
+                "flex h-9 w-9 shrink-0 items-center justify-center rounded-md border transition-colors disabled:opacity-45",
+                autoRefresh
+                  ? "border-emerald-400/60 bg-emerald-400/15 text-emerald-300 hover:bg-emerald-400/25"
+                  : "border-slate-700/80 bg-slate-950/40 text-slate-300 hover:border-cyan-400/50 hover:bg-cyan-400/10 hover:text-cyan-200",
+              )}
             >
               <RefreshCw className={cn("h-4 w-4", listLoading && "animate-spin")} />
             </button>
