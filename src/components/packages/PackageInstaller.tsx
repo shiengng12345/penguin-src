@@ -6,7 +6,7 @@ import { Package, X, Download, CheckCircle2, XCircle, Loader2, Search, RefreshCw
 import { cn } from "@/lib/utils";
 import { isAllowedSnsoftPackageSpec, normalizePackageSpec, protocolFromSnsoftPackageSpec } from "@penguin/core";
 import { filterPackages, protocolOfPackage, type PackageProtocol, type RegistryPackage } from "@/lib/registry-search-core";
-import { fetchPackageVersions, fetchRegistryPackages, type PackageVersions } from "@/lib/registry-search";
+import { fetchPackageVersions, fetchRegistryPackages, loadCachedRegistryPackages, type PackageVersions } from "@/lib/registry-search";
 
 function detectProtocol(spec: string): "grpc-web" | "grpc" | "sdk" | null {
   return protocolFromSnsoftPackageSpec(spec);
@@ -83,17 +83,29 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
   const [versionsLoading, setVersionsLoading] = useState(false);
   const [versionsError, setVersionsError] = useState<string | null>(null);
 
-  const loadRegistryList = (force = false) => {
+  // stale-while-revalidate：磁盘缓存先秒出，后台刷新完替换。
+  // 有缓存在展示时，刷新失败保持静默（旧列表仍可用）。
+  const loadRegistryList = async (force = false) => {
     setListLoading(true);
     setListError(null);
-    fetchRegistryPackages(force)
-      .then((list) => setRegistryList(list))
-      .catch((err) => setListError(String(err)))
-      .finally(() => setListLoading(false));
+    let showedCache = false;
+    const cached = await loadCachedRegistryPackages();
+    if (cached) {
+      setRegistryList(cached);
+      showedCache = true;
+    }
+    try {
+      const list = await fetchRegistryPackages(force);
+      setRegistryList(list);
+    } catch (err) {
+      if (!showedCache) setListError(String(err));
+    } finally {
+      setListLoading(false);
+    }
   };
 
   useEffect(() => {
-    if (protocolTab !== "rest") loadRegistryList();
+    if (protocolTab !== "rest") void loadRegistryList();
   }, []);
 
   const searchResults = useMemo(() => {
@@ -278,7 +290,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                 <button
                   type="button"
                   title="Refresh list / 刷新列表"
-                  onClick={() => loadRegistryList(true)}
+                  onClick={() => void loadRegistryList(true)}
                   disabled={listLoading || isInstalling}
                   className="rounded p-1.5 text-muted-foreground hover:bg-accent disabled:opacity-40"
                 >
@@ -296,7 +308,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
               ) : listLoading && !registryList ? (
                 <div className="mt-2 flex items-center gap-2 rounded-md border border-border bg-muted/30 p-2 text-[11px] text-muted-foreground">
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  Loading package list from registry… / 正在拉取包列表…
+                  首次拉取需遍历 Nexus 全部版本，可能 10-30 秒；之后秒开（本地缓存）
                 </div>
               ) : registryList && searchResults.length === 0 ? (
                 <div className="mt-2 rounded-md border border-border bg-muted/30 p-2 text-[11px] text-muted-foreground">

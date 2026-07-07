@@ -272,23 +272,43 @@ async fn nexus_search_all(
 
 // ---- 命令 ----
 
+// 该 Nexus 的 npm 搜索端点一旦被发现返回空/失败，本进程内不再重试——
+// 避免每次刷新都白等一趟（用户机器实测 /-/v1/search 返回 200 但 0 结果）。
+static NPM_SEARCH_UNSUPPORTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 #[tauri::command]
 pub(crate) async fn registry_search_packages() -> Result<Vec<RegistryPackage>, String> {
+    use std::sync::atomic::Ordering;
     eprintln!("INFO registry_search_packages - entry");
     let (registry_url, auth_b64) = crate::registry::read_registry_connection()
         .ok_or_else(|| format!("registry 未配置 — {AUTH_HINT}"))?;
     let client = http_client()?;
     let auth = format!("Basic {auth_b64}");
 
-    let result = match npm_search_all(&client, &registry_url, &auth).await {
-        Ok(list) if !list.is_empty() => Ok(list),
-        Ok(_) => {
-            eprintln!("WARN registry_search_packages - npm search 返回空，回退 Nexus REST");
-            nexus_search_all(&client, &registry_url, &auth).await
-        }
-        Err(err) => {
-            eprintln!("WARN registry_search_packages - npm search 失败 ({err})，回退 Nexus REST");
-            nexus_search_all(&client, &registry_url, &auth).await
+    let result = if NPM_SEARCH_UNSUPPORTED.load(Ordering::Relaxed) {
+        nexus_search_all(&client, &registry_url, &auth).await
+    } else {
+        // 两个端点并行发起：npm 命中就用（快路径），否则用 Nexus 结果——
+        // 串行「先试 npm 再回退」会把 npm 的等待时间白白加在总时长上。
+        let (npm_res, nexus_res) = tokio::join!(
+            npm_search_all(&client, &registry_url, &auth),
+            nexus_search_all(&client, &registry_url, &auth),
+        );
+        match npm_res {
+            Ok(list) if !list.is_empty() => Ok(list),
+            other => {
+                match &other {
+                    Ok(_) => eprintln!(
+                        "WARN registry_search_packages - npm search 返回空，本进程内后续直走 Nexus"
+                    ),
+                    Err(err) => eprintln!(
+                        "WARN registry_search_packages - npm search 失败 ({err})，本进程内后续直走 Nexus"
+                    ),
+                }
+                NPM_SEARCH_UNSUPPORTED.store(true, Ordering::Relaxed);
+                nexus_res
+            }
         }
     };
     let mut list = result?;

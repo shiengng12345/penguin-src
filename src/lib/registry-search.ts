@@ -11,8 +11,26 @@ export interface PackageVersions {
 }
 
 const LIST_TTL_MS = 5 * 60_000;
+// Nexus 逐页爬列表首拉可达 10-30s——把结果落盘（app_kv），下次打开安装器
+// 先秒出旧列表、后台刷新替换（stale-while-revalidate）。
+const DISK_CACHE_KEY = "registry:pkg-list:v1";
 let listCache: { at: number; list: RegistryPackage[] } | null = null;
 const versionsCache = new Map<string, PackageVersions>();
+
+// 读磁盘缓存（不管多旧）——调用方先展示它，再等 fetch 的新结果。
+export async function loadCachedRegistryPackages(): Promise<RegistryPackage[] | null> {
+  if (listCache) return listCache.list;
+  try {
+    const raw = await invoke<string | null>("db_get_app_value", { key: DISK_CACHE_KEY });
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { at?: number; list?: RegistryPackage[] };
+    if (!Array.isArray(parsed.list)) return null;
+    listCache = { at: parsed.at ?? 0, list: parsed.list };
+    return parsed.list;
+  } catch {
+    return null;
+  }
+}
 
 export async function fetchRegistryPackages(force = false): Promise<RegistryPackage[]> {
   if (!force && listCache && Date.now() - listCache.at < LIST_TTL_MS) {
@@ -20,6 +38,12 @@ export async function fetchRegistryPackages(force = false): Promise<RegistryPack
   }
   const list = await invoke<RegistryPackage[]>("registry_search_packages");
   listCache = { at: Date.now(), list };
+  void invoke("db_set_app_value", {
+    key: DISK_CACHE_KEY,
+    value: JSON.stringify({ at: listCache.at, list }),
+  }).catch(() => {
+    // 落盘失败只是丢缓存加速，不影响功能
+  });
   return list;
 }
 
