@@ -43,3 +43,19 @@ export function filterPackages(
   });
   return fuse.search(q, { limit: RESULT_LIMIT }).map((r) => r.item);
 }
+
+// 展示排序：命中 query 的 tag 排最前（用户要能看见「为什么匹配」并直接点它）。
+// 高亮判断用词元子串——够准且便宜。
+export function prioritizeTags(tags: string[], query: string): string[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return tags;
+  const tokens = q.split(/\s+/).filter(Boolean);
+  const hit = (t: string) => tokens.some((tok) => t.toLowerCase().includes(tok));
+  return [...tags.filter(hit), ...tags.filter((t) => !hit(t))];
+}
+
+export function tagMatchesQuery(tag: string, query: string): boolean {
+  const q = query.trim().toLowerCase();
+  if (!q) return false;
+  return q.split(/\s+/).filter(Boolean).some((tok) => tag.toLowerCase().includes(tok));
+}

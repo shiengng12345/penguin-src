@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Package, X, Download, CheckCircle2, XCircle, Loader2, Search, RefreshCw } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { isAllowedSnsoftPackageSpec, normalizePackageSpec, protocolFromSnsoftPackageSpec } from "@penguin/core";
-import { filterPackages, protocolOfPackage, type PackageProtocol, type RegistryPackage } from "@/lib/registry-search-core";
+import { filterPackages, prioritizeTags, protocolOfPackage, tagMatchesQuery, type PackageProtocol, type RegistryPackage } from "@/lib/registry-search-core";
 import { fetchPackageVersions, fetchRegistryPackages, loadCachedRegistryPackages, type PackageVersions } from "@/lib/registry-search";
 
 function detectProtocol(spec: string): "grpc-web" | "grpc" | "sdk" | null {
@@ -396,18 +396,31 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                               })()}
                             </span>
                           </div>
-                          {/* 第二行：项目 tag，超出裁切 */}
+                          {/* 第二行：项目 tag——命中 query 的排最前并高亮；点 tag 直接填 name@tag */}
                           {pkg.tags.length > 0 && (
                             <div className="flex w-full items-center gap-1 overflow-hidden">
-                              {pkg.tags.slice(0, 3).map((t) => (
-                                <span
-                                  key={t}
-                                  className="max-w-44 shrink-0 truncate rounded bg-amber-500/15 px-1 py-px text-[9px] text-amber-600 dark:text-amber-400"
-                                  title={t}
-                                >
-                                  {t}
-                                </span>
-                              ))}
+                              {prioritizeTags(pkg.tags, searchQuery).slice(0, 3).map((t) => {
+                                const isHit = tagMatchesQuery(t, searchQuery);
+                                return (
+                                  <span
+                                    key={t}
+                                    role="button"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      if (!isInstalling) pickVersion(pkg.name, t);
+                                    }}
+                                    className={cn(
+                                      "max-w-44 shrink-0 cursor-pointer truncate rounded px-1 py-px text-[9px]",
+                                      isHit
+                                        ? "bg-amber-500/30 font-semibold text-amber-500 ring-1 ring-amber-500/50"
+                                        : "bg-amber-500/15 text-amber-600 hover:bg-amber-500/25 dark:text-amber-400"
+                                    )}
+                                    title={`点击填入 ${pkg.name}@${t}`}
+                                  >
+                                    {t}
+                                  </span>
+                                );
+                              })}
                               {pkg.tags.length > 3 && (
                                 <span className="shrink-0 text-[9px] text-muted-foreground/70">
                                   +{pkg.tags.length - 3}

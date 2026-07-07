@@ -65,6 +65,15 @@ test("project tag search finds every package carrying the tag", () => {
   assert.ok(!hits.includes("@snsoft/promotion-grpc"));
 });
 
+test("prioritizeTags puts query-matching tags first", async () => {
+  const { prioritizeTags, tagMatchesQuery } = core;
+  const tags = ["accumulative-bet-v3-1", "ai-disable-account", "kyc-merge-account"];
+  assert.equal(prioritizeTags(tags, "merge")[0], "kyc-merge-account");
+  assert.ok(tagMatchesQuery("kyc-merge-account", "merge"));
+  assert.ok(!tagMatchesQuery("accumulative-bet-v3-1", "merge"));
+  assert.deepEqual(prioritizeTags(tags, ""), tags);
+});
+
 test("js-sdk is findable by fuzzy sdk-ish queries with no protocol filter", () => {
   for (const q of ["js-sdk", "jssdk", "sdk"]) {
     const hits = filterPackages(PKGS, q, null).map((p) => p.name);
