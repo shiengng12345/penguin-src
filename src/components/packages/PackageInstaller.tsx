@@ -612,26 +612,6 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                   </div>
                 )}
               </div>
-              {selectedFamilies.size > 0 && (
-                <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
-                  {[...selectedFamilies].map((stem) => (
-                    <span
-                      key={stem}
-                      className="inline-flex items-center gap-1 rounded-md bg-cyan-500/12 px-2 py-0.5 font-mono text-[11px] text-cyan-200 ring-1 ring-cyan-400/25"
-                    >
-                      {stem}
-                      <button
-                        type="button"
-                        aria-label={`移除 ${stem}`}
-                        onClick={() => toggleFamily(stem)}
-                        className="text-cyan-300/70 hover:text-cyan-100"
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
-                    </span>
-                  ))}
-                </div>
-              )}
             </div>
             <div className="min-w-0 sm:flex-[35_1_0%]">
               <div className="mb-1 flex items-center justify-between gap-2">
