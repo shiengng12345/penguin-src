@@ -554,6 +554,8 @@ COMMIT
 
 ## 7. 笔记 Wiki（UI 与行为）
 
+**使用模型定位（2026-07-07 用户拍板）**：知识主要由命令与 AI 写入，用户很少手写笔记。写入通道优先级：① `penguin init/index` 自动代码知识 ② AI 经 MCP `write_note` 存调查结论/case（笔记的主要作者）③ CLI `penguin note` 快速捕获 ④ UI 编辑器（基础款即可——用户主要用 UI **读**：浏览/搜索/backlinks/图；编辑是修订工具不是写作工具）。工程含义：MCP 写路径与索引器是关键路径，编辑器不追 Notion 级体验（标准 Markdown + `[[]]`/`#` 补全为完整验收线，slash 块仍不做）。
+
 按 [ai-knowledge-vault.md](../docs/ai-knowledge-vault.md) 蓝图执行，本次交付范围：
 
 - **布局**：Icon Rail 新增 Wiki 入口 | 文件树侧栏（Inbox/Cases/Knowledge/Repos/Credentials 分区）| 编辑器 | 右侧上下文面板
