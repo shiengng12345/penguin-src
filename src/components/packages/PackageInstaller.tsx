@@ -543,8 +543,22 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                   autoCorrect="off"
                   autoCapitalize="none"
                   spellCheck={false}
-                  className="h-9 rounded-md border-cyan-400/55 bg-slate-950/35 pl-10 pr-9 text-sm text-slate-100 placeholder:text-slate-600 focus-visible:ring-cyan-400/70"
+                  className="h-9 rounded-md border-cyan-400/55 bg-slate-950/35 pl-10 pr-14 text-sm text-slate-100 placeholder:text-slate-600 focus-visible:ring-cyan-400/70"
                 />
+                {searchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setSearchQuery("");
+                      setNameSuggestIdx(-1);
+                    }}
+                    disabled={isInstalling}
+                    className="absolute right-8 top-1/2 -translate-y-1/2 rounded p-0.5 text-slate-500 hover:text-slate-200"
+                    aria-label="清除包名搜索"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                )}
                 <button
                   type="button"
                   aria-label="展开产品线清单"
