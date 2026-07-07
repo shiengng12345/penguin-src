@@ -27,6 +27,13 @@ export interface NodeRow {
   created_at: string;
 }
 
+export interface SearchHit {
+  nodeId: string;
+  nodeType: string;
+  title: string;
+  snippet: string | null;
+}
+
 // 存储核心唯一对外 API（D4 隔离层）。
 // §2.2 铁律在代码层的收口点：不可再生知识只有 recordKnowledge() 一个入口，
 // 本类不提供任何绕过账本写 events/node_aliases/非 parser 边的方法。
@@ -138,5 +145,95 @@ export class KnowledgeStore {
       }
     });
     tx();
+  }
+
+  indexNoteText(p: {
+    nodeId: string;
+    path: string;
+    title: string;
+    body: string;
+    frontmatter?: Record<string, unknown>;
+    sensitive?: boolean;
+    mcpAccess?: "allowed" | "denied";
+    contentHash: string;
+  }): void {
+    const tx = this.db.transaction(() => {
+      this.db
+        .prepare(
+          `INSERT INTO notes_index (node_id, path, frontmatter, sensitive, ai_access, mcp_access, content_hash)
+           VALUES (@node_id, @path, @frontmatter, @sensitive, 'allowed', @mcp_access, @content_hash)
+           ON CONFLICT (node_id) DO UPDATE SET
+             path = @path, frontmatter = @frontmatter, sensitive = @sensitive,
+             mcp_access = @mcp_access, content_hash = @content_hash`,
+        )
+        .run({
+          node_id: p.nodeId,
+          path: p.path,
+          frontmatter: JSON.stringify(p.frontmatter ?? {}),
+          sensitive: p.sensitive ? 1 : 0,
+          mcp_access: p.mcpAccess ?? "allowed",
+          content_hash: p.contentHash,
+        });
+      this.db.prepare("DELETE FROM fts_notes WHERE node_id = ?").run(p.nodeId);
+      this.db
+        .prepare("INSERT INTO fts_notes (node_id, title, body) VALUES (?, ?, ?)")
+        .run(p.nodeId, p.title, p.body);
+    });
+    tx();
+  }
+
+  indexSymbolText(p: {
+    nodeId: string;
+    name: string;
+    signature?: string | null;
+  }): void {
+    const tx = this.db.transaction(() => {
+      this.db.prepare("DELETE FROM fts_symbols WHERE node_id = ?").run(p.nodeId);
+      this.db
+        .prepare(
+          "INSERT INTO fts_symbols (node_id, name, signature) VALUES (?, ?, ?)",
+        )
+        .run(p.nodeId, p.name, p.signature ?? "");
+    });
+    tx();
+  }
+
+  searchText(
+    query: string,
+    opts?: { types?: string[]; includeSensitive?: boolean; limit?: number },
+  ): SearchHit[] {
+    const limit = opts?.limit ?? 50;
+    // FTS5 查询串加引号转义，避免用户输入被当作查询语法
+    const match = `"${query.replace(/"/g, '""')}"`;
+
+    const noteRows = this.db
+      .prepare(
+        `SELECT n.id AS nodeId, n.node_type AS nodeType, n.title AS title,
+                snippet(fts_notes, 2, '[', ']', '…', 12) AS snippet
+         FROM fts_notes f
+         JOIN nodes n ON n.id = f.node_id
+         JOIN notes_index ni ON ni.node_id = f.node_id
+         WHERE fts_notes MATCH ?
+           AND (? = 1 OR (ni.sensitive = 0 AND ni.mcp_access = 'allowed'))
+         LIMIT ?`,
+      )
+      .all(match, opts?.includeSensitive ? 1 : 0, limit) as SearchHit[];
+
+    const symbolRows = this.db
+      .prepare(
+        `SELECT n.id AS nodeId, n.node_type AS nodeType, n.title AS title,
+                NULL AS snippet
+         FROM fts_symbols f
+         JOIN nodes n ON n.id = f.node_id
+         WHERE fts_symbols MATCH ?
+         LIMIT ?`,
+      )
+      .all(match, limit) as SearchHit[];
+
+    let hits = [...noteRows, ...symbolRows];
+    if (opts?.types?.length) {
+      hits = hits.filter((h) => opts.types!.includes(h.nodeType));
+    }
+    return hits.slice(0, limit);
   }
 }

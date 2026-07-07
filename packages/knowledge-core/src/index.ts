@@ -17,4 +17,5 @@ export {
   KnowledgeStore,
   type NodeRow,
   type ParsedEdge,
+  type SearchHit,
 } from "./store.js";
