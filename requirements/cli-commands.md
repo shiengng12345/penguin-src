@@ -96,7 +96,8 @@ staleness 取值：`fresh`（watcher 已追平）/ `stale`（索引落后，附�
 3. 查重：`root_path` 已登记 → 幂等，报「已登记」+ 当前状态后退 0（不重复索引；增量用 `penguin index`，强制重建用 `penguin rebuild`）
 4. 写 `repos` 行 + `branches` 行（status=live, checkout_path=repo 根）
 5. 首次全量索引（进程内跑 indexer，进度条到 stderr：文件数/符号数/耗时）
-6. 若 Penguin app 正在跑：通知其 watcher 接管该 repo（本地 IPC，V1 可降级为「app 下次启动自动发现」）
+6. **项目级 AI hook 自动安装**：往该 repo 的 `.claude/settings.json` 合并一条 UserPromptSubmit hook——`penguin search --json --repo <此repo>`，把相关知识自动注入该 repo 内每条 Claude Code 消息（直读 knowledge.db，毫秒级，app 不必在跑）。**同意机制：第一次 init 询问「以后自动装？」，选择记入 app 配置，此后各 repo init 静默执行**；`--hooks`/`--no-hooks` 显式覆盖；合并不覆盖已有 hooks，幂等（带标记可识别更新）。Codex 侧等其 hook 机制可用后同策略跟进。
+7. 若 Penguin app 正在跑：通知其 watcher 接管该 repo（本地 IPC，V1 可降级为「app 下次启动自动发现」）
 
 **输出**（人类）：
 
@@ -442,7 +443,7 @@ GetLoginURL: main@abc123 ↔ feat/new-login@def456
    接线复用现有 `src-tauri/src/mcp.rs` 逻辑：合并进各家配置、不覆盖其他 server。**首发 provider：Claude Code、Codex**；Claude Desktop 探测到即列出。
 3. **AI 使用规则注入（可选，缺省勾选）**——只装 MCP 不保证 AI 主动查，需三级杠杆：MCP server instructions（计划 4 内置，免费）＋ agent 规则 ＋ hook。install 在此步征求同意后：
    - 往 `~/.claude/CLAUDE.md` / `~/.codex/AGENTS.md` **追加**一段使用规则（幂等：已有标记段则更新不重复）：「回答项目相关问题前先调 penguin MCP 的 knowledge_search / explore_graph；调查结论用 write_note 存回」
-   - advanced 选项：安装 Claude Code hook（UserPromptSubmit 自动注入相关知识上下文，同用户 codegraph 的玩法）——缺省不勾
+   - hook 归 `penguin init`（项目级，见 §1 行为 6）：install 只负责全局规则与 MCP 接线，不装 hook——机器级/项目级分工清晰
 4. **同伴工具可选安装**（外部工具，非依赖——D3 不变；走各自官方安装器，装完即独立于 Penguin）：
 
 ```text
