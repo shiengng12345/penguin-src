@@ -163,11 +163,11 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
 
   const [typeFilter, setTypeFilter] = useState<PackageProtocolFilter>("all");
   const [searchQuery, setSearchQuery] = useState("");
-  // 分支搜索：输入框默认空（不显示 master），但未手动编辑前默认按 master 过滤。
-  // 一旦用户输入/清空（branchTouched=true）就按输入框实际值走（空=全部分支）。
+  // 「仅 master」勾选框：默认勾上 → 按 master 分支过滤；在分支框输入即自动
+  // 取消勾选、改按输入框的值走（空=全部分支）。
   const [branchQuery, setBranchQuery] = useState("");
-  const [branchTouched, setBranchTouched] = useState(false);
-  const effectiveBranch = branchTouched ? branchQuery : "master";
+  const [masterOnly, setMasterOnly] = useState(true);
+  const effectiveBranch = masterOnly ? "master" : branchQuery;
   const [manualSpec, setManualSpec] = useState("");
   const [selectedRowKey, setSelectedRowKey] = useState<string | null>(null);
   const [registryList, setRegistryList] = useState<RegistryPackage[] | null>(null);
@@ -452,31 +452,40 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
               </div>
             </div>
             <div className="min-w-0 sm:flex-[35_1_0%]">
-              <label className="mb-1 block text-[11px] font-medium text-slate-300">搜索分支</label>
+              <div className="mb-1 flex items-center justify-between gap-2">
+                <label className="block text-[11px] font-medium text-slate-300">搜索分支</label>
+                <label className="flex cursor-pointer select-none items-center gap-1.5 text-[11px] text-slate-400">
+                  <input
+                    type="checkbox"
+                    checked={masterOnly}
+                    onChange={(e) => setMasterOnly(e.target.checked)}
+                    disabled={isInstalling}
+                    className="h-3.5 w-3.5 accent-cyan-500"
+                  />
+                  仅 master
+                </label>
+              </div>
               <div className="relative">
                 <GitBranch className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
                 <Input
                   value={branchQuery}
                   onChange={(e) => {
                     setBranchQuery(e.target.value);
-                    setBranchTouched(true);
+                    setMasterOnly(false);
                   }}
-                  placeholder="搜索分支，例如：brazil-v2"
+                  placeholder={masterOnly ? "已锁定 master（勾选框控制）" : "搜索分支，例如：brazil-v2"}
                   name="penguin-branch-search"
-                  disabled={isInstalling}
+                  disabled={isInstalling || masterOnly}
                   autoComplete="off"
                   autoCorrect="off"
                   autoCapitalize="none"
                   spellCheck={false}
-                  className="h-9 rounded-md border-slate-700/80 bg-slate-950/35 pl-10 text-sm text-slate-100 placeholder:text-slate-600 focus-visible:ring-cyan-400/70"
+                  className="h-9 rounded-md border-slate-700/80 bg-slate-950/35 pl-10 text-sm text-slate-100 placeholder:text-slate-600 focus-visible:ring-cyan-400/70 disabled:opacity-50"
                 />
-                {branchQuery && (
+                {branchQuery && !masterOnly && (
                   <button
                     type="button"
-                    onClick={() => {
-                      setBranchQuery("");
-                      setBranchTouched(true);
-                    }}
+                    onClick={() => setBranchQuery("")}
                     className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-slate-500 hover:text-slate-200"
                     aria-label="清除分支筛选"
                   >
