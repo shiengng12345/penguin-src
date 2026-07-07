@@ -13,3 +13,8 @@ export {
 } from "./ledger.js";
 export { SCHEMA_VERSION, openDatabase } from "./schema.js";
 export { materialize } from "./materializer.js";
+export {
+  KnowledgeStore,
+  type NodeRow,
+  type ParsedEdge,
+} from "./store.js";
