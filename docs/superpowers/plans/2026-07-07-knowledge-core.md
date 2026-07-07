@@ -695,7 +695,7 @@ git commit -m "feat(knowledge): ledger read validation — checksum, seq continu
 
 **Interfaces:**
 - Produces:
-  - `openDatabase(path: string): Database`（better-sqlite3 实例；WAL、busy_timeout=5000、foreign_keys=ON、幂等建表、`ledger_state` 预置 `('main', 0)` 行）
+  - `openDatabase(path: string): Database`（better-sqlite3 实例；WAL、busy_timeout=5000、foreign_keys 显式 OFF、幂等建表、`ledger_state` 预置 `('main', 0)` 行）
   - 表：`repos` `branches` `nodes` `node_aliases` `symbol_versions` `edges` `events` `ledger_state` `workspaces` `workspace_repos` `notes_index` `entities` `meta` + 虚表 `fts_notes` `fts_symbols`
   - 列定义与 spec §3.2 逐字段一致（events 含 `ledger_seq`/`workspace_id`/`origin`/`method`；node_aliases 含 `current_identity_key`）
 
