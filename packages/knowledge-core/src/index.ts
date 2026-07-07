@@ -12,3 +12,4 @@ export {
   type LedgerTarget,
 } from "./ledger.js";
 export { SCHEMA_VERSION, openDatabase } from "./schema.js";
+export { materialize } from "./materializer.js";
