@@ -260,6 +260,41 @@ export function filterPackageRows(
     .slice(0, RESULT_LIMIT);
 }
 
+// 包家族前缀（去掉协议后缀）：player-grpc-web / player-grpc / player-grpc-json
+// → player；js-sdk → js-sdk。用于搜索包名的自动补全建议。
+function familyOf(name: string): string {
+  const bare = barePackageName(name);
+  // 只剥 gRPC 系后缀；SDK 仅 js-sdk 一个包（无 xxx-sdk 家族），保留原名
+  return bare.replace(/-(grpc-web|grpc-json|grpc)$/, "");
+}
+
+// 从已拉取列表提取去重的包家族前缀，按 query 过滤（前缀命中优先），供
+// 搜索包名的自动补全下拉使用。空 query 返回全部家族（字典序）。
+export function suggestPackageStems(
+  list: RegistryPackage[],
+  query: string,
+  limit = 8,
+): string[] {
+  const q = query.trim().toLowerCase();
+  const set = new Set<string>();
+  for (const pkg of list) {
+    const fam = familyOf(pkg.name);
+    if (fam) set.add(fam);
+  }
+  let stems = Array.from(set);
+  if (q) {
+    stems = stems.filter((s) => s.toLowerCase().includes(q));
+    stems.sort((a, b) => {
+      const ap = a.toLowerCase().startsWith(q) ? 0 : 1;
+      const bp = b.toLowerCase().startsWith(q) ? 0 : 1;
+      return ap - bp || a.localeCompare(b);
+    });
+  } else {
+    stems.sort((a, b) => a.localeCompare(b));
+  }
+  return stems.slice(0, limit);
+}
+
 export function isPackageRowInstalled(
   row: Pick<PackageResultRow, "name" | "version"> | undefined,
   packages: Array<{ name: string; version: string }>,

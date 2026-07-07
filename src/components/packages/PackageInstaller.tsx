@@ -25,6 +25,7 @@ import {
   completePackageSpec,
   filterPackageRows,
   isPackageRowInstalled,
+  suggestPackageStems,
   type PackageProtocol,
   type PackageProtocolFilter,
   type PackageResultRow,
@@ -170,6 +171,9 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
   const effectiveBranch = masterOnly ? "master" : branchQuery;
   const [manualSpec, setManualSpec] = useState("");
   const [selectedRowKey, setSelectedRowKey] = useState<string | null>(null);
+  const [nameSuggestOpen, setNameSuggestOpen] = useState(false);
+  const [nameSuggestIdx, setNameSuggestIdx] = useState(-1);
+  const nameBlurTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [registryList, setRegistryList] = useState<RegistryPackage[] | null>(null);
   const [listLoading, setListLoading] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
@@ -285,6 +289,21 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
       protocol: typeFilter,
     });
   }, [registryList, searchQuery, effectiveBranch, typeFilter]);
+
+  const nameSuggestions = useMemo(
+    () => (registryList ? suggestPackageStems(registryList, searchQuery) : []),
+    [registryList, searchQuery],
+  );
+
+  const pickSuggestion = (stem: string) => {
+    setSearchQuery(stem);
+    setNameSuggestOpen(false);
+    setNameSuggestIdx(-1);
+  };
+
+  useEffect(() => () => {
+    if (nameBlurTimer.current) clearTimeout(nameBlurTimer.current);
+  }, []);
 
   useEffect(() => {
     if (selectedRowKey && !searchResults.some((pkg) => packageRowKey(pkg) === selectedRowKey)) {
@@ -432,11 +451,40 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                 <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
                 <Input
                   value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
+                  onChange={(e) => {
+                    setSearchQuery(e.target.value);
+                    setNameSuggestOpen(true);
+                    setNameSuggestIdx(-1);
+                  }}
+                  onFocus={() => setNameSuggestOpen(true)}
+                  onBlur={() => {
+                    // 延迟关闭，让下拉项的 mousedown 先触发
+                    nameBlurTimer.current = setTimeout(() => setNameSuggestOpen(false), 120);
+                  }}
                   onKeyDown={(e) => {
-                    if (e.key === "Enter" && searchResults.length > 0) {
+                    const open = nameSuggestOpen && nameSuggestions.length > 0;
+                    if (open && e.key === "ArrowDown") {
                       e.preventDefault();
-                      selectPackage(packageRowKey(searchResults[0]));
+                      setNameSuggestIdx((i) => Math.min(i + 1, nameSuggestions.length - 1));
+                      return;
+                    }
+                    if (open && e.key === "ArrowUp") {
+                      e.preventDefault();
+                      setNameSuggestIdx((i) => Math.max(i - 1, -1));
+                      return;
+                    }
+                    if (e.key === "Escape" && open) {
+                      e.preventDefault();
+                      setNameSuggestOpen(false);
+                      return;
+                    }
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      if (open && nameSuggestIdx >= 0) {
+                        pickSuggestion(nameSuggestions[nameSuggestIdx]);
+                      } else if (searchResults.length > 0) {
+                        selectPackage(packageRowKey(searchResults[0]));
+                      }
                     }
                   }}
                   placeholder="搜索包名，例如：player, auth, ccms"
@@ -449,6 +497,29 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                   spellCheck={false}
                   className="h-9 rounded-md border-cyan-400/55 bg-slate-950/35 pl-10 text-sm text-slate-100 placeholder:text-slate-600 focus-visible:ring-cyan-400/70"
                 />
+                {nameSuggestOpen && nameSuggestions.length > 0 && (
+                  <div className="absolute left-0 right-0 top-[calc(100%+4px)] z-20 max-h-56 overflow-y-auto rounded-lg border border-slate-700/80 bg-[#0d1420] py-1 shadow-[0_16px_40px_rgba(0,0,0,0.5)]">
+                    {nameSuggestions.map((stem, i) => (
+                      <button
+                        key={stem}
+                        type="button"
+                        // mousedown 早于 input 的 blur，避免下拉先被关掉
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          pickSuggestion(stem);
+                        }}
+                        onMouseEnter={() => setNameSuggestIdx(i)}
+                        className={cn(
+                          "flex w-full items-center gap-2 px-3 py-1.5 text-left font-mono text-[13px] text-slate-200",
+                          i === nameSuggestIdx ? "bg-cyan-500/15 text-cyan-100" : "hover:bg-white/5",
+                        )}
+                      >
+                        <Search className="h-3.5 w-3.5 shrink-0 text-slate-500" />
+                        {stem}
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
             <div className="min-w-0 sm:flex-[35_1_0%]">

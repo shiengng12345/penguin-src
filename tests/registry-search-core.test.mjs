@@ -390,3 +390,24 @@ test("branch filter still supports partial typing via prefix (mast → master)",
   ];
   assert.equal(filterPackageRows(list, { query: "", branch: "mast", protocol: "all" }).length, 1);
 });
+
+test("suggestPackageStems extracts unique family prefixes, prefix-ranked", () => {
+  const { suggestPackageStems } = core;
+  const list = [
+    { name: "@snsoft/player-grpc-web", latest_version: "1", newest_version: "1", description: null, tags: [] },
+    { name: "@snsoft/player-grpc", latest_version: "1", newest_version: "1", description: null, tags: [] },
+    { name: "@snsoft/player-grpc-json", latest_version: "1", newest_version: "1", description: null, tags: [] },
+    { name: "@snsoft/payment-grpc", latest_version: "1", newest_version: "1", description: null, tags: [] },
+    { name: "@snsoft/js-sdk", latest_version: "1", newest_version: "1", description: null, tags: [] },
+  ];
+  // 空 query：去重的家族前缀，字典序
+  assert.deepEqual(suggestPackageStems(list, ""), ["js-sdk", "payment", "player"]);
+  // 输入 "play"：前缀命中
+  assert.deepEqual(suggestPackageStems(list, "play"), ["player"]);
+  // 前缀命中排在子串命中之前
+  const list2 = [
+    { name: "@snsoft/xplayer-grpc", latest_version: "1", newest_version: "1", description: null, tags: [] },
+    { name: "@snsoft/player-grpc", latest_version: "1", newest_version: "1", description: null, tags: [] },
+  ];
+  assert.deepEqual(suggestPackageStems(list2, "play"), ["player", "xplayer"]);
+});
