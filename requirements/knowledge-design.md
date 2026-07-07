@@ -410,6 +410,7 @@ AI 时代**信任就是产品**：agent 拿到一条边，「解析出来的」�
 5. **笔记可声明分支上下文**：case frontmatter 支持 `branch: feature/xxx`，生成 `case --on_branch--> branch` 边。
 6. **分支生命周期**：远端被删/已合并 → 标 `gone`，快照保留，设置里可一键清理（防 versions 膨胀）。
 7. **多 repo**：各自登记、各自索引、各自 watch；符号身份自带 repo 前缀；笔记跨 repo 链接自由。
+8. **非 git 目录（降级不拒绝）**：登记时向上找 `.git`（读 `.git/HEAD`/`.git/config` 纯文件解析，不依赖 git 命令；gitlink 文件/worktree 也跟过去）。找不到 → 照常登记索引，插一条隐式分支 `name='(workdir)', head_commit=NULL, status=live`——schema 所有「代码边带 branch_id」规则无需特判，引擎只有一条代码路径。降级的只有 git 专属能力：`compare_branches` 不可用、provenance 无 commit 戳（staleness 依据退化为 content_hash + 时间戳）、无切分支感知。后来 `git init` 了 → watcher 发现 `.git/HEAD` 出现，自动把 `(workdir)` 升级为真实分支名，节点身份不变（D6 红利）。
 
 ## 5. 融合机制（笔记 ↔ 代码）
 
@@ -532,6 +533,8 @@ penguin install              把 penguin CLI 软链到 PATH + 确认 MCP 已接�
 **headless 行为**：查询动词只读 `knowledge.db`（app 不在跑也能查，秒回）；`init/sync` 在 CLI 进程内跑一次性索引（复用 indexer 模块）；常驻 watcher 仍归 app（CLI 不起 daemon，V1）。
 
 **跨进程并发（新增硬规则）**：app 和 CLI 可能同时写账本——`ledger.jsonl` 的 append 必须持**跨进程文件锁**（lock 文件 + O_EXCL 或 flock），锁内完成「读 lastSeq → 写行 → fsync」；SQLite 侧靠 WAL + busy_timeout 已安全。此规则落在 `knowledge-core` 的 `Ledger.append()` 内部，所有入口自动继承。
+
+**逐命令详细规格**（用法/旗标/行为/输出/退出码/错误情形）见 [cli-commands.md](cli-commands.md)。
 
 ## 9. 错误处理 / 性能 / 降级
 
