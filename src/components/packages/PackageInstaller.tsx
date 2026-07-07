@@ -210,8 +210,10 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
   // 多选：勾选多个包一次批量安装（对齐一次装一整批的工作流）
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null);
-  // 行内「复制安装规格」的短暂反馈：记住刚复制的那一行 key，1.5s 后清除。
+  // 行内「复制安装规格」的短暂反馈：记住刚复制的那一行 key + 弹出的 toast 文案，
+  // 1.5s 后一起清除。
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const [copyToast, setCopyToast] = useState<string | null>(null);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [nameSuggestOpen, setNameSuggestOpen] = useState(false);
   const [nameSuggestIdx, setNameSuggestIdx] = useState(-1);
@@ -465,8 +467,12 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
       // 剪贴板不可用时静默失败——不打断安装流程
     }
     setCopiedKey(key);
+    setCopyToast(spec);
     if (copyTimer.current) clearTimeout(copyTimer.current);
-    copyTimer.current = setTimeout(() => setCopiedKey(null), 1500);
+    copyTimer.current = setTimeout(() => {
+      setCopiedKey(null);
+      setCopyToast(null);
+    }, 1500);
   };
 
   useEffect(
@@ -1014,6 +1020,18 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
           </Button>
         </footer>
       </div>
+
+      {copyToast &&
+        createPortal(
+          <div className="pointer-events-none fixed inset-x-0 bottom-8 z-[80] flex justify-center">
+            <div className="flex max-w-[90vw] items-center gap-2 rounded-lg border border-emerald-400/30 bg-[#0d1420] px-4 py-2.5 shadow-[0_12px_32px_rgba(0,0,0,0.6)]">
+              <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-300" />
+              <span className="text-sm font-medium text-slate-100">已复制</span>
+              <span className="truncate font-mono text-[12px] text-slate-400">{copyToast}</span>
+            </div>
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
