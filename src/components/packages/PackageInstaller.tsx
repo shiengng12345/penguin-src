@@ -1,14 +1,19 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  Box,
   CheckCircle2,
+  Clock,
   Download,
   GitBranch,
+  Globe,
+  LayoutGrid,
   Loader2,
   Package,
   RefreshCw,
   Search,
   X,
   XCircle,
+  type LucideIcon,
 } from "lucide-react";
 import { isAllowedSnsoftPackageSpec, normalizePackageSpec, protocolFromSnsoftPackageSpec } from "@penguin/core";
 import { Button } from "@/components/ui/button";
@@ -32,11 +37,16 @@ interface PackageInstallerProps {
   packages: InstalledPackage[];
 }
 
-const TYPE_FILTERS: Array<{ value: PackageProtocolFilter; label: string }> = [
-  { value: "all", label: "全部" },
-  { value: "grpc", label: "gRPC" },
-  { value: "grpc-web", label: "gRPC-Web" },
-  { value: "sdk", label: "JS-SDK" },
+const TYPE_FILTERS: Array<{
+  value: PackageProtocolFilter;
+  label: string;
+  Icon?: LucideIcon;
+  iconClass: string;
+}> = [
+  { value: "all", label: "全部", Icon: LayoutGrid, iconClass: "text-cyan-300" },
+  { value: "grpc", label: "gRPC", Icon: Box, iconClass: "text-cyan-300" },
+  { value: "grpc-web", label: "gRPC-Web", Icon: Globe, iconClass: "text-emerald-300" },
+  { value: "sdk", label: "JS-SDK", iconClass: "text-purple-300" }, // JS 徽标
 ];
 
 const PROTOCOL_LABELS: Record<PackageProtocol, string> = {
@@ -88,14 +98,12 @@ function RowRadio({ selected }: { selected: boolean }) {
   return (
     <span
       className={cn(
-        "flex h-4 w-4 shrink-0 items-center justify-center rounded-full border transition-colors",
-        selected
-          ? "border-cyan-400 bg-cyan-400 text-slate-950"
-          : "border-slate-500/80 text-transparent",
+        "flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full border-2 transition-colors",
+        selected ? "border-cyan-400" : "border-slate-600",
       )}
       aria-hidden="true"
     >
-      <span className="h-1.5 w-1.5 rounded-full bg-current" />
+      {selected && <span className="h-2 w-2 rounded-full bg-cyan-400" />}
     </span>
   );
 }
@@ -368,7 +376,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
         <div className="flex min-h-0 flex-1 flex-col px-5 py-4">
           <section className="shrink-0">
             <label className="mb-1.5 block text-[11px] font-medium text-slate-300">包类型</label>
-            <div className="inline-flex rounded-md border border-slate-700/80 bg-slate-950/35 p-0.5">
+            <div className="flex flex-wrap gap-2">
               {TYPE_FILTERS.map((item) => {
                 const active = typeFilter === item.value;
                 return (
@@ -378,12 +386,24 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                     onClick={() => setTypeFilter(item.value)}
                     disabled={isInstalling}
                     className={cn(
-                      "h-8 rounded px-4 text-sm font-medium text-slate-400 transition-colors",
+                      "flex h-9 items-center gap-2 rounded-lg border px-4 text-sm font-medium transition-colors",
                       active
-                        ? "bg-cyan-400/15 text-cyan-200 ring-1 ring-cyan-400/35"
-                        : "hover:bg-white/5 hover:text-slate-100",
+                        ? "border-cyan-400/60 bg-cyan-500/20 text-cyan-100"
+                        : "border-slate-700/70 bg-slate-950/40 text-slate-300 hover:border-slate-600 hover:text-slate-100",
                     )}
                   >
+                    {item.Icon ? (
+                      <item.Icon className={cn("h-4 w-4", active ? "text-cyan-200" : item.iconClass)} />
+                    ) : (
+                      <span
+                        className={cn(
+                          "grid h-4 w-4 place-items-center rounded-[3px] text-[8px] font-bold leading-none",
+                          active ? "bg-cyan-300/30 text-cyan-100" : "bg-purple-500/20 text-purple-300",
+                        )}
+                      >
+                        JS
+                      </span>
+                    )}
                     {item.label}
                   </button>
                 );
@@ -463,16 +483,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                 <span className="text-[11px] text-slate-400">共 {searchResults.length} 个结果</span>
               )}
             </div>
-            <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-slate-700/70 bg-slate-950/20">
-              {/* 列头 */}
-              <div className="grid shrink-0 grid-cols-[minmax(0,1fr)_84px_162px_156px_146px_78px] items-center gap-3 border-b border-slate-800/80 bg-slate-950/50 px-3 py-1.5 text-[10px] font-medium uppercase tracking-wide text-slate-500">
-                <span className="pl-[68px]">包名</span>
-                <span>类型</span>
-                <span>版本</span>
-                <span>构建时间</span>
-                <span>分支</span>
-                <span className="text-right">状态</span>
-              </div>
+            <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-slate-800/80 bg-slate-950/25">
               {listError ? (
                 <div className="m-2 rounded-md border border-yellow-500/25 bg-yellow-500/10 px-3 py-3 text-sm text-yellow-200">
                   搜索不可用：{listError}
@@ -500,46 +511,51 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                         onClick={() => selectPackage(key)}
                         disabled={isInstalling}
                         className={cn(
-                          "grid min-h-[60px] w-full grid-cols-[minmax(0,1fr)_84px_162px_156px_146px_78px] items-center gap-3 border-l-2 px-3 py-2 text-left transition-colors",
+                          "flex min-h-[64px] w-full items-center gap-3 border px-3 py-2.5 text-left transition-colors",
                           selected
-                            ? "border-l-cyan-400 bg-cyan-400/10"
-                            : "border-l-transparent hover:bg-slate-900/55",
+                            ? "border-cyan-400/70 bg-cyan-500/10"
+                            : "border-transparent hover:bg-slate-900/55",
                         )}
                       >
-                        {/* 包名列：单选 + 图标 + 名称（类型 chip 独立成列） */}
-                        <div className="flex min-w-0 items-center gap-2.5">
-                          <RowRadio selected={selected} />
-                          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-cyan-400/10 text-cyan-300">
-                            <Package className="h-4 w-4" />
-                          </div>
-                          <span
+                        <RowRadio selected={selected} />
+                        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-cyan-400/20 bg-cyan-400/10 text-cyan-300">
+                          <Package className="h-4 w-4" />
+                        </div>
+                        {/* 名称块：包名在上，类型 chip + 版本在下 */}
+                        <div className="min-w-0 flex-1">
+                          <div
                             title={pkg.name}
-                            className="min-w-0 truncate font-mono text-[13px] font-semibold text-slate-50"
+                            className="truncate font-mono text-[13px] font-semibold text-slate-50"
                           >
                             {pkg.name}
-                          </span>
-                        </div>
-                        <div className="min-w-0">
-                          <TypeChip protocol={pkg.protocol} />
-                        </div>
-                        <span
-                          title={pkg.version}
-                          className="min-w-0 truncate font-mono text-[12px] text-slate-300"
-                        >
-                          {pkg.version}
-                        </span>
-                        <span className="whitespace-nowrap font-mono text-[12px] tabular-nums text-slate-400">
-                          {stamp ? fmtStamp(stamp) : "-"}
-                        </span>
-                        <div className="min-w-0">
-                          {pkg.branch ? <BranchChip branch={pkg.branch} /> : null}
-                        </div>
-                        <div className="flex justify-end">
-                          {installed && (
-                            <span className="shrink-0 whitespace-nowrap rounded bg-emerald-500/14 px-2 py-0.5 text-[11px] font-medium text-emerald-300">
-                              已安装
+                          </div>
+                          <div className="mt-1 flex min-w-0 items-center gap-2">
+                            <TypeChip protocol={pkg.protocol} />
+                            <span
+                              title={pkg.version}
+                              className="min-w-0 truncate font-mono text-[12px] text-slate-400"
+                            >
+                              {pkg.version}
                             </span>
-                          )}
+                          </div>
+                        </div>
+                        {/* 右侧：构建时间 · 分支 · 状态，右对齐固定列宽保持稳定 */}
+                        <div className="flex shrink-0 items-center gap-3">
+                          <span className="hidden items-center gap-1.5 whitespace-nowrap font-mono text-[12px] tabular-nums text-slate-400 sm:flex">
+                            <Clock className="h-3.5 w-3.5 text-slate-500" />
+                            {stamp ? fmtStamp(stamp) : "-"}
+                          </span>
+                          <div className="hidden w-[150px] justify-start md:flex">
+                            {pkg.branch ? <BranchChip branch={pkg.branch} /> : null}
+                          </div>
+                          <div className="flex w-[72px] justify-end">
+                            {installed && (
+                              <span className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-md bg-emerald-500/15 px-2 py-0.5 text-[11px] font-medium text-emerald-300">
+                                <CheckCircle2 className="h-3 w-3" />
+                                已安装
+                              </span>
+                            )}
+                          </div>
                         </div>
                       </button>
                     );
