@@ -12,7 +12,7 @@ export {
   type LedgerTarget,
 } from "./ledger.js";
 export { SCHEMA_VERSION, openDatabase } from "./schema.js";
-export { materialize } from "./materializer.js";
+export { materialize, LedgerGapError } from "./materializer.js";
 export {
   KnowledgeStore,
   type NodeRow,

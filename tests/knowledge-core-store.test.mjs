@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { KnowledgeStore } from "../packages/knowledge-core/dist/index.js";
+import { KnowledgeStore, Ledger } from "../packages/knowledge-core/dist/index.js";
 
 function openTemp() {
   const dir = mkdtempSync(join(tmpdir(), "pk-store-"));
@@ -158,6 +158,43 @@ test("undone alias no longer resolves", () => {
     payload: { alias_key: "repo:A.old", alias_type: "qualified_name" },
   });
   assert.equal(store.resolveIdentity("repo:A.old"), null);
+  store.close();
+});
+
+test("recordKnowledge recovers a cross-process ledger gap via full replay (Important)", () => {
+  const { dir, store } = openTemp();
+  const noteId = store.upsertNode({
+    nodeType: "note", identityKey: "cases/gap.md", title: "Gap",
+  });
+  // 另一个"进程"直接往同一账本追加 seq 1——store 的 DB 对此一无所知
+  const other = Ledger.open(join(dir, "ledger.jsonl")).ledger;
+  const gapEvent = other.append({
+    type: "node_alias_added",
+    origin: "system", method: "EXTRACTED",
+    actor: { type: "system", id: "other-process" },
+    target: { node_id: noteId },
+    payload: { alias_key: "cases/gap-old.md", alias_type: "path", reason: "rename" },
+  });
+  assert.equal(gapEvent.seq, 1);
+
+  // store 追加自己的事件（seq 2）；单条物化会触发断档 → 应自动全量重放补齐 seq 1
+  const own = store.recordKnowledge({
+    type: "node_alias_added",
+    origin: "user", method: "ASSERTED",
+    actor: { type: "user", id: "shieng" },
+    target: { node_id: noteId },
+    payload: { alias_key: "cases/gap-new.md", alias_type: "path" },
+  });
+  assert.equal(own.seq, 2);
+
+  // 两条事件都物化了（seq 1 没被跳过），ledger_state 追平到 2
+  assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM events").get().n, 2);
+  assert.equal(
+    store.db.prepare("SELECT materialized_seq AS s FROM ledger_state WHERE id='main'").get().s,
+    2,
+  );
+  // 断档事件的别名可解析
+  assert.ok(store.resolveIdentity("cases/gap-old.md"));
   store.close();
 });
 

@@ -4,7 +4,7 @@ import { Ledger, readLedgerFile } from "./ledger.js";
 
 type Database = DatabaseCtor.Database;
 import type { LedgerEvent, LedgerEventInput } from "./ledger.js";
-import { materialize } from "./materializer.js";
+import { materialize, LedgerGapError } from "./materializer.js";
 import { openDatabase } from "./schema.js";
 
 export interface ParsedEdge {
@@ -58,7 +58,17 @@ export class KnowledgeStore {
   // —— 不可再生知识唯一写入口：先账本，后物化 ——
   recordKnowledge(input: LedgerEventInput): LedgerEvent {
     const event = this.ledger.append(input);
-    materialize(this.db, [event]);
+    try {
+      materialize(this.db, [event]);
+    } catch (err) {
+      // 多进程断档：别的进程在我方 DB 未追平时抢先追加了更早的 seq。
+      // 读全账本重放补齐这段缺口（含我方刚写的这条）。
+      if (err instanceof LedgerGapError) {
+        materialize(this.db, readLedgerFile(this.ledgerPath).events);
+      } else {
+        throw err;
+      }
+    }
     return event;
   }
 

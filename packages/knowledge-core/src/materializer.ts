@@ -3,6 +3,22 @@ import type { LedgerEvent } from "./ledger.js";
 
 type Database = DatabaseCtor.Database;
 
+// 传入的事件与已物化位置之间有断档（materialized_seq+1 缺失）。发生在多进程
+// 场景：另一进程追加了 seq N，本进程 DB 尚未物化，本进程又追加 seq N+1 并只
+// 传了自己这条。若直接应用会把 materialized_seq 越过 N，导致 N 永久不被物化
+// （连全量重放也跳过）。抛出让调用方改走「读全账本重放」补齐（终审 Important）。
+export class LedgerGapError extends Error {
+  constructor(
+    readonly expectedSeq: number,
+    readonly gotSeq: number,
+  ) {
+    super(
+      `ledger materialize gap: expected seq ${expectedSeq}, got ${gotSeq} — caller must replay the full ledger`,
+    );
+    this.name = "LedgerGapError";
+  }
+}
+
 // Ledger → SQLite 物化（§2.1/§2.2）。
 // events/node_aliases/manual edges 是账本的物化视图——本模块是唯一写它们的地方。
 // 物化行 id 从账本事件 id 确定性派生，保证「删库重放」结果逐字节可复现。
@@ -17,6 +33,10 @@ export function materialize(
     .filter((e) => e.seq > state.materialized_seq)
     .sort((a, b) => a.seq - b.seq);
   if (pending.length === 0) return { applied: 0 };
+  // 只允许从 materialized_seq+1 连续物化；断档必须由调用方全量重放补齐。
+  if (pending[0].seq !== state.materialized_seq + 1) {
+    throw new LedgerGapError(state.materialized_seq + 1, pending[0].seq);
+  }
 
   const insertEvent = db.prepare(`
     INSERT INTO events (id, ledger_seq, ts, event_type, node_id, edge_id,

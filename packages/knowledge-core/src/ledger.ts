@@ -1,4 +1,5 @@
 import {
+  appendFileSync,
   closeSync,
   existsSync,
   fsyncSync,
@@ -7,6 +8,7 @@ import {
   readFileSync,
   statSync,
   unlinkSync,
+  writeFileSync,
   writeSync,
 } from "node:fs";
 import { randomUUID } from "node:crypto";
@@ -136,22 +138,44 @@ function acquireLock(lockPath: string, timeoutMs = 5000): void {
   }
 }
 
-// 锁内快速读末行 seq——其他进程可能刚追加过，任何内存缓存都不可信。
-// 末尾残行（写一半崩溃）跳过取上一行，与 readLedgerFile 的截断语义一致。
-function readLastSeqUnderLock(path: string): number {
-  if (!existsSync(path)) return 0;
+// JSON 归一化：把 payload/target/provenance 先过一遍 JSON.parse(JSON.stringify(...))，
+// 使 checksum（canonicalJson）与落盘（JSON.stringify）看到完全一致的值。否则带
+// toJSON 的对象（如 Date）会：checksum 按对象自身键算（{}）、磁盘写成 ISO 串，
+// 读回必然 checksum 失败并连坐丢失后缀。
+function normalizeJson<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value ?? null)) as T;
+}
+
+// writeSync 可能部分写入——循环直到整段落盘。
+function writeAll(fd: number, data: string): void {
+  const buf = Buffer.from(data, "utf8");
+  let off = 0;
+  while (off < buf.length) {
+    off += writeSync(fd, buf, off, buf.length - off);
+  }
+}
+
+// 崩溃残尾/损坏修复：把文件截断到「有效前缀」（第 truncatedAtLine 行之前），
+// 坏尾字节存档到 <path>.corrupt。必须在 append 写入前做，否则新事件会粘在残行
+// 同一物理行上、或落在损坏行之后——两种情况下 readLedgerFile 都会在坏行停止，
+// 使新写入的不可再生知识在重放/重建时静默蒸发（终审 Critical）。
+// 说明：全文件按行校验的成本是 O(n)，但只在检测到损坏时才重写；正常 append
+// 只多一次 readLedgerFile（与原先 readLastSeqUnderLock 同为一次全文件读）。
+function repairToValidPrefix(path: string, truncatedAtLine: number): void {
   const lines = readFileSync(path, "utf8").split("\n");
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (!line) continue;
+  const keep = lines.slice(0, truncatedAtLine - 1);
+  const corrupt = lines.slice(truncatedAtLine - 1).join("\n");
+  if (corrupt.trim()) {
     try {
-      const seq = (JSON.parse(line) as { seq?: number }).seq;
-      if (typeof seq === "number") return seq;
+      appendFileSync(
+        path + ".corrupt",
+        `--- repaired ${new Date().toISOString()} (from line ${truncatedAtLine}) ---\n${corrupt}\n`,
+      );
     } catch {
-      continue;
+      // 存档失败不阻塞修复：账本一致性优先于取证副本
     }
   }
-  return 0;
+  writeFileSync(path, keep.length > 0 ? keep.join("\n") + "\n" : "");
 }
 
 export class Ledger {
@@ -171,22 +195,30 @@ export class Ledger {
     const lockPath = this.path + ".lock";
     acquireLock(lockPath);
     try {
+      // 锁内读一次有效前缀：拿 lastSeq，并在检测到坏尾时先修复，保证新事件
+      // 落在一个连续有效的账本尾部。
+      const read = readLedgerFile(this.path);
+      if (read.truncatedAtLine !== null) {
+        repairToValidPrefix(this.path, read.truncatedAtLine);
+      }
+      const lastSeq =
+        read.events.length > 0 ? read.events[read.events.length - 1].seq : 0;
       const body: Omit<LedgerEvent, "checksum"> = {
-        seq: readLastSeqUnderLock(this.path) + 1,
+        seq: lastSeq + 1,
         id: `led_${randomUUID()}`,
         ts: now(),
         type: input.type,
         origin: input.origin,
         method: input.method,
-        actor: input.actor,
-        target: input.target ?? {},
-        payload: input.payload ?? {},
-        provenance: input.provenance ?? {},
+        actor: normalizeJson(input.actor),
+        target: normalizeJson(input.target ?? {}),
+        payload: normalizeJson(input.payload ?? {}),
+        provenance: normalizeJson(input.provenance ?? {}),
       };
       const event: LedgerEvent = { ...body, checksum: eventChecksum(body) };
       const fd = openSync(this.path, "a");
       try {
-        writeSync(fd, JSON.stringify(event) + "\n", null, "utf8");
+        writeAll(fd, JSON.stringify(event) + "\n");
         fsyncSync(fd);
       } finally {
         closeSync(fd);

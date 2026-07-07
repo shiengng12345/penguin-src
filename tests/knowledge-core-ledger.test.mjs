@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { appendFileSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -166,4 +166,56 @@ test("append after truncated tail continues from last valid seq", () => {
   const second = Ledger.open(path);
   const e = second.ledger.append(INPUT, () => "2026-07-07T10:00:03.000Z");
   assert.equal(e.seq, 2);
+});
+
+test("append HEALS a corrupt tail so replay keeps the new event (Critical)", () => {
+  const path = tempLedgerPath();
+  const { ledger } = Ledger.open(path);
+  ledger.append(INPUT, () => "2026-07-07T10:00:00.000Z"); // seq 1
+  // 模拟崩溃残留：坏行卡在文件尾部
+  appendFileSync(path, "not-json-crash-tail\n");
+
+  // 未修复前：readLedgerFile 在坏行停止，只见 seq 1
+  assert.equal(readLedgerFile(path).events.length, 1);
+
+  // append 应先修复再写：新事件成为可读的 seq 2
+  const e2 = ledger.append(INPUT, () => "2026-07-07T10:00:04.000Z");
+  assert.equal(e2.seq, 2);
+
+  // 关键：重放现在能看到两条事件、无截断——新写入不再蒸发
+  const after = readLedgerFile(path);
+  assert.equal(after.events.length, 2);
+  assert.equal(after.truncatedAtLine, null);
+  assert.deepEqual(after.events.map((e) => e.seq), [1, 2]);
+  // 坏尾被存档而非丢弃
+  assert.ok(existsSync(path + ".corrupt"));
+  assert.match(readFileSync(path + ".corrupt", "utf8"), /not-json-crash-tail/);
+});
+
+test("append heals a half-written (newline-less) tail without gluing", () => {
+  const path = tempLedgerPath();
+  const { ledger } = Ledger.open(path);
+  ledger.append(INPUT, () => "2026-07-07T10:00:00.000Z"); // seq 1
+  appendFileSync(path, '{"seq":2,"id":"led_x","ts":"2026-07-0'); // 写一半、无换行
+
+  const e2 = ledger.append(INPUT, () => "2026-07-07T10:00:05.000Z");
+  assert.equal(e2.seq, 2);
+  const after = readLedgerFile(path);
+  assert.deepEqual(after.events.map((e) => e.seq), [1, 2]);
+  assert.equal(after.truncatedAtLine, null);
+});
+
+test("payload with a non-JSON-safe value (Date) round-trips + checksum holds", () => {
+  const path = tempLedgerPath();
+  const { ledger } = Ledger.open(path);
+  const e = ledger.append(
+    { ...INPUT, payload: { when: new Date("2026-07-07T10:00:00.000Z"), n: 1 } },
+    () => "2026-07-07T10:00:00.000Z",
+  );
+  // Date 已归一化为 ISO 串，两种序列化一致
+  assert.equal(e.payload.when, "2026-07-07T10:00:00.000Z");
+  const read = readLedgerFile(path);
+  assert.equal(read.truncatedAtLine, null, "checksum must not fail on Date payload");
+  assert.equal(read.events.length, 1);
+  assert.equal(read.events[0].payload.when, "2026-07-07T10:00:00.000Z");
 });
