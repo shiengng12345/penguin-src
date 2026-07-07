@@ -45,7 +45,9 @@ staleness 取值：`fresh`（watcher 已追平）/ `stale`（索引落后，附�
 
 ### 0.4 进度输出（init / index / rebuild）
 
-**分层**：indexer（knowledge-core）只发进度事件 `{phase, done, total, currentFile}`（回调），渲染是 CLI 的格式化职责——app UI（计划 5）订阅同一事件流画自己的进度，两边永远同步。**不引进度条库**（ora/cli-progress/ink 皆不用）：ANSI 光标重画手写（~100 行），颜色至多 picocolors。
+**分层**：indexer（knowledge-core）只发进度事件 `{phase, done, total, currentFile}`（回调），渲染是 CLI 的格式化职责——app UI（计划 5）订阅同一事件流画自己的进度，两边永远同步。
+
+**渲染实现（2026-07-07 拍板：质量优先，用成熟库）**：`@clack/prompts`（+ 需要时用 `@clack/core` 扩展进度条）——目标视觉（◆ 菱形阶段标记 + 竖线边栏）正是 clack 的签名风格，Astro/create-vite/SvelteKit 的 CLI 皆用它。**明确不手写 ANSI 渲染**：终端 resize、行宽折行、CJK 宽字符宽度、崩溃后光标恢复、Windows 终端差异是细节翻车重灾区，自写必然做出 demo 级效果。下列 UX 行为与库无关，作为**验收标准**：
 
 **TTY 下三阶段，完成即折叠：**
 
