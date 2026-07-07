@@ -601,8 +601,6 @@ async fn fetch_packument(
 }
 
 const PACKUMENT_CONCURRENCY: usize = 24;
-// 直连已知包（~55 个候选，含小写兜底变体）：一轮全部并发打完，最少 round-trip。
-const DIRECT_FETCH_CONCURRENCY: usize = 64;
 
 fn recent_packument_indexes(list: &[RegistryPackage], limit: usize) -> Vec<usize> {
     let mut indexes: Vec<usize> = (0..list.len()).collect();
@@ -650,42 +648,38 @@ async fn fetch_known_client_packages(
 ) -> Vec<RegistryPackage> {
     let names = client_package_candidates();
     let mut out: Vec<RegistryPackage> = Vec::new();
-    for chunk in names.chunks(DIRECT_FETCH_CONCURRENCY) {
-        let mut set = tokio::task::JoinSet::new();
-        for name in chunk.iter().cloned() {
-            let client = client.clone();
-            let registry_url = registry_url.to_string();
-            let auth = auth.to_string();
-            set.spawn(async move {
-                let result = fetch_packument(&client, &registry_url, &auth, &name).await;
-                (name, result)
-            });
+    let mut set = tokio::task::JoinSet::new();
+    for name in names.iter().cloned() {
+        let client = client.clone();
+        let registry_url = registry_url.to_string();
+        let auth = auth.to_string();
+        set.spawn(async move {
+            let result = fetch_packument(&client, &registry_url, &auth, &name).await;
+            (name, result)
+        });
+    }
+    // 谁先回来先推谁：不等整波里最慢的请求，最快的包几百毫秒即上屏；
+    // 慢尾巴（个别慢响应/404）只影响它自己。
+    while let Some(joined) = set.join_next().await {
+        let Ok((name, Ok(packument))) = joined else { continue };
+        let mut pkg = RegistryPackage {
+            name,
+            latest_version: String::new(),
+            newest_version: String::new(),
+            description: None,
+            tags: Vec::new(),
+            versions: Vec::new(),
+            dist_tags: HashMap::new(),
+        };
+        apply_packument(&mut pkg, packument);
+        // 无任何版本（空/已弃用包）→ 不展示
+        if pkg.newest_version.is_empty() {
+            continue;
         }
-        let mut enriched: Vec<RegistryPackage> = Vec::new();
-        while let Some(joined) = set.join_next().await {
-            let Ok((name, Ok(packument))) = joined else { continue };
-            let mut pkg = RegistryPackage {
-                name,
-                latest_version: String::new(),
-                newest_version: String::new(),
-                description: None,
-                tags: Vec::new(),
-                versions: Vec::new(),
-                dist_tags: HashMap::new(),
-            };
-            apply_packument(&mut pkg, packument);
-            // 无任何版本（空/已弃用包）→ 不展示
-            if pkg.newest_version.is_empty() {
-                continue;
-            }
-            out.push(pkg.clone());
-            enriched.push(pkg);
+        if let Some(app) = app {
+            let _ = app.emit(ENRICHED_EVENT, std::slice::from_ref(&pkg));
         }
-        if !enriched.is_empty() {
-            if let Some(app) = app {
-                let _ = app.emit(ENRICHED_EVENT, &enriched);
-            }
-        }
+        out.push(pkg);
     }
     eprintln!(
         "INFO fetch_known_client_packages - resolved {} of {} candidates",
