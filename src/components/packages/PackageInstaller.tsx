@@ -703,7 +703,9 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
             </button>
           </section>
 
-          <section className="flex min-h-0 flex-1 flex-col" style={{ minHeight: 336 }}>
+          {/* flex-1 让结果区吃掉剩余空间（正常窗口 5-6+ 行）；min-h-0 允许在窗口
+              变矮时收缩，避免把手动输入/底部按钮挤出去、盖在一起 */}
+          <section className="flex min-h-0 flex-1 flex-col">
             <div className="mb-1.5 flex shrink-0 items-center justify-between gap-3">
               <div className="flex items-center gap-2">
                 <label className="block text-[11px] font-medium text-slate-300">搜索结果</label>
