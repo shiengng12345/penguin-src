@@ -154,6 +154,19 @@ importers:
         specifier: 7.6.4
         version: 7.6.4
 
+  packages/knowledge-cli:
+    dependencies:
+      '@penguin/knowledge-core':
+        specifier: workspace:*
+        version: link:../knowledge-core
+      '@penguin/knowledge-indexer':
+        specifier: workspace:*
+        version: link:../knowledge-indexer
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.19.19
+
   packages/knowledge-core:
     dependencies:
       better-sqlite3:

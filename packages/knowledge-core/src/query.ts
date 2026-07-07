@@ -13,7 +13,15 @@ export interface SearchResultRow {
 function resolveNodeId(store: KnowledgeStore, idOrKey: string): string | null {
   if (store.getNode(idOrKey)) return idOrKey;
   const r = store.resolveIdentity(idOrKey);
-  return r ? r.nodeId : null;
+  if (r) return r.nodeId;
+  // friendly-name fallback: a unique node by title or qualified-name suffix
+  // (so CLI/MCP callers can pass "login" or "Svc.login", not just full keys).
+  const rows = store.db
+    .prepare(
+      "SELECT id FROM nodes WHERE title = ? OR identity_key LIKE ? OR identity_key LIKE ? LIMIT 2",
+    )
+    .all(idOrKey, `%::${idOrKey}`, `%.${idOrKey}`) as { id: string }[];
+  return rows.length === 1 ? rows[0].id : null;
 }
 
 // knowledge_search: title→FTS unified retrieval with scope filters (§8.1).

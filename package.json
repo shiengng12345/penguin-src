@@ -5,11 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "pnpm -F @penguin/core build && pnpm -F @penguin/mcp build && pnpm -F @penguin/knowledge-core build && pnpm -F @penguin/knowledge-indexer build && tsc -b && vite build",
+    "build": "pnpm -F @penguin/core build && pnpm -F @penguin/mcp build && pnpm -F @penguin/knowledge-core build && pnpm -F @penguin/knowledge-indexer build && pnpm -F @penguin/knowledge-cli build && tsc -b && vite build",
     "preview": "vite preview",
     "test": "node --test tests/",
     "test:coverage": "node --test --experimental-test-coverage tests/",
-    "typecheck": "pnpm -F @penguin/core build && pnpm -F @penguin/mcp build && pnpm -F @penguin/knowledge-core build && pnpm -F @penguin/knowledge-indexer build && tsc -b",
+    "typecheck": "pnpm -F @penguin/core build && pnpm -F @penguin/mcp build && pnpm -F @penguin/knowledge-core build && pnpm -F @penguin/knowledge-indexer build && pnpm -F @penguin/knowledge-cli build && tsc -b",
     "tauri": "tauri",
     "set-version": "node scripts/set-version.mjs"
   },
