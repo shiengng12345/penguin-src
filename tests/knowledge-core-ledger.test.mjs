@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -11,6 +11,7 @@ const execFileP = promisify(execFile);
 import {
   Ledger,
   eventChecksum,
+  readLedgerFile,
 } from "../packages/knowledge-core/dist/index.js";
 
 function tempLedgerPath() {
@@ -107,4 +108,62 @@ test("two real OS processes appending concurrently never collide on seq", async 
     .sort((a, b) => a - b);
   assert.equal(seqs.length, 50);
   assert.deepEqual(seqs, Array.from({ length: 50 }, (_, i) => i + 1));
+});
+
+test("readLedgerFile validates checksums and stops at tampered line", () => {
+  const path = tempLedgerPath();
+  const { ledger } = Ledger.open(path);
+  ledger.append(INPUT, () => "2026-07-07T10:00:00.000Z");
+  const e2 = ledger.append(INPUT, () => "2026-07-07T10:00:01.000Z");
+  ledger.append(INPUT, () => "2026-07-07T10:00:02.000Z");
+
+  // 篡改第 2 行 payload 但保留旧 checksum
+  const lines = readFileSync(path, "utf8").trim().split("\n");
+  const tampered = JSON.parse(lines[1]);
+  tampered.payload.dst = "node_evil";
+  lines[1] = JSON.stringify(tampered);
+  writeFileSync(path, lines.join("\n") + "\n");
+
+  const result = readLedgerFile(path);
+  assert.equal(result.events.length, 1);
+  assert.equal(result.truncatedAtLine, 2);
+  assert.match(result.truncatedReason, /checksum/i);
+  void e2;
+});
+
+test("readLedgerFile stops at seq gap", () => {
+  const path = tempLedgerPath();
+  const { ledger } = Ledger.open(path);
+  ledger.append(INPUT, () => "2026-07-07T10:00:00.000Z");
+  const orphan = Ledger.open(tempLedgerPath());
+  orphan.ledger.append(INPUT, () => "2026-07-07T10:00:01.000Z"); // seq=1
+  const orphanLine = readFileSync(orphan.ledger.path, "utf8");
+  appendFileSync(path, orphanLine); // 追加 seq=1 到已有 seq=1 之后 → 断号
+
+  const result = readLedgerFile(path);
+  assert.equal(result.events.length, 1);
+  assert.equal(result.truncatedAtLine, 2);
+  assert.match(result.truncatedReason, /seq/i);
+});
+
+test("readLedgerFile ignores partial final line and reports it", () => {
+  const path = tempLedgerPath();
+  const { ledger } = Ledger.open(path);
+  ledger.append(INPUT, () => "2026-07-07T10:00:00.000Z");
+  appendFileSync(path, '{"seq":2,"id":"led_x","ts":"2026-07-0'); // 模拟写一半崩溃
+
+  const result = readLedgerFile(path);
+  assert.equal(result.events.length, 1);
+  assert.equal(result.truncatedAtLine, 2);
+  assert.match(result.truncatedReason, /parse/i);
+});
+
+test("append after truncated tail continues from last valid seq", () => {
+  const path = tempLedgerPath();
+  const first = Ledger.open(path);
+  first.ledger.append(INPUT, () => "2026-07-07T10:00:00.000Z");
+  appendFileSync(path, "not-json\n");
+  const second = Ledger.open(path);
+  const e = second.ledger.append(INPUT, () => "2026-07-07T10:00:03.000Z");
+  assert.equal(e.seq, 2);
 });

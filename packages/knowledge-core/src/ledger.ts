@@ -57,17 +57,51 @@ export interface LedgerReadResult {
   truncatedReason: string | null;
 }
 
-// Task 4 完整实现校验；本 Task 先提供解析（不校验 checksum/seq），
-// 让 Ledger.open 能续算 lastSeq。Task 4 会替换此函数体并保持签名不变。
+// §2.2 / §9：只接受 checksum 有效且 seq 连续的前缀。
+// 任何一行校验失败（JSON 解析 / checksum / seq 断号）即在该行停止，
+// 返回之前的完整前缀，并报告截断位置与原因——绝不静默丢弃中间行再继续。
 export function readLedgerFile(path: string): LedgerReadResult {
   if (!existsSync(path)) {
     return { events: [], truncatedAtLine: null, truncatedReason: null };
   }
   const events: LedgerEvent[] = [];
-  const lines = readFileSync(path, "utf8").split("\n");
-  for (const line of lines) {
+  const raw = readFileSync(path, "utf8");
+  const lines = raw.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line === "" && i === lines.length - 1) break; // 末尾正常换行
     if (!line.trim()) continue;
-    events.push(JSON.parse(line) as LedgerEvent);
+
+    let parsed: LedgerEvent;
+    try {
+      parsed = JSON.parse(line) as LedgerEvent;
+    } catch {
+      return {
+        events,
+        truncatedAtLine: i + 1,
+        truncatedReason: `line ${i + 1}: JSON parse failed (possible partial write)`,
+      };
+    }
+
+    const { checksum, ...body } = parsed;
+    if (checksum !== eventChecksum(body as Omit<LedgerEvent, "checksum">)) {
+      return {
+        events,
+        truncatedAtLine: i + 1,
+        truncatedReason: `line ${i + 1}: checksum mismatch`,
+      };
+    }
+
+    const expectedSeq = events.length > 0 ? events[events.length - 1].seq + 1 : 1;
+    if (parsed.seq !== expectedSeq) {
+      return {
+        events,
+        truncatedAtLine: i + 1,
+        truncatedReason: `line ${i + 1}: seq ${parsed.seq}, expected ${expectedSeq}`,
+      };
+    }
+
+    events.push(parsed);
   }
   return { events, truncatedAtLine: null, truncatedReason: null };
 }
