@@ -125,7 +125,7 @@ staleness 取值：`fresh`（watcher 已追平）/ `stale`（索引落后，附�
 ```text
 fpms-provider   main@abc123   synced   3,801 符号   分支: 2 live · 3 snapshot
 penguin         main@455eac5  stale(2 commits behind)   12,044 符号   分支: 1 live
-vault           —             synced   0 符号（纯笔记）
+wiki           —             synced   0 符号（纯笔记）
 ```
 
 `--json`：`{ repos: [{name, current_branch, head_commit, last_indexed_commit, staleness, symbols, edges, branches: {live,snapshot,gone}}], ledger: {seq, materialized_seq, truncated_at} }`
@@ -380,7 +380,7 @@ GetLoginURL: main@abc123 ↔ feat/new-login@def456
 ### 13.1 `penguin note new <title>`
 
 旗标：`--type inbox|case|knowledge|repo`（缺省 inbox）、`--tags a,b`、`--body <text>`（缺省读 stdin；终端交互时打开 `$EDITOR`）
-行为：按 vault 蓝图规则生成 frontmatter（id/type/created…）→ 写 `~/.penguin/vault/<区>/<slug>.md` → 索引该文件 → 正文里的 `[[链接]]` 照常解析
+行为：按 wiki 蓝图规则生成 frontmatter（id/type/created…）→ 写 `~/.penguin/wiki/<区>/<slug>.md` → 索引该文件 → 正文里的 `[[链接]]` 照常解析
 输出：`✓ 创建 inbox/2026-07-07-quick-note.md (node_xxx)`
 错误：同名文件已存在 → slug 加序号，不覆盖；**不允许** `--type credential`（敏感页只能在 app 内创建），退 1
 
@@ -409,8 +409,8 @@ GetLoginURL: main@abc123 ↔ feat/new-login@def456
 ✓ knowledge.db 存在 · schema v1
 ✓ 账本 1,042 行 · checksum 全部有效 · 无截断
 ✓ 一致性: materialized_seq 1042 = ledger seq 1042
-✓ vault 路径可读写 (~/.penguin/vault) · 在 iCloud 同步下
-⚠ vault 不在任何 git/同步管理下 → 建议备份（spec §9）
+✓ wiki 路径可读写 (~/.penguin/wiki) · 在 iCloud 同步下
+⚠ wiki 不在任何 git/同步管理下 → 建议备份（spec §9）
 ✓ repos: 3 个已登记 · 2 synced · 1 stale
 ⚠ fpms-provider 落后 2 commits → 运行 penguin index
 ✓ 残留锁: 无

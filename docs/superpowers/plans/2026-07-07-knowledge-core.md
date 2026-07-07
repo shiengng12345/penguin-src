@@ -2151,7 +2151,7 @@ git commit -m "feat(knowledge): consistency check + rebuild-from-ledger recovery
 
 ## 显式不在本计划（后续计划承接）
 
-- Vault 扫描/frontmatter/wikilink 解析 → 计划 2
+- Wiki 扫描/frontmatter/wikilink 解析 → 计划 2
 - tree-sitter、branches 感知、rename 检测、chokidar → 计划 3（rename 检测产出的 `node_alias_added` 事件走本计划的 `recordKnowledge`）
 - MCP 六件套 → 计划 4（只依赖本计划的公开 API + 计划 2/3 的数据）
 - UI / Tauri 命令 → 计划 5

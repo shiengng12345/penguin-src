@@ -1,23 +1,23 @@
 简体中文 | Penguin Knowledge 设计文档
 
-# Penguin Knowledge —— 统一知识图谱（笔记 Vault + 代码图谱）设计
+# Penguin Knowledge —— 统一知识图谱（笔记 Wiki + 代码图谱）设计
 
 > 日期：2026-07-07
 > 状态：设计稿 v2.5（2026-07-07 六次修订：**上线门拍板——完整交付不分批发布**（§11 重写为完整范围清单）、原 V2 产品项全部并入范围、`penguin install` 升级为 provider 选择 TUI、events 双类行缝合；§7 UI 细则随计划 5 定稿）
-> 上游文档：[graph.md](graph.md)（四工具能力手册 + 命令生态北极星）、[../docs/ai-knowledge-vault.md](../docs/ai-knowledge-vault.md)（笔记 Vault 产品蓝图）
+> 上游文档：[graph.md](graph.md)（四工具能力手册 + 命令生态北极星）、[../docs/ai-knowledge-vault.md](../docs/ai-knowledge-vault.md)（笔记 Wiki 产品蓝图）
 > 参考实现（不依赖、只参考）：[codegraph](https://github.com/colbymchenry/codegraph) · [graphify](https://github.com/Graphify-Labs/graphify) · [Understand-Anything](https://github.com/Egonex-AI/Understand-Anything) · Obsidian（对标物）
 
 ---
 
 ## 0. 一句话
 
-Penguin 内建一张**统一知识图谱**：Obsidian 式笔记 vault 和多 repo 代码符号图谱进**同一张 nodes/edges 表**，笔记可以链接代码符号，AI 通过 Penguin MCP 查询全图——并且图谱**理解 Repository 和 Branch**（参考实现都只有「当前代码快照」，这是 Penguin 的最大差异化）。
+Penguin 内建一张**统一知识图谱**：Obsidian 式笔记 wiki 和多 repo 代码符号图谱进**同一张 nodes/edges 表**，笔记可以链接代码符号，AI 通过 Penguin MCP 查询全图——并且图谱**理解 Repository 和 Branch**（参考实现都只有「当前代码快照」，这是 Penguin 的最大差异化）。
 
 ## 1. 已拍板的决策（2026-07-07）
 
 | # | 决策 | 说明 |
 |---|------|------|
-| D1 | 笔记 vault 和代码图谱**一起做，不分期** | 一次交付完整形态，无 Phase 1/2 |
+| D1 | 笔记 wiki 和代码图谱**一起做，不分期** | 一次交付完整形态，无 Phase 1/2 |
 | D2 | **内建于 Penguin app，三个入口同一语义**：桌面 UI（人点）+ MCP（AI 调）+ **薄 CLI（终端用，2026-07-07 改判加入）** | MCP 扩展现有 `packages/mcp`；CLI 是 `knowledge-core` 查询层上的薄壳，动词集与 MCP 六件套一一对应（§8.3），不做 115 命令全集 |
 | D3 | **不依赖 codegraph/graphify**，仅作参考实现 | 自研引擎；它们仍是开发期给 AI 用的工具 |
 | D4 | **SQLite 优先**，线上存储库以后再考虑 | 核心关系模型不用 SQLite 专有特性；FTS 等加速索引隔离在 `KnowledgeStore` 检索层后面，将来换库=换实现 |
@@ -26,11 +26,11 @@ Penguin 内建一张**统一知识图谱**：Obsidian 式笔记 vault 和多 rep
 | D7 | **Branch 是一等公民**，独立 `branches` 表 | 为 worktree、多分支同开、Compare Branch、Branch Timeline 留好架构 |
 | D8 | 索引策略：当前检出实时 watch；曾索引过的分支保留最后快照；stale 只标不删；切回自动恢复 | 切分支不丢知识 |
 | D9 | **真相三源：Markdown 文件 + Git 仓库 + Knowledge Ledger**；派生 Index 可删可重建 | 解析衍生数据（符号/代码边/FTS/实体提取）可重建；用户建链、AI 断言、alias 历史、事件、快照清单**不可从文件推导**，必须进 Ledger（§2.1） |
-| D10 | **Ledger / Index 双层存储** | `ledger.jsonl`（append-only，随 vault 同步备份）+ `knowledge.db`（SQLite 索引缓存，可删可重建） |
+| D10 | **Ledger / Index 双层存储** | `ledger.jsonl`（append-only，随 wiki 同步备份）+ `knowledge.db`（SQLite 索引缓存，可删可重建） |
 | D11 | **Provenance 双轴**：`origin`（谁产生）× `method`（认识论地位）+ confidence | AI 信任的基础；provenance 回填永远有损，V1 就上 |
 | D12 | **事件账本从第一天记录**（append-only）；**不做双时态图** | 过去补不回来；timeline/replay/recent_changes 是 V2 在事件上长出的查询视图 |
 | D13 | **稳定身份 + alias 历史**：rename/文件移动不断链 | V1 做 content_hash 全等检测自动记 alias；相似度检测 V2；歧义进确认队列，合并可撤销 |
-| D14 | **Workspace 薄层**：多 repo 分组为一个逻辑产品 + 查询作用域，仅此而已 | 不做 workspace 级权限/独立 vault/重设置 |
+| D14 | **Workspace 薄层**：多 repo 分组为一个逻辑产品 + 查询作用域，仅此而已 | 不做 workspace 级权限/独立 wiki/重设置 |
 
 **明确不做（本次范围外）：**
 
@@ -40,7 +40,7 @@ Penguin 内建一张**统一知识图谱**：Obsidian 式笔记 vault 和多 rep
 - **双时态图（永不做）**：不给每条边加 `valid_from/valid_to`——复杂度乘数打在每条查询/写入/UI 上，存储无界增长。时间维度由 append-only 事件账本承担（D12）
 - **公开插件 API（V3）**：先做内部注册表（语言/实体/Git provider/存储），接缝被内部实现磨过两轮再公开
 - graph.md 的 115 条命令生态**全集**（❄️ 仍冻结北极星）——V1 只落地与 MCP 六件套同语义的薄 CLI 动词集（§8.3）；why/replay/scar/graveyard 等依赖捕获层的命令不做
-- 凭据页加密（沿用 vault 蓝图的 sensitive 标记 + 排除机制；加密另行立项）
+- 凭据页加密——已被 C 案取代（凭据正文存 SQLite 专表、不落 .md，见 §5；加密与既有 Postman 式取向一致地不做）
 
 ## 2. 总体架构
 
@@ -48,7 +48,7 @@ Penguin 内建一张**统一知识图谱**：Obsidian 式笔记 vault 和多 rep
 ┌─────────────────────────── Penguin (Tauri 2) ───────────────────────────┐
 │                                                                          │
 │  React UI                                                                │
-│   ├─ Vault 区（新）：文件树 + Markdown 编辑器（CodeMirror 6，复用现有依赖）│
+│   ├─ Wiki 区（新）：文件树 + Markdown 编辑器（CodeMirror 6，复用现有依赖）│
 │   ├─ Repos 区（新）：登记 repo/分支、索引状态、符号搜索、callers/callees   │
 │   └─ 局部图视图：当前节点的邻居图（React canvas，非全库大图）              │
 │                                                                          │
@@ -57,7 +57,7 @@ Penguin 内建一张**统一知识图谱**：Obsidian 式笔记 vault 和多 rep
 │  Node sidecar「knowledge-indexer」（新，复用现有 sidecar 机制）            │
 │   ├─ 结构层（便宜·常开·零 LLM）：tree-sitter + tags.scm → 符号/引用/边     │
 │   ├─ 笔记索引：frontmatter + [[wikilink]] + #tag + 实体正则 → 笔记边      │
-│   ├─ chokidar 监听：vault 目录 + 各 repo 检出目录 + .git/HEAD             │
+│   ├─ chokidar 监听：wiki 目录 + 各 repo 检出目录 + .git/HEAD             │
 │   └─ 增量管线：content_hash 判变 → 只重解析真正变化的文件                  │
 │                                                                          │
 │  MCP server（扩展现有 packages/mcp）V1 六件套（§8.1）：knowledge_search / │
@@ -70,10 +70,10 @@ Penguin 内建一张**统一知识图谱**：Obsidian 式笔记 vault 和多 rep
 └──────────────────────────────────────────────────────────────────────────┘
 
 存储（铁律修订：真相三源 = Markdown 文件 + Git 仓库 + Ledger；派生 Index 可删可重建）
-  ~/.penguin/vault/                        Markdown 笔记（Obsidian 兼容；路径可配置，
+  ~/.penguin/wiki/                        Markdown 笔记（Obsidian 兼容；路径可配置，
                                            可直接指向现有 Obsidian vault）
-  ~/.penguin/vault/.penguin/ledger.jsonl   Knowledge Ledger（append-only 不可再生知识，
-                                           随 vault 一起被 iCloud/git 同步备份）
+  ~/.penguin/wiki/.penguin/ledger.jsonl   Knowledge Ledger（append-only 不可再生知识，
+                                           随 wiki 一起被 iCloud/git 同步备份）
   ~/.penguin/knowledge.db                  SQLite 索引缓存（WAL + FTS5，可删可重建），
                                            与现有 penguin.sqlite3（应用状态）分开
 ```
@@ -90,15 +90,15 @@ Penguin 内建一张**统一知识图谱**：Obsidian 式笔记 vault 和多 rep
 
 | 层 | 内容 | 可否重建 | 落盘 |
 |---|------|---------|------|
-| **Ledger（账本）** | events、node_aliases、用户手工建的边、AI 断言边、snapshot manifests、人工纠错、AI 建议的采纳/拒绝记录 | ❌ 不可再生 | `vault/.penguin/ledger.jsonl`，append-only，每行带 seq + checksum |
+| **Ledger（账本）** | events、node_aliases、用户手工建的边、AI 断言边、snapshot manifests、人工纠错、AI 建议的采纳/拒绝记录 | ❌ 不可再生 | `wiki/.penguin/ledger.jsonl`，append-only，每行带 seq + checksum |
 | **Index（索引）** | 解析符号、symbol_versions、代码边、FTS 表、实体提取结果、搜索缓存 | ✅ 可再生 | `~/.penguin/knowledge.db` |
 
 运行机制：
 
 - **写路径**：不可再生知识先追加进 `ledger.jsonl`，再写入 `knowledge.db`——DB 里的对应行只是账本的物化视图
 - **启动时**：校验 ledger（seq 连续性 + checksum）→ 若 DB 缺失或落后则 replay 补齐
-- **`knowledge.db` 被删** → 从三源全量重建：vault Markdown（笔记与笔记边）+ Git 仓库（符号与代码边）+ `ledger.jsonl`（其余一切）
-- **ledger 放 vault 内的理由**：获得与笔记同等的「文件为真相」地位，免费获得 vault 的同步/备份通道
+- **`knowledge.db` 被删** → 从三源全量重建：wiki Markdown（笔记与笔记边）+ Git 仓库（符号与代码边）+ `ledger.jsonl`（其余一切）
+- **ledger 放 wiki 内的理由**：获得与笔记同等的「文件为真相」地位，免费获得 wiki 的同步/备份通道
 - **对账元表**：`knowledge.db` 维护 `ledger_state(materialized_seq)`——记录已物化到哪个 seq，启动一致性检查和崩溃恢复都靠它
 
 ### 2.2 Ledger 写入规则与格式（工程硬规则）
@@ -204,7 +204,7 @@ ai_suggestion_rejected  snapshot_manifest_created  alias_merge_undone
 
 #### 2.2.5 多设备限制（V1 单写者假设）
 
-ledger 随 vault 被 iCloud/git 同步是把双刃剑：**两台机器同时追加会产生 seq 分叉和同步冲突文件**（iCloud 会生成 "conflicted copy"）。V1 显式假定**单写者**；启动时若检测到外来 seq 分叉或冲突副本，进入只读模式并提示人工合并，绝不静默择一丢弃。真正的多设备方案（per-device 段文件 / 合并协议）属「线上存储库」阶段。
+ledger 随 wiki 被 iCloud/git 同步是把双刃剑：**两台机器同时追加会产生 seq 分叉和同步冲突文件**（iCloud 会生成 "conflicted copy"）。V1 显式假定**单写者**；启动时若检测到外来 seq 分叉或冲突副本，进入只读模式并提示人工合并，绝不静默择一丢弃。真正的多设备方案（per-device 段文件 / 合并协议）属「线上存储库」阶段。
 
 **同机多进程另论**：app 与 CLI（§8.3）在同一台机器上并发追加是**允许**的——`Ledger.append()` 内部持跨进程文件锁，「读 lastSeq → 写行 → fsync」在锁内完成，seq 不会分叉。单写者假设针对的是**跨设备**（同步通道无法提供锁）。
 
@@ -246,7 +246,7 @@ branches (
 nodes (
   id TEXT PRIMARY KEY,
   node_type TEXT NOT NULL,          -- note|file|symbol|repo|tag|entity
-  identity_key TEXT NOT NULL,       -- note: vault相对路径或frontmatter uuid
+  identity_key TEXT NOT NULL,       -- note: wiki相对路径或frontmatter uuid
                                     -- symbol: repo:qualified_name（冲突时降级附加文件路径）
   repo_id TEXT,                     -- 代码节点归属；笔记节点 NULL
   title TEXT NOT NULL,
@@ -376,7 +376,7 @@ workspace_repos (
 -- 笔记文件索引（真相在 .md 文件）
 notes_index (
   node_id TEXT PRIMARY KEY REFERENCES nodes(id),
-  path TEXT NOT NULL UNIQUE,        -- vault 相对路径
+  path TEXT NOT NULL UNIQUE,        -- wiki 相对路径
   frontmatter TEXT NOT NULL DEFAULT '{}',
   sensitive INTEGER NOT NULL DEFAULT 0,
   ai_access TEXT NOT NULL DEFAULT 'allowed',
@@ -384,7 +384,7 @@ notes_index (
   content_hash TEXT NOT NULL        -- 增量索引用
 );
 
--- 提取实体（vault 蓝图：trace_id/reqid/playerId/config key/API method/env…）
+-- 提取实体（wiki 蓝图：trace_id/reqid/playerId/config key/API method/env…）
 entities (
   id TEXT PRIMARY KEY,
   entity_type TEXT NOT NULL,
@@ -445,12 +445,12 @@ AI 时代**信任就是产品**：agent 拿到一条边，「解析出来的」�
 **链接解析统一走 nodes，优先级：笔记标题 → 符号名 → 实体。**
 
 - `[[GetLoginURL]]` 命中符号 → 生成 `note --wikilink--> symbol` 边（provenance 盖建链时 branch/commit 戳）
-- 命名空间强制指定（vault 蓝图语法）：`[[api:Svc.GetLoginURL]]`、`[[repo:fpms-provider]]`、`[[trace:3d0e…]]`
+- 命名空间强制指定（wiki 蓝图语法）：`[[api:Svc.GetLoginURL]]`、`[[repo:fpms-provider]]`、`[[trace:3d0e…]]`
 - 解析不到 → `dst=NULL, raw_target` 保留，目标出现后自动补链
 - 一名多中 → 存候选、UI 展示歧义，不瞎猜
 - 实体提取（正则，零 LLM）：trace_id、reqid、playerId、proposalId、API method、config key、repo/文件路径、环境名 → `entity_mention` 边
-- **敏感规则**（vault 蓝图继承）：`sensitive=1` 或 `mcp_access=denied` 的笔记默认排除在 MCP 结果外，只返回「存在一个敏感关联页」占位
-- **凭据存储（2026-07-07 拍板 C 案）**：凭据类内容正文**不落 .md 文件**，存 `knowledge.db` 专表（`credential_entries`，与现有 REST 凭据同取向：SQLite、Postman 式）。图谱中仍有凭据节点（node_type=credential，只含标题/安全元数据）可被笔记链接；正文仅 app 内查看，永不进 FTS/MCP/AI，不随 vault 同步。加密不做（与既有取向一致）。
+- **敏感规则**（wiki 蓝图继承）：`sensitive=1` 或 `mcp_access=denied` 的笔记默认排除在 MCP 结果外，只返回「存在一个敏感关联页」占位
+- **凭据存储（2026-07-07 拍板 C 案）**：凭据类内容正文**不落 .md 文件**，存 `knowledge.db` 专表（`credential_entries`，与现有 REST 凭据同取向：SQLite、Postman 式）。图谱中仍有凭据节点（node_type=credential，只含标题/安全元数据）可被笔记链接；正文仅 app 内查看，永不进 FTS/MCP/AI，不随 wiki 同步。加密不做（与既有取向一致）。
 
 ## 6. 索引引擎管线（提案，待确认）
 
@@ -550,13 +550,13 @@ COMMIT
 
 - 解析 frontmatter（yaml）、`[[wikilink]]`、`#tag`、实体正则、Markdown 标题结构
 - 笔记的移动/改名：frontmatter `id`（uuid）为身份优先，路径变化不断链（Obsidian 兼容：无 id 的外来笔记以路径为身份）
-- vault 目录 watch 同一管线
+- wiki 目录 watch 同一管线
 
-## 7. 笔记 Vault（UI 与行为）
+## 7. 笔记 Wiki（UI 与行为）
 
 按 [ai-knowledge-vault.md](../docs/ai-knowledge-vault.md) 蓝图执行，本次交付范围：
 
-- **布局**：Icon Rail 新增 Vault 入口 | 文件树侧栏（Inbox/Cases/Knowledge/Repos/Credentials 分区）| 编辑器 | 右侧上下文面板
+- **布局**：Icon Rail 新增 Wiki 入口 | 文件树侧栏（Inbox/Cases/Knowledge/Repos/Credentials 分区）| 编辑器 | 右侧上下文面板
 - **编辑器**：CodeMirror 6 Markdown 模式（复用现有依赖，不引入块编辑器库）：大标题、`[[...]]` 自动补全（跨笔记+符号+实体）、`#tag` 补全、frontmatter 属性面板、保存指示
 - **上下文面板**：属性 | backlinks | 相关页 | 实体提及 | 链接的符号（带当前分支版本状态）
 - **局部图视图**：以当前笔记/符号为中心的邻居图（1–2 跳，节点上限 + 按 edge_type 过滤），React canvas；**不做全库大图**（>5000 节点浏览器扛不住，graphify 已验证）
@@ -578,10 +578,10 @@ COMMIT
 | `get_node(id\|identity_key)` | 节点详情 + 版本列表（符号）或正文（笔记，尊重 mcp_access）+ alias 历史 |
 | `explore_graph(mode, node, options?)` | 图遍历统一入口，`mode = who_calls \| calls_of \| impact \| backlinks \| path \| timeline \| recent_changes`；options 含 branch/workspace/深度/节点上限。timeline 与 recent_changes 直接查 events 物化表（数据 V1 已在记） |
 | `compare_branches(symbol, branch_a, branch_b)` | 同一符号跨分支差异（hash 相同秒答无差异） |
-| `write_note(action, payload)` | 安全写操作统一入口，`action = create_page \| append_note \| link_pages`；**所有写操作必须遵守 Ledger 写入规则（§2.2）**：不可再生知识先 appendLedger 再物化；并遵守 vault 蓝图 AI 写入策略（只建草稿、只追加、不碰敏感页） |
+| `write_note(action, payload)` | 安全写操作统一入口，`action = create_page \| append_note \| link_pages`；**所有写操作必须遵守 Ledger 写入规则（§2.2）**：不可再生知识先 appendLedger 再物化；并遵守 wiki 蓝图 AI 写入策略（只建草稿、只追加、不碰敏感页） |
 | `index_status()` | 各 repo/分支索引状态、staleness、repo/branch/workspace 清单（兼答原 list_repos / list_branches） |
 
-**`write_note` 命名决定（V1 拍板）**：名字听起来 note-only，而 `link_pages` 实际可以建 note→note / note→symbol / note→entity / case→symbol 等图边——这是**有意为之的收窄**：V1 的 AI 写能力刻意限制在「Vault / 写笔记」这个面上，link 只允许作为写笔记工作流的一部分发生，**绝不让它长成任意图变更 API**。若 V2 需要更广的图变更能力，另立新工具（如 `knowledge_write(action, payload)`），**不重命名 V1 的 `write_note`**。
+**`write_note` 命名决定（V1 拍板）**：名字听起来 note-only，而 `link_pages` 实际可以建 note→note / note→symbol / note→entity / case→symbol 等图边——这是**有意为之的收窄**：V1 的 AI 写能力刻意限制在「Wiki / 写笔记」这个面上，link 只允许作为写笔记工作流的一部分发生，**绝不让它长成任意图变更 API**。若 V2 需要更广的图变更能力，另立新工具（如 `knowledge_write(action, payload)`），**不重命名 V1 的 `write_note`**。
 
 ### 8.2 V2 派生工具
 
@@ -682,9 +682,9 @@ penguin rebuild（修复动词，很少用）
 | 笔记外部被改（Obsidian 同时开） | watcher 收敛；编辑冲突以 mtime 新者为准 + 冲突提示，不静默覆盖 |
 | versions/边膨胀 | gone 分支一键清理；per-repo 统计可视 |
 | SQLite 调优 | WAL + busy_timeout；FTS 单独表不拖关系查询；符号级 diff 减少写放大 |
-| ledger.jsonl 损坏/被截断 | 每行带 seq + checksum；从损坏行起截断并告警，之前的完整前缀照常 replay；vault 同步通道天然多副本 |
+| ledger.jsonl 损坏/被截断 | 每行带 seq + checksum；从损坏行起截断并告警，之前的完整前缀照常 replay；wiki 同步通道天然多副本 |
 | ledger replay 失败 | replay 事务化；校验失败的行进隔离区并报告，不阻塞启动 |
-| knowledge.db 被删/损坏 | 启动检测 → 提示一键全量重建：vault Markdown + Git 仓库 + ledger.jsonl 三源（§2.1），无数据损失 |
+| knowledge.db 被删/损坏 | 启动检测 → 提示一键全量重建：wiki Markdown + Git 仓库 + ledger.jsonl 三源（§2.1），无数据损失 |
 | alias 错误合并 | 合并可撤销（拆分操作作为新账本条目写入 Ledger）；低置信度合并必须走确认队列，不自动执行 |
 | 事件量膨胀（ledger 压缩） | 账本默认永远 append-only；压缩是可选操作，产物必须是**新的带校验段**，旧段归档、绝不静默删除；涉及 timeline/undo 所需语义历史的压缩必须用户显式确认。策略：按节点保留里程碑事件，聚合高频低值事件（index_started/finished 等） |
 | Index 与 Ledger 漂移 | 启动一致性检查：ledger 最新 seq vs `ledger_state.materialized_seq`，不一致自动补 replay |
@@ -692,7 +692,7 @@ penguin rebuild（修复动词，很少用）
 | 账本已写、SQLite 物化前崩溃 | 安全：下次启动 replay 发现 ledger seq > materialized seq，自动补齐 |
 | SQLite 已写、账本未写 | **写路径禁令下不应发生**（不可再生知识没有 SQLite-first 入口）；启动一致性检查发现「无账本出处的物化行」→ 隔离并报告，不静默保留 |
 | 多设备同时追加账本 | V1 单写者假设（§2.2.5）：检测到 seq 分叉/同步冲突副本 → 只读模式 + 人工合并提示，绝不静默择一 |
-| vault 未备份 | ledger 依赖 vault 的同步/备份通道；检测到 vault 不在任何同步/git 管理下时，明确警告用户 |
+| wiki 未备份 | ledger 依赖 wiki 的同步/备份通道；检测到 wiki 不在任何同步/git 管理下时，明确警告用户 |
 | CLI 找不到 knowledge.db | 提示运行 `penguin init` 或打开 Penguin app 初始化；**只读命令不得自动创建半成品 DB**（三源俱在时可提示一键重建，须用户确认） |
 | CLI 与 app watcher 同 repo 同分支撞索引 | 索引任务锁只允许一个任务；CLI 按文档策略等待/跳过/明确失败（退出码 4），**不启动第二个索引任务** |
 | CLI 写 Ledger 时 app 同时写 | `Ledger.append()` 跨进程锁串行化；seq 在锁内分配，不分叉 |
@@ -714,7 +714,7 @@ penguin rebuild（修复动词，很少用）
 - **CLI**：每个命令覆盖普通文本与 `--json` 双输出；`--json` schema snapshot 测试（字段增删即红）；只读命令跑完断言账本零新行；写命令断言先 appendLedger 后物化；CLI 与 MCP 对同一查询返回等价结果（同实现对拍）；退出码矩阵测试（0/1/2/3/4）；索引任务锁冲突时 wait/`--no-wait` 两种行为各一例
 - **增量索引**：files_index 的 mtime/size 快筛与 hash 终判各一例（touch 不重解析、真改重解析）；逐文件事务中途 kill → 重跑收敛且无半新半旧；删除文件 → deleted/stale/边清理断言；切分支 → 检查点按 branch 隔离、复切回免重扫；**逐文件替换事务不删除任何账本物化行**（events/aliases/手工边计数前后一致）
 - **MCP**：每个工具契约测试（含敏感页排除、staleness 戳存在、origin/method 字段完整）
-- **UI 冒烟**：vault 建页 → 写 `[[链接]]` → backlinks 出现 → 上下文面板正确
+- **UI 冒烟**：wiki 建页 → 写 `[[链接]]` → backlinks 出现 → 上下文面板正确
 
 ## 11. 产品定位与架构不变量（十年视角）
 
@@ -735,7 +735,7 @@ penguin rebuild（修复动词，很少用）
 
 - 全量 schema（node_aliases / events 双类行 / workspaces / files_index / 双轴 provenance）、Ledger/Index 双层存储与写入铁律（含跨进程账本锁、索引任务锁）
 - 全语言 tree-sitter 索引引擎：增量管线、watcher、切分支感知、rename 检测（hash 全等自动 + **相似度检测进确认队列**）
-- 笔记 Vault 完整形态：文件树、编辑器、`[[]]`/`#` 补全、backlinks、上下文面板、局部图视图、敏感页机制
+- 笔记 Wiki 完整形态：文件树、编辑器、`[[]]`/`#` 补全、backlinks、上下文面板、局部图视图、敏感页机制
 - **timeline / replay / recent_changes 视图与 UI**（事件账本之上）
 - **AI 建议边确认流**（suggest / accept / reject + 信任策略：未确认的 AI 断言不进默认检索）
 - **snapshot manifest**（case 钉住世界状态）
@@ -755,7 +755,7 @@ penguin rebuild（修复动词，很少用）
 ## 12. 待确认（下一轮讨论）
 
 1. §6 索引引擎管线细节（WASM grammar 首发清单、引用解析规则）是否认可
-2. §7 Vault UI 范围是否认可（特别是：局部图视图要不要、slash 命令块这次做不做——蓝图里有 `/finding` `/request` 等 Penguin 专属块，建议本次先做标准 Markdown + `[[]]`/`#` 补全，Penguin 块下一轮）
+2. §7 Wiki UI 范围是否认可（特别是：局部图视图要不要、slash 命令块这次做不做——蓝图里有 `/finding` `/request` 等 Penguin 专属块，建议本次先做标准 Markdown + `[[]]`/`#` 补全，Penguin 块下一轮）
 3. §8 MCP 工具清单增删
-4. vault 默认路径 `~/.penguin/vault`、knowledge.db 路径确认
+4. wiki 默认路径 `~/.penguin/wiki`、knowledge.db 路径确认
 5. Repos 区 UI：登记 repo 的交互（选目录 → 自动识别 git/分支 → 开始索引）细节
