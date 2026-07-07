@@ -45,19 +45,30 @@ staleness 取值：`fresh`（watcher 已追平）/ `stale`（索引落后，附�
 
 ### 0.4 进度输出（init / index / rebuild）
 
-索引类命令在 **TTY** 下输出分阶段实时进度（spinner + 进度条 + 百分比）：
+**分层**：indexer（knowledge-core）只发进度事件 `{phase, done, total, currentFile}`（回调），渲染是 CLI 的格式化职责——app UI（计划 5）订阅同一事件流画自己的进度，两边永远同步。**不引进度条库**（ora/cli-progress/ink 皆不用）：ANSI 光标重画手写（~100 行），颜色至多 picocolors。
+
+**TTY 下三阶段，完成即折叠：**
 
 ```text
-  Indexing project
+运行中：
+  Indexing fpms-provider (main)
 
-  ◆ Scanning files — 261 found
-  ✦ Parsing code   ━━━━━━╺╺╺╺╺╺╺╺╺╺  38%
-    Linking refs   （待进入）
+  ✔ Scanning files — 412 found, 7 changed        ← 完成阶段折叠为一行
+  ◆ Parsing code   ━━━━━━╺╺╺╺╺╺╺╺  4/7  src/login.ts   ⚠ 1
+    Linking refs                                  ← 未开始，灰显
+
+结束后整块替换为摘要（不留进度痕迹）：
+  ✔ fpms-provider: 7 文件 → +3 ~12 -1 符号 · 2 rename · 1.1s
+    ⚠ 1 文件解析失败: src/legacy/gen.ts (查 penguin doctor)
 ```
 
-- 阶段：`Scanning files`（文件清单 + files_index 比对，显示发现数）→ `Parsing code`（逐文件解析，按文件数计百分比）→ `Linking refs`（引用解析/FTS）；完成后各阶段折叠为一行摘要
-- **非 TTY**（管道/CI）：降级为普通行日志（每阶段一行开始/结束）
-- **`--json`**：进度全部走 stderr，stdout 只留最终 JSON 文档——机器消费永不被进度污染
+规则：
+
+- 阶段：`Scanning`（清单 + files_index 比对，显示 found/changed）→ `Parsing`（**done/total + 当前文件名**，截断到行宽——卡住时能看见卡在哪，比裸百分比有用）→ `Linking refs`（引用解析/FTS）
+- **不显示 ETA**：文件解析耗时方差极大，ETA 必然乱跳骗人；真实耗时只在结束摘要给
+- **静默起手 300ms**：增量常见「0～3 文件」几百毫秒完事，跑不满 300ms 不升进度 UI，避免闪烁杂讯
+- **单文件失败不打断**：进度行计 `⚠ N`，结束后列清单（文件+原因）；Ctrl+C 干净退出并提示「已完成 X/N，重跑 penguin index 从断点收敛」（逐文件事务 §6.3.2 保证这句话为真）
+- **降级矩阵**：非 TTY（管道/CI）→ 每阶段一行普通日志；`CI=true`/`NO_COLOR` 遵守；`--json` → 进度全走 stderr，stdout 只留最终 JSON；`--quiet` → 只出错误与摘要；TTY 重画节流 ≤10fps（SSH 不刷屏）
 - 进度条只是展示，**不是** `--json` 稳定契约的一部分，样式可随时调整
 
 ### 0.5 通用错误情形（所有命令）
