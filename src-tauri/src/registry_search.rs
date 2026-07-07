@@ -1120,4 +1120,39 @@ mod tests {
             3
         );
     }
+
+    #[test]
+    fn direct_cache_round_trips_etag_and_package() {
+        // 用测试专属包名，避免与并行测试共享 static 缓存互扰
+        let name = "@snsoft/__direct-cache-test-grpc";
+        let pkg = RegistryPackage {
+            name: name.to_string(),
+            latest_version: "1.0.0-20260707000000".to_string(),
+            newest_version: "1.0.0-20260707000000".to_string(),
+            description: None,
+            tags: vec!["master".to_string()],
+            versions: vec!["1.0.0-20260707000000".to_string()],
+            dist_tags: HashMap::from([(
+                "master".to_string(),
+                "1.0.0-20260707000000".to_string(),
+            )]),
+        };
+        direct_cache().lock().unwrap().insert(
+            name.to_string(),
+            CachedPackument {
+                etag: "\"abc123\"".to_string(),
+                pkg: pkg.clone(),
+            },
+        );
+        {
+            let cache = direct_cache().lock().unwrap();
+            let hit = cache.get(name).expect("cached entry");
+            assert_eq!(hit.etag, "\"abc123\"");
+            assert_eq!(hit.pkg.newest_version, pkg.newest_version);
+            assert_eq!(hit.pkg.tags, pkg.tags);
+        }
+        // 404 路径会 remove——模拟后确认查不到
+        direct_cache().lock().unwrap().remove(name);
+        assert!(direct_cache().lock().unwrap().get(name).is_none());
+    }
 }

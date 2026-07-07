@@ -165,6 +165,34 @@ test("PackageInstaller renders compact rows with branch chip after build time", 
   assert.match(source, /共 \{searchResults\.length\} 个结果/);
 });
 
+test("App prewarms the registry list on startup", async () => {
+  const source = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
+  // 启动即后台拉一次（预热连接 + 内存缓存），失败静默
+  assert.match(source, /fetchRegistryPackages\(\)\.catch\(/);
+});
+
+test("registry-search bridges streamed enriched events into memory cache", async () => {
+  const source = await readFile(
+    new URL("../src/lib/registry-search.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /listen<RegistryPackage\[\]>\("registry-search:enriched"/);
+  assert.match(source, /mergeRegistryPackages/);
+});
+
+test("PackageInstaller auto-refresh is silent and paused while installing", async () => {
+  const source = await readFile(
+    new URL("../src/components/packages/PackageInstaller.tsx", import.meta.url),
+    "utf8",
+  );
+  // 30s 后台静默重拉；不打扰筛选/勾选；安装中暂停
+  assert.match(source, /if \(!autoRefresh \|\| isInstalling\) return;/);
+  assert.match(source, /\{ useCache: false, force: true, silent: true \}/);
+  assert.match(source, /30_000/);
+  // 绿灯开着时图标持续旋转
+  assert.match(source, /autoRefresh && "animate-spin"/);
+});
+
 test("extracts package name from allowed snsoft package specs", async () => {
   const { snsoftPackageNameFromSpec } = await loadPackageSpecModule();
 
