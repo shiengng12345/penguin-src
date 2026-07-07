@@ -347,17 +347,17 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
       <div
         role="dialog"
         aria-modal="true"
-        className="relative z-50 flex max-h-[86vh] w-full max-w-[1040px] flex-col overflow-hidden rounded-xl border border-slate-700/70 bg-[#071016]/95 shadow-[0_22px_70px_rgba(0,0,0,0.5)]"
+        className="relative z-50 flex h-[86vh] max-h-[880px] min-h-[560px] w-full max-w-[1040px] flex-col overflow-hidden rounded-xl border border-slate-700/70 bg-[#0b111a] shadow-[0_28px_80px_rgba(0,0,0,0.6)]"
         onClick={(e) => e.stopPropagation()}
       >
-        <header className="flex items-start justify-between border-b border-slate-800/90 px-5 py-4">
-          <div className="flex items-start gap-2.5">
-            <div className="flex h-8 w-8 items-center justify-center rounded-md border border-cyan-400/25 bg-cyan-400/10 text-cyan-300">
-              <Package className="h-4 w-4" />
+        <header className="flex shrink-0 items-start justify-between border-b border-slate-800/90 px-6 py-5">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-cyan-400/25 bg-cyan-400/10 text-cyan-300">
+              <Package className="h-5 w-5" />
             </div>
             <div>
-              <h2 className="text-lg font-semibold leading-5 text-slate-50">安装包</h2>
-              <p className="mt-1 text-xs text-slate-400">
+              <h2 className="text-xl font-semibold leading-6 text-slate-50">安装包</h2>
+              <p className="mt-0.5 text-[13px] text-slate-400">
                 安装 gRPC / gRPC-Web / JS-SDK package
               </p>
             </div>
@@ -373,7 +373,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
           </button>
         </header>
 
-        <div className="flex min-h-0 flex-1 flex-col px-5 py-4">
+        <div className="flex min-h-0 flex-1 flex-col gap-5 px-6 py-5">
           <section className="shrink-0">
             <label className="mb-1.5 block text-[11px] font-medium text-slate-300">包类型</label>
             <div className="flex flex-wrap gap-2">
@@ -411,7 +411,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
             </div>
           </section>
 
-          <section className="mt-4 flex shrink-0 flex-col gap-3 sm:flex-row sm:items-end">
+          <section className="flex shrink-0 flex-col gap-3 sm:flex-row sm:items-end">
             <div className="min-w-0 sm:flex-[65_1_0%]">
               <label className="mb-1.5 block text-[11px] font-medium text-slate-300">搜索包名</label>
               <div className="relative">
@@ -476,7 +476,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
             </button>
           </section>
 
-          <section className="mt-4 flex min-h-0 flex-1 flex-col">
+          <section className="flex min-h-0 flex-1 flex-col">
             <div className="mb-1.5 flex shrink-0 items-center justify-between gap-3">
               <label className="block text-[11px] font-medium text-slate-300">搜索结果</label>
               {registryList && (
@@ -567,7 +567,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
             </div>
           </section>
 
-          <section className="mt-4 shrink-0">
+          <section className="shrink-0">
             <label className="mb-1.5 block text-[11px] font-medium text-slate-300">
               手动输入包规格（可选）
             </label>
@@ -604,7 +604,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
           </section>
 
           {(installLog.length > 0 || isInstalling) && (
-            <section className="mt-4 shrink-0 space-y-2">
+            <section className="shrink-0 space-y-2">
               {logStatus.logLines.length > 0 && (
                 <div className="max-h-24 overflow-y-auto rounded-lg border border-slate-800 bg-slate-950/50 p-2 font-mono text-[10px] text-slate-400">
                   {logStatus.logLines.map((line, i) => (
