@@ -108,15 +108,20 @@ function RowRadio({ selected }: { selected: boolean }) {
   );
 }
 
+// 克制的类型徽标：只用极淡底色 + 细 ring，不像按钮。gRPC-Web 淡青、
+// gRPC 灰蓝、JS-SDK 淡紫；始终不换行。
+const TYPE_CHIP_CLASS: Record<PackageProtocol, string> = {
+  "grpc-web": "bg-cyan-500/[0.08] text-cyan-300 ring-1 ring-cyan-400/10",
+  grpc: "bg-slate-700/35 text-slate-300 ring-1 ring-white/5",
+  sdk: "bg-violet-500/10 text-violet-300 ring-1 ring-violet-400/15",
+};
+
 function TypeChip({ protocol }: { protocol: PackageProtocol }) {
   return (
     <span
       className={cn(
-        // 自然紧凑宽度；版本对齐由外层 mini-grid 的固定列负责
-        "inline-flex h-5 shrink-0 items-center whitespace-nowrap rounded px-2 text-[11px] font-medium leading-none",
-        protocol === "sdk"
-          ? "border border-purple-400/25 bg-purple-500/15 text-purple-200"
-          : "border border-cyan-400/20 bg-cyan-400/10 text-cyan-200",
+        "inline-flex shrink-0 items-center whitespace-nowrap rounded-md px-1.5 py-0.5 text-[11px] font-medium",
+        TYPE_CHIP_CLASS[protocol],
       )}
     >
       {PROTOCOL_LABELS[protocol]}
@@ -129,10 +134,10 @@ function BranchChip({ branch }: { branch: string }) {
   return (
     <span
       title={branch}
-      // 填满分支列：无论分支名长短，chip 统一成同宽的框，过长截断
-      className="inline-flex h-5 w-full items-center gap-1 whitespace-nowrap rounded-md border border-slate-700/70 bg-slate-800/70 px-2 text-[11px] leading-none text-slate-300"
+      // 纯元数据：灰蓝极淡底 + ring-white/5，不用青色、不像可选中/可编辑
+      className="inline-flex max-w-[160px] items-center gap-1 whitespace-nowrap rounded-md bg-slate-800/45 px-2 py-0.5 text-[11px] text-slate-400 ring-1 ring-white/5"
     >
-      <GitBranch className="h-3 w-3 shrink-0 text-slate-400" />
+      <GitBranch className="h-3 w-3 shrink-0 text-slate-500" />
       <span className="truncate">{branch}</span>
     </span>
   );
