@@ -3,7 +3,7 @@
 # Penguin Knowledge —— 统一知识图谱（笔记 Vault + 代码图谱）设计
 
 > 日期：2026-07-07
-> 状态：设计稿 v2.3（2026-07-07 三次修订：D2 改判——CLI 升级为第三入口（薄壳、与 MCP 同语义）；新增 §8.3 CLI 形态与跨进程账本锁；§6 索引管线与 §7 UI 范围仍待确认）
+> 状态：设计稿 v2.3-final（2026-07-07 四次修订：架构图补 CLI、CLI 六条不变量、读写命令分类、sync 非 daemon、`--json` 稳定契约、CLI/app 并发规则与测试补全、新增 `penguin index`；§6 索引管线与 §7 UI 范围仍待确认）
 > 上游文档：[graph.md](graph.md)（四工具能力手册 + 命令生态北极星）、[../docs/ai-knowledge-vault.md](../docs/ai-knowledge-vault.md)（笔记 Vault 产品蓝图）
 > 参考实现（不依赖、只参考）：[codegraph](https://github.com/colbymchenry/codegraph) · [graphify](https://github.com/Graphify-Labs/graphify) · [Understand-Anything](https://github.com/Egonex-AI/Understand-Anything) · Obsidian（对标物）
 
@@ -62,6 +62,11 @@ Penguin 内建一张**统一知识图谱**：Obsidian 式笔记 vault 和多 rep
 │                                                                          │
 │  MCP server（扩展现有 packages/mcp）V1 六件套（§8.1）：knowledge_search / │
 │   get_node / explore_graph / compare_branches / write_note / index_status │
+│                                                                          │
+│  CLI「penguin」（新，packages/knowledge-cli）                              │
+│   ├─ 人在终端用的薄壳：参数解析 + 调 knowledge-core + 格式化输出            │
+│   ├─ 查询/图遍历语义与 MCP 六件套一致（同一实现，不另写业务逻辑）           │
+│   └─ 不启动 daemon；watcher 仍归 Penguin app                              │
 └──────────────────────────────────────────────────────────────────────────┘
 
 存储（铁律修订：真相三源 = Markdown 文件 + Git 仓库 + Ledger；派生 Index 可删可重建）
@@ -511,7 +516,8 @@ AI 时代**信任就是产品**：agent 拿到一条边，「解析出来的」�
 ```text
 penguin init [path]          登记当前/指定目录为 repo（探测 git/分支）+ 一次性首建索引
 penguin status               各 repo/分支索引状态、staleness（= index_status）
-penguin sync [path]          手动一次增量索引（headless，一次性进程）
+penguin sync [path]          手动一次增量索引（headless，一次性进程，非 watcher）
+penguin index [path]         全量重建该 repo 的解析衍生数据（推倒重来的显式动词；--all 全部 repo）
 penguin search <query>       统一检索（= knowledge_search；--type --repo --workspace --branch）
 penguin node <id|name>       节点详情 + 版本 + alias 历史（= get_node）
 penguin callers <symbol>     谁调用它（= explore_graph mode=who_calls；--branch）
@@ -526,13 +532,38 @@ penguin doctor               环境 + 知识库自检（DB/账本一致性、wat
 penguin install              把 penguin CLI 软链到 PATH + 确认 MCP 已接线
 ```
 
-全局旗标（graph.md §6 继承，砍到 V1 能兑现的）：`--json`（机器可读）、`--branch <b>`；每条输出必带 `origin/method/confidence/staleness/branch/commit`（适用时）——与 MCP 返回契约一致。
+**CLI 六条不变量（防止 CLI 长成第二个产品）：**
+
+1. CLI 是薄壳：参数解析 + 调 `knowledge-core` + 格式化输出，**不得包含独立的搜索/索引/业务逻辑**。
+2. CLI 查询结果必须与 MCP 同语义：同一输入在 CLI/MCP/UI 查询层返回等价结果（同一实现保证）。
+3. CLI 不启动常驻 daemon；watcher 仍归 Penguin app。
+4. CLI 写操作必须遵守 Ledger-first（§2.2）；不可再生知识不得 SQLite-first。
+5. `--json` 输出是**稳定契约**（供 shell script / jq / AI agents / CI 使用）：字段命名、嵌套结构、退出码语义保持兼容，破坏性变更需版本化；普通文本输出可为可读性随时调整。
+6. CLI 只做 V1 动词集（六件套对应 + 系统动词），不实现 graph.md 115 命令全集。
+
+**读写命令分类：**
+
+```text
+只读命令（绝不写 Ledger；不需要账本锁；读 SQLite WAL，事务保持短）：
+  search · node · callers · calls · impact · backlinks · path ·
+  recent · compare · status · doctor（不带 --fix）
+
+写命令（可能获取账本锁 / 索引任务锁 / SQLite 写事务 / 文件系统写）：
+  init · sync · index · note · install · doctor --fix
+```
+
+全局旗标（graph.md §6 继承，砍到 V1 能兑现的）：`--json`（机器可读）、`--branch <b>`；每条输出必带 `origin/method/confidence/staleness/branch/commit/source_path/node_id`（适用时）——与 MCP 返回契约一致，`--json` 中作为顶层结构化字段出现。
 
 **分发**：CLI 随 app 捆绑（Tauri resources，同 MCP server 模式），设置页/`penguin install` 把启动脚本软链到 `/usr/local/bin/penguin`（学 VS Code 的 `code` 命令）；运行时用系统 Node（同 sidecar 机制）。
 
-**headless 行为**：查询动词只读 `knowledge.db`（app 不在跑也能查，秒回）；`init/sync` 在 CLI 进程内跑一次性索引（复用 indexer 模块）；常驻 watcher 仍归 app（CLI 不起 daemon，V1）。
+**headless 行为**：查询动词只读 `knowledge.db`（app 不在跑也能查，秒回）；`init/sync/index` 在 CLI 进程内跑**一次性**索引任务（复用 indexer 模块）——`sync` 是增量索引，**不是 watcher**，跑完即退出，不长期监听文件变化；长期监听请打开 Penguin app。
 
-**跨进程并发（新增硬规则）**：app 和 CLI 可能同时写账本——`ledger.jsonl` 的 append 必须持**跨进程文件锁**（lock 文件 + O_EXCL 或 flock），锁内完成「读 lastSeq → 写行 → fsync」；SQLite 侧靠 WAL + busy_timeout 已安全。此规则落在 `knowledge-core` 的 `Ledger.append()` 内部，所有入口自动继承。
+**CLI / App 并发规则：**
+
+1. **账本追加锁**：所有 Ledger 写入经 `knowledge-core` 的 `Ledger.append()`——跨进程文件锁内完成「读 lastSeq → 算 checksum → 写行 → fsync」，同机 app + CLI 并发追加不产生重复 seq。所有入口自动继承，CLI 无需额外处理。
+2. **索引任务锁**：同一 repo + 同一分支 + 同一 checkout 目录**只允许一个活跃索引任务**。app watcher 与 `penguin sync/index` 通过索引任务锁协调；发现已有任务时 CLI 的行为必须确定性：缺省**等待**（stderr 提示等谁），`--no-wait` 则跳过并以专属退出码 4 退出——具体见 cli-commands.md。
+3. **SQLite 并发**：WAL + busy_timeout。只读命令事务保持短；长索引写入分批提交，不阻塞查询。
+4. **无独立 daemon**：CLI 在 V1 永不启动后台 watcher；常驻索引属于 app sidecar。
 
 **逐命令详细规格**（用法/旗标/行为/输出/退出码/错误情形）见 [cli-commands.md](cli-commands.md)。
 
@@ -558,6 +589,12 @@ penguin install              把 penguin CLI 软链到 PATH + 确认 MCP 已接�
 | SQLite 已写、账本未写 | **写路径禁令下不应发生**（不可再生知识没有 SQLite-first 入口）；启动一致性检查发现「无账本出处的物化行」→ 隔离并报告，不静默保留 |
 | 多设备同时追加账本 | V1 单写者假设（§2.2.5）：检测到 seq 分叉/同步冲突副本 → 只读模式 + 人工合并提示，绝不静默择一 |
 | vault 未备份 | ledger 依赖 vault 的同步/备份通道；检测到 vault 不在任何同步/git 管理下时，明确警告用户 |
+| CLI 找不到 knowledge.db | 提示运行 `penguin init` 或打开 Penguin app 初始化；**只读命令不得自动创建半成品 DB**（三源俱在时可提示一键重建，须用户确认） |
+| CLI 与 app watcher 同 repo 同分支撞索引 | 索引任务锁只允许一个任务；CLI 按文档策略等待/跳过/明确失败（退出码 4），**不启动第二个索引任务** |
+| CLI 写 Ledger 时 app 同时写 | `Ledger.append()` 跨进程锁串行化；seq 在锁内分配，不分叉 |
+| CLI 读取时 app 正在物化 | SQLite WAL + busy_timeout；超时 CLI 输出明确错误码，不静默失败 |
+| `penguin sync` 被误当 watcher | 文档与输出明示：sync 是一次性索引；长期监听请打开 Penguin app |
+| `--json` 结构破坏兼容 | 视为契约破坏；字段改名/删除需版本化或保留兼容字段，不允许随意改 |
 
 ## 10. 测试策略
 
@@ -565,6 +602,7 @@ penguin install              把 penguin CLI 软链到 PATH + 确认 MCP 已接�
 - **集成**：以 Penguin 仓库自身为测试 repo → init 索引 → 断言已知符号存在、callers 正确；建临时 git repo 双分支 fixture → 切分支 → 断言 versions 双行、stale 标记、切回恢复、compare_branches 正确
 - **Ledger**：事件 JSON 规范化（键序稳定）与 checksum 校验；按 seq 顺序 replay；末尾残行恢复；`ledger_state.materialized_seq` 追踪与对账；**SQLite-first 写入防护**（运行时断言 + 代码层无绕过账本的写入口）；从 Markdown + Git + Ledger 三源重建 knowledge.db；events 表可完全由 Ledger 重建；alias 合并与撤销回归
 - **MCP 写路径**：`write_note` 每种 action 断言「先出现账本行、后出现物化行」，顺序颠倒即失败
+- **CLI**：每个命令覆盖普通文本与 `--json` 双输出；`--json` schema snapshot 测试（字段增删即红）；只读命令跑完断言账本零新行；写命令断言先 appendLedger 后物化；CLI 与 MCP 对同一查询返回等价结果（同实现对拍）；退出码矩阵测试（0/1/2/3/4）；索引任务锁冲突时 wait/`--no-wait` 两种行为各一例
 - **MCP**：每个工具契约测试（含敏感页排除、staleness 戳存在、origin/method 字段完整）
 - **UI 冒烟**：vault 建页 → 写 `[[链接]]` → backlinks 出现 → 上下文面板正确
 

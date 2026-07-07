@@ -5,7 +5,8 @@
 > 日期：2026-07-07
 > 上游：[knowledge-design.md](knowledge-design.md) §8.3（CLI 形态与铁律）
 > 定位：`packages/knowledge-cli`，bin 名 `penguin`。**薄壳**：查询动词直接调 `knowledge-core` 查询层（与 MCP 六件套同一实现），写动词走 `recordKnowledge()` 铁律。CLI 不长自己的逻辑。
-> graph.md 的 115 命令全集仍冻结；本文只规格 V1 的 15 个动词。
+> graph.md 的 115 命令全集仍冻结；本文只规格 V1 的 16 个动词。
+> 读写分类与 CLI 六条不变量见 knowledge-design.md §8.3——只读命令绝不写账本；写命令（init/sync/index/note/install/doctor --fix）可能获取账本锁/索引任务锁。
 
 ---
 
@@ -39,6 +40,7 @@ staleness 取值：`fresh`（watcher 已追平）/ `stale`（索引落后，附�
 | 1 | 一般错误（参数错、目标不存在、账本锁超时等，stderr 给原因） |
 | 2 | 环境错误（knowledge.db 缺失且无法重建、非登记 repo 且命令需要 repo 上下文） |
 | 3 | 数据完整性警告态（账本截断/Index 落后但已自动修复——结果仍输出，供脚本感知） |
+| 4 | 索引任务锁冲突且 `--no-wait`（同 repo+分支+目录已有活跃索引任务，本次跳过） |
 
 ### 0.4 通用错误情形（所有命令）
 
@@ -60,7 +62,7 @@ staleness 取值：`fresh`（watcher 已追平）/ `stale`（索引落后，附�
 1. 解析 path（缺省 cwd）→ 向上找 `.git`（纯文件解析 `.git/HEAD`/`.git/config`，gitlink/worktree 跟过去；不依赖 git 命令）
 2. **是 git**：repo 根 = `.git` 所在目录；读出当前分支、HEAD commit、remote_url
    **非 git**：repo 根 = path 本身；插隐式分支 `(workdir)`（见 knowledge-design §4.8）；stderr 提示 `⚠ 不是 git 仓库——已按无版本目录索引，分支对比等功能不可用`
-3. 查重：`root_path` 已登记 → 幂等，报「已登记」+ 当前状态后退 0（不重复索引；想强制重建用 `penguin sync --full`）
+3. 查重：`root_path` 已登记 → 幂等，报「已登记」+ 当前状态后退 0（不重复索引；想强制重建用 `penguin index`）
 4. 写 `repos` 行 + `branches` 行（status=live, checkout_path=repo 根）
 5. 首次全量索引（进程内跑 indexer，进度条到 stderr：文件数/符号数/耗时）
 6. 若 Penguin app 正在跑：通知其 watcher 接管该 repo（本地 IPC，V1 可降级为「app 下次启动自动发现」）
@@ -101,19 +103,24 @@ vault           —             synced   0 符号（纯笔记）
 
 ---
 
-## 3. `penguin sync [path]`
+## 3. `penguin sync [path]` / `penguin index [path]`
 
-**用途**：手动触发一次增量索引（app 不在跑、或不想等 watcher 时）。
+一对索引动词，共用索引任务锁与协调规则（见 3.3）。**都是一次性进程，跑完即退出——不是 watcher，不启动 daemon，不长期监听文件变化**；长期监听请打开 Penguin app。
 
-**旗标**：`--full`（无视 content_hash 全量重建该 repo）、`--all`（所有已登记 repo）
+### 3.1 `penguin sync [path]` —— 增量
+
+**用途**：手动触发一次**增量**索引（app 不在跑、或不想等 watcher 时）。
+
+**旗标**：`--all`（所有已登记 repo）、`--no-wait`（撞锁不等待，退 4）
 
 **行为**：
 
 1. 定位 repo（path/cwd → 已登记 repo；`--all` 遍历）
-2. 读 `.git/HEAD`——发现分支切换先走分支切换流程（旧分支转 snapshot、新分支建/升 live）
-3. content_hash 扫描 → 只重解析变化文件 → 更新 nodes/versions/edges/FTS
-4. rename 检测（hash 全等）命中 → 经 `recordKnowledge()` 写 alias 事件（账本锁自动处理与 app 的并发）
-5. 结束打印 diff 摘要
+2. 获取索引任务锁（见 3.3；撞锁缺省等待）
+3. 读 `.git/HEAD`——发现分支切换先走分支切换流程（旧分支转 snapshot、新分支建/升 live）
+4. content_hash 扫描 → 只重解析变化文件 → 更新 nodes/versions/edges/FTS
+5. rename 检测（hash 全等）命中 → 经 `recordKnowledge()` 写 alias 事件（账本锁自动处理与 app 的并发）
+6. 结束打印 diff 摘要
 
 **输出**（人类）：
 
@@ -124,6 +131,39 @@ vault           —             synced   0 符号（纯笔记）
 `--json`：`{ repo, branch, files_changed, symbols: {added,updated,removed}, renames: [{from,to}], duration_ms }`
 
 **错误**：repo 未登记 → 退 2 提示 init；索引中途单文件解析失败 → 该文件标 Error 继续（出现在摘要里），整体退 0。
+
+### 3.2 `penguin index [path]` —— 全量重建
+
+**用途**：推倒重来的显式动词——丢弃该 repo 的**解析衍生数据**（符号/versions/parser 边/FTS/实体缓存）后全量重扫重建。用于：怀疑索引坏了、语言 grammar 升级后、`doctor` 建议重建时。
+
+**旗标**：`--all`（所有已登记 repo，逐个执行）、`--no-wait`（同上）
+
+**行为**：
+
+1. 定位 repo + 获取索引任务锁
+2. 单事务删除该 repo 的解析衍生数据——**账本与其物化视图（events/aliases/手工边/AI 断言）一概不动**（不可再生知识与解析数据的边界，spec §2.2.4）
+3. 全量扫描重建（同 init 的首建流程）
+4. 结束跑一次 `consistencyCheck` 并打印摘要
+
+**输出**（人类）：
+
+```text
+✓ fpms-provider 全量重建: 412 文件 · 3,801 符号 · 9,214 边 · 6.8s
+  账本数据未受影响 (1,042 行 · 物化一致)
+```
+
+`--json`：`{ repo, files, symbols, edges, duration_ms, ledger: {seq, materialized_seq} }`
+
+**错误**：同 sync。**注**：`index` 不重放账本（物化视图本来就不属于解析衍生数据、未被删除）；需要「删库级」重建时直接删 `knowledge.db` 后跑任意命令触发三源重建。
+
+### 3.3 索引任务锁（sync/index/app watcher 共用）
+
+同一 **repo + 分支 + checkout 目录** 只允许一个活跃索引任务：
+
+- app watcher 正在索引同一作用域 → CLI **缺省等待**（stderr：`等待 Penguin app 的索引任务完成…`），锁释放后继续
+- `--no-wait` → 跳过并退 **4**（`--json` 输出 `{ skipped: true, reason: "index_job_locked", holder: "app" }`）
+- 锁持有进程崩溃 → 残留锁按 mtime 超时回收（同账本锁策略）
+- 行为确定性：等待/跳过/失败三种结果都显式可见，绝不静默启动第二个索引任务
 
 ---
 
