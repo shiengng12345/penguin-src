@@ -156,6 +156,14 @@ CREATE TABLE IF NOT EXISTS entities (
   UNIQUE (entity_type, normalized_value)
 );
 
+CREATE TABLE IF NOT EXISTS credential_entries (
+  node_id TEXT PRIMARY KEY REFERENCES nodes(id),
+  title TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_notes USING fts5(
   node_id UNINDEXED, title, body
 );
@@ -164,7 +172,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts_symbols USING fts5(
 );
 `;
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 export function openDatabase(path: string): Database.Database {
   const db = new Database(path);

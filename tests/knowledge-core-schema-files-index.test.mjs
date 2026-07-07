@@ -9,11 +9,11 @@ function tempDbPath() {
   return join(mkdtempSync(join(tmpdir(), "pk-fidx-")), "knowledge.db");
 }
 
-test("schema version is 2 and meta records it", () => {
-  assert.equal(SCHEMA_VERSION, 2);
+test("schema version is 3 and meta records it", () => {
+  assert.equal(SCHEMA_VERSION, 3);
   const db = openDatabase(tempDbPath());
   const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
-  assert.equal(row.value, "2");
+  assert.equal(row.value, "3");
   db.close();
 });
 

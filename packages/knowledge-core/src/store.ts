@@ -394,6 +394,82 @@ export class KnowledgeStore {
       .run(p.repoId, p.branchId, p.filePath);
   }
 
+  // —— 笔记边（可再生：从 .md 解析出的 wikilink/entity_mention，直写；分支无关）——
+  // 全量替换某笔记节点产出的 parser 边（未解析目标 dst=NULL + raw_target 保留）。
+  replaceNoteEdges(
+    srcNodeId: string,
+    edges: Array<{
+      dst: string | null;
+      rawTarget: string | null;
+      edgeType: string;
+      confidence?: number;
+    }>,
+  ): void {
+    const del = this.db.prepare(
+      "DELETE FROM edges WHERE src = ? AND origin = 'parser' AND branch_id IS NULL",
+    );
+    const ins = this.db.prepare(
+      `INSERT INTO edges (id, src, dst, raw_target, edge_type, branch_id, origin, method, confidence, provenance)
+       VALUES (?, ?, ?, ?, ?, NULL, 'parser', 'EXTRACTED', ?, '{}')`,
+    );
+    const tx = this.db.transaction(() => {
+      del.run(srcNodeId);
+      for (const e of edges) {
+        ins.run(
+          `edge_${randomUUID()}`,
+          srcNodeId,
+          e.dst,
+          e.rawTarget,
+          e.edgeType,
+          e.confidence ?? 1.0,
+        );
+      }
+    });
+    tx();
+  }
+
+  // 目标节点出现后回填此前未解析的 wikilink（dst=NULL 且 raw_target 命中）。
+  // 幂等：只更新仍为 NULL 的行。返回补上的边数。
+  linkUnresolvedTargets(p: { nodeId: string; matches: string[] }): number {
+    if (p.matches.length === 0) return 0;
+    const placeholders = p.matches.map(() => "?").join(",");
+    const info = this.db
+      .prepare(
+        `UPDATE edges SET dst = ?
+         WHERE dst IS NULL AND edge_type = 'wikilink' AND raw_target IN (${placeholders})`,
+      )
+      .run(p.nodeId, ...p.matches);
+    return info.changes;
+  }
+
+  // —— 凭据正文（§5 C 案）：只存本表，永不进 FTS/MCP；图里仅有 credential 节点 ——
+  putCredential(p: { nodeId: string; title: string; kind: string; body: string }): void {
+    this.db
+      .prepare(
+        `INSERT INTO credential_entries (node_id, title, kind, body, created_at)
+         VALUES (@nodeId, @title, @kind, @body, @createdAt)
+         ON CONFLICT (node_id) DO UPDATE SET title=@title, kind=@kind, body=@body`,
+      )
+      .run({ ...p, createdAt: new Date().toISOString() });
+  }
+
+  getCredential(nodeId: string): { title: string; kind: string; body: string } | null {
+    return (
+      (this.db
+        .prepare("SELECT title, kind, body FROM credential_entries WHERE node_id = ?")
+        .get(nodeId) as { title: string; kind: string; body: string } | undefined) ?? null
+    );
+  }
+
+  // 只回元数据（title/kind），绝不含 body——供列表/图展示。
+  listCredentialMeta(): Array<{ nodeId: string; title: string; kind: string; createdAt: string }> {
+    return this.db
+      .prepare(
+        "SELECT node_id AS nodeId, title, kind, created_at AS createdAt FROM credential_entries ORDER BY created_at",
+      )
+      .all() as Array<{ nodeId: string; title: string; kind: string; createdAt: string }>;
+  }
+
   // 解析产出的代码边：同 file+branch 全量替换（§6.3 增量语义）。
   // 非 parser 边在这里是实现错误，不是数据——直接抛。
   replaceFileEdges(p: {
