@@ -127,6 +127,7 @@ Penguin 内建一张**统一知识图谱**：Obsidian 式笔记 vault 和多 rep
 - 提取的代码边（origin=parser）
 - FTS 行、实体提取缓存、搜索缓存
 - 解析器状态/文件错误标记
+- parser 生命周期事件（events 表中 `ledger_seq NULL` 的行：node_created/node_stale——可再生，供 timeline/recent_changes 覆盖代码侧变化；rename 例外，它是历史身份知识必须走账本）
 
 #### 2.2.2 ledger.jsonl 行格式
 
@@ -319,9 +320,13 @@ edges (
   provenance TEXT NOT NULL DEFAULT '{}'    -- JSON：file/line/解析器版本 + 建链时 branch/commit
 );
 
--- 事件查询表 —— ⚠️ 非真相源！ledger.jsonl 才是权威事件记录（§2.2）。
--- 本表是 replay 物化出来的查询加速视图：DB 被删后由 Ledger 重建；
--- 开发者禁止把本表当写入 API——写事件的唯一入口是 appendLedger()。
+-- 事件查询表 —— 两类行，由 ledger_seq 区分（2026-07-07 评审缝合）：
+--   ledger_seq NOT NULL：账本物化行（权威）。ledger.jsonl 是真相源（§2.2），
+--     写入唯一入口 appendLedger()；DB 被删后由 Ledger 重放重建。
+--   ledger_seq NULL：parser 生命周期事件（node_created/node_stale 等）——
+--     可再生的 Index 层数据，索引器直写（不进账本，否则账本被可再生数据膨胀，
+--     违反 §2.2.4 边界）；rebuild 时随解析数据删除重建。
+-- 对账（ledger_state.materialized_seq）只认 ledger_seq NOT NULL 的行。
 -- 物化必须同时保留 origin 和 method：timeline/recent_changes 查询要能区分
 -- 「解析器提取的事件 / AI 推断的事件 / 用户主张的事件」。
 events (
@@ -413,6 +418,7 @@ AI 时代**信任就是产品**：agent 拿到一条边，「解析出来的」�
 - FTS5 虚表：`fts_notes(node_id, title, body)`、`fts_symbols(node_id, name, signature)`
 - 所有查询走 TS 侧 `KnowledgeStore` 模块（`searchText()` / `neighbors()` / `path()` / `whoCalls()`…），业务代码不裸写 FTS5 语法；迁线上库 = 换这一层实现（守 D4）
 - FTS/加速索引可随时 drop 重建，不属于核心关系模型
+- **V1 已知局限**：笔记与符号分属两张 FTS 表、各自排序后应用层拼接，无跨表统一相关性——将来做混合重排/合并表都在 `searchText()` 接口后面完成，不破消费方
 
 ### 3.5 这个模型直接解锁的能力
 
@@ -694,6 +700,7 @@ penguin rebuild（修复动词，很少用）
 | `penguin index` 中途崩溃 | 逐文件事务回滚（§6.3.2）；下次 index 按 files_index 的 status/hash 重新处理未完成文件 |
 | 用户手动删除文件 | 下次 index：files_index 标 deleted、symbol_versions 标 stale、删该文件的 parser 边与 FTS 行 |
 | 改内容但 mtime/size 未变（极端） | content_hash 是最终判断，但快筛会漏过——`penguin doctor --verify` 强制全量 hash 扫描兜底 |
+| 引用完整性（外键不开） | 三源重建时 Ledger 先重放、nodes 后到，故不开 SQLite 外键；完整性由「账本+重建流程」保证，`doctor --verify` 附孤儿行检查（悬空边/无主 version/无主 alias）兜底 |
 | 切分支后没开 app 直接查询 | 查询结果按 last_indexed_commit 判 stale 并标注；`penguin index` 读 `.git/HEAD` 走分支切换流程（§6.3.3）追平 |
 | `--json` 结构破坏兼容 | 视为契约破坏；字段改名/删除需版本化或保留兼容字段，不允许随意改 |
 
@@ -728,6 +735,8 @@ penguin rebuild（修复动词，很少用）
 | **V1（本设计交付）** | 全量 schema（含 node_aliases / events / workspaces / 双轴 provenance）、Ledger/Index 双层存储与写入铁律（§2.2，含跨进程账本锁）、事件开始记录（无 UI）、content_hash 全等 rename 检测、Workspace 分组与查询作用域、MCP 六件套（`explore_graph` 的 timeline/recent_changes mode 即查即得）、**薄 CLI 动词集（§8.3）** |
 | **V2** | timeline/replay 视图与 UI、相似度 rename 检测、AI 建议边确认流（suggest/accept/reject）、snapshot manifest、本地 git 对象（commit/tag/merge 拓扑）入图、远端 PR/Issue（走 GitProvider 注册表，存引用+缓存摘要，不整库镜像）、信任策略 |
 | **V3** | 公开插件 API（语言/实体/provider/集成）、线上存储库、多人协作 |
+
+**范围收缩预案（2026-07-07 评审共识）**：V1 交付量偏大是首要执行风险。若计划推进中需要砍，按此顺序：局部图视图 → Penguin slash 块（本已推迟）→ CLI 的 note 写动词（查询动词保留）→ 语言 grammar 首发 20 门缩到 6 门（TS/JS/Rust/Go/Java/Python）。**不可砍**：存储核心（Ledger/Index）、MCP 六件套、基本 vault 编辑（文件树+编辑器+backlinks）。Vault UI 整体不砍——它是产品的壳。
 
 ## 12. 待确认（下一轮讨论）
 
