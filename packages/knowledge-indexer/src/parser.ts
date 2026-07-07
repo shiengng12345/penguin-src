@@ -21,15 +21,20 @@ async function ensureInit(): Promise<void> {
   await initPromise;
 }
 
-// Load (and cache) the grammar for a language, returning a fresh Parser bound
-// to it. Language objects are cached across calls; Parser objects are cheap.
-export async function loadParser(lang: Lang): Promise<Parser> {
+// Load (and cache) the grammar Language for a language. Cached across calls.
+export async function loadLanguage(lang: Lang): Promise<Language> {
   await ensureInit();
   let language = languageCache.get(lang);
   if (!language) {
     language = await Language.load(join(wasmsOutDir(), WASM_FILE[lang]));
     languageCache.set(lang, language);
   }
+  return language;
+}
+
+// A fresh Parser bound to the language (Parser objects are cheap; Language is cached).
+export async function loadParser(lang: Lang): Promise<Parser> {
+  const language = await loadLanguage(lang);
   const parser = new Parser();
   parser.setLanguage(language);
   return parser;
