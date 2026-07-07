@@ -352,13 +352,13 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
         className="relative z-50 flex h-[86vh] max-h-[880px] min-h-[560px] w-full max-w-[1040px] flex-col overflow-hidden rounded-xl border border-slate-700/70 bg-[#0b111a] shadow-[0_28px_80px_rgba(0,0,0,0.6)]"
         onClick={(e) => e.stopPropagation()}
       >
-        <header className="flex shrink-0 items-start justify-between border-b border-slate-800/90 px-6 py-5">
+        <header className="flex shrink-0 items-center justify-between border-b border-slate-800/90 px-6 py-4">
           <div className="flex items-center gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-cyan-400/25 bg-cyan-400/10 text-cyan-300">
-              <Package className="h-5 w-5" />
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg border border-cyan-400/25 bg-cyan-400/10 text-cyan-300">
+              <Package className="h-[18px] w-[18px]" />
             </div>
             <div>
-              <h2 className="text-xl font-semibold leading-6 text-slate-50">安装包</h2>
+              <h2 className="text-lg font-semibold leading-6 text-slate-50">安装包</h2>
               <p className="mt-0.5 text-[13px] text-slate-400">
                 安装 gRPC / gRPC-Web / JS-SDK package
               </p>
@@ -375,9 +375,9 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
           </button>
         </header>
 
-        <div className="flex min-h-0 flex-1 flex-col gap-5 px-6 py-5">
+        <div className="flex min-h-0 flex-1 flex-col gap-3.5 px-6 py-4">
           <section className="shrink-0">
-            <label className="mb-1.5 block text-[11px] font-medium text-slate-300">包类型</label>
+            <label className="mb-1 block text-[11px] font-medium text-slate-300">包类型</label>
             <div className="flex flex-wrap gap-2">
               {TYPE_FILTERS.map((item) => {
                 const active = typeFilter === item.value;
@@ -415,7 +415,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
 
           <section className="flex shrink-0 flex-col gap-3 sm:flex-row sm:items-end">
             <div className="min-w-0 sm:flex-[65_1_0%]">
-              <label className="mb-1.5 block text-[11px] font-medium text-slate-300">搜索包名</label>
+              <label className="mb-1 block text-[11px] font-medium text-slate-300">搜索包名</label>
               <div className="relative">
                 <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
                 <Input
@@ -440,7 +440,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
               </div>
             </div>
             <div className="min-w-0 sm:flex-[35_1_0%]">
-              <label className="mb-1.5 block text-[11px] font-medium text-slate-300">搜索分支</label>
+              <label className="mb-1 block text-[11px] font-medium text-slate-300">搜索分支</label>
               <div className="relative">
                 <GitBranch className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
                 <Input
@@ -478,7 +478,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
             </button>
           </section>
 
-          <section className="flex min-h-0 flex-1 flex-col">
+          <section className="flex min-h-0 flex-1 flex-col" style={{ minHeight: 336 }}>
             <div className="mb-1.5 flex shrink-0 items-center justify-between gap-3">
               <label className="block text-[11px] font-medium text-slate-300">搜索结果</label>
               {registryList && (
@@ -513,7 +513,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                         onClick={() => selectPackage(key)}
                         disabled={isInstalling}
                         className={cn(
-                          "grid min-h-[68px] w-full grid-cols-[minmax(0,1fr)_190px_168px_84px] items-center gap-4 border px-4 py-2.5 text-left transition-colors",
+                          "grid min-h-[63px] w-full grid-cols-[minmax(0,1fr)_190px_168px_84px] items-center gap-4 border px-4 py-2 text-left transition-colors",
                           selected
                             ? "border-cyan-400/70 bg-cyan-500/10"
                             : "border-transparent hover:bg-slate-900/55",
@@ -571,7 +571,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
           </section>
 
           <section className="shrink-0">
-            <label className="mb-1.5 block text-[11px] font-medium text-slate-300">
+            <label className="mb-1 block text-[11px] font-medium text-slate-300">
               手动输入包规格（可选）
             </label>
             <div className="relative">
@@ -651,19 +651,19 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
           )}
         </div>
 
-        <footer className="flex items-center justify-end gap-2.5 border-t border-slate-800/90 px-5 py-3">
+        <footer className="flex shrink-0 items-center justify-end gap-2.5 border-t border-slate-800/90 px-6 py-4">
           <Button
             variant="outline"
             onClick={onClose}
             disabled={isInstalling}
-            className="h-9 border-slate-700 bg-transparent px-5 text-slate-100 hover:bg-white/5"
+            className="h-10 border-slate-700 bg-transparent px-5 text-slate-100 hover:bg-white/5"
           >
             取消
           </Button>
           <Button
             onClick={handleInstall}
             disabled={!canInstall}
-            className="h-9 bg-cyan-500 px-6 text-slate-950 hover:bg-cyan-400 disabled:bg-cyan-500/40"
+            className="h-10 bg-cyan-500 px-6 font-medium text-slate-950 hover:bg-cyan-400 disabled:cursor-not-allowed disabled:bg-cyan-500/30 disabled:text-cyan-50/70"
           >
             <Download className="h-4 w-4" />
             {isInstalling ? "安装中" : "安装"}
