@@ -440,7 +440,10 @@ GetLoginURL: main@abc123 ↔ feat/new-login@def456
 ```
 
    接线复用现有 `src-tauri/src/mcp.rs` 逻辑：合并进各家配置、不覆盖其他 server。**首发 provider：Claude Code、Codex**；Claude Desktop 探测到即列出。
-3. **同伴工具可选安装**（外部工具，非依赖——D3 不变；走各自官方安装器，装完即独立于 Penguin）：
+3. **AI 使用规则注入（可选，缺省勾选）**——只装 MCP 不保证 AI 主动查，需三级杠杆：MCP server instructions（计划 4 内置，免费）＋ agent 规则 ＋ hook。install 在此步征求同意后：
+   - 往 `~/.claude/CLAUDE.md` / `~/.codex/AGENTS.md` **追加**一段使用规则（幂等：已有标记段则更新不重复）：「回答项目相关问题前先调 penguin MCP 的 knowledge_search / explore_graph；调查结论用 write_note 存回」
+   - advanced 选项：安装 Claude Code hook（UserPromptSubmit 自动注入相关知识上下文，同用户 codegraph 的玩法）——缺省不勾
+4. **同伴工具可选安装**（外部工具，非依赖——D3 不变；走各自官方安装器，装完即独立于 Penguin）：
 
 ```text
   ◆ 顺手装点同伴工具？（可跳过）
