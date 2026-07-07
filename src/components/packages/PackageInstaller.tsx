@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
   Box,
   Braces,
@@ -6,6 +7,7 @@ import {
   CheckCircle2,
   ChevronDown,
   Clock,
+  Copy,
   Download,
   GitBranch,
   Globe,
@@ -138,15 +140,43 @@ function ProtocolIcon({ protocol }: { protocol: PackageProtocol }) {
 }
 
 function BranchChip({ branch }: { branch: string }) {
+  const labelRef = useRef<HTMLSpanElement>(null);
+  const [tip, setTip] = useState<{ x: number; y: number } | null>(null);
   if (!branch) return null;
+  // 名字被截断时才在 hover 弹出完整分支名；tooltip 用 fixed + portal 到 body，
+  // 不会被结果列表的 overflow 容器裁掉。
+  const onEnter = () => {
+    const el = labelRef.current;
+    if (!el || el.scrollWidth <= el.clientWidth) return;
+    const r = el.getBoundingClientRect();
+    setTip({ x: r.left + r.width / 2, y: r.top });
+  };
   return (
     <span
-      title={branch}
+      onMouseEnter={onEnter}
+      onMouseLeave={() => setTip(null)}
       // 纯元数据：灰蓝极淡底 + ring-white/5，不用青色、不像可选中/可编辑
       className="inline-flex max-w-[160px] items-center gap-1 whitespace-nowrap rounded-md bg-slate-800/45 px-2 py-0.5 text-[11px] text-slate-400 ring-1 ring-white/5"
     >
       <GitBranch className="h-3 w-3 shrink-0 text-slate-500" />
-      <span className="truncate">{branch}</span>
+      <span ref={labelRef} className="truncate">
+        {branch}
+      </span>
+      {tip &&
+        createPortal(
+          <div
+            style={{
+              position: "fixed",
+              left: tip.x,
+              top: tip.y - 8,
+              transform: "translate(-50%, -100%)",
+            }}
+            className="pointer-events-none z-[70] max-w-[360px] break-all rounded-md border border-slate-700 bg-[#0d1420] px-2.5 py-1 font-mono text-[11px] text-slate-100 shadow-[0_8px_24px_rgba(0,0,0,0.55)]"
+          >
+            {branch}
+          </div>,
+          document.body,
+        )}
     </span>
   );
 }
@@ -180,6 +210,9 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
   // 多选：勾选多个包一次批量安装（对齐一次装一整批的工作流）
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [batchProgress, setBatchProgress] = useState<{ done: number; total: number } | null>(null);
+  // 行内「复制安装规格」的短暂反馈：记住刚复制的那一行 key，1.5s 后清除。
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [nameSuggestOpen, setNameSuggestOpen] = useState(false);
   const [nameSuggestIdx, setNameSuggestIdx] = useState(-1);
   const nameBlurTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -424,6 +457,25 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
     setManualSpec("");
   };
 
+  // 复制该行的完整安装规格（@snsoft/x-grpc-web@版本），带 1.5s「已复制」反馈。
+  const copySpec = async (key: string, spec: string) => {
+    try {
+      await navigator.clipboard.writeText(spec);
+    } catch {
+      // 剪贴板不可用时静默失败——不打断安装流程
+    }
+    setCopiedKey(key);
+    if (copyTimer.current) clearTimeout(copyTimer.current);
+    copyTimer.current = setTimeout(() => setCopiedKey(null), 1500);
+  };
+
+  useEffect(
+    () => () => {
+      if (copyTimer.current) clearTimeout(copyTimer.current);
+    },
+    [],
+  );
+
   const logStatus = (() => {
     const isSuccess = lastLog === "Installation complete!" || lastLog === "Package removed!";
     const isFailed =
@@ -565,13 +617,15 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                 />
                 <button
                   type="button"
+                  // 清空搜索词 + 取消所有已勾选的产品线（移除筛选，恢复全部）
                   onClick={() => {
                     setSearchQuery("");
+                    setSelectedFamilies(new Set());
                     setNameSuggestIdx(-1);
                   }}
                   disabled={isInstalling}
                   className="absolute right-8 top-1/2 -translate-y-1/2 rounded p-0.5 text-slate-500 hover:text-slate-200"
-                  aria-label="清除包名搜索"
+                  aria-label="清除包名搜索与产品线筛选"
                 >
                   <X className="h-3.5 w-3.5" />
                 </button>
@@ -752,21 +806,42 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                     const installed = isPackageRowInstalled(pkg, packages);
                     const stamp = stampFromVersion(pkg.version);
                     return (
-                      <button
+                      <div
                         key={key}
-                        type="button"
-                        onClick={() => toggleRow(key)}
-                        disabled={isInstalling}
+                        role="button"
+                        tabIndex={0}
+                        aria-label={`复制 ${packageInstallSpec(pkg)}`}
+                        // 整行点击 = 复制安装规格；勾选用左侧的勾选框（独立点击）
+                        onClick={() => void copySpec(key, packageInstallSpec(pkg))}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            void copySpec(key, packageInstallSpec(pkg));
+                          }
+                        }}
                         className={cn(
-                          "grid min-h-[63px] w-full grid-cols-[minmax(0,1fr)_190px_168px_84px] items-center gap-4 border px-4 py-2 text-left transition-colors",
+                          "group grid min-h-[63px] w-full cursor-pointer grid-cols-[minmax(0,1fr)_190px_168px_84px_44px] items-center gap-4 border px-4 py-2 text-left transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-cyan-400/60",
                           selected
                             ? "border-cyan-400/70 bg-cyan-500/10"
                             : "border-transparent hover:bg-slate-900/55",
                         )}
                       >
-                        {/* 名称列：单选 + 图标块 + （包名 / 类型 chip + 版本） */}
+                        {/* 名称列：勾选框（点击=选择安装） + 图标块 + （包名 / 版本） */}
                         <div className="flex min-w-0 items-center gap-3">
-                          <RowCheck selected={selected} />
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (!isInstalling) toggleRow(key);
+                            }}
+                            disabled={isInstalling}
+                            aria-pressed={selected}
+                            aria-label={selected ? "取消选择" : "选择以安装"}
+                            title={selected ? "取消选择" : "选择以安装"}
+                            className="shrink-0 rounded focus:outline-none focus-visible:ring-1 focus-visible:ring-cyan-400/60 disabled:opacity-50"
+                          >
+                            <RowCheck selected={selected} />
+                          </button>
                           <ProtocolIcon protocol={pkg.protocol} />
                           <div className="min-w-0">
                             <div
@@ -801,7 +876,31 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                             </span>
                           )}
                         </div>
-                      </button>
+                        {/* 复制安装规格列：hover 显示复制按钮；已复制变绿勾 */}
+                        <div className="flex justify-end">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void copySpec(key, packageInstallSpec(pkg));
+                            }}
+                            title={`复制 ${packageInstallSpec(pkg)}`}
+                            aria-label={`复制 ${packageInstallSpec(pkg)}`}
+                            className={cn(
+                              "flex h-7 w-7 items-center justify-center rounded-md transition-all hover:bg-white/10 hover:text-slate-100 focus:outline-none focus-visible:opacity-100 focus-visible:ring-1 focus-visible:ring-cyan-400/60",
+                              copiedKey === key
+                                ? "text-emerald-300 opacity-100"
+                                : "text-slate-400 opacity-0 group-hover:opacity-100",
+                            )}
+                          >
+                            {copiedKey === key ? (
+                              <Check className="h-4 w-4" />
+                            ) : (
+                              <Copy className="h-3.5 w-3.5" />
+                            )}
+                          </button>
+                        </div>
+                      </div>
                     );
                   })}
                 </div>
