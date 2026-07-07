@@ -371,15 +371,22 @@ test("branch filter excludes js-sdk (no branch)", () => {
   assert.deepEqual(rows.map((r) => [r.name, r.branch]), [["@snsoft/player-grpc-web", "master"]]);
 });
 
-test("branch filter ranks exact/prefix branch above mere substring", () => {
+test("branch filter is prefix-only (excludes substring) and orders newest first", () => {
   const list = [
-    { name: "@snsoft/a-grpc", latest_version: "1.0.0", newest_version: "1.0.0-20260101000000", description: null, tags: ["origin-edmond-replace-pulsar-with-temporal"], dist_tags: { "origin-edmond-replace-pulsar-with-temporal": "1.0.0-20260101000000" } },
-    { name: "@snsoft/b-grpc", latest_version: "1.0.0", newest_version: "1.0.0-20260202000000", description: null, tags: ["replace-pulsar-with-temporal"], dist_tags: { "replace-pulsar-with-temporal": "1.0.0-20260202000000" } },
+    { name: "@snsoft/a-grpc", latest_version: "1.0.0", newest_version: "1.0.0-20260706111355", description: null, tags: ["origin-edmond-replace-pulsar-with-temporal"], dist_tags: { "origin-edmond-replace-pulsar-with-temporal": "1.0.0-20260706111355" } },
+    { name: "@snsoft/b-grpc", latest_version: "1.0.0", newest_version: "1.0.0-20260706111324", description: null, tags: ["replace-pulsar-with-temporal"], dist_tags: { "replace-pulsar-with-temporal": "1.0.0-20260706111324" } },
+    { name: "@snsoft/c-grpc", latest_version: "1.0.0", newest_version: "1.0.0-20260706111323", description: null, tags: ["replace-pulsar-with-temporal-hotfix"], dist_tags: { "replace-pulsar-with-temporal-hotfix": "1.0.0-20260706111323" } },
   ];
   const rows = filterPackageRows(list, { query: "", branch: "replace-pulsar-with-temporal", protocol: "all" });
-  // 精确分支的包排最前，尽管它构建时间更早
-  assert.equal(rows[0].name, "@snsoft/b-grpc");
-  assert.equal(rows[0].branch, "replace-pulsar-with-temporal");
-  // 子串命中的仍在结果里（不丢），只是排后面
-  assert.ok(rows.some((r) => r.name === "@snsoft/a-grpc"));
+  // origin-edmond-... 只是包含关键字、不以它开头 → 排除
+  assert.ok(!rows.some((r) => r.name === "@snsoft/a-grpc"));
+  // 前缀命中保留（exact 与 exact-hotfix），且按构建时间新→旧
+  assert.deepEqual(rows.map((r) => r.name), ["@snsoft/b-grpc", "@snsoft/c-grpc"]);
+});
+
+test("branch filter still supports partial typing via prefix (mast → master)", () => {
+  const list = [
+    { name: "@snsoft/x-grpc", latest_version: "1.0.0", newest_version: "1.0.0-20260101000000", description: null, tags: ["master"], dist_tags: { master: "1.0.0-20260101000000" } },
+  ];
+  assert.equal(filterPackageRows(list, { query: "", branch: "mast", protocol: "all" }).length, 1);
 });

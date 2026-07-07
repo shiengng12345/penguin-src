@@ -238,40 +238,26 @@ export function filterPackageRows(
   const scoped = list
     .flatMap(rowsForPackage)
     .filter((pkg) => filters.protocol === "all" || pkg.protocol === filters.protocol)
-    .filter((pkg) => !branchQuery || pkg.branch.toLowerCase().includes(branchQuery));
-
-  // 分支匹配精度：精确 > 前缀 > 子串。避免 `origin-edmond-replace-...`
-  // 这类「包含」命中盖过精确的 `replace-pulsar-with-temporal`。
-  const branchRank = (branch: string): number => {
-    if (!branchQuery) return 0;
-    const b = branch.toLowerCase();
-    if (b === branchQuery) return 0;
-    if (b.startsWith(branchQuery)) return 1;
-    return 2;
-  };
-  const withBranchRank = (
-    rows: PackageResultRow[],
-    cmp: (a: PackageResultRow, b: PackageResultRow) => number,
-  ): PackageResultRow[] =>
-    branchQuery
-      ? [...rows].sort((a, b) => branchRank(a.branch) - branchRank(b.branch) || cmp(a, b))
-      : [...rows].sort(cmp);
+    // 分支匹配 = 前缀（拍板）：`replace-pulsar-with-temporal` 只命中以它
+    // 开头的分支；`origin-edmond-replace-...` 不以它开头，排除。部分输入
+    // （mast → master）仍可用。命中后纯按构建时间新→旧排，最新在最上面。
+    .filter((pkg) => !branchQuery || pkg.branch.toLowerCase().startsWith(branchQuery));
 
   const query = filters.query.trim();
   if (!query) {
-    return withBranchRank(scoped, rowNewestFirst).slice(0, RESULT_LIMIT);
+    return [...scoped].sort(rowNewestFirst).slice(0, RESULT_LIMIT);
   }
 
   const queryKey = normalizeSearchText(query);
   const structuredHits = scoped.filter((row) => branchPackageMatches(row, queryKey));
   if (structuredHits.length > 0) {
-    return withBranchRank(structuredHits, rowNewestFirst).slice(0, RESULT_LIMIT);
+    return structuredHits.sort(rowNewestFirst).slice(0, RESULT_LIMIT);
   }
 
-  return withBranchRank(
-    scoped.filter((row) => packageMatches(row, queryKey)),
-    rowNewestFirst,
-  ).slice(0, RESULT_LIMIT);
+  return scoped
+    .filter((row) => packageMatches(row, queryKey))
+    .sort(rowNewestFirst)
+    .slice(0, RESULT_LIMIT);
 }
 
 export function isPackageRowInstalled(
