@@ -112,8 +112,8 @@ function TypeChip({ protocol }: { protocol: PackageProtocol }) {
   return (
     <span
       className={cn(
-        // 固定宽度：gRPC / gRPC-Web / JS-SDK 占同宽，后面的版本号才能列对齐
-        "inline-flex h-5 w-[68px] shrink-0 items-center justify-center whitespace-nowrap rounded px-1 text-[11px] font-medium leading-none",
+        // 自然紧凑宽度；版本对齐由外层 mini-grid 的固定列负责
+        "inline-flex h-5 shrink-0 items-center whitespace-nowrap rounded px-2 text-[11px] font-medium leading-none",
         protocol === "sdk"
           ? "border border-purple-400/25 bg-purple-500/15 text-purple-200"
           : "border border-cyan-400/20 bg-cyan-400/10 text-cyan-200",
@@ -532,7 +532,8 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                             >
                               {pkg.name}
                             </div>
-                            <div className="mt-1 flex min-w-0 items-center gap-2">
+                            {/* mini-grid：chip 自然宽度居左，版本号固定从 70px 起对齐 */}
+                            <div className="mt-1 grid grid-cols-[70px_minmax(0,1fr)] items-center gap-2">
                               <TypeChip protocol={pkg.protocol} />
                               <span
                                 title={pkg.version}
