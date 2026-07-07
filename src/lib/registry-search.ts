@@ -13,7 +13,7 @@ export interface PackageVersions {
 
 // 团队高频 publish：缓存只做「秒开第一屏」，每次打开都后台实时重爬替换；
 // 版本/tag（点包之后）永远实时拉、绝不缓存——刚 publish 的立刻可见。
-const DISK_CACHE_KEY = "registry:pkg-list:v2"; // v2: 增加 tags 字段
+const DISK_CACHE_KEY = "registry:pkg-list:v3"; // v3: 增加 newest_version 字段
 let memoryList: RegistryPackage[] | null = null;
 let inflight: Promise<RegistryPackage[]> | null = null;
 

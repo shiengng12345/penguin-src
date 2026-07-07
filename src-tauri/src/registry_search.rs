@@ -25,6 +25,9 @@ const AUTH_HINT: &str = "请到 Settings → Package Registry 检查凭据";
 pub(crate) struct RegistryPackage {
     pub name: String,
     pub latest_version: String,
+    // 全部版本（含发到任意 tag 的）里构建时间最新的那个——
+    // 「最近发布」排序/显示用它；latest_version 只反映 latest tag。
+    pub newest_version: String,
     pub description: Option<String>,
     // dist-tags（去掉 latest）——团队按项目打 tag 发布
     // （如 kyc-merge-account / freespin-every-day-v3），搜索要能按它命中。
@@ -54,8 +57,47 @@ fn status_error(context: &str, status: reqwest::StatusCode) -> String {
     }
 }
 
-// snsoft 版本带 14 位 YYYYMMDDHHMMSS 构建时间戳；比较新旧以它为准。
+// js-sdk 系用 ISO 风格戳：2025-11-25T08-08-26-612Z → 20251125080826
+fn iso_stamp(version: &str) -> Option<u64> {
+    for (i, _) in version.match_indices('T') {
+        if i < 10 {
+            continue;
+        }
+        let date = &version[i - 10..i];
+        let rest = &version[i + 1..];
+        let db = date.as_bytes();
+        let rb = rest.as_bytes();
+        if db[4] == b'-'
+            && db[7] == b'-'
+            && rb.len() >= 8
+            && rb[2] == b'-'
+            && rb[5] == b'-'
+        {
+            let parts = [
+                &date[0..4],
+                &date[5..7],
+                &date[8..10],
+                &rest[0..2],
+                &rest[3..5],
+                &rest[6..8],
+            ];
+            if parts
+                .iter()
+                .all(|s| s.bytes().all(|b| b.is_ascii_digit()))
+            {
+                return parts.concat().parse().ok();
+            }
+        }
+    }
+    None
+}
+
+// snsoft 版本两种构建时间戳都认：14 位 YYYYMMDDHHMMSS（grpc 系）
+// 与 ISO 风格 YYYY-MM-DDTHH-MM-SS-mmmZ（js-sdk 系）。比较新旧以它为准。
 fn version_stamp(version: &str) -> Option<u64> {
+    if let Some(s) = iso_stamp(version) {
+        return Some(s);
+    }
     let bytes = version.as_bytes();
     let mut run_start = None;
     let mut run_len = 0usize;
@@ -169,6 +211,7 @@ async fn npm_search_all(
             if obj.package.name.starts_with(SNSOFT_SCOPE) {
                 out.push(RegistryPackage {
                     name: obj.package.name,
+                    newest_version: obj.package.version.clone(),
                     latest_version: obj.package.version,
                     description: obj.package.description,
                     tags: Vec::new(), // enrich_with_packuments 统一补
@@ -340,9 +383,11 @@ async fn nexus_search_all(
         .into_iter()
         .map(|(name, versions)| {
             let sorted = sort_versions_desc(versions);
+            let newest = sorted.first().cloned().unwrap_or_default();
             RegistryPackage {
                 name,
-                latest_version: sorted.first().cloned().unwrap_or_default(),
+                newest_version: newest.clone(),
+                latest_version: newest,
                 description: None,
                 tags: Vec::new(), // enrich_with_packuments 统一补
             }
@@ -480,6 +525,11 @@ async fn enrich_with_packuments(
             if let Some(latest) = packument.dist_tags.get("latest") {
                 pkg.latest_version = latest.clone();
             }
+            // 「最近发布」= 全版本最大构建戳——发到任意 tag（不只 latest）都算
+            let all_versions: Vec<String> = packument.versions.keys().cloned().collect();
+            if let Some(newest) = sort_versions_desc(all_versions).into_iter().next() {
+                pkg.newest_version = newest;
+            }
             if pkg.description.is_none() {
                 pkg.description = packument.description.clone();
             }
@@ -515,6 +565,20 @@ pub(crate) async fn registry_package_versions(name: String) -> Result<PackageVer
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_stamp_parses_iso_style_js_sdk_builds() {
+        assert_eq!(
+            version_stamp("1.0.0-2025-11-25T08-08-26-612Z"),
+            Some(20251125080826)
+        );
+        // ISO 2026 must sort above 14 位 2025
+        let sorted = sort_versions_desc(vec![
+            "1.0.0-2025-11-25T08-08-26-612Z".to_string(),
+            "1.0.1-2026-01-05T10-00-00-000Z".to_string(),
+        ]);
+        assert_eq!(sorted[0], "1.0.1-2026-01-05T10-00-00-000Z");
+    }
 
     #[test]
     fn version_stamp_extracts_14_digit_build_time() {

@@ -6,6 +6,8 @@ import { protocolFromSnsoftPackageName } from "@penguin/core";
 export interface RegistryPackage {
   name: string;
   latest_version: string;
+  // 全部版本（含任意 tag）里构建时间最新者——「最近发布」排序/显示用它
+  newest_version: string;
   description: string | null;
   // dist-tags（项目标签，如 kyc-merge-account）——搜索按它命中
   tags: string[];
@@ -15,8 +17,11 @@ export type PackageProtocol = "grpc-web" | "grpc" | "sdk";
 
 const RESULT_LIMIT = 50;
 
-// snsoft 版本里的 14 位 YYYYMMDDHHMMSS 构建时间戳；无戳视为最旧。
+// 构建时间戳双格式：14 位 YYYYMMDDHHMMSS（grpc 系）与
+// ISO 风格 YYYY-MM-DDTHH-MM-SS（js-sdk 系）；无戳视为最旧。
 function buildStampOf(version: string): number {
+  const iso = version.match(/(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})/);
+  if (iso) return Number(iso.slice(1, 7).join(""));
   const m = version.match(/(?:^|\D)(\d{14})(?!\d)/);
   return m ? Number(m[1]) : 0;
 }
@@ -46,7 +51,7 @@ export function filterPackages(
     return [...scoped]
       .sort(
         (a, b) =>
-          buildStampOf(b.latest_version) - buildStampOf(a.latest_version) ||
+          buildStampOf(b.newest_version) - buildStampOf(a.newest_version) ||
           a.name.localeCompare(b.name),
       )
       .slice(0, RESULT_LIMIT);

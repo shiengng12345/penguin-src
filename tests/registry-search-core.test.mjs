@@ -33,12 +33,12 @@ const core = await loadCore();
 const { filterPackages, protocolOfPackage } = core;
 
 const PKGS = [
-  { name: "@snsoft/auth-grpc-web", latest_version: "2.1.1-20260624172317", description: "auth service stubs", tags: ["cicd-master"] },
-  { name: "@snsoft/auth-grpc", latest_version: "2.1.1-20260624172317", description: null, tags: ["master"] },
-  { name: "@snsoft/payment-grpc-web", latest_version: "1.0.0-20260101000000", description: "payment flows", tags: ["kyc-merge-account"] },
-  { name: "@snsoft/payment-grpc", latest_version: "1.0.0-20260101000000", description: null, tags: ["kyc-merge-account"] },
-  { name: "@snsoft/promotion-grpc", latest_version: "2.0.0", description: null, tags: ["freespin-every-day-v3"] },
-  { name: "@snsoft/js-sdk", latest_version: "3.0.0", description: "browser sdk", tags: [] },
+  { name: "@snsoft/auth-grpc-web", latest_version: "2.1.1-20260624172317", newest_version: "2.1.1-20260624172317", description: "auth service stubs", tags: ["cicd-master"] },
+  { name: "@snsoft/auth-grpc", latest_version: "2.1.1-20260624172317", newest_version: "2.1.1-20260624172317", description: null, tags: ["master"] },
+  { name: "@snsoft/payment-grpc-web", latest_version: "1.0.0-20260101000000", newest_version: "1.0.0-20260101000000", description: "payment flows", tags: ["kyc-merge-account"] },
+  { name: "@snsoft/payment-grpc", latest_version: "1.0.0-20260101000000", newest_version: "1.0.0-20260101000000", description: null, tags: ["kyc-merge-account"] },
+  { name: "@snsoft/promotion-grpc", latest_version: "2.0.0", newest_version: "2.0.0", description: null, tags: ["freespin-every-day-v3"] },
+  { name: "@snsoft/js-sdk", latest_version: "3.0.0", newest_version: "3.0.0", description: "browser sdk", tags: [] },
 ];
 
 test("protocol scoping: grpc-web keeps only -grpc-web packages", () => {
@@ -132,10 +132,25 @@ test("browse mode (empty query) orders newest build first", () => {
   );
 });
 
+test("browse ordering understands both stamp formats (14-digit and ISO)", () => {
+  const mixed = [
+    { name: "@snsoft/old-iso-grpc", latest_version: "1.0.0", newest_version: "1.0.0-2025-11-25T08-08-26-612Z", description: null, tags: [] },
+    { name: "@snsoft/new-14-grpc", latest_version: "1.0.0", newest_version: "1.0.0-20260707114517", description: null, tags: [] },
+    { name: "@snsoft/new-iso-grpc", latest_version: "1.0.0", newest_version: "1.0.0-2026-01-05T10-00-00-000Z", description: null, tags: [] },
+  ];
+  const hits = filterPackages(mixed, "", null).map((p) => p.name);
+  assert.deepEqual(hits, [
+    "@snsoft/new-14-grpc",
+    "@snsoft/new-iso-grpc",
+    "@snsoft/old-iso-grpc",
+  ]);
+});
+
 test("empty query returns protocol-scoped list, capped at 50", () => {
   const big = Array.from({ length: 60 }, (_, i) => ({
     name: `@snsoft/pkg-${i}-grpc`,
     latest_version: "1.0.0",
+    newest_version: "1.0.0",
     description: null,
     tags: [],
   }));

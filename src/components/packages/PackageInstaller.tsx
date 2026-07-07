@@ -21,9 +21,15 @@ function splitSpec(spec: string): { name: string; version: string } {
   return { name: trimmed.slice(0, at), version: trimmed.slice(at + 1) };
 }
 
-// snsoft build versions carry a 14-digit YYYYMMDDHHMMSS stamp
-// (e.g. "2.1.1-20260624172317") — that's the package's build time.
+// snsoft build stamps come in two shapes: 14-digit YYYYMMDDHHMMSS
+// ("2.1.1-20260624172317", grpc 系) and ISO-with-hyphens
+// ("1.0.0-2025-11-25T08-08-26-612Z", js-sdk 系). Parse both.
 function stampFromVersion(version: string): Date | null {
+  const iso = version.match(/(\d{4})-(\d{2})-(\d{2})T(\d{2})-(\d{2})-(\d{2})/);
+  if (iso) {
+    const dt = new Date(+iso[1], +iso[2] - 1, +iso[3], +iso[4], +iso[5], +iso[6]);
+    if (!Number.isNaN(dt.getTime())) return dt;
+  }
   const m = version.match(/(\d{14})(?:\D|$)/);
   if (!m) return null;
   const s = m[1];
@@ -139,7 +145,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
           const seen = new Set((cur ?? []).map((p) => p.name));
           const additions = event.payload
             .filter((n) => !seen.has(n) && !n.endsWith("-coco"))
-            .map((name) => ({ name, latest_version: "…", description: null, tags: [] }));
+            .map((name) => ({ name, latest_version: "…", newest_version: "…", description: null, tags: [] }));
           if (additions.length === 0) return cur;
           return [...(cur ?? []), ...additions].sort((a, b) => a.name.localeCompare(b.name));
         });
@@ -512,11 +518,11 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
                             )}
                             <span
                               className="shrink-0 font-mono text-[10px] text-muted-foreground"
-                              title={pkg.latest_version}
+                              title={`latest: ${pkg.latest_version} · 最近发布: ${pkg.newest_version}`}
                             >
                               {(() => {
-                                const d = stampFromVersion(pkg.latest_version);
-                                return d ? fmtStamp(d) : pkg.latest_version;
+                                const d = stampFromVersion(pkg.newest_version);
+                                return d ? fmtStamp(d) : pkg.newest_version;
                               })()}
                             </span>
                           </div>
