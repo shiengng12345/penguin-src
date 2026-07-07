@@ -34,9 +34,13 @@ function stampFromVersion(version: string): Date | null {
   return Number.isNaN(dt.getTime()) ? null : dt;
 }
 
+// 用户拍板的可读格式：YYYY-MM-DD hh:mm:ss A（12 小时制 + AM/PM）
 function fmtStamp(d: Date): string {
   const p = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  const h24 = d.getHours();
+  const ampm = h24 >= 12 ? "PM" : "AM";
+  const h12 = h24 % 12 === 0 ? 12 : h24 % 12;
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(h12)}:${p(d.getMinutes())}:${p(d.getSeconds())} ${ampm}`;
 }
 
 const PROTOCOL_LABELS: Record<string, string> = {
