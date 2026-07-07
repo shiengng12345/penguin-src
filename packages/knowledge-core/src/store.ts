@@ -55,6 +55,22 @@ export interface BranchRow {
   status: string;
 }
 
+export type FileStatus = "indexed" | "deleted" | "error" | "skipped";
+
+export interface FileCheckpointRow {
+  id: string;
+  repo_id: string;
+  branch_id: string;
+  file_path: string;
+  lang: string | null;
+  mtime_ms: number | null;
+  size_bytes: number | null;
+  content_hash: string | null;
+  indexed_at: string | null;
+  status: string;
+  error: string | null;
+}
+
 export type SymbolStatus = "fresh" | "stale";
 
 export interface SymbolVersionRow {
@@ -301,6 +317,81 @@ export class KnowledgeStore {
       )
       .run(p.branchId, p.filePath);
     return info.changes;
+  }
+
+  // —— files_index：逐文件增量检查点（可再生直写，spec §6.3.1）——
+  getFileCheckpoint(
+    repoId: string,
+    branchId: string,
+    filePath: string,
+  ): FileCheckpointRow | null {
+    return (
+      (this.db
+        .prepare(
+          "SELECT * FROM files_index WHERE repo_id = ? AND branch_id = ? AND file_path = ?",
+        )
+        .get(repoId, branchId, filePath) as FileCheckpointRow | undefined) ?? null
+    );
+  }
+
+  upsertFileCheckpoint(p: {
+    repoId: string;
+    branchId: string;
+    filePath: string;
+    lang?: string | null;
+    mtimeMs?: number | null;
+    sizeBytes?: number | null;
+    contentHash?: string | null;
+    status: FileStatus;
+    error?: string | null;
+  }): string {
+    const row = this.db
+      .prepare(
+        `INSERT INTO files_index
+           (id, repo_id, branch_id, file_path, lang, mtime_ms, size_bytes,
+            content_hash, indexed_at, status, error)
+         VALUES (@id, @repoId, @branchId, @filePath, @lang, @mtimeMs, @sizeBytes,
+            @contentHash, @indexedAt, @status, @error)
+         ON CONFLICT (repo_id, branch_id, file_path) DO UPDATE SET
+           lang = excluded.lang,
+           mtime_ms = excluded.mtime_ms,
+           size_bytes = excluded.size_bytes,
+           content_hash = excluded.content_hash,
+           indexed_at = excluded.indexed_at,
+           status = excluded.status,
+           error = excluded.error
+         RETURNING id`,
+      )
+      .get({
+        id: `fidx_${randomUUID()}`,
+        repoId: p.repoId,
+        branchId: p.branchId,
+        filePath: p.filePath,
+        lang: p.lang ?? null,
+        mtimeMs: p.mtimeMs ?? null,
+        sizeBytes: p.sizeBytes ?? null,
+        contentHash: p.contentHash ?? null,
+        indexedAt: new Date().toISOString(),
+        status: p.status,
+        error: p.error ?? null,
+      }) as { id: string };
+    return row.id;
+  }
+
+  listFileCheckpoints(repoId: string, branchId: string): FileCheckpointRow[] {
+    return this.db
+      .prepare(
+        "SELECT * FROM files_index WHERE repo_id = ? AND branch_id = ? ORDER BY file_path",
+      )
+      .all(repoId, branchId) as FileCheckpointRow[];
+  }
+
+  markFileDeleted(p: { repoId: string; branchId: string; filePath: string }): void {
+    this.db
+      .prepare(
+        "UPDATE files_index SET status = 'deleted' WHERE repo_id = ? AND branch_id = ? AND file_path = ?",
+      )
+      .run(p.repoId, p.branchId, p.filePath);
   }
 
   // 解析产出的代码边：同 file+branch 全量替换（§6.3 增量语义）。
