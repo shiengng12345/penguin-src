@@ -25,6 +25,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { useAppStore, type InstalledPackage } from "@/lib/store";
+import {
+  canBackgroundRefreshRegistry,
+  REGISTRY_AUTO_REFRESH_OPEN_MS,
+} from "@/lib/registry-auto-refresh";
+import { useRegistryPoll } from "@/hooks/useRegistryPoll";
 import { useDeveloperMode } from "@/hooks/useDeveloperMode";
 import {
   completePackageSpec,
@@ -219,17 +224,21 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
   const [nameSuggestOpen, setNameSuggestOpen] = useState(false);
   const [nameSuggestIdx, setNameSuggestIdx] = useState(-1);
   const nameBlurTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const manualInputRef = useRef<HTMLInputElement>(null);
   const [registryList, setRegistryList] = useState<RegistryPackage[] | null>(null);
   const [listLoading, setListLoading] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
   const [isInstalling, setIsInstalling] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  // 自动刷新开关（绿色=开）：开启即静默重拉一次最新列表，之后每 30s 后台重拉。
+  // 自动刷新开关（绿色=开）：开启即静默重拉一次最新列表，之后每 5s 后台重拉。
   // 后台刷新只替换底层列表，不触碰搜索/勾选/loading UI，不打断用户操作。
   // 权限：仅 admin / super-admin（有效 dev token）可用自动刷新；普通用户该按钮
   // 退化为「点一下刷新一次」。
-  const [autoRefresh, setAutoRefresh] = useState(false);
+  // 持久化到 store：绿灯开关跨「关闭→重开」记住，且 app 级 poller 在关闭期间
+  // 后台续刷（严格门控见 canBackgroundRefreshRegistry）。
+  const autoRefresh = useAppStore((s) => s.installerAutoRefresh);
+  const setInstallerAutoRefresh = useAppStore((s) => s.setInstallerAutoRefresh);
   const { enabled: devModeEnabled, hasValidToken } = useDeveloperMode();
   const canAutoRefresh = devModeEnabled && hasValidToken;
 
@@ -267,16 +276,13 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
     clearInstallLog();
   }, []);
 
-  // 自动刷新开启：立刻静默重拉一次，之后每 30s 后台重拉最新（安装中暂停，
-  // 避免与安装流程抢刷新）。关闭或卸载即停。
-  useEffect(() => {
-    if (!autoRefresh || !canAutoRefresh || isInstalling) return;
-    void loadRegistryList({ useCache: false, force: true, silent: true });
-    const id = setInterval(() => {
-      void loadRegistryList({ useCache: false, force: true, silent: true });
-    }, 30_000);
-    return () => clearInterval(id);
-  }, [autoRefresh, canAutoRefresh, isInstalling]);
+  // 自动刷新（绿灯开）：弹窗开着 5s 一刷，走共享自调度轮询——在途去重（await 上一次
+  // 再排下一次）+ 失败退避；安装中暂停；同一严格门控（admin/super-admin）。开着时列表
+  // 由 registry-search 事件更新；关着时改由 app 级 poller 按 30s 暖缓存。
+  const installerPollActive =
+    canBackgroundRefreshRegistry({ enabled: autoRefresh, devModeEnabled, hasValidToken }) &&
+    !isInstalling;
+  useRegistryPoll(installerPollActive, REGISTRY_AUTO_REFRESH_OPEN_MS);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -366,6 +372,17 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
       families: familyFilter,
     });
   }, [registryList, allowedList, searchQuery, effectiveBranch, typeFilter, familyFilter]);
+
+  // 用户搜了但一条没匹配上——此时手动输入区是主路径，高亮并（防抖后）自动聚焦。
+  const noSearchResults =
+    !!registryList && searchQuery.trim().length > 0 && searchResults.length === 0;
+
+  // 停止输入 ~500ms 且仍无结果、手动框还空着，才把光标移过去——避免打字途中抢焦点。
+  useEffect(() => {
+    if (!noSearchResults || isInstalling || manualSpec.trim().length > 0) return;
+    const id = setTimeout(() => manualInputRef.current?.focus(), 500);
+    return () => clearTimeout(id);
+  }, [noSearchResults, isInstalling, manualSpec]);
 
   // 多选下拉展示全部家族（21 个 + js-sdk），所以放开条数上限。
   const nameSuggestions = useMemo(
@@ -752,18 +769,18 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
             </div>
             <button
               type="button"
-              // admin/super-admin：自动刷新开关（绿色=开，每 30s 后台拉最新）；
+              // admin/super-admin：自动刷新开关（绿色=开，每 5s 后台拉最新）；
               // 普通用户：点一下刷新一次，无自动。
               title={
                 canAutoRefresh
                   ? autoRefresh
-                    ? "自动刷新：开（每 30s 拉取最新，点击关闭）"
+                    ? "自动刷新：开（每 5s 拉取最新，点击关闭）"
                     : "自动刷新：关（点击开启）"
                   : "刷新"
               }
               aria-pressed={canAutoRefresh ? autoRefresh : undefined}
               onClick={() => {
-                if (canAutoRefresh) setAutoRefresh((v) => !v);
+                if (canAutoRefresh) setInstallerAutoRefresh(!autoRefresh);
                 else void loadRegistryList({ useCache: false, force: true });
               }}
               disabled={isInstalling || (!canAutoRefresh && listLoading)}
@@ -940,15 +957,23 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
             </div>
           </section>
 
-          <section className="shrink-0">
-            <label className="mb-1 block text-[11px] font-medium text-slate-300">
-              手动输入包规格（可选）
-            </label>
+          <section
+            className={cn(
+              "shrink-0 rounded-lg border border-l-2 border-cyan-400/25 border-l-cyan-400/70 bg-cyan-400/[0.04] p-3 transition-all",
+              // 搜索无结果时进一步高亮，配合自动聚焦引导用户直接手输
+              noSearchResults && "border-cyan-400/60 bg-cyan-400/[0.09] ring-1 ring-cyan-400/40",
+            )}
+          >
+            <div className="mb-2 flex items-center gap-1.5">
+              <Braces className="h-3.5 w-3.5 text-cyan-300" />
+              <span className="text-xs font-semibold text-cyan-200">搜不到想要的？直接输入包名安装</span>
+            </div>
             <div className="relative">
               <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 font-mono text-sm text-slate-500">
                 @
               </span>
               <Input
+                ref={manualInputRef}
                 value={manualSpec}
                 onChange={(e) => {
                   setManualSpec(normalizePackageSpec(e.target.value));

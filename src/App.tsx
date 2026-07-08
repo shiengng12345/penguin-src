@@ -4,6 +4,7 @@ import { useAppStore, useActiveTab, getDefaultHeadersForProtocol, visibleProtoco
 import { usePackages } from "@/hooks/usePackages";
 import { useEnvironments } from "@/hooks/useEnvironments";
 import { useAppUpdateScheduler } from "@/hooks/useAppUpdateScheduler";
+import { useRegistryAutoRefresh } from "@/hooks/useRegistryAutoRefresh";
 import { interpolate } from "@/lib/environment-store";
 import { hideAllInlineWebviews } from "@/lib/inline-webview";
 import { Header } from "@/components/layout/Header";
@@ -280,6 +281,9 @@ export default function App() {
     [selectApiClient, selectVaultFromHome, selectDocsFromHome, selectRest, selectBrowser, selectDatabase, selectWiki],
   );
   const appUpdate = useAppUpdateScheduler(openSettings);
+  // Background registry refresh for admins/super-admins — keeps the cache warm
+  // while the installer is closed (strictly gated inside the hook).
+  useRegistryAutoRefresh();
   const handlePackagesCleared = useCallback(async () => {
     resetPackageTabs();
     await refresh();

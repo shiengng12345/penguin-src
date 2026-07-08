@@ -89,14 +89,33 @@ fn derive_registry_scope_lines(registry_url: &str) -> [String; 2] {
     [scope_main, scope_dev]
 }
 
-fn derive_registry_url_from_auth_line(line: &str) -> Option<String> {
-    eprintln!("INFO derive_registry_url_from_auth_line - entry");
-    let stripped_leading_slashes = line.strip_prefix("//")?;
-    let auth_suffix_position = stripped_leading_slashes.find(REGISTRY_AUTH_SUFFIX)?;
-    let url_without_scheme = &stripped_leading_slashes[..auth_suffix_position];
-    let reconstructed = format!("{REGISTRY_HTTP_PREFIX}{url_without_scheme}");
-    eprintln!("INFO derive_registry_url_from_auth_line - exit");
-    Some(reconstructed)
+// 定位 .npmrc 里「@snsoft 作用域指向的那个 registry」及其配套 _auth 凭据。
+// 关键：以 @snsoft:registry= 作用域行为准（而不是抓文件里第一条 _auth 行）——
+// 用户 ~/.npmrc 常常还有别的 registry（GitHub Packages、公司其他私服）的 _auth
+// 行，若只取第一条就会读回别人的地址/用户名。且作用域行保留了用户配置的原始
+// scheme（http/https），从这里取 URL 才不会把 https 误降级成 http。
+// 返回 (带尾斜线且保留 scheme 的 registry url, base64 _auth 值)。
+fn find_snsoft_registry_auth(content: &str) -> Option<(String, String)> {
+    eprintln!("INFO find_snsoft_registry_auth - entry");
+    let scope_url = content.lines().find_map(|line| {
+        line.strip_prefix(REGISTRY_SNSOFT_SCOPE_PREFIX)
+            .or_else(|| line.strip_prefix(REGISTRY_SNSOFT_DEV_SCOPE_PREFIX))
+    })?;
+    let normalized = normalize_registry_url(scope_url);
+    // 只认「指向这个 registry 主机」的 _auth 行，忽略无关 registry 的凭据行。
+    let auth_key = derive_registry_auth_key(&normalized);
+    let encoded_auth = content
+        .lines()
+        .find_map(|line| line.strip_prefix(auth_key.as_str()))?
+        .trim()
+        .trim_matches(REGISTRY_AUTH_QUOTE)
+        .to_string();
+    if encoded_auth.is_empty() {
+        eprintln!("WARN find_snsoft_registry_auth - auth 值为空");
+        return None;
+    }
+    eprintln!("INFO find_snsoft_registry_auth - exit");
+    Some((normalized, encoded_auth))
 }
 
 // 包搜索/版本查询需要「registry 地址 + 原始 base64 凭据」发请求；status 接口
@@ -105,21 +124,9 @@ pub(crate) fn read_registry_connection() -> Option<(String, String)> {
     eprintln!("INFO read_registry_connection - entry");
     let home = dirs::home_dir()?;
     let content = fs::read_to_string(home.join(REGISTRY_NPMRC_FILE)).ok()?;
-    let auth_line = content
-        .lines()
-        .find(|line| line.starts_with("//") && line.contains(REGISTRY_AUTH_SUFFIX))?;
-    let registry_url = derive_registry_url_from_auth_line(auth_line)?;
-    let auth_suffix_position = auth_line.find(REGISTRY_AUTH_SUFFIX)?;
-    let encoded_auth = auth_line[auth_suffix_position + REGISTRY_AUTH_SUFFIX.len()..]
-        .trim()
-        .trim_matches(REGISTRY_AUTH_QUOTE)
-        .to_string();
-    if encoded_auth.is_empty() {
-        eprintln!("WARN read_registry_connection - auth 值为空");
-        return None;
-    }
-    eprintln!("INFO read_registry_connection - exit");
-    Some((normalize_registry_url(&registry_url), encoded_auth))
+    let result = find_snsoft_registry_auth(&content);
+    eprintln!("INFO read_registry_connection - exit found={}", result.is_some());
+    result
 }
 
 fn registry_credential_has_invalid_character(value: &str) -> bool {
@@ -374,6 +381,41 @@ pub(crate) fn write_registry_npmrc(
     Ok(REGISTRY_WRITE_SUCCESS_MESSAGE.to_string())
 }
 
+// 从 _auth 值（base64 的 username:password）取出用户名；解不出则 None。
+fn decode_auth_username(encoded_auth: &str) -> Option<String> {
+    let decoded_bytes = STANDARD.decode(encoded_auth).ok()?;
+    let decoded_text = String::from_utf8(decoded_bytes).ok()?;
+    let (username, _password) = decoded_text.split_once(REGISTRY_AUTH_SEPARATOR)?;
+    if username.is_empty() {
+        return None;
+    }
+    Some(username.to_string())
+}
+
+// 纯函数：从 .npmrc 内容解析出配置状态。以 @snsoft 作用域行为准定位 registry，
+// registry_url 直接来自作用域行（保留用户配置的 http/https）。可脱离 HOME 单测。
+fn registry_status_from_content(content: &str) -> ConfiguredStatus {
+    let (registry_url, encoded_auth) = match find_snsoft_registry_auth(content) {
+        Some(pair) => pair,
+        None => {
+            eprintln!("WARN registry_status_from_content - 未找到 @snsoft registry 凭据");
+            return registry_unconfigured_status();
+        }
+    };
+    let username = match decode_auth_username(&encoded_auth) {
+        Some(username) => username,
+        None => {
+            eprintln!("WARN registry_status_from_content - registry auth 无法解出用户名");
+            return registry_unconfigured_status();
+        }
+    };
+    ConfiguredStatus {
+        configured: true,
+        username: Some(username),
+        registry_url: Some(registry_url),
+    }
+}
+
 fn read_registry_npmrc_status_inner() -> ConfiguredStatus {
     eprintln!("INFO read_registry_npmrc_status_inner - entry");
     // 业务原因：配置的事实来源是 ~/.npmrc（协议目录里的只是镜像副本），状态必须从源头读。
@@ -396,73 +438,11 @@ fn read_registry_npmrc_status_inner() -> ConfiguredStatus {
             return registry_unconfigured_status();
         }
     };
-    let auth_line = match content
-        .lines()
-        .find(|line| line.starts_with("//") && line.contains(REGISTRY_AUTH_SUFFIX))
-    {
-        Some(line) => line,
-        None => {
-            eprintln!("WARN read_registry_npmrc_status_inner - 未找到 registry auth 行");
-            return registry_unconfigured_status();
-        }
-    };
-    let recovered_registry_url = match derive_registry_url_from_auth_line(auth_line) {
-        Some(url) => url,
-        None => {
-            eprintln!("WARN read_registry_npmrc_status_inner - 无法从 auth 行还原 registry url");
-            return registry_unconfigured_status();
-        }
-    };
-    let auth_suffix_position = match auth_line.find(REGISTRY_AUTH_SUFFIX) {
-        Some(position) => position,
-        None => {
-            eprintln!("WARN read_registry_npmrc_status_inner - auth 行缺少 _auth= 分隔符");
-            return registry_unconfigured_status();
-        }
-    };
-    let encoded_auth = auth_line[auth_suffix_position + REGISTRY_AUTH_SUFFIX.len()..]
-        .trim()
-        .trim_matches(REGISTRY_AUTH_QUOTE);
-    let decoded_bytes = match STANDARD.decode(encoded_auth) {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            eprintln!(
-                "WARN read_registry_npmrc_status_inner - registry auth base64 解码失败 error={}",
-                error
-            );
-            return registry_unconfigured_status();
-        }
-    };
-    let decoded_text = match String::from_utf8(decoded_bytes) {
-        Ok(text) => text,
-        Err(error) => {
-            eprintln!(
-                "WARN read_registry_npmrc_status_inner - registry auth 不是有效 UTF-8 error={}",
-                error
-            );
-            return registry_unconfigured_status();
-        }
-    };
-    let username = match decoded_text.split_once(REGISTRY_AUTH_SEPARATOR) {
-        Some((username, _password)) => username,
-        None => {
-            eprintln!("WARN read_registry_npmrc_status_inner - registry auth 缺少分隔符");
-            return registry_unconfigured_status();
-        }
-    };
-    let username_is_empty = username.is_empty();
-    // 业务原因：空用户名不能代表已配置凭证，必须按未配置展示。
-    if username_is_empty {
-        eprintln!("WARN read_registry_npmrc_status_inner - registry auth 用户名为空");
-        return registry_unconfigured_status();
-    }
-
-    let status = ConfiguredStatus {
-        configured: true,
-        username: Some(username.to_string()),
-        registry_url: Some(recovered_registry_url),
-    };
-    eprintln!("INFO read_registry_npmrc_status_inner - exit configured=true");
+    let status = registry_status_from_content(&content);
+    eprintln!(
+        "INFO read_registry_npmrc_status_inner - exit configured={}",
+        status.configured
+    );
     status
 }
 
@@ -522,18 +502,70 @@ mod registry_auth_tests {
         );
     }
 
+    // Regression: status/connection used to grab the FIRST `//...:_auth=` line
+    // in ~/.npmrc regardless of which registry it belonged to. A user whose
+    // .npmrc also holds an unrelated registry's _auth (GitHub Packages, another
+    // private feed) got that OTHER registry's URL + username echoed back into
+    // Settings — so "配置不到对的 registry/username". We must correlate the auth
+    // line to the @snsoft scope registry, not just take whichever comes first.
     #[test]
-    fn derive_registry_url_from_auth_line_roundtrips() {
-        let line = "//sonatype.client88.me/repository/npm_hosted/:_auth=YWRtaW46c25zb2Z0MTIz";
-        let url = derive_registry_url_from_auth_line(line).expect("expected url");
-        assert_eq!(url, "http://sonatype.client88.me/repository/npm_hosted/");
+    fn status_ignores_unrelated_leading_auth_line() {
+        // alice:secret encoded — the snsoft credential we actually configured.
+        let snsoft_auth = encode_registry_auth_value(TEST_USERNAME, TEST_PASSWORD);
+        let content = format!(
+            "//npm.pkg.github.com/:_auth=b3RoZXI6b3RoZXI=\n\
+             @snsoft:registry=http://sonatype.client88.me/repository/npm_hosted/\n\
+             @snsoft-dev:registry=http://sonatype.client88.me/repository/npm_hosted/\n\
+             //sonatype.client88.me/repository/npm_hosted/:_auth={snsoft_auth}\n",
+        );
+        let status = registry_status_from_content(&content);
+        assert!(status.configured, "should be configured: {content:?}");
+        assert_eq!(status.username.as_deref(), Some(TEST_USERNAME));
+        assert_eq!(
+            status.registry_url.as_deref(),
+            Some("http://sonatype.client88.me/repository/npm_hosted/"),
+            "picked the wrong (unrelated) registry"
+        );
+    }
+
+    // Regression: the URL was always reconstructed with an http:// prefix, so a
+    // user who configured an https:// registry saw it silently downgraded to
+    // http:// on reload (and package search then hit the wrong scheme). The
+    // scope line preserves the real scheme — read the URL from there.
+    #[test]
+    fn status_preserves_https_scheme() {
+        let auth = encode_registry_auth_value(TEST_USERNAME, TEST_PASSWORD);
+        let content = format!(
+            "@snsoft:registry=https://nexus.example.com/repo/\n\
+             //nexus.example.com/repo/:_auth={auth}\n",
+        );
+        let status = registry_status_from_content(&content);
+        assert_eq!(
+            status.registry_url.as_deref(),
+            Some("https://nexus.example.com/repo/"),
+            "https downgraded to http"
+        );
+        assert_eq!(status.username.as_deref(), Some(TEST_USERNAME));
     }
 
     #[test]
-    fn derive_registry_url_from_auth_line_rejects_non_auth_line() {
-        let line = "@snsoft:registry=http://sonatype.client88.me/repository/npm_hosted/";
-        let url = derive_registry_url_from_auth_line(line);
-        assert!(url.is_none());
+    fn find_snsoft_registry_auth_matches_scope_host_and_preserves_scheme() {
+        let auth = encode_registry_auth_value(TEST_USERNAME, TEST_PASSWORD);
+        let content = format!(
+            "//other.example.com/:_auth=b3RoZXI6b3RoZXI=\n\
+             @snsoft:registry=https://nexus.example.com/repo/\n\
+             //nexus.example.com/repo/:_auth={auth}\n",
+        );
+        let (url, encoded) = find_snsoft_registry_auth(&content).expect("expected snsoft creds");
+        assert_eq!(url, "https://nexus.example.com/repo/");
+        assert_eq!(encoded, auth);
+    }
+
+    #[test]
+    fn status_unconfigured_when_scope_line_missing() {
+        // Only an unrelated registry's auth — no @snsoft scope → not configured.
+        let content = "//npm.pkg.github.com/:_auth=b3RoZXI6b3RoZXI=\n";
+        assert!(!registry_status_from_content(content).configured);
     }
 
     // Regression test for the adrianchong E404: registry settings used to be

@@ -19,6 +19,11 @@ export const APP_VALUE_KEYS = {
   // scheduler skips its startup + interval + focus checks. The Settings
   // "Check for Updates" button still works manually regardless.
   autoCheckForUpdates: "penguin-auto-check-for-updates",
+  // Installer registry auto-refresh toggle (admin/super-admin only). Persisted
+  // so the green toggle survives closing/reopening the installer, and so the
+  // app-level poller keeps the registry cache warm in the background while the
+  // installer is closed. Strictly gated to a valid dev token at run time.
+  installerAutoRefresh: "penguin-installer-auto-refresh",
   devModeEnabled: "penguin-dev-mode-enabled",
   devModeToken: "penguin-dev-mode-token",
   devModeAdminToken: "penguin-dev-mode-admin-token",

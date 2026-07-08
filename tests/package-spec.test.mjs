@@ -180,15 +180,15 @@ test("registry-search bridges streamed enriched events into memory cache", async
   assert.match(source, /mergeRegistryPackages/);
 });
 
-test("PackageInstaller auto-refresh is silent and paused while installing", async () => {
+test("PackageInstaller auto-refresh delegates to shared poller, 5s, paused while installing", async () => {
   const source = await readFile(
     new URL("../src/components/packages/PackageInstaller.tsx", import.meta.url),
     "utf8",
   );
-  // 30s 后台静默重拉；不打扰筛选/勾选；安装中暂停；仅 admin 可自动
-  assert.match(source, /if \(!autoRefresh \|\| !canAutoRefresh \|\| isInstalling\) return;/);
-  assert.match(source, /\{ useCache: false, force: true, silent: true \}/);
-  assert.match(source, /30_000/);
+  // 严格门控 + 安装中暂停，委托给共享自调度轮询（在途去重 + 退避），开着用 5s
+  assert.match(source, /canBackgroundRefreshRegistry\(\{ enabled: autoRefresh, devModeEnabled, hasValidToken \}\)/);
+  assert.match(source, /!isInstalling;/);
+  assert.match(source, /useRegistryPoll\(installerPollActive, REGISTRY_AUTO_REFRESH_OPEN_MS\)/);
 });
 
 test("PackageInstaller auto-refresh is gated to admin tokens; normal users one-shot", async () => {
@@ -198,10 +198,25 @@ test("PackageInstaller auto-refresh is gated to admin tokens; normal users one-s
   );
   // admin/super-admin = 有效 dev token；普通用户点击 = 单次强制刷新
   assert.match(source, /const canAutoRefresh = devModeEnabled && hasValidToken;/);
-  assert.match(source, /if \(canAutoRefresh\) setAutoRefresh\(\(v\) => !v\);/);
+  // 开关持久化到 store（跨关闭/重开记住，供 app 级后台 poller 共享）
+  assert.match(source, /if \(canAutoRefresh\) setInstallerAutoRefresh\(!autoRefresh\);/);
   assert.match(source, /else void loadRegistryList\(\{ useCache: false, force: true \}\);/);
   // 绿灯常转（admin 开启时）；普通用户仅加载中转
   assert.match(source, /canAutoRefresh && autoRefresh\) \|\| \(!canAutoRefresh && listLoading\)/);
+});
+
+test("PackageInstaller manual input is a highlighted card that auto-focuses on empty search", async () => {
+  const source = await readFile(
+    new URL("../src/components/packages/PackageInstaller.tsx", import.meta.url),
+    "utf8",
+  );
+  // 行动号召标题 + 青色左边框强调
+  assert.match(source, /搜不到想要的？直接输入包名安装/);
+  assert.match(source, /border-l-cyan-400\/70/);
+  // 无结果标志 + 防抖自动聚焦（停 500ms 且仍无结果才聚焦，不打字途中抢焦点）
+  assert.match(source, /const noSearchResults =/);
+  assert.match(source, /searchResults\.length === 0/);
+  assert.match(source, /setTimeout\(\(\) => manualInputRef\.current\?\.focus\(\), 500\)/);
 });
 
 test("extracts package name from allowed snsoft package specs", async () => {
