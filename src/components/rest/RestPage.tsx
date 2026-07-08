@@ -222,8 +222,9 @@ export function RestPage({ onClose }: RestPageProps) {
     if (!col) return;
     // Confirmation is inline (two-click) in RestCollectionsTree — window.confirm
     // can silently return false in Tauri's webview, which ate the delete.
-    setCollections(deleteCollection({ id }));
-    setRequests(loadRequests());
+    deleteCollection({ id }); // persist (also drops its requests in storage)
+    setCollections((prev) => prev.filter((c) => c.id !== id));
+    setRequests((prev) => prev.filter((r) => r.collectionId !== id));
     // Clear active request if it belonged to the deleted collection
     if (activeRequest?.collectionId === id) setActiveRequestId(null);
   };
@@ -402,10 +403,12 @@ export function RestPage({ onClose }: RestPageProps) {
   };
 
   const handleDeleteRequest = (id: string) => {
-    const r = requests.find((req) => req.id === id);
-    if (!r) return;
     // Confirmation is inline (two-click) in RestCollectionsTree.
-    setRequests(deleteRequest({ id }));
+    // Drive the UI off the exact state the tree renders (filter React state),
+    // not deleteRequest()'s storage re-read — that decouples the visible list
+    // from any state/storage divergence so the clicked row always disappears.
+    deleteRequest({ id }); // persist
+    setRequests((prev) => prev.filter((req) => req.id !== id));
     if (activeRequestId === id) setActiveRequestId(null);
     // Drop the session-only response slot for this id so deleted
     // requests don't keep their response payload pinned in memory.
