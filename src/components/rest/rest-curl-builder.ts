@@ -12,6 +12,7 @@
 // — process-local IPC, no network. buildCurl is async because of this.
 
 import { resolveSecretPlain } from "./rest-keychain";
+import { fieldsToJson } from "@/lib/rest-body-fields";
 import type { RestHeader, RestRequestRecord } from "./rest-types";
 
 export async function buildCurl(req: RestRequestRecord): Promise<string> {
@@ -67,6 +68,10 @@ export async function buildCurl(req: RestRequestRecord): Promise<string> {
     if (req.body.mode === "json") {
       lines.push(`  -H 'Content-Type: application/json'`);
       lines.push(`  -d ${shellQuote(req.body.content)}`);
+    } else if (req.body.mode === "key-value") {
+      // Typed key→value rows export as the JSON body they produce.
+      lines.push(`  -H 'Content-Type: application/json'`);
+      lines.push(`  -d ${shellQuote(fieldsToJson(req.body.fields))}`);
     } else if (req.body.mode === "raw") {
       lines.push(`  -d ${shellQuote(req.body.content)}`);
     } else if (req.body.mode === "form-urlencoded") {

@@ -24,6 +24,8 @@ import { computeResponseMatches } from "@/lib/response-search";
 import { useAppStore } from "@/lib/store";
 import type { RestResponseSlot } from "@/lib/store-types";
 import { JsonEditor } from "@/components/ui/json-editor";
+import { RestKeyValueBody } from "./RestKeyValueBody";
+import { fieldsToJson, jsonToFields, newBodyField } from "@/lib/rest-body-fields";
 import type { RestMethod, RestRequestRecord, RestResponse } from "./rest-types";
 import { writeClipboard } from "@/lib/clipboard";
 import { EditorView } from "@codemirror/view";
@@ -103,9 +105,13 @@ export function RestRequestEditor({ request, onChange, envVars = {} }: RestReque
       const penguinRequestId = generatePenguinRequestId().value;
       sendHeaders.push({ key: PENGUIN_REQUEST_ID_HEADER, value: penguinRequestId, enabled: true });
       const sendBody = req.body
-        ? (req.body.mode === "json" || req.body.mode === "raw")
-          ? { ...req.body, content: interpolate(req.body.content) }
-          : req.body
+        ? req.body.mode === "key-value"
+          ? // Typed key→value rows serialize to a JSON body (the backend only
+            // knows json/raw/form/etc — never "key-value").
+            { mode: "json" as const, content: interpolate(fieldsToJson(req.body.fields)) }
+          : (req.body.mode === "json" || req.body.mode === "raw")
+            ? { ...req.body, content: interpolate(req.body.content) }
+            : req.body
         : undefined;
       resp = await invoke<RestResponse>("rest_send_request", {
         payload: {
@@ -165,17 +171,34 @@ export function RestRequestEditor({ request, onChange, envVars = {} }: RestReque
 
   // ---- Body (JSON/raw editable — matching gRPC client) ----
   const body = request.body;
+  const isKeyValue = body?.mode === "key-value";
+  const kvFields = body?.mode === "key-value" ? body.fields : [];
   const bodyContent =
     body === undefined || body.mode === "none"
       ? "{}"
-      : body.mode === "form-urlencoded" || body.mode === "multipart"
-        ? // Legacy form bodies (pre-simplification): show the real fields as
-          // urlencoded text instead of a fake "{}" that hides them.
-          body.fields
-            .filter((f) => f.enabled)
-            .map((f) => `${encodeURIComponent(f.key)}=${encodeURIComponent(f.value)}`)
-            .join("&")
-        : body.content;
+      : body.mode === "key-value"
+        ? fieldsToJson(body.fields)
+        : body.mode === "form-urlencoded" || body.mode === "multipart"
+          ? // Legacy form bodies (pre-simplification): show the real fields as
+            // urlencoded text instead of a fake "{}" that hides them.
+            body.fields
+              .filter((f) => f.enabled)
+              .map((f) => `${encodeURIComponent(f.key)}=${encodeURIComponent(f.value)}`)
+              .join("&")
+          : body.content;
+  // Switch between JSON and the typed key→value editor. Leaving key-value seeds
+  // the JSON editor with the generated body so nothing is lost.
+  const switchBodyMode = (mode: "json" | "key-value") => {
+    if (mode === "key-value") {
+      if (body?.mode === "key-value") return;
+      // JSON → rows: parse the current JSON so edits carry over both ways.
+      const parsed = jsonToFields(bodyContent);
+      onChange({ ...request, body: { mode: "key-value", fields: parsed.length > 0 ? parsed : [newBodyField()] } });
+    } else {
+      // rows → JSON: bodyContent already = fieldsToJson(fields) in key-value mode.
+      onChange({ ...request, body: { mode: "json", content: bodyContent } });
+    }
+  };
   const handleBodyChange = (content: string) =>
     // WHY: keep non-json bodies raw — stamping mode:"json" onto an edited
     // form/raw body would misrepresent what gets sent.
@@ -346,19 +369,47 @@ export function RestRequestEditor({ request, onChange, envVars = {} }: RestReque
               )}
             </div>
 
-            {/* Body — JSON only */}
+            {/* Body — JSON editor or typed key→value rows */}
             <div className="flex-1 flex flex-col min-h-0">
               <div className="flex items-center justify-between px-3 py-1.5 bg-muted/20 border-b border-border">
-                <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Body</span>
-                <div className="flex gap-0.5">
-                  <button className="h-5 w-5 inline-flex items-center justify-center rounded hover:bg-accent text-muted-foreground"
-                    onClick={handleFormatBody} title="Format JSON"><Braces className="h-3 w-3" /></button>
-                  <button className="h-5 w-5 inline-flex items-center justify-center rounded hover:bg-accent text-muted-foreground"
-                    onClick={() => onChange({ ...request, body: { mode: "json", content: "{}" } })} title="Reset"><RotateCcw className="h-3 w-3" /></button>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Body</span>
+                  <div className="flex items-center gap-0.5 rounded border border-border p-0.5">
+                    {([["json", "JSON"], ["key-value", "键值对"]] as const).map(([m, label]) => (
+                      <button
+                        key={m}
+                        type="button"
+                        onClick={() => switchBodyMode(m)}
+                        className={cn(
+                          "rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors",
+                          (m === "key-value" ? isKeyValue : !isKeyValue)
+                            ? "bg-primary text-primary-foreground"
+                            : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                        )}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
+                {!isKeyValue && (
+                  <div className="flex gap-0.5">
+                    <button className="h-5 w-5 inline-flex items-center justify-center rounded hover:bg-accent text-muted-foreground"
+                      onClick={handleFormatBody} title="Format JSON"><Braces className="h-3 w-3" /></button>
+                    <button className="h-5 w-5 inline-flex items-center justify-center rounded hover:bg-accent text-muted-foreground"
+                      onClick={() => onChange({ ...request, body: { mode: "json", content: "{}" } })} title="Reset"><RotateCcw className="h-3 w-3" /></button>
+                  </div>
+                )}
               </div>
-              <div className="flex-1 min-h-0 w-full">
-                <JsonEditor value={bodyContent} onChange={handleBodyChange} placeholder='{"key": "value"}' />
+              <div className="flex-1 min-h-0 w-full overflow-auto">
+                {isKeyValue ? (
+                  <RestKeyValueBody
+                    fields={kvFields}
+                    onChange={(fields) => onChange({ ...request, body: { mode: "key-value", fields } })}
+                  />
+                ) : (
+                  <JsonEditor value={bodyContent} onChange={handleBodyChange} placeholder='{"key": "value"}' />
+                )}
               </div>
             </div>
           </div>

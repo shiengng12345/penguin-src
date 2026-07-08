@@ -23,9 +23,26 @@ export interface RestQueryParam {
   enabled: boolean;
 }
 
+// A typed key→value row for the "key-value" body editor. `type` picks how the
+// string `value` is coerced into JSON (string/number/boolean/null, or
+// object/array where `value` is a JSON snippet) — so the form covers anything
+// JSON can express. Converted to a { mode: "json", content } body on send.
+export type RestBodyValueType = "string" | "number" | "boolean" | "null" | "object" | "array";
+
+export interface RestBodyField {
+  id: string;
+  key: string;
+  type: RestBodyValueType;
+  value: string;
+  enabled: boolean;
+}
+
 export type RestBody =
   | { mode: "json"; content: string }
   | { mode: "raw"; content: string }
+  // Frontend-only editing mode: typed key→value rows serialized to a JSON body
+  // on send (the Rust side only sees { mode: "json", content }).
+  | { mode: "key-value"; fields: RestBodyField[] }
   | { mode: "form-urlencoded"; fields: RestHeader[] }
   | { mode: "multipart"; fields: RestHeader[] }
   | { mode: "binary"; content: string }
