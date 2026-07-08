@@ -128,6 +128,24 @@ export function knowledgeRepoGraph(repoId: string, branchId: string): Promise<Kn
   return query<KnowledgeGraphView>(["repograph", repoId, branchId]);
 }
 
+// —— File-backed notes (C9): create / read / overwrite / list ——
+
+export function knowledgeNoteNew(title: string): Promise<{ ok: boolean; slug: string; path: string; nodeId: string }> {
+  return query(["note", "new", title]);
+}
+
+export function knowledgeNoteWrite(slug: string, body: string): Promise<{ ok: boolean; path: string; nodeId: string }> {
+  return query(["note", "write", slug, body]);
+}
+
+export function knowledgeNoteRead(slug: string): Promise<{ slug: string; source: string }> {
+  return query(["note", "read", slug]);
+}
+
+export function knowledgeNoteList(): Promise<string[]> {
+  return query(["note", "list"]);
+}
+
 // Parse the search box's `type:`/`repo:`/`tag:`/`entity:` filter syntax out of
 // the free text (§7). Returns the residual query + parsed filters.
 export function parseSearchFilters(input: string): {

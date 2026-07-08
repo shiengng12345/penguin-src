@@ -61,6 +61,33 @@ export function appendNote(input: {
   return { path: full, nodeId };
 }
 
+// Overwrite a note's body (keeping its frontmatter block) and re-index — the
+// save path for the Wiki editor. Frontmatter (id/title) is preserved verbatim.
+export function writeNoteBody(input: {
+  store: KnowledgeStore;
+  notesDir: string;
+  slug: string;
+  body: string;
+}): { path: string; nodeId: string } {
+  const full = join(input.notesDir, `${input.slug}.md`);
+  if (!existsSync(full)) throw new Error(`note not found: ${input.slug}`);
+  const src = readFileSync(full, "utf8");
+  let frontmatter = "";
+  if (src.startsWith("---")) {
+    const end = src.indexOf("\n---", 3);
+    if (end !== -1) frontmatter = `${src.slice(0, end + 4)}\n`; // through closing ---
+  }
+  writeFileSync(full, `${frontmatter}\n${input.body.replace(/^\n+/, "")}`);
+  const nodeId = indexFile(input.store, input.notesDir, `${input.slug}.md`);
+  return { path: full, nodeId };
+}
+
+// Read a note's raw Markdown (for the editor to load). null if missing.
+export function readNote(notesDir: string, slug: string): string | null {
+  const full = join(notesDir, `${slug}.md`);
+  return existsSync(full) ? readFileSync(full, "utf8") : null;
+}
+
 export function listNotes(notesDir: string): string[] {
   if (!existsSync(notesDir)) return [];
   return readdirSync(notesDir)

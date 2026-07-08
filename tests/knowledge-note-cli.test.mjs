@@ -58,6 +58,34 @@ test("note append to a missing note exits 1", async () => {
   assert.equal(await runCli(["note", "append", "ghost", "x"], deps), 1);
 });
 
+test("note write overwrites the body (keeps frontmatter); note read returns source", async () => {
+  const { deps, lines } = harness();
+  await runCli(["note", "new", "Editme"], deps);
+  await runCli(["note", "append", "editme", "old body kryptonite"], deps);
+  // overwrite
+  assert.equal(await runCli(["note", "write", "editme", "brand new qwertybody"], deps), 0);
+
+  lines.length = 0;
+  await runCli(["note", "read", "editme", "--json"], deps);
+  const read = JSON.parse(lines[0]);
+  assert.match(read.source, /^---\nid: editme\ntitle: Editme\n---/, "frontmatter preserved");
+  assert.match(read.source, /brand new qwertybody/);
+  assert.doesNotMatch(read.source, /kryptonite/, "old body replaced");
+
+  // new body searchable, old gone
+  lines.length = 0;
+  await runCli(["search", "qwertybody", "--json"], deps);
+  assert.ok(JSON.parse(lines[0]).length >= 1);
+  lines.length = 0;
+  await runCli(["search", "kryptonite", "--json"], deps);
+  assert.equal(JSON.parse(lines[0]).length, 0, "old body no longer indexed");
+});
+
+test("note write to a missing note exits 1", async () => {
+  const { deps } = harness();
+  assert.equal(await runCli(["note", "write", "ghost", "x"], deps), 1);
+});
+
 test("note new never clobbers — duplicate title gets a -2 slug", async () => {
   const { deps, lines } = harness();
   await runCli(["note", "new", "Dup Title"], deps);

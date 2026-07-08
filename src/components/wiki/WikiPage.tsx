@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { Search, RefreshCw, Database, FileText, Box, Loader2, X, FolderTree, Network, FileCode } from "lucide-react";
+import { Search, RefreshCw, Database, FileText, Box, Loader2, X, FolderTree, Network, FileCode, FilePlus, Save, Pencil } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { WikiBrowseTree } from "@/components/wiki/WikiBrowseTree";
 import { WikiGraph } from "@/components/wiki/WikiGraph";
+import { WikiNoteEditor } from "@/components/wiki/WikiNoteEditor";
 import {
   knowledgeDbStatus,
   knowledgeSearch,
@@ -12,6 +13,9 @@ import {
   knowledgeFileSymbols,
   knowledgeGraph,
   knowledgeRepoGraph,
+  knowledgeNoteNew,
+  knowledgeNoteWrite,
+  knowledgeNoteRead,
   parseSearchFilters,
   type KnowledgeDbStatus,
   type KnowledgeSearchHit,
@@ -46,6 +50,10 @@ export function WikiPage({ onClose }: WikiPageProps) {
   const [graphLoading, setGraphLoading] = useState(false);
   const [reindexing, setReindexing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState<{ slug: string; body: string } | null>(null);
+  const [creating, setCreating] = useState(false);
+  const [newTitle, setNewTitle] = useState("");
+  const [savingNote, setSavingNote] = useState(false);
 
   const refreshStatus = useCallback(() => {
     knowledgeDbStatus().then(setStatus).catch(() => setStatus(null));
@@ -131,6 +139,54 @@ export function WikiPage({ onClose }: WikiPageProps) {
     }
   }, [refreshStatus]);
 
+  // Strip the leading `--- … ---` frontmatter so the editor shows just the body.
+  const noteBodyOf = (source: string): string => {
+    if (!source.startsWith("---")) return source;
+    const end = source.indexOf("\n---", 3);
+    return end === -1 ? source : source.slice(end + 4).replace(/^\r?\n+/, "");
+  };
+
+  const createNote = useCallback(async () => {
+    const title = newTitle.trim();
+    if (!title) return;
+    setError(null);
+    try {
+      const r = await knowledgeNoteNew(title);
+      setCreating(false);
+      setNewTitle("");
+      setDetail(null);
+      setEditing({ slug: r.slug, body: "" });
+      refreshStatus();
+    } catch (e) {
+      setError(String((e as Error).message ?? e));
+    }
+  }, [newTitle, refreshStatus]);
+
+  const editNote = useCallback(async (slug: string) => {
+    setError(null);
+    try {
+      const r = await knowledgeNoteRead(slug);
+      setEditing({ slug, body: noteBodyOf(r.source) });
+    } catch (e) {
+      setError(String((e as Error).message ?? e));
+    }
+  }, []);
+
+  const saveNote = useCallback(async () => {
+    if (!editing) return;
+    setSavingNote(true);
+    setError(null);
+    try {
+      await knowledgeNoteWrite(editing.slug, editing.body);
+      refreshStatus();
+      setEditing(null);
+    } catch (e) {
+      setError(String((e as Error).message ?? e));
+    } finally {
+      setSavingNote(false);
+    }
+  }, [editing, refreshStatus]);
+
   const TypeIcon = ({ t }: { t: string }) =>
     t === "note" ? <FileText className="h-4 w-4 text-emerald-300" /> : <Box className="h-4 w-4 text-cyan-300" />;
 
@@ -155,6 +211,15 @@ export function WikiPage({ onClose }: WikiPageProps) {
       <div className="flex items-center gap-2">
         <TypeIcon t={detail.node.nodeType} />
         <h2 className="min-w-0 flex-1 truncate font-mono text-base font-semibold">{detail.node.title}</h2>
+        {detail.node.nodeType === "note" && (
+          <button
+            type="button"
+            onClick={() => void editNote(detail.node.identityKey)}
+            className="flex h-7 items-center gap-1 rounded border border-slate-700 px-2 text-xs text-slate-300 hover:bg-white/5"
+          >
+            <Pencil className="h-3.5 w-3.5" /> 编辑
+          </button>
+        )}
         <button
           type="button"
           onClick={() => void focusGraph(detail.node.id)}
@@ -219,6 +284,13 @@ export function WikiPage({ onClose }: WikiPageProps) {
           <ModeButton m="graph" icon={<Network className="h-3.5 w-3.5" />} label="图谱" />
         </div>
         <div className="ml-auto flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => { setCreating(true); setEditing(null); setNewTitle(""); }}
+            className="flex h-9 items-center gap-2 rounded-md border border-slate-700 px-3 text-sm hover:bg-white/5"
+          >
+            <FilePlus className="h-4 w-4" /> 新建笔记
+          </button>
           <button type="button" onClick={reindex} disabled={reindexing} className="flex h-9 items-center gap-2 rounded-md border border-slate-700 px-3 text-sm hover:bg-white/5 disabled:opacity-50">
             <RefreshCw className={cn("h-4 w-4", reindexing && "animate-spin")} />
             {reindexing ? "重建中" : "重建索引"}
@@ -300,7 +372,37 @@ export function WikiPage({ onClose }: WikiPageProps) {
 
           {/* RIGHT: node detail, or (browse + file selected) the file's symbols */}
           <div className="min-h-0 w-1/2 overflow-y-auto p-4">
-            {detailPane ? (
+            {editing ? (
+              <div className="flex h-full flex-col gap-2">
+                <div className="flex items-center gap-2 border-b border-slate-800 pb-2">
+                  <Pencil className="h-4 w-4 text-emerald-300" />
+                  <span className="min-w-0 flex-1 truncate font-mono text-sm">{editing.slug}.md</span>
+                  <button type="button" onClick={() => setEditing(null)} className="rounded border border-slate-700 px-2 py-1 text-xs hover:bg-white/5">取消</button>
+                  <button type="button" onClick={() => void saveNote()} disabled={savingNote} className="flex items-center gap-1 rounded bg-cyan-500/20 px-2 py-1 text-xs text-cyan-200 hover:bg-cyan-500/30 disabled:opacity-50">
+                    <Save className="h-3.5 w-3.5" /> {savingNote ? "保存中" : "保存"}
+                  </button>
+                </div>
+                <div className="min-h-0 flex-1">
+                  <WikiNoteEditor body={editing.body} onChange={(v) => setEditing((e) => (e ? { ...e, body: v } : e))} />
+                </div>
+              </div>
+            ) : creating ? (
+              <div className="space-y-3">
+                <h3 className="text-sm font-medium">新建笔记</h3>
+                <input
+                  value={newTitle}
+                  onChange={(e) => setNewTitle(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") void createNote(); if (e.key === "Escape") setCreating(false); }}
+                  placeholder="笔记标题"
+                  autoFocus
+                  className="h-9 w-full rounded-md border border-slate-700 bg-slate-950/40 px-3 text-sm outline-none focus:border-cyan-400/60"
+                />
+                <div className="flex gap-2">
+                  <button type="button" onClick={() => void createNote()} disabled={!newTitle.trim()} className="rounded bg-cyan-500/20 px-3 py-1.5 text-sm text-cyan-200 hover:bg-cyan-500/30 disabled:opacity-50">创建并编辑</button>
+                  <button type="button" onClick={() => setCreating(false)} className="rounded border border-slate-700 px-3 py-1.5 text-sm hover:bg-white/5">取消</button>
+                </div>
+              </div>
+            ) : detailPane ? (
               detailPane
             ) : mode === "browse" && selectedFile ? (
               <div className="space-y-2">

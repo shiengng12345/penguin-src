@@ -12,7 +12,7 @@ import {
   type GraphMode,
   type KnowledgeStore,
 } from "@penguin/knowledge-core";
-import { indexRepo, createNote, appendNote, listNotes, reindexNotesDir } from "@penguin/knowledge-indexer";
+import { indexRepo, createNote, appendNote, writeNoteBody, readNote, listNotes, reindexNotesDir } from "@penguin/knowledge-indexer";
 
 export interface CliDeps {
   cwd: string;
@@ -205,6 +205,29 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
           deps.err((e as Error).message);
           return 1;
         }
+      }
+      if (sub === "write") {
+        // note write <slug> <body> — overwrite body (editor save). Body is a
+        // single arg so newlines survive (the app passes it as one argv entry).
+        const slug = pos[1];
+        const body = pos[2] ?? "";
+        if (!slug) { deps.err("usage: penguin note write <slug> <body>"); return 2; }
+        try {
+          const r = writeNoteBody({ store, notesDir, slug, body });
+          emit(deps, json, `wrote → ${r.path}`, { ok: true, path: r.path, nodeId: r.nodeId });
+          return 0;
+        } catch (e) {
+          deps.err((e as Error).message);
+          return 1;
+        }
+      }
+      if (sub === "read") {
+        const slug = pos[1];
+        if (!slug) { deps.err("usage: penguin note read <slug>"); return 2; }
+        const src = readNote(notesDir, slug);
+        if (src == null) { deps.err(`note not found: ${slug}`); return 1; }
+        emit(deps, json, src, { slug, source: src });
+        return 0;
       }
       if (sub === "reindex") {
         const r = reindexNotesDir({ store, notesDir });

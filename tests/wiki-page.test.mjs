@@ -80,3 +80,30 @@ test("WikiGraph renders via a dynamically-imported force-graph (code-split, defe
   assert.match(source, /onNodeClick/);
   assert.match(source, /\.catch\(/); // load failure must not break the rest of the Wiki
 });
+
+test("WikiNoteEditor is a CodeMirror editor with search-backed [[ wikilink autocomplete", async () => {
+  const source = await readFile(new URL("../src/components/wiki/WikiNoteEditor.tsx", import.meta.url), "utf8");
+  assert.match(source, /@codemirror\/view/);
+  assert.match(source, /autocompletion/);
+  assert.match(source, /noteCompletionTrigger/); // uses the unit-tested trigger
+  assert.match(source, /knowledgeSearch/); // wikilink candidates come from search
+  assert.match(source, /apply: `\$\{h\.title\}\]\]`/); // completes to [[Title]]
+});
+
+test("WikiPage wires note create/edit/save via the C9 note verbs", async () => {
+  const source = await readFile(new URL("../src/components/wiki/WikiPage.tsx", import.meta.url), "utf8");
+  assert.match(source, /knowledgeNoteNew/);
+  assert.match(source, /knowledgeNoteWrite/);
+  assert.match(source, /knowledgeNoteRead/);
+  assert.match(source, /<WikiNoteEditor/);
+  assert.match(source, /新建笔记/); // create affordance
+  assert.match(source, /editing/); // edit state
+});
+
+test("knowledge-client exposes note new/write/read/list wrappers", async () => {
+  const source = await readFile(new URL("../src/lib/knowledge-client.ts", import.meta.url), "utf8");
+  assert.match(source, /\["note", "new", title\]/);
+  assert.match(source, /\["note", "write", slug, body\]/);
+  assert.match(source, /\["note", "read", slug\]/);
+  assert.match(source, /\["note", "list"\]/);
+});
