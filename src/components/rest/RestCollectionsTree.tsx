@@ -85,9 +85,10 @@ export function RestCollectionsTree(props: RestCollectionsTreeProps) {
         const Icon = isCollapsed ? Folder : FolderOpen;
         return (
           <div key={collection.id} className="mb-0.5">
-            <button
-              type="button"
-              className="group flex w-full items-center gap-1 rounded px-2 py-1 text-left text-xs hover:bg-accent/50"
+            <div
+              role="button"
+              tabIndex={0}
+              className="group flex w-full cursor-pointer items-center gap-1 rounded px-2 py-1 text-left text-xs hover:bg-accent/50"
               onClick={() => {
                 setCollapsed((prev) => {
                   const next = new Set(prev);
@@ -95,6 +96,17 @@ export function RestCollectionsTree(props: RestCollectionsTreeProps) {
                   else next.add(collection.id);
                   return next;
                 });
+              }}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setCollapsed((prev) => {
+                    const next = new Set(prev);
+                    if (next.has(collection.id)) next.delete(collection.id);
+                    else next.add(collection.id);
+                    return next;
+                  });
+                }
               }}
             >
               <ChevronIcon className="h-3 w-3 shrink-0 text-muted-foreground" />
@@ -116,10 +128,9 @@ export function RestCollectionsTree(props: RestCollectionsTreeProps) {
                 <span className="truncate text-foreground">{collection.name}</span>
               )}
               <span className="ml-auto flex shrink-0 items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-                <span
+                <button
+                  type="button"
                   className="text-muted-foreground hover:text-foreground"
-                  role="button"
-                  tabIndex={0}
                   title="Rename"
                   onClick={(e) => {
                     e.stopPropagation();
@@ -128,11 +139,10 @@ export function RestCollectionsTree(props: RestCollectionsTreeProps) {
                   }}
                 >
                   <Pencil className="h-3 w-3" />
-                </span>
-                <span
+                </button>
+                <button
+                  type="button"
                   className="text-muted-foreground hover:text-foreground"
-                  role="button"
-                  tabIndex={0}
                   title="New request"
                   onClick={(e) => {
                     e.stopPropagation();
@@ -140,11 +150,10 @@ export function RestCollectionsTree(props: RestCollectionsTreeProps) {
                   }}
                 >
                   <Plus className="h-3 w-3" />
-                </span>
-                <span
+                </button>
+                <button
+                  type="button"
                   className="text-muted-foreground hover:text-destructive"
-                  role="button"
-                  tabIndex={0}
                   title="Delete collection"
                   onClick={(e) => {
                     e.stopPropagation();
@@ -152,9 +161,9 @@ export function RestCollectionsTree(props: RestCollectionsTreeProps) {
                   }}
                 >
                   <Trash2 className="h-3 w-3" />
-                </span>
+                </button>
               </span>
-            </button>
+            </div>
             {!isCollapsed && (
               <div className="ml-3 border-l border-border/60 pl-2">
                 {requests.length === 0 ? (
@@ -163,14 +172,18 @@ export function RestCollectionsTree(props: RestCollectionsTreeProps) {
                   requests.map((r) => {
                     const isActive = r.id === props.activeRequestId;
                     return (
-                      <button
+                      <div
                         key={r.id}
-                        type="button"
+                        role="button"
+                        tabIndex={0}
                         className={cn(
-                          "group flex w-full items-center gap-1.5 rounded px-2 py-1 text-left",
+                          "group flex w-full cursor-pointer items-center gap-1.5 rounded px-2 py-1 text-left",
                           isActive ? "bg-primary/10" : "hover:bg-accent/50",
                         )}
                         onClick={() => props.onSelectRequest(r.id)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); props.onSelectRequest(r.id); }
+                        }}
                       >
                         <span
                           className={cn(
@@ -188,10 +201,12 @@ export function RestCollectionsTree(props: RestCollectionsTreeProps) {
                         >
                           {r.name}
                         </span>
-                        <span
+                        {/* Real <button> sibling — NOT nested in an interactive
+                            row (WebKit retargets clicks on children to the
+                            enclosing <button>, which swallowed this delete). */}
+                        <button
+                          type="button"
                           className="shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
-                          role="button"
-                          tabIndex={0}
                           title="Delete request"
                           onClick={(e) => {
                             e.stopPropagation();
@@ -199,8 +214,8 @@ export function RestCollectionsTree(props: RestCollectionsTreeProps) {
                           }}
                         >
                           <Trash2 className="h-3 w-3" />
-                        </span>
-                      </button>
+                        </button>
+                      </div>
                     );
                   })
                 )}
