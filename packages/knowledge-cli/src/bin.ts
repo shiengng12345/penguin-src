@@ -19,6 +19,9 @@ runCli(process.argv.slice(2), {
   progress: process.stderr.isTTY ? (chunk) => process.stderr.write(chunk) : undefined,
   storeExists: () => existsSync(DB_PATH),
   notesDir: NOTES_DIR,
+  // Machine-parseable progress lines on stderr (stdout stays the --json report).
+  // The Rust bridge reads "PENGUIN_PROGRESS {json}" lines → Tauri events.
+  progressEvent: (payload) => process.stderr.write(`PENGUIN_PROGRESS ${JSON.stringify(payload)}\n`),
   openStore: () => {
     mkdirSync(dirname(DB_PATH), { recursive: true });
     return KnowledgeStore.open({ dbPath: DB_PATH, ledgerPath: LEDGER_PATH });

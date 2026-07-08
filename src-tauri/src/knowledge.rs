@@ -101,6 +101,60 @@ fn run_cli<R: tauri::Runtime>(app: &tauri::AppHandle<R>, args: &[String]) -> Res
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+// Like run_cli but streams stderr: lines `PENGUIN_PROGRESS {json}` (emitted by
+// the CLI under --progress-events) become `knowledge-index-progress` Tauri
+// events so the Wiki can show a live bar; stdout is collected as the final
+// report. Same event pattern as the package watcher (packages.rs).
+fn run_cli_streaming<R: tauri::Runtime>(app: &tauri::AppHandle<R>, args: &[String]) -> Result<String, String> {
+    use std::io::{BufRead, BufReader, Read};
+    use std::process::Stdio;
+    use tauri::Emitter;
+
+    let node = resolve_node().ok_or("Node.js not detected in common paths")?;
+    let cli = bundled_cli_path(app)?;
+    let mut child = Command::new(node)
+        .arg(&cli)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("penguin CLI failed to launch: {e}"))?;
+
+    let stderr = child.stderr.take();
+    let app_evt = app.clone();
+    let err_handle = std::thread::spawn(move || {
+        let mut tail = String::new();
+        if let Some(stderr) = stderr {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if let Some(rest) = line.strip_prefix("PENGUIN_PROGRESS ") {
+                    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(rest) {
+                        let _ = app_evt.emit("knowledge-index-progress", payload);
+                    }
+                } else {
+                    tail.push_str(&line);
+                    tail.push('\n');
+                }
+            }
+        }
+        tail
+    });
+
+    let mut stdout_buf = String::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        let _ = stdout.read_to_string(&mut stdout_buf);
+    }
+    let status = child.wait().map_err(|e| format!("penguin CLI wait failed: {e}"))?;
+    let stderr_tail = err_handle.join().unwrap_or_default();
+    if !status.success() {
+        return Err(format!(
+            "penguin CLI exit {}: {}",
+            status.code().unwrap_or(-1),
+            stderr_tail.trim()
+        ));
+    }
+    Ok(stdout_buf)
+}
+
 // Generic query passthrough for the Wiki UI: e.g. args = ["search","gameurl"]
 // or ["callers","GetLoginURL"]. Always JSON. Returns the CLI's raw JSON string
 // (the webview parses it) so the UI shares the CLI/MCP query semantics exactly.
@@ -127,7 +181,9 @@ pub(crate) fn knowledge_reindex<R: tauri::Runtime>(
         args.push(p);
     }
     args.push("--json".to_string());
-    run_cli(&app, &args)
+    args.push("--progress-events".to_string());
+    // Streams knowledge-index-progress events while running; returns the report.
+    run_cli_streaming(&app, &args)
 }
 
 #[derive(Serialize)]

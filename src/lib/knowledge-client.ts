@@ -151,6 +151,21 @@ export function knowledgeTags(): Promise<string[]> {
   return query<string[]>(["tags"]);
 }
 
+export interface IndexProgress {
+  phase: "scan" | "index";
+  done: number;
+  total: number;
+  file?: string;
+}
+
+// Subscribe to live index progress (emitted by the Rust bridge while
+// knowledge_reindex runs). Returns an unlisten fn. Lazy-imports the event API
+// so the module's only static Tauri import stays @tauri-apps/api/core.
+export async function onIndexProgress(cb: (p: IndexProgress) => void): Promise<() => void> {
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<IndexProgress>("knowledge-index-progress", (e) => cb(e.payload));
+}
+
 // Parse the search box's `type:`/`repo:`/`tag:`/`entity:` filter syntax out of
 // the free text (§7). Returns the residual query + parsed filters.
 export function parseSearchFilters(input: string): {

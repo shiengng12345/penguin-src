@@ -16,6 +16,7 @@ import {
   knowledgeNoteNew,
   knowledgeNoteWrite,
   knowledgeNoteRead,
+  onIndexProgress,
   parseSearchFilters,
   type KnowledgeDbStatus,
   type KnowledgeSearchHit,
@@ -23,6 +24,7 @@ import {
   type KnowledgeGraphResult,
   type KnowledgeFileSymbol,
   type KnowledgeGraphView,
+  type IndexProgress,
 } from "@/lib/knowledge-client";
 
 interface WikiPageProps {
@@ -49,6 +51,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
   const [graphData, setGraphData] = useState<KnowledgeGraphView | null>(null);
   const [graphLoading, setGraphLoading] = useState(false);
   const [reindexing, setReindexing] = useState(false);
+  const [indexProgress, setIndexProgress] = useState<IndexProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<{ slug: string; body: string } | null>(null);
   const [creating, setCreating] = useState(false);
@@ -129,13 +132,17 @@ export function WikiPage({ onClose }: WikiPageProps) {
   const reindex = useCallback(async () => {
     setReindexing(true);
     setError(null);
+    setIndexProgress(null);
+    const unlisten = await onIndexProgress(setIndexProgress);
     try {
       await knowledgeReindex();
       refreshStatus();
     } catch (e) {
       setError(String((e as Error).message ?? e));
     } finally {
+      unlisten();
       setReindexing(false);
+      setIndexProgress(null);
     }
   }, [refreshStatus]);
 
@@ -293,7 +300,13 @@ export function WikiPage({ onClose }: WikiPageProps) {
           </button>
           <button type="button" onClick={reindex} disabled={reindexing} className="flex h-9 items-center gap-2 rounded-md border border-slate-700 px-3 text-sm hover:bg-white/5 disabled:opacity-50">
             <RefreshCw className={cn("h-4 w-4", reindexing && "animate-spin")} />
-            {reindexing ? "重建中" : "重建索引"}
+            {reindexing
+              ? indexProgress
+                ? indexProgress.phase === "scan"
+                  ? `扫描 ${indexProgress.total}`
+                  : `${Math.round((indexProgress.done / Math.max(1, indexProgress.total)) * 100)}%`
+                : "重建中"
+              : "重建索引"}
           </button>
           <button type="button" onClick={onClose} className="rounded p-1.5 hover:bg-white/5" aria-label="关闭">
             <X className="h-4 w-4" />

@@ -32,6 +32,10 @@ export interface CliDeps {
   // Directory holding file-backed knowledge notes (*.md). bin.ts sets it to
   // ~/.penguin/knowledge/notes; the `note` verb reads/writes here.
   notesDir?: string;
+  // Structured progress sink for `--progress-events` (index/rebuild). bin.ts
+  // writes a machine-parseable line to stderr so the Rust bridge can turn each
+  // into a Tauri event; stdout stays clean for the final --json report.
+  progressEvent?: (payload: unknown) => void;
 }
 
 const READ_VERBS = new Set([
@@ -135,12 +139,16 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     const rootPath = pos[0] ?? deps.cwd;
     const store = deps.openStore();
     try {
-      const progress = json ? undefined : deps.progress;
+      // --progress-events: emit structured progress (for the app/Rust bridge to
+      // parse into Tauri events). Otherwise the human bar on stderr (TTY only).
+      const emitEvents = flags.includes("--progress-events") && !!deps.progressEvent;
+      const progress = !emitEvents && !json ? deps.progress : undefined;
       const step = (total: number) => Math.max(1, Math.floor(total / 100)); // ~1% cadence
       const report = await indexRepo({
         store, rootPath, mode: verb === "rebuild" ? "rebuild" : "incremental",
-        // Phased progress bar on stderr (stdout stays clean for --json).
-        onProgress: progress
+        onProgress: emitEvents
+          ? (p) => deps.progressEvent!(p)
+          : progress
           ? (p) => {
               if (p.phase === "scan") {
                 progress(`  Scanning files — ${p.total} found\n`);
