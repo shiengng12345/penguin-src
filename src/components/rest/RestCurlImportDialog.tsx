@@ -14,6 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { parseCurl, type ParsedCurl } from "@/lib/curl-parser";
+import { jsonToFields } from "@/lib/rest-body-fields";
 import type {
   RestAuth,
   RestBody,
@@ -426,6 +427,11 @@ function inferBody(parsed: ParsedCurl): RestBody | undefined {
   const contentType = (
     findHeader(parsed.headers, "Content-Type") ?? ""
   ).toLowerCase();
+  // JSON-object body → editable key-value form (kept in sync with the JSON tab).
+  const kvFields = jsonToFields(parsed.body);
+  if (kvFields.length > 0) {
+    return { mode: "key-value", fields: kvFields };
+  }
   if (contentType.includes("application/json")) {
     return { mode: "json", content: parsed.body };
   }
