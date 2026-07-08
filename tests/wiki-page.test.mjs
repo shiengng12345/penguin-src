@@ -43,3 +43,40 @@ test("knowledge-client routes through the Rust bridge commands", async () => {
   assert.match(source, /invoke<KnowledgeDbStatus>\("knowledge_db_status"\)/);
   assert.match(source, /invoke<string>\("knowledge_reindex"/);
 });
+
+test("knowledge-client exposes index-browse + graph wrappers over the CLI verbs", async () => {
+  const source = await readFile(new URL("../src/lib/knowledge-client.ts", import.meta.url), "utf8");
+  // each wrapper maps to its CLI verb through the generic query() passthrough
+  assert.match(source, /query<KnowledgeIndexStatus>\(\["status"\]\)/);
+  assert.match(source, /query<KnowledgeFileRow\[\]>\(\["files", repoId, branchId\]\)/);
+  assert.match(source, /query<KnowledgeFileSymbol\[\]>\(\["filesymbols", branchId, filePath\]\)/);
+  assert.match(source, /query<KnowledgeGraphView>\(\["graph", node, String\(depth\)\]\)/);
+  assert.match(source, /query<KnowledgeGraphView>\(\["repograph", repoId, branchId\]\)/);
+});
+
+test("WikiPage has browse/search/graph modes wiring the tree + graph", async () => {
+  const source = await readFile(new URL("../src/components/wiki/WikiPage.tsx", import.meta.url), "utf8");
+  assert.match(source, /type Mode = "browse" \| "search" \| "graph"/);
+  assert.match(source, /useState<Mode>\("browse"\)/); // default = browse, not a blank search box
+  assert.match(source, /<WikiBrowseTree/);
+  assert.match(source, /<WikiGraph/);
+  assert.match(source, /knowledgeFileSymbols/);
+  assert.match(source, /knowledgeRepoGraph/);
+  assert.match(source, /knowledgeGraph/);
+});
+
+test("WikiBrowseTree lazy-loads repo→branch→file and can open a repo graph", async () => {
+  const source = await readFile(new URL("../src/components/wiki/WikiBrowseTree.tsx", import.meta.url), "utf8");
+  assert.match(source, /knowledgeIndexStatus/); // repos + branches
+  assert.match(source, /knowledgeFiles\(repoId, branchId\)/); // files lazy per branch
+  assert.match(source, /onSelectFile/);
+  assert.match(source, /onOpenRepoGraph/);
+});
+
+test("WikiGraph renders via a dynamically-imported force-graph (code-split, defensive)", async () => {
+  const source = await readFile(new URL("../src/components/wiki/WikiGraph.tsx", import.meta.url), "utf8");
+  assert.match(source, /import\("force-graph"\)/); // dynamic → own chunk + graceful failure
+  assert.match(source, /new ForceGraph\(el\)/);
+  assert.match(source, /onNodeClick/);
+  assert.match(source, /\.catch\(/); // load failure must not break the rest of the Wiki
+});

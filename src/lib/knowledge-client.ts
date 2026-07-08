@@ -70,6 +70,64 @@ export async function knowledgeReindex(path?: string): Promise<KnowledgeIndexRep
   return JSON.parse(raw) as KnowledgeIndexReport;
 }
 
+// —— Index browse (repo → branch → file → symbol) + graph view (Plan 8 ②) ——
+
+export interface KnowledgeIndexStatus {
+  repos: Array<{
+    repoId: string;
+    name: string;
+    rootPath: string;
+    branches: Array<{ branchId: string; name: string; status: string; lastIndexedAt: string | null; staleSymbols: number }>;
+  }>;
+}
+
+export interface KnowledgeFileRow {
+  filePath: string;
+  lang: string | null;
+  status: string; // indexed | skipped | deleted | error
+  sizeBytes: number | null;
+  indexedAt: string | null;
+  error: string | null;
+}
+
+export interface KnowledgeFileSymbol {
+  nodeId: string;
+  title: string;
+  kind: string;
+  status: string; // fresh | stale
+}
+
+export interface KnowledgeGraphView {
+  focus: string | null;
+  nodes: Array<{ nodeId: string; title: string; nodeType: string }>;
+  edges: Array<{ src: string; dst: string; edgeType: string }>;
+}
+
+// repos + branches for the navigation tree's top two levels.
+export function knowledgeIndexStatus(): Promise<KnowledgeIndexStatus> {
+  return query<KnowledgeIndexStatus>(["status"]);
+}
+
+// The files captured for a repo/branch (tree leaf level, lazy-loaded).
+export function knowledgeFiles(repoId: string, branchId: string): Promise<KnowledgeFileRow[]> {
+  return query<KnowledgeFileRow[]>(["files", repoId, branchId]);
+}
+
+// The symbols defined in one file (click-a-file → its symbols).
+export function knowledgeFileSymbols(branchId: string, filePath: string): Promise<KnowledgeFileSymbol[]> {
+  return query<KnowledgeFileSymbol[]>(["filesymbols", branchId, filePath]);
+}
+
+// Local graph: a focus node + its neighbourhood (recenter by picking a node).
+export function knowledgeGraph(node: string, depth = 1): Promise<KnowledgeGraphView> {
+  return query<KnowledgeGraphView>(["graph", node, String(depth)]);
+}
+
+// Repo/branch-scoped graph (top-degree hubs).
+export function knowledgeRepoGraph(repoId: string, branchId: string): Promise<KnowledgeGraphView> {
+  return query<KnowledgeGraphView>(["repograph", repoId, branchId]);
+}
+
 // Parse the search box's `type:`/`repo:`/`tag:`/`entity:` filter syntax out of
 // the free text (§7). Returns the residual query + parsed filters.
 export function parseSearchFilters(input: string): {
