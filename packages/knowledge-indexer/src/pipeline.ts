@@ -4,6 +4,7 @@ import { basename } from "node:path";
 import type { KnowledgeStore } from "@penguin/knowledge-core";
 import { extractSymbols, type ExtractedSymbol } from "./extract.js";
 import { readGitContext } from "./git.js";
+import { indexGitObjects } from "./gitgraph.js";
 import { langForExtension } from "./registry.js";
 import { detectRenames } from "./rename.js";
 import { resolveRefs, type SymbolIndex } from "./resolve.js";
@@ -20,6 +21,8 @@ export interface IndexReport {
   deleted: number;
   errors: number;
   renamed: number;
+  commits: number; // git commit nodes captured
+  tags: number; // git tag nodes captured
 }
 
 // In-process index task lock: one active task per repo+branch+checkout (§8.3).
@@ -249,6 +252,7 @@ export async function indexRepo(input: {
   const report: IndexReport = {
     repoId, branchId, branchName: git.branch, commit: git.commit,
     scanned: 0, parsed: 0, skipped: 0, deleted: 0, errors: 0, renamed: 0,
+    commits: 0, tags: 0,
   };
 
   try {
@@ -319,6 +323,11 @@ export async function indexRepo(input: {
         .run(branchId, cp.file_path);
       report.deleted += 1;
     }
+
+    // git topology (commits/tags) into the graph — on-demand, bounded (§11).
+    const gitGraph = indexGitObjects({ store, rootPath });
+    report.commits = gitGraph.commits;
+    report.tags = gitGraph.tags;
 
     store.recordBranchIndexed({ branchId, commit: git.commit });
     return report;

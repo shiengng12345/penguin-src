@@ -13,5 +13,6 @@ export { parseNote, indexNote, extractEntities, type ParsedNote } from "./notes.
 export { resolveNoteLinks } from "./fusion.js";
 export { readGitContext, type GitContext } from "./git.js";
 export { walkRepoFiles, type WalkedFile } from "./walk.js";
+export { indexGitObjects, type GitGraphResult } from "./gitgraph.js";
 export { indexRepo, reconcileOnStartup, IndexTaskLock, type IndexReport } from "./pipeline.js";
 export { startWatcher, type WatcherHandle, type WatcherStatus } from "./watcher.js";
