@@ -71,6 +71,15 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     try {
       const report = await indexRepo({
         store, rootPath, mode: verb === "rebuild" ? "rebuild" : "incremental",
+        // Progress on stderr (stdout stays clean for --json); shows life on
+        // large repos and pinpoints a file if one ever hangs.
+        onProgress: json
+          ? undefined
+          : ({ scanned, parsed, file }) => {
+              if (scanned % 25 === 0 || parsed === 0) {
+                deps.err(`  indexing… ${parsed} parsed / ${scanned} scanned  (${file})`);
+              }
+            },
       });
       emit(deps, json,
         `${verb}: ${report.branchName} — ${report.parsed} parsed, ${report.skipped} skipped, ${report.deleted} deleted, ${report.renamed} renamed, ${report.errors} errors`,

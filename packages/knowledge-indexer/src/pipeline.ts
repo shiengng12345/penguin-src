@@ -224,6 +224,9 @@ export async function indexRepo(input: {
   store: KnowledgeStore;
   rootPath: string;
   mode: "incremental" | "rebuild";
+  // Called as each file is about to be processed (so long indexes show life
+  // and, if one file hangs, you can see which). Optional.
+  onProgress?: (p: { scanned: number; parsed: number; file: string }) => void;
 }): Promise<IndexReport> {
   const { store, rootPath, mode } = input;
   const git = readGitContext(rootPath);
@@ -280,6 +283,7 @@ export async function indexRepo(input: {
         continue;
       }
 
+      input.onProgress?.({ scanned: report.scanned, parsed: report.parsed, file: file.relPath });
       const r = await indexFileWithSource(store, {
         repoId, branchId, commit: git.commit, relPath: file.relPath,
         source, contentHash, mtimeMs: file.mtimeMs, sizeBytes: file.sizeBytes,
