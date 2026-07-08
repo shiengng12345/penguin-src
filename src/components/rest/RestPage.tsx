@@ -220,7 +220,8 @@ export function RestPage({ onClose }: RestPageProps) {
   const handleDeleteCollection = (id: string) => {
     const col = collections.find((c) => c.id === id);
     if (!col) return;
-    if (!window.confirm(`Delete collection "${col.name}" and its requests?`)) return;
+    // Confirmation is inline (two-click) in RestCollectionsTree — window.confirm
+    // can silently return false in Tauri's webview, which ate the delete.
     setCollections(deleteCollection({ id }));
     setRequests(loadRequests());
     // Clear active request if it belonged to the deleted collection
@@ -403,7 +404,7 @@ export function RestPage({ onClose }: RestPageProps) {
   const handleDeleteRequest = (id: string) => {
     const r = requests.find((req) => req.id === id);
     if (!r) return;
-    if (!window.confirm(`Delete request "${r.name}"?`)) return;
+    // Confirmation is inline (two-click) in RestCollectionsTree.
     setRequests(deleteRequest({ id }));
     if (activeRequestId === id) setActiveRequestId(null);
     // Drop the session-only response slot for this id so deleted

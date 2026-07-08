@@ -1,7 +1,7 @@
 // Sprint 10 Phase 10A.7 — Postman-style collections tree.
 
-import { useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, Folder, FolderOpen, Pencil, Plus, Trash2 } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { ChevronDown, ChevronRight, Check, Folder, FolderOpen, Pencil, Plus, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { RestCollection, RestRequestRecord } from "./rest-types";
 import { Input } from "@/components/ui/input";
@@ -33,6 +33,24 @@ export function RestCollectionsTree(props: RestCollectionsTreeProps) {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
+  // Inline two-click delete confirm — first click arms (key = "req:<id>" /
+  // "col:<id>"), second click deletes. Avoids window.confirm(), which can
+  // silently return false in Tauri's webview. Auto-disarms after 3s.
+  const [confirmKey, setConfirmKey] = useState<string | null>(null);
+  useEffect(() => {
+    if (!confirmKey) return;
+    const t = window.setTimeout(() => setConfirmKey(null), 3000);
+    return () => window.clearTimeout(t);
+  }, [confirmKey]);
+  // Returns true if this click should perform the delete (already armed).
+  const armOrConfirm = (key: string): boolean => {
+    if (confirmKey === key) {
+      setConfirmKey(null);
+      return true;
+    }
+    setConfirmKey(key);
+    return false;
+  };
 
   const commitRename = () => {
     if (renamingId && renameDraft.trim()) {
@@ -153,14 +171,17 @@ export function RestCollectionsTree(props: RestCollectionsTreeProps) {
                 </button>
                 <button
                   type="button"
-                  className="text-muted-foreground hover:text-destructive"
-                  title="Delete collection"
+                  className={cn(
+                    "hover:text-destructive",
+                    confirmKey === `col:${collection.id}` ? "text-destructive" : "text-muted-foreground",
+                  )}
+                  title={confirmKey === `col:${collection.id}` ? "Click again to confirm delete" : "Delete collection"}
                   onClick={(e) => {
                     e.stopPropagation();
-                    props.onDeleteCollection(collection.id);
+                    if (armOrConfirm(`col:${collection.id}`)) props.onDeleteCollection(collection.id);
                   }}
                 >
-                  <Trash2 className="h-3 w-3" />
+                  {confirmKey === `col:${collection.id}` ? <Check className="h-3 w-3" /> : <Trash2 className="h-3 w-3" />}
                 </button>
               </span>
             </div>
@@ -206,14 +227,19 @@ export function RestCollectionsTree(props: RestCollectionsTreeProps) {
                             enclosing <button>, which swallowed this delete). */}
                         <button
                           type="button"
-                          className="shrink-0 text-muted-foreground opacity-0 transition-opacity hover:text-destructive group-hover:opacity-100"
-                          title="Delete request"
+                          className={cn(
+                            "shrink-0 transition-opacity hover:text-destructive",
+                            confirmKey === `req:${r.id}`
+                              ? "text-destructive opacity-100"
+                              : "text-muted-foreground opacity-0 group-hover:opacity-100",
+                          )}
+                          title={confirmKey === `req:${r.id}` ? "Click again to confirm delete" : "Delete request"}
                           onClick={(e) => {
                             e.stopPropagation();
-                            props.onDeleteRequest(r.id);
+                            if (armOrConfirm(`req:${r.id}`)) props.onDeleteRequest(r.id);
                           }}
                         >
-                          <Trash2 className="h-3 w-3" />
+                          {confirmKey === `req:${r.id}` ? <Check className="h-3 w-3" /> : <Trash2 className="h-3 w-3" />}
                         </button>
                       </div>
                     );
