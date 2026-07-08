@@ -108,11 +108,14 @@ test("§10 CLI files/graph/repograph verbs after init", async () => {
   const files = await json(["files", repo.repoId, branch.branchId]);
   assert.ok(files.some((f) => f.filePath === "src/a.ts" && f.status === "indexed"), "src/a.ts indexed");
 
-  // repograph: outer + inner + the calls edge among them
+  // repograph: symbols outer+inner AND the file node (file nodes are part of the
+  // graph now — Plan B P1), the calls edge among symbols + defines edges from file.
   const rg = await json(["repograph", repo.repoId, branch.branchId]);
   const titles = rg.nodes.map((n) => n.title).sort();
-  assert.deepEqual(titles, ["inner", "outer"]);
-  assert.equal(rg.edges.length, 1);
+  assert.ok(titles.includes("inner") && titles.includes("outer"), "symbols present");
+  assert.ok(titles.includes("src/a.ts"), "file node present in graph");
+  assert.ok(rg.edges.some((e) => e.edgeType === "calls"), "calls edge present");
+  assert.ok(rg.edges.some((e) => e.edgeType === "defines"), "defines edge present");
 
   // graph (local): focus inner → its caller outer is a neighbour
   const g = await json(["graph", "inner"]);

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { basename } from "node:path";
-import type { KnowledgeStore } from "@penguin/knowledge-core";
+import { readFileSync, statSync } from "node:fs";
+import { basename, dirname, relative, resolve as pathResolve } from "node:path";
+import type { KnowledgeStore, ParsedEdge } from "@penguin/knowledge-core";
 import { extractSymbols, type ExtractedSymbol } from "./extract.js";
 import { readGitContext } from "./git.js";
 import { indexGitObjects } from "./gitgraph.js";
@@ -47,6 +47,41 @@ function symbolIdentityKey(repoId: string, qualifiedName: string): string {
   return `${repoId}::${qualifiedName}`;
 }
 
+// Test files (*.spec.ts / *.test.ts / __tests__/…) get `tests` edges to the
+// symbols they exercise, so "what tests cover X" is a graph query (§ vision #9).
+function isTestFile(relPath: string): boolean {
+  return /\.(spec|test)\.[cm]?[jt]sx?$/.test(relPath) || relPath.includes("__tests__/");
+}
+
+// A file is a first-class node (node_type='file') so import/defines edges have
+// real endpoints (both AI reviewers: file nodes are the missing primitive).
+function fileIdentityKey(repoId: string, relPath: string): string {
+  return `${repoId}::file::${relPath}`;
+}
+
+// Resolve a relative import specifier to a repo-relative file path (or null for
+// bare/external modules or unresolved paths). Tries TS/JS extensions + index.
+const IMPORT_EXTS = ["", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".d.ts"];
+const IMPORT_INDEX = ["/index.ts", "/index.tsx", "/index.js", "/index.jsx"];
+function isFile(p: string): boolean {
+  try {
+    return statSync(p).isFile();
+  } catch {
+    return false;
+  }
+}
+function resolveRelativeImport(fromAbsPath: string, spec: string, rootPath: string): string | null {
+  if (!spec.startsWith(".")) return null; // bare/external module — no file node
+  const base = pathResolve(dirname(fromAbsPath), spec);
+  for (const cand of [...IMPORT_EXTS.map((e) => base + e), ...IMPORT_INDEX.map((e) => base + e)]) {
+    if (isFile(cand)) {
+      const rel = relative(rootPath, cand);
+      if (rel && !rel.startsWith("..")) return rel.split("\\").join("/");
+    }
+  }
+  return null;
+}
+
 // Same-repo resolution backend (node identity is branch-independent, D6).
 function storeSymbolIndex(store: KnowledgeStore, repoId: string): SymbolIndex {
   return {
@@ -61,14 +96,18 @@ function storeSymbolIndex(store: KnowledgeStore, repoId: string): SymbolIndex {
     bareNameCandidates: (bare) => {
       const rows = store.db
         .prepare(
-          `SELECT id FROM nodes
-           WHERE node_type='symbol' AND repo_id=?
-             AND (identity_key = ? OR identity_key LIKE ? OR identity_key LIKE ?)`,
+          `SELECT n.id AS id,
+                  (SELECT sv.file_path FROM symbol_versions sv
+                     WHERE sv.node_id = n.id AND sv.status='fresh' LIMIT 1) AS filePath
+           FROM nodes n
+           WHERE n.node_type='symbol' AND n.repo_id=?
+             AND (n.identity_key = ? OR n.identity_key LIKE ? OR n.identity_key LIKE ?)`,
         )
-        .all(repoId, symbolIdentityKey(repoId, bare), `%::${bare}`, `%.${bare}`) as {
+        .all(repoId, symbolIdentityKey(repoId, bare), `%::${bare}`, `%.${bare}`) as Array<{
         id: string;
-      }[];
-      return rows.map((r) => r.id);
+        filePath: string | null;
+      }>;
+      return rows;
     },
   };
 }
@@ -108,6 +147,8 @@ async function indexFileWithSource(
     branchId: string;
     commit: string | null;
     relPath: string;
+    absPath: string;
+    rootPath: string;
     source: string;
     contentHash: string;
     mtimeMs: number;
@@ -152,7 +193,24 @@ async function indexFileWithSource(
     });
   }
 
+  // Resolve this file's relative imports → target repo-relative paths (used both
+  // for `imports` edges and to scope bare-name symbol resolution).
+  const importedFiles = new Set<string>();
+  for (const spec of extracted.fileImports) {
+    const target = resolveRelativeImport(p.absPath, spec, p.rootPath);
+    if (target && target !== p.relPath) importedFiles.add(target);
+  }
+
   const tx = store.db.transaction(() => {
+    // 0. the file itself is a node (defines/imports edges hang off it)
+    const fileNodeId = store.upsertNode({
+      nodeType: "file",
+      identityKey: fileIdentityKey(p.repoId, p.relPath),
+      repoId: p.repoId,
+      title: p.relPath,
+      meta: { path: p.relPath, lang },
+    });
+
     // 1. upsert nodes for current symbols, collect qualifiedName → nodeId
     const fileSymbolIds = new Map<string, string>();
     for (const sym of extracted.symbols) {
@@ -178,12 +236,40 @@ async function indexFileWithSource(
       });
     }
 
-    // 3. resolve call refs → edges, full-replace this file's parser edges
+    // 3. resolve call/type refs → edges (import-scoped), plus structural edges:
+    //    file →defines→ symbol, and file →imports→ imported file.
     const resolved = resolveRefs({
       refs: extracted.refs, fileSymbols: extracted.symbols,
       fileSymbolIds, lookup: storeSymbolIndex(store, p.repoId),
+      currentFile: p.relPath, importedFiles,
     });
-    store.replaceFileEdges({ branchId: p.branchId, filePath: p.relPath, edges: resolved.edges });
+    const structural: ParsedEdge[] = [];
+    for (const nodeId of fileSymbolIds.values()) {
+      structural.push({ src: fileNodeId, dst: nodeId, edgeType: "defines", origin: "parser", method: "EXTRACTED" });
+    }
+    for (const target of importedFiles) {
+      const targetFileId = store.upsertNode({
+        nodeType: "file",
+        identityKey: fileIdentityKey(p.repoId, target),
+        repoId: p.repoId,
+        title: target,
+        meta: { path: target },
+      });
+      structural.push({ src: fileNodeId, dst: targetFileId, edgeType: "imports", origin: "parser", method: "EXTRACTED" });
+    }
+    // tests: a spec/test file → the symbols it exercises (the resolved call/type
+    // targets that live outside this file). Grounded in real usage, not guessed.
+    if (isTestFile(p.relPath)) {
+      const localIds = new Set(fileSymbolIds.values());
+      const tested = new Set(resolved.edges.map((e) => e.dst).filter((d): d is string => !!d && !localIds.has(d)));
+      for (const dst of tested) {
+        structural.push({ src: fileNodeId, dst, edgeType: "tests", origin: "parser", method: "EXTRACTED" });
+      }
+    }
+    store.replaceFileEdges({
+      branchId: p.branchId, filePath: p.relPath,
+      edges: [...resolved.edges, ...structural],
+    });
 
     // 4. FTS for each symbol
     for (const sym of extracted.symbols) {
@@ -301,6 +387,7 @@ export async function indexRepo(input: {
 
       const r = await indexFileWithSource(store, {
         repoId, branchId, commit: git.commit, relPath: file.relPath,
+        absPath: file.absPath, rootPath,
         source, contentHash, mtimeMs: file.mtimeMs, sizeBytes: file.sizeBytes,
       });
       if (r.error) report.errors += 1;

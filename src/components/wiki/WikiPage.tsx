@@ -46,6 +46,8 @@ export function WikiPage({ onClose }: WikiPageProps) {
   const [searching, setSearching] = useState(false);
   const [detail, setDetail] = useState<KnowledgeNodeDetail | null>(null);
   const [backlinks, setBacklinks] = useState<KnowledgeGraphResult | null>(null);
+  const [calls, setCalls] = useState<KnowledgeGraphResult | null>(null);
+  const [siblings, setSiblings] = useState<KnowledgeFileSymbol[]>([]);
   const [selectedFile, setSelectedFile] = useState<{ branchId: string; filePath: string } | null>(null);
   const [fileSymbols, setFileSymbols] = useState<KnowledgeFileSymbol[]>([]);
   const [graphData, setGraphData] = useState<KnowledgeGraphView | null>(null);
@@ -83,9 +85,27 @@ export function WikiPage({ onClose }: WikiPageProps) {
   const openNode = useCallback(async (nodeId: string) => {
     setError(null);
     try {
-      const [d, bl] = await Promise.all([knowledgeNode(nodeId), knowledgeExplore("backlinks", nodeId)]);
+      const [d, bl, cl] = await Promise.all([
+        knowledgeNode(nodeId),
+        knowledgeExplore("backlinks", nodeId),
+        knowledgeExplore("calls", nodeId),
+      ]);
       setDetail(d);
       setBacklinks(bl);
+      setCalls(cl);
+      // Same-file symbols (containment) — a symbol always has file-mates even
+      // when it has no call edges, so the panel is never bare.
+      const v = d.versions.find((x) => x.status === "fresh") ?? d.versions[0];
+      if (v) {
+        try {
+          const syms = await knowledgeFileSymbols(v.branchId, v.filePath);
+          setSiblings(syms.filter((s) => s.nodeId !== d.node.id));
+        } catch {
+          setSiblings([]);
+        }
+      } else {
+        setSiblings([]);
+      }
     } catch (e) {
       setError(String((e as Error).message ?? e));
     }
@@ -94,6 +114,9 @@ export function WikiPage({ onClose }: WikiPageProps) {
   const selectFile = useCallback(async (branchId: string, filePath: string) => {
     setError(null);
     setDetail(null);
+    setBacklinks(null);
+    setCalls(null);
+    setSiblings([]);
     setSelectedFile({ branchId, filePath });
     try {
       setFileSymbols(await knowledgeFileSymbols(branchId, filePath));
@@ -213,11 +236,41 @@ export function WikiPage({ onClose }: WikiPageProps) {
 
   const focusNode = graphData?.nodes.find((n) => n.nodeId === graphData.focus);
 
+  // A clickable relation row (reused across calls / backlinks / same-file).
+  const RelRow = ({ id, title, type, meta }: { id: string; title: string; type: string; meta?: string }) => (
+    <button
+      type="button"
+      onClick={() => void openNode(id)}
+      className="group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-white/5"
+    >
+      <TypeIcon t={type} />
+      <span className="min-w-0 flex-1 truncate font-mono text-xs text-slate-200 group-hover:text-cyan-200">{title}</span>
+      {meta && <span className="shrink-0 text-[10px] text-slate-500">{meta}</span>}
+    </button>
+  );
+
+  const RelSection = ({ label, count, children }: { label: string; count: number; children: ReactNode }) =>
+    count === 0 ? null : (
+      <section>
+        <h3 className="mb-1 flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-slate-400">
+          {label}
+          <span className="rounded-full bg-slate-800 px-1.5 text-[10px] font-normal text-slate-400">{count}</span>
+        </h3>
+        <div className="-mx-1">{children}</div>
+      </section>
+    );
+
+  const primary = detail?.versions.find((v) => v.status === "fresh") ?? detail?.versions[0];
+
   const detailPane = detail && (
-    <div className="space-y-4">
+    <div className="space-y-5">
+      {/* Title row */}
       <div className="flex items-center gap-2">
         <TypeIcon t={detail.node.nodeType} />
         <h2 className="min-w-0 flex-1 truncate font-mono text-base font-semibold">{detail.node.title}</h2>
+        {primary && (
+          <span className="shrink-0 rounded bg-slate-800 px-1.5 py-0.5 text-[10px] uppercase text-slate-300">{primary.kind}</span>
+        )}
         {detail.node.nodeType === "note" && (
           <button
             type="button"
@@ -235,35 +288,59 @@ export function WikiPage({ onClose }: WikiPageProps) {
           <Network className="h-3.5 w-3.5" /> 图谱
         </button>
       </div>
-      {detail.versions.length > 0 && (
+
+      {/* Location */}
+      {primary && (
+        <div className="flex items-center gap-1.5 text-xs text-slate-400">
+          <FileCode className="h-3.5 w-3.5 shrink-0 text-slate-500" />
+          <span className="min-w-0 truncate font-mono">{primary.filePath}</span>
+          {primary.startLine != null && <span className="shrink-0 text-slate-500">:{primary.startLine}</span>}
+          <span className={cn("ml-1 h-1.5 w-1.5 shrink-0 rounded-full", primary.status === "fresh" ? "bg-emerald-400" : "bg-slate-600")} title={primary.status} />
+        </div>
+      )}
+
+      {/* Signature */}
+      {primary?.signature && (
+        <div className="rounded-md border border-slate-800 bg-slate-950/50 px-3 py-2 font-mono text-xs text-cyan-100">
+          {primary.signature}
+        </div>
+      )}
+
+      {/* Source code (read off disk) */}
+      {detail.source && (
         <section>
-          <h3 className="mb-1 text-[11px] font-medium uppercase text-slate-400">版本（分支）</h3>
-          {detail.versions.map((v, i) => (
-            <div key={i} className="flex items-center gap-2 text-xs text-slate-300">
-              <span className={cn("h-1.5 w-1.5 rounded-full", v.status === "fresh" ? "bg-emerald-400" : "bg-slate-600")} />
-              <span className="font-mono">{v.filePath}</span>
-              <span className="text-slate-500">{v.kind} · {v.status}</span>
-            </div>
-          ))}
+          <div className="flex items-center justify-between rounded-t-md border border-b-0 border-slate-800 bg-slate-900/60 px-3 py-1.5">
+            <span className="text-[11px] font-medium uppercase tracking-wide text-slate-400">源码</span>
+            <span className="font-mono text-[10px] text-slate-500">{detail.source.lang}</span>
+          </div>
+          <pre className="max-h-[420px] overflow-auto rounded-b-md border border-slate-800 bg-slate-950/70 p-3 text-xs leading-relaxed text-slate-200">
+            <code className="font-mono">{detail.source.code}</code>
+          </pre>
         </section>
       )}
+
+      {/* Note body */}
       {detail.body != null && (
         <section>
           <h3 className="mb-1 text-[11px] font-medium uppercase text-slate-400">正文</h3>
           <textarea readOnly value={detail.body} className="h-40 w-full rounded-md border border-slate-800 bg-slate-950/40 p-2 font-mono text-xs text-slate-200" />
         </section>
       )}
-      {backlinks && backlinks.nodes.length > 0 && (
-        <section>
-          <h3 className="mb-1 text-[11px] font-medium uppercase text-slate-400">反向链接 / 谁引用</h3>
-          {backlinks.nodes.map((n) => (
-            <button key={n.nodeId} type="button" onClick={() => void openNode(n.nodeId)} className="flex w-full items-center gap-2 rounded px-1.5 py-1 text-left text-xs hover:bg-white/5">
-              <TypeIcon t={n.nodeType} />
-              <span className="font-mono">{n.title}</span>
-            </button>
-          ))}
-        </section>
-      )}
+
+      {/* Relations */}
+      <RelSection label="调用 →" count={calls?.nodes.length ?? 0}>
+        {calls?.nodes.map((n) => <RelRow key={n.nodeId} id={n.nodeId} title={n.title} type={n.nodeType} />)}
+      </RelSection>
+      <RelSection label="← 被引用 / 谁调用" count={backlinks?.nodes.length ?? 0}>
+        {backlinks?.nodes.map((n) => <RelRow key={n.nodeId} id={n.nodeId} title={n.title} type={n.nodeType} />)}
+      </RelSection>
+      <RelSection label="同文件符号" count={siblings.length}>
+        {siblings.map((s) => (
+          <RelRow key={s.nodeId} id={s.nodeId} title={s.title} type="symbol" meta={s.status === "stale" ? `${s.kind} · stale` : s.kind} />
+        ))}
+      </RelSection>
+
+      {/* Aliases */}
       {detail.aliases.length > 0 && (
         <section>
           <h3 className="mb-1 text-[11px] font-medium uppercase text-slate-400">别名历史</h3>

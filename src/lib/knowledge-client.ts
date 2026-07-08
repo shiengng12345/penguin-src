@@ -21,9 +21,14 @@ export interface KnowledgeSearchHit {
 
 export interface KnowledgeNodeDetail {
   node: { id: string; nodeType: string; identityKey: string; title: string; repoId: string | null };
-  versions: Array<{ branchId: string; filePath: string; lang: string; kind: string; status: string; contentHash: string }>;
+  versions: Array<{
+    branchId: string; filePath: string; lang: string; kind: string; status: string;
+    contentHash: string; signature: string | null; startLine: number | null; endLine: number | null;
+  }>;
   aliases: Array<{ aliasKey: string; reason: string | null; validTo: string | null }>;
   body: string | null;
+  // Code symbols: the declaration's source read off disk (null for notes/unreadable).
+  source: { code: string; lang: string; filePath: string; startLine: number } | null;
 }
 
 export interface KnowledgeGraphResult {

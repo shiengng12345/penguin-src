@@ -4,6 +4,9 @@ import type { Lang } from "./registry.js";
 //   @definition.<kind>  — the symbol's def node (kind = function|method|class|…)
 //   @name               — the symbol's leaf name (paired within one match)
 //   @reference.call     — a call callee name (2c resolves to a `calls` edge)
+//   @reference.type     — a type used (annotation/generic/extends/implements);
+//                         resolves to a `references` edge so DTOs/interfaces/
+//                         types connect to their users (Plan B), not just fns.
 //   @reference.import   — a raw import target (2c resolves to `imports`)
 // Only node types that exist in the corresponding grammar may appear, or the
 // Query constructor throws. A language without a row here still parses (file
@@ -23,6 +26,12 @@ const TS_QUERY = `
 (call_expression function: (identifier) @reference.call)
 (call_expression function: (member_expression property: (property_identifier) @reference.call))
 (import_statement source: (string (string_fragment) @reference.import))
+(type_annotation (type_identifier) @reference.type)
+(type_arguments (type_identifier) @reference.type)
+(generic_type name: (type_identifier) @reference.type)
+(extends_clause (identifier) @reference.type)
+(implements_clause (type_identifier) @reference.type)
+(extends_type_clause (type_identifier) @reference.type)
 `;
 
 const JS_QUERY = `

@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
 import type { KnowledgeStore } from "./store.js";
 
 // The single query implementation shared by MCP tools, the CLI, and the UI
@@ -50,9 +52,16 @@ export function search(
 
 export interface NodeDetail {
   node: { id: string; nodeType: string; identityKey: string; title: string; repoId: string | null };
-  versions: Array<{ branchId: string; filePath: string; lang: string; kind: string; status: string; contentHash: string }>;
+  versions: Array<{
+    branchId: string; filePath: string; lang: string; kind: string; status: string;
+    contentHash: string; signature: string | null; startLine: number | null; endLine: number | null;
+  }>;
   aliases: Array<{ aliasKey: string; reason: string | null; validTo: string | null }>;
   body: string | null; // note body, honoring mcp_access; null for symbols/denied
+  // For code symbols: the declaration's actual source, read off disk by line
+  // range (the graph stores only a content hash, not the text). null if the
+  // file is unreadable or the node is a note (use body instead).
+  source: { code: string; lang: string; filePath: string; startLine: number } | null;
 }
 
 // get_node: node + versions (symbol) or body (note, respects mcp_access) + aliases (§8.1).
@@ -62,7 +71,8 @@ export function getNodeDetail(store: KnowledgeStore, idOrKey: string): NodeDetai
   const node = store.getNode(nodeId)!;
   const versions = store.db
     .prepare(
-      `SELECT branch_id AS branchId, file_path AS filePath, lang, kind, status, content_hash AS contentHash
+      `SELECT branch_id AS branchId, file_path AS filePath, lang, kind, status,
+              content_hash AS contentHash, signature, start_line AS startLine, end_line AS endLine
        FROM symbol_versions WHERE node_id=? ORDER BY branch_id`,
     )
     .all(nodeId) as NodeDetail["versions"];
@@ -81,12 +91,33 @@ export function getNodeDetail(store: KnowledgeStore, idOrKey: string): NodeDetai
     body = fts?.body ?? null;
   }
 
+  // Symbol source: prefer the fresh version, read [startLine, endLine] off disk.
+  let source: NodeDetail["source"] = null;
+  if (!noteRow && node.repo_id) {
+    const v = versions.find((x) => x.status === "fresh") ?? versions[0];
+    if (v && v.startLine != null && v.endLine != null) {
+      const repo = store.db
+        .prepare("SELECT root_path AS rootPath FROM repos WHERE id=?")
+        .get(node.repo_id) as { rootPath: string } | undefined;
+      if (repo) {
+        try {
+          const abs = isAbsolute(v.filePath) ? v.filePath : join(repo.rootPath, v.filePath);
+          const lines = readFileSync(abs, "utf8").split(/\r?\n/);
+          const code = lines.slice(v.startLine - 1, v.endLine).join("\n");
+          if (code.trim()) source = { code, lang: v.lang, filePath: v.filePath, startLine: v.startLine };
+        } catch {
+          source = null; // best-effort: file moved/unreadable → fall back to signature
+        }
+      }
+    }
+  }
+
   return {
     node: {
       id: node.id, nodeType: node.node_type, identityKey: node.identity_key,
       title: node.title, repoId: node.repo_id,
     },
-    versions, aliases, body,
+    versions, aliases, body, source,
   };
 }
 
@@ -323,6 +354,9 @@ export function graphNeighborhood(
     }
     frontier = next;
   }
+  // Every symbol now connects to its file node via a real `defines` edge (P1),
+  // so a focused node always has a genuine neighbourhood — no synthetic fallback
+  // needed (removing it keeps the graph free of edges that aren't real facts).
   return { focus, ...collectGraph(store, [...seen]) };
 }
 

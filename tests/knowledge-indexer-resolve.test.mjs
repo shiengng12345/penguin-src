@@ -9,7 +9,9 @@ import {
 function fakeLookup({ qualified = {}, bare = {} } = {}) {
   return {
     byQualifiedName: (qn) => qualified[qn] ?? null,
-    bareNameCandidates: (b) => bare[b] ?? [],
+    // candidates carry a filePath now; accept bare string ids for terseness.
+    bareNameCandidates: (b) =>
+      (bare[b] ?? []).map((x) => (typeof x === "string" ? { id: x, filePath: null } : x)),
   };
 }
 
@@ -53,6 +55,80 @@ test("resolveRefs drops calls with no enclosing symbol (no caller)", async () =>
     lookup: fakeLookup({ bare: { topLevel: ["n_x"] } }),
   });
   assert.equal(r.edges.length, 0);
+  assert.ok(r.unresolved >= 1);
+});
+
+test("extractSymbols captures type references (Plan B)", async () => {
+  const src = [
+    "export interface Resp { token: TokenDto; }",
+    "export class Proc extends Base implements IProc {",
+    "  run(): Promise<Wrapper<Resp>> { const x: TokenDto = build(); return x; }",
+    "}",
+  ].join("\n");
+  const out = await extractSymbols({ lang: "ts", source: src });
+  const typeNames = new Set(out.refs.filter((r) => r.kind === "type").map((r) => r.rawName));
+  for (const n of ["TokenDto", "Base", "IProc", "Resp", "Wrapper"]) {
+    assert.ok(typeNames.has(n), `expected a type reference for ${n}`);
+  }
+});
+
+test("resolveRefs: type ref becomes a references edge to the used type (Plan B)", async () => {
+  const src = "export interface Resp { token: Foo; }";
+  const out = await extractSymbols({ lang: "ts", source: src });
+  const ids = new Map([["Resp", "n_resp"]]);
+  const r = resolveRefs({
+    refs: out.refs, fileSymbols: out.symbols, fileSymbolIds: ids,
+    lookup: fakeLookup({ qualified: { Foo: "n_foo" } }),
+  });
+  const edge = r.edges.find((e) => e.edgeType === "references" && e.dst === "n_foo");
+  assert.ok(edge, "expected a references edge to Foo");
+  assert.equal(edge.src, "n_resp");
+});
+
+test("resolveRefs: over-ambiguous bare name is dropped, not force-merged (Plan B)", async () => {
+  const src = "function caller() { log(); }";
+  const out = await extractSymbols({ lang: "ts", source: src });
+  const many = Array.from({ length: 20 }, (_, i) => `n_${i}`);
+  const r = resolveRefs({
+    refs: out.refs, fileSymbols: out.symbols, fileSymbolIds: new Map([["caller", "n_caller"]]),
+    lookup: fakeLookup({ bare: { log: many } }),
+  });
+  assert.equal(r.edges.length, 0, "a name matching 20 candidates must not create a fake hub edge");
+  assert.ok(r.unresolved >= 1);
+});
+
+test("resolveRefs: import scoping picks the imported candidate over ambiguity (Plan B)", async () => {
+  const out = await extractSymbols({ lang: "ts", source: "function caller() { build(); }" });
+  const lookup = {
+    byQualifiedName: () => null,
+    bareNameCandidates: () => [
+      { id: "n_a", filePath: "src/a.ts" },
+      { id: "n_b", filePath: "src/b.ts" },
+    ],
+  };
+  const r = resolveRefs({
+    refs: out.refs, fileSymbols: out.symbols, fileSymbolIds: new Map([["caller", "n_caller"]]),
+    lookup, currentFile: "src/caller.ts", importedFiles: new Set(["src/b.ts"]),
+  });
+  const e = r.edges.find((x) => x.edgeType === "calls");
+  assert.ok(e && e.dst === "n_b", "should resolve to the imported-file candidate");
+  assert.equal(e.method, "EXTRACTED");
+});
+
+test("resolveRefs: still-ambiguous after import scoping → dropped, no guess (Plan B)", async () => {
+  const out = await extractSymbols({ lang: "ts", source: "function caller() { build(); }" });
+  const lookup = {
+    byQualifiedName: () => null,
+    bareNameCandidates: () => [
+      { id: "n_a", filePath: "src/a.ts" },
+      { id: "n_b", filePath: "src/b.ts" },
+    ],
+  };
+  const r = resolveRefs({
+    refs: out.refs, fileSymbols: out.symbols, fileSymbolIds: new Map([["caller", "n_caller"]]),
+    lookup, currentFile: "src/caller.ts", importedFiles: new Set(["src/a.ts", "src/b.ts"]),
+  });
+  assert.equal(r.edges.filter((x) => x.edgeType === "calls").length, 0);
   assert.ok(r.unresolved >= 1);
 });
 

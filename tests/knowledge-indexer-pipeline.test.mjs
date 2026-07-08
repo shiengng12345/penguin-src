@@ -139,6 +139,72 @@ test("indexRepo: branch switch flips old→snapshot, keeps node identity", async
   store.close();
 });
 
+test("indexRepo: file nodes + defines edges + relative-import edges (Plan B P1)", async () => {
+  const root = tempRepo();
+  writeGit(root, "ref: refs/heads/main\n", { main: "c0" });
+  mkdirSync(join(root, "src"), { recursive: true });
+  writeFileSync(join(root, "src", "util.ts"), "export function helper() { return 1; }");
+  writeFileSync(
+    join(root, "src", "svc.ts"),
+    "import { helper } from './util';\nexport function run() { return helper(); }",
+  );
+  const store = openStore();
+  await indexRepo({ store, rootPath: root, mode: "incremental" }); // pass 1: create all nodes
+  const r = await indexRepo({ store, rootPath: root, mode: "rebuild" }); // pass 2: resolve cross-file with full symbol table
+
+  // file nodes exist for both files
+  const svcFile = store.db
+    .prepare("SELECT id FROM nodes WHERE node_type='file' AND identity_key=?")
+    .get(`${r.repoId}::file::src/svc.ts`);
+  const utilFile = store.db
+    .prepare("SELECT id FROM nodes WHERE node_type='file' AND identity_key=?")
+    .get(`${r.repoId}::file::src/util.ts`);
+  assert.ok(svcFile && utilFile, "both file nodes created");
+
+  // defines: svc file → run symbol
+  const defines = store.db
+    .prepare("SELECT COUNT(*) AS n FROM edges WHERE edge_type='defines' AND src=?")
+    .get(svcFile.id);
+  assert.ok(defines.n >= 1, "file defines its symbols");
+
+  // imports: svc file → util file (resolved from './util')
+  const imports = store.db
+    .prepare("SELECT COUNT(*) AS n FROM edges WHERE edge_type='imports' AND src=? AND dst=?")
+    .get(svcFile.id, utilFile.id);
+  assert.equal(imports.n, 1, "relative import resolved to a file→file edge");
+
+  // import scoping made run→helper an EXTRACTED calls edge (helper is imported)
+  const call = store.db
+    .prepare("SELECT method FROM edges WHERE edge_type='calls' LIMIT 1")
+    .get();
+  assert.ok(call, "run→helper calls edge exists");
+  store.close();
+});
+
+test("indexRepo: spec file gets tests edges to exercised symbols (Plan B P1)", async () => {
+  const root = tempRepo();
+  writeGit(root, "ref: refs/heads/main\n", { main: "c0" });
+  mkdirSync(join(root, "src"), { recursive: true });
+  writeFileSync(join(root, "src", "calc.ts"), "export function add(a, b) { return a + b; }");
+  writeFileSync(
+    join(root, "src", "calc.spec.ts"),
+    "import { add } from './calc';\nfunction testAdd() { return add(1, 2); }",
+  );
+  const store = openStore();
+  await indexRepo({ store, rootPath: root, mode: "incremental" });
+  const r = await indexRepo({ store, rootPath: root, mode: "rebuild" });
+
+  const specFile = store.db
+    .prepare("SELECT id FROM nodes WHERE identity_key=?")
+    .get(`${r.repoId}::file::src/calc.spec.ts`);
+  const addSym = store.resolveIdentity(`${r.repoId}::add`);
+  const testsEdge = store.db
+    .prepare("SELECT COUNT(*) AS n FROM edges WHERE edge_type='tests' AND src=? AND dst=?")
+    .get(specFile.id, addSym.nodeId);
+  assert.equal(testsEdge.n, 1, "spec file → add() tests edge");
+  store.close();
+});
+
 test("IndexTaskLock: only one active per key", () => {
   const a = IndexTaskLock.tryAcquire("repo:branch:/co");
   assert.ok(a);

@@ -86,6 +86,11 @@ CREATE TABLE IF NOT EXISTS edges (
 );
 CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src);
 CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst);
+-- Composite indexes for the hot traversal shapes (who_calls/calls_of/backlinks
+-- filter by endpoint + edge_type + status; repoGraph by branch + status).
+CREATE INDEX IF NOT EXISTS idx_edges_dst_type_status ON edges(dst, edge_type, status);
+CREATE INDEX IF NOT EXISTS idx_edges_src_type_status ON edges(src, edge_type, status);
+CREATE INDEX IF NOT EXISTS idx_edges_branch_status ON edges(branch_id, status);
 
 CREATE TABLE IF NOT EXISTS files_index (
   id TEXT PRIMARY KEY,
@@ -149,6 +154,11 @@ CREATE TABLE IF NOT EXISTS notes_index (
   content_hash TEXT NOT NULL
 );
 
+-- NOTE (model decision): entities are modelled as ordinary nodes rows
+-- (node_type=entity) created by fusion when a note mentions one — that is the
+-- canonical representation used by search/graph. This standalone table is NOT
+-- written or read by any code path; it is kept only to avoid a destructive
+-- migration on existing DBs. Do not add new dependencies on it.
 CREATE TABLE IF NOT EXISTS entities (
   id TEXT PRIMARY KEY,
   entity_type TEXT NOT NULL,
