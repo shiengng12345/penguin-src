@@ -60,22 +60,25 @@ test("detectRenames: equal-hash disappeared+appeared → one alias; unrelated �
   const gone = [{ qualifiedName: "Svc.login", name: "login", kind: "method", contentHash: "H", signature: null, startLine: 1, endLine: 3 }];
   const arrived = [{ qualifiedName: "Svc.signIn", name: "signIn", kind: "method", contentHash: "H", signature: null, startLine: 1, endLine: 3 }];
   const ev = detectRenames({ disappeared: gone, appeared: arrived });
-  assert.equal(ev.length, 1);
-  assert.equal(ev[0].aliasKey, "Svc.login");
-  assert.equal(ev[0].reason, "rename");
+  assert.equal(ev.auto.length, 1);
+  assert.equal(ev.auto[0].aliasKey, "Svc.login");
+  assert.equal(ev.auto[0].reason, "rename");
+  assert.equal(ev.suggested.length, 0);
 
   // different hash → not a rename
-  assert.equal(
-    detectRenames({ disappeared: gone, appeared: [{ ...arrived[0], contentHash: "OTHER" }] }).length,
-    0,
-  );
+  const diff = detectRenames({ disappeared: gone, appeared: [{ ...arrived[0], contentHash: "OTHER" }] });
+  assert.equal(diff.auto.length, 0);
+  assert.equal(diff.suggested.length, 0);
 });
 
-test("detectRenames: ambiguous equal-hash (2 appeared) → no alias (never auto-merge)", () => {
+test("detectRenames: ambiguous equal-hash (2 appeared) → no auto, goes to suggested queue", () => {
   const gone = [{ qualifiedName: "A.x", name: "x", kind: "method", contentHash: "H", signature: null, startLine: 1, endLine: 2 }];
   const arrived = [
     { qualifiedName: "A.y", name: "y", kind: "method", contentHash: "H", signature: null, startLine: 1, endLine: 2 },
     { qualifiedName: "A.z", name: "z", kind: "method", contentHash: "H", signature: null, startLine: 3, endLine: 4 },
   ];
-  assert.equal(detectRenames({ disappeared: gone, appeared: arrived }).length, 0);
+  const r = detectRenames({ disappeared: gone, appeared: arrived });
+  assert.equal(r.auto.length, 0); // never auto-merge on ambiguity
+  assert.equal(r.suggested.length, 1);
+  assert.deepEqual(r.suggested[0].candidateKeys.sort(), ["A.y", "A.z"]);
 });

@@ -533,6 +533,42 @@ export class KnowledgeStore {
     return rows.map((r) => ({ ...r, suggestionEventId: r.edgeId.replace(/^edge_/, "") }));
   }
 
+  // —— Snapshot manifest（§11）：把一组 node/version 钉成一个命名世界状态 ——
+  // 账本事件（不可再生）；重建后仍可从 events 表读回。V1 存 node id 清单，
+  // 供 case 引用「当时的世界」。
+  createSnapshot(p: { name: string; nodeIds: string[]; note?: string }): LedgerEvent {
+    return this.recordKnowledge({
+      type: "snapshot_manifest_created",
+      origin: "user",
+      method: "ASSERTED",
+      actor: { type: "user", id: "user" },
+      payload: { name: p.name, node_ids: p.nodeIds, note: p.note ?? null },
+    });
+  }
+
+  // Pending rename-suggestion queue (ambiguous same-body moves, §11).
+  listRenameSuggestions(): Array<{ id: string; oldKey: string; candidateKeys: string[]; ts: string }> {
+    const rows = this.db
+      .prepare("SELECT id, ts, payload FROM events WHERE event_type='rename_suggested' ORDER BY ts DESC")
+      .all() as Array<{ id: string; ts: string; payload: string }>;
+    return rows.map((r) => {
+      const p = JSON.parse(r.payload) as { old_key?: string; candidate_keys?: string[] };
+      return { id: r.id, oldKey: String(p.old_key ?? ""), candidateKeys: p.candidate_keys ?? [], ts: r.ts };
+    });
+  }
+
+  listSnapshots(): Array<{ id: string; name: string; nodeIds: string[]; ts: string }> {
+    const rows = this.db
+      .prepare(
+        "SELECT id, ts, payload FROM events WHERE event_type='snapshot_manifest_created' ORDER BY ts DESC",
+      )
+      .all() as Array<{ id: string; ts: string; payload: string }>;
+    return rows.map((r) => {
+      const p = JSON.parse(r.payload) as { name?: string; node_ids?: string[] };
+      return { id: r.id, name: String(p.name ?? ""), nodeIds: p.node_ids ?? [], ts: r.ts };
+    });
+  }
+
   // 解析产出的代码边：同 file+branch 全量替换（§6.3 增量语义）。
   // 非 parser 边在这里是实现错误，不是数据——直接抛。
   replaceFileEdges(p: {

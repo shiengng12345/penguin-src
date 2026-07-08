@@ -137,11 +137,16 @@ async function indexFileWithSource(
   const disappeared = prior.filter((s) => !nowKeys.has(s.qualifiedName));
   const appeared = extracted.symbols.filter((s) => !priorKeys.has(s.qualifiedName));
   const renames = detectRenames({ disappeared, appeared });
-  for (const ev of renames) {
-    // The alias points at the node keeping the NEW identity; find it after upsert.
-    // We defer node creation to the txn, so resolve the new node's id there.
-    // Store the intent; applied post-txn once node ids exist.
-    void ev;
+  // Ambiguous same-body moves go to a confirmation queue (Ledger), never
+  // auto-applied (§11 相似度检测进确认队列).
+  for (const s of renames.suggested) {
+    store.recordKnowledge({
+      type: "rename_suggested",
+      origin: "system",
+      method: "INFERRED",
+      actor: { type: "system", id: "knowledge-indexer" },
+      payload: { old_key: symbolIdentityKey(p.repoId, s.oldKey), candidate_keys: s.candidateKeys.map((k) => symbolIdentityKey(p.repoId, k)) },
+    });
   }
 
   const tx = store.db.transaction(() => {
@@ -197,7 +202,7 @@ async function indexFileWithSource(
 
   // Apply rename aliases now that node ids exist (Ledger-first, outside the txn).
   let renamed = 0;
-  for (const ev of renames) {
+  for (const ev of renames.auto) {
     // the alias's node = the appeared symbol sharing the gone symbol's hash
     const gone = disappeared.find((d) => d.qualifiedName === ev.aliasKey);
     const arrived = appeared.find((a) => a.contentHash === gone?.contentHash);

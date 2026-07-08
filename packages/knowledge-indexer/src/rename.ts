@@ -5,42 +5,56 @@ export interface RenameAliasEvent {
   reason: "rename";
 }
 
-// Detect symbol renames within one file's re-index (§6.3): a symbol that
-// disappeared + a symbol that appeared + identical content_hash = the same
-// implementation under a new name → emit an alias so the old name still
-// resolves. Ambiguity (an equal hash matched by multiple appeared symbols, or
-// multiple disappeared sharing a hash) yields NO alias — never auto-merge on
-// ambiguity (§9). The caller feeds each alias to recordKnowledge() (Ledger).
+export interface RenameSuggestion {
+  oldKey: string; // disappeared symbol's qualified name
+  candidateKeys: string[]; // appeared symbols sharing its body (ambiguous target)
+}
+
+// Detect symbol renames within one file's re-index (§6.3/§11):
+//  - CLEAN 1:1 equal content_hash across gone/appeared → `auto` alias (the old
+//    name keeps resolving). Applied directly (Ledger).
+//  - AMBIGUOUS equal-hash group (N gone / M appeared, not 1:1) → `suggested`:
+//    the implementation clearly moved but we can't auto-pick which pairing, so
+//    it goes to a confirmation queue instead of auto-merging (§9 never
+//    auto-merge on ambiguity; §11 "相似度检测进确认队列").
 export function detectRenames(input: {
   disappeared: ExtractedSymbol[];
   appeared: ExtractedSymbol[];
-}): RenameAliasEvent[] {
-  const events: RenameAliasEvent[] = [];
+}): { auto: RenameAliasEvent[]; suggested: RenameSuggestion[] } {
+  const auto: RenameAliasEvent[] = [];
+  const suggested: RenameSuggestion[] = [];
 
-  // Group by content_hash; a rename is a 1:1 hash match across the two sets.
-  const appearedByHash = new Map<string, ExtractedSymbol[]>();
-  for (const s of input.appeared) {
-    const arr = appearedByHash.get(s.contentHash) ?? [];
-    arr.push(s);
-    appearedByHash.set(s.contentHash, arr);
-  }
-  const disappearedByHash = new Map<string, ExtractedSymbol[]>();
-  for (const s of input.disappeared) {
-    const arr = disappearedByHash.get(s.contentHash) ?? [];
-    arr.push(s);
-    disappearedByHash.set(s.contentHash, arr);
-  }
+  const byHash = (list: ExtractedSymbol[]) => {
+    const m = new Map<string, ExtractedSymbol[]>();
+    for (const s of list) {
+      const arr = m.get(s.contentHash) ?? [];
+      arr.push(s);
+      m.set(s.contentHash, arr);
+    }
+    return m;
+  };
+  const appearedByHash = byHash(input.appeared);
+  const disappearedByHash = byHash(input.disappeared);
 
   for (const [hash, goneList] of disappearedByHash) {
     const newList = appearedByHash.get(hash);
-    if (!newList) continue;
-    // Only a clean 1:1 hash match is an unambiguous rename.
-    if (goneList.length !== 1 || newList.length !== 1) continue;
-    const gone = goneList[0];
-    const arrived = newList[0];
-    if (gone.qualifiedName === arrived.qualifiedName) continue; // same name, not a rename
-    events.push({ aliasKey: gone.qualifiedName, reason: "rename" });
+    if (!newList || newList.length === 0) continue;
+
+    if (goneList.length === 1 && newList.length === 1) {
+      const gone = goneList[0];
+      const arrived = newList[0];
+      if (gone.qualifiedName === arrived.qualifiedName) continue; // same name, not a rename
+      auto.push({ aliasKey: gone.qualifiedName, reason: "rename" });
+      continue;
+    }
+
+    // ambiguous same-body group → queue each gone with its candidate targets
+    const candidateKeys = newList.map((s) => s.qualifiedName);
+    for (const gone of goneList) {
+      if (candidateKeys.includes(gone.qualifiedName)) continue;
+      suggested.push({ oldKey: gone.qualifiedName, candidateKeys });
+    }
   }
 
-  return events;
+  return { auto, suggested };
 }
