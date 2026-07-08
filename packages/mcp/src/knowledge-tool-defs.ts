@@ -80,6 +80,33 @@ export const KNOWLEDGE_TOOL_DEFS = [
     description: "Index status across repos/branches/workspaces: staleness + counts (also answers list_repos / list_branches).",
     inputSchema: { type: "object", properties: {} },
   },
+  {
+    name: "list_suggestions",
+    description: "Pending AI edge suggestions awaiting accept/reject (excluded from default search until accepted).",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "suggest_links",
+    description: "Propose an edge for confirmation (origin=ai, method=INFERRED). Stays out of default results until accepted. Returns the suggestion event id.",
+    inputSchema: {
+      type: "object",
+      required: ["src", "dst"],
+      properties: {
+        src: { type: "string" }, dst: { type: "string" },
+        edge_type: { type: "string" }, confidence: { type: "number" },
+      },
+    },
+  },
+  {
+    name: "accept_suggestion",
+    description: "Accept a pending suggestion by its event id (edge becomes active/ASSERTED).",
+    inputSchema: { type: "object", required: ["suggestion_event_id"], properties: { suggestion_event_id: { type: "string" } } },
+  },
+  {
+    name: "reject_suggestion",
+    description: "Reject a pending suggestion by its event id.",
+    inputSchema: { type: "object", required: ["suggestion_event_id"], properties: { suggestion_event_id: { type: "string" } } },
+  },
 ] as const;
 
 const NAMES = new Set(KNOWLEDGE_TOOL_DEFS.map((t) => t.name));

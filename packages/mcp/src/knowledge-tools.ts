@@ -80,6 +80,24 @@ export function handleKnowledgeTool(
       );
     case "index_status":
       return indexStatus(store);
+    case "list_suggestions":
+      return { suggestions: store.listSuggestions() };
+    case "suggest_links": {
+      const ev = store.suggestEdge({
+        src: String(a.src ?? ""),
+        dst: a.dst == null ? null : String(a.dst),
+        edgeType: String(a.edge_type ?? "wikilink"),
+        confidence: a.confidence as number | undefined,
+        actorId: "mcp",
+      });
+      return { ok: true, suggestionEventId: ev.id };
+    }
+    case "accept_suggestion":
+      store.acceptSuggestion(String(a.suggestion_event_id ?? ""), "mcp");
+      return { ok: true };
+    case "reject_suggestion":
+      store.rejectSuggestion(String(a.suggestion_event_id ?? ""), "mcp");
+      return { ok: true };
     case "write_note":
       return writeNote(store, a);
     default:

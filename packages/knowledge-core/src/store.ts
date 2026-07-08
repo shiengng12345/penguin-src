@@ -546,6 +546,38 @@ export class KnowledgeStore {
     });
   }
 
+  // —— Workspaces（D14）：多 repo 逻辑分组，仅用于查询作用域 ——
+  createWorkspace(name: string): string {
+    const row = this.db
+      .prepare(
+        "INSERT INTO workspaces (id, name, created_at) VALUES (@id, @name, @at) RETURNING id",
+      )
+      .get({ id: `ws_${randomUUID()}`, name, at: new Date().toISOString() }) as { id: string };
+    return row.id;
+  }
+
+  addRepoToWorkspace(workspaceId: string, repoId: string): void {
+    this.db
+      .prepare("INSERT OR IGNORE INTO workspace_repos (workspace_id, repo_id) VALUES (?, ?)")
+      .run(workspaceId, repoId);
+  }
+
+  workspaceRepoIds(workspaceId: string): string[] {
+    return (
+      this.db
+        .prepare("SELECT repo_id FROM workspace_repos WHERE workspace_id = ?")
+        .all(workspaceId) as { repo_id: string }[]
+    ).map((r) => r.repo_id);
+  }
+
+  listWorkspaces(): Array<{ id: string; name: string; repoIds: string[] }> {
+    const rows = this.db.prepare("SELECT id, name FROM workspaces ORDER BY name").all() as Array<{
+      id: string;
+      name: string;
+    }>;
+    return rows.map((w) => ({ ...w, repoIds: this.workspaceRepoIds(w.id) }));
+  }
+
   // Pending rename-suggestion queue (ambiguous same-body moves, §11).
   listRenameSuggestions(): Array<{ id: string; oldKey: string; candidateKeys: string[]; ts: string }> {
     const rows = this.db

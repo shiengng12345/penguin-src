@@ -55,11 +55,26 @@ function seed() {
   return { store, repoId, login, caller };
 }
 
-test("the 6-pack is registered", () => {
+test("knowledge tools registered (6-pack + suggestion flow)", () => {
   const names = KNOWLEDGE_TOOL_DEFS.map((t) => t.name).sort();
-  assert.deepEqual(names, ["compare_branches", "explore_graph", "get_node", "index_status", "knowledge_search", "write_note"]);
+  assert.deepEqual(names, [
+    "accept_suggestion", "compare_branches", "explore_graph", "get_node",
+    "index_status", "knowledge_search", "list_suggestions", "reject_suggestion",
+    "suggest_links", "write_note",
+  ]);
   assert.ok(isKnowledgeTool("knowledge_search"));
+  assert.ok(isKnowledgeTool("suggest_links"));
   assert.ok(!isKnowledgeTool("mcp_health"));
+});
+
+test("MCP suggest_links → list_suggestions → accept round-trips", () => {
+  const { store, login, caller } = seed();
+  const r = handleKnowledgeTool("suggest_links", { src: caller, dst: login, edge_type: "wikilink" }, store);
+  assert.ok(r.suggestionEventId);
+  assert.equal(handleKnowledgeTool("list_suggestions", {}, store).suggestions.length, 1);
+  handleKnowledgeTool("accept_suggestion", { suggestion_event_id: r.suggestionEventId }, store);
+  assert.equal(handleKnowledgeTool("list_suggestions", {}, store).suggestions.length, 0);
+  store.close();
 });
 
 test("null store → not-initialized hint (no crash)", () => {

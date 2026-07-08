@@ -28,17 +28,23 @@ function resolveNodeId(store: KnowledgeStore, idOrKey: string): string | null {
 export function search(
   store: KnowledgeStore,
   query: string,
-  filters?: { type?: string[]; repo?: string; includeSensitive?: boolean; limit?: number },
+  filters?: { type?: string[]; repo?: string; workspace?: string; includeSensitive?: boolean; limit?: number },
 ): SearchResultRow[] {
   const hits = store.searchText(query, {
     types: filters?.type,
     includeSensitive: filters?.includeSensitive,
     limit: filters?.limit,
   });
-  if (!filters?.repo) return hits;
+  // Scope by repo, or by all repos in a workspace (§8.1 workspace filter).
+  const repoScope: Set<string> | null = filters?.workspace
+    ? new Set(store.workspaceRepoIds(filters.workspace))
+    : filters?.repo
+      ? new Set([filters.repo])
+      : null;
+  if (!repoScope) return hits;
   return hits.filter((h) => {
     const n = store.getNode(h.nodeId);
-    return n?.repo_id === filters.repo;
+    return n?.repo_id != null && repoScope.has(n.repo_id);
   });
 }
 
