@@ -280,6 +280,26 @@ async function indexFileWithSource(
       });
       structural.push({ src: routeNodeId, dst: handlerId, edgeType: "handles", origin: "parser", method: "EXTRACTED" });
     }
+    // code entities: thrown errors + env reads → entity nodes, edges from the
+    // enclosing symbol ('throws' / 'uses'). "where is XError thrown / who uses JWT_SECRET".
+    for (const ref of extracted.refs) {
+      if (ref.kind !== "throws" && ref.kind !== "env") continue;
+      const src = ref.enclosingQualifiedName ? fileSymbolIds.get(ref.enclosingQualifiedName) : undefined;
+      if (!src) continue;
+      const entityType = ref.kind === "throws" ? "error" : "env";
+      const entityId = store.upsertNode({
+        nodeType: "entity",
+        identityKey: `${p.repoId}::entity::${entityType}::${ref.rawName}`,
+        repoId: p.repoId,
+        title: ref.rawName,
+        meta: { entityType },
+      });
+      structural.push({
+        src, dst: entityId,
+        edgeType: ref.kind === "throws" ? "throws" : "uses",
+        origin: "parser", method: "EXTRACTED",
+      });
+    }
     store.replaceFileEdges({
       branchId: p.branchId, filePath: p.relPath,
       edges: [...resolved.edges, ...structural],
