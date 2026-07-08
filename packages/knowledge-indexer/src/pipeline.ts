@@ -224,9 +224,9 @@ export async function indexRepo(input: {
   store: KnowledgeStore;
   rootPath: string;
   mode: "incremental" | "rebuild";
-  // Called as each file is about to be processed (so long indexes show life
-  // and, if one file hangs, you can see which). Optional.
-  onProgress?: (p: { scanned: number; parsed: number; file: string }) => void;
+  // Progress callback: phase "scan" fires once after the walk with the total
+  // file count; phase "index" fires per file with done/total for a % bar.
+  onProgress?: (p: { phase: "scan" | "index"; done: number; total: number; file: string }) => void;
 }): Promise<IndexReport> {
   const { store, rootPath, mode } = input;
   const git = readGitContext(rootPath);
@@ -251,10 +251,17 @@ export async function indexRepo(input: {
       store.db.prepare("DELETE FROM files_index WHERE repo_id=? AND branch_id=?").run(repoId, branchId);
     }
 
+    // Collect the file list first so progress has a total for a % bar.
+    const files = [...walkRepoFiles(rootPath)];
+    input.onProgress?.({ phase: "scan", done: 0, total: files.length, file: "" });
+
     const seen = new Set<string>();
-    for (const file of walkRepoFiles(rootPath)) {
+    let done = 0;
+    for (const file of files) {
       report.scanned += 1;
       seen.add(file.relPath);
+      done += 1;
+      input.onProgress?.({ phase: "index", done, total: files.length, file: file.relPath });
       const prev = store.getFileCheckpoint(repoId, branchId, file.relPath);
 
       // quick filter: mtime+size unchanged (and not previously errored) → skip
@@ -283,7 +290,6 @@ export async function indexRepo(input: {
         continue;
       }
 
-      input.onProgress?.({ scanned: report.scanned, parsed: report.parsed, file: file.relPath });
       const r = await indexFileWithSource(store, {
         repoId, branchId, commit: git.commit, relPath: file.relPath,
         source, contentHash, mtimeMs: file.mtimeMs, sizeBytes: file.sizeBytes,

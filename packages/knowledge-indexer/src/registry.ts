@@ -51,7 +51,9 @@ const EXT_TO_LANG: Record<string, Lang> = {
   html: "html", htm: "html",
   css: "css",
   json: "json",
-  yaml: "yaml", yml: "yaml",
+  // NOTE: .yml/.yaml intentionally unmapped — the bundled yaml grammar wasm
+  // can't parse in this web-tree-sitter build, and yaml has no code symbols
+  // anyway, so treat yaml files as skipped (lang=null) rather than errored.
 };
 
 // Map a file path to its language by extension; null when unsupported.

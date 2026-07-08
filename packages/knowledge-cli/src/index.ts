@@ -13,6 +13,9 @@ export interface CliDeps {
   cwd: string;
   out: (line: string) => void;
   err: (line: string) => void;
+  // Raw stderr writer (no auto-newline) for the live progress bar; the CLI
+  // controls \r / \n. Optional — omitted in tests (progress then stays silent).
+  progress?: (chunk: string) => void;
   // Opens the knowledge store (write verbs may create it). Kept a factory so
   // read verbs can refuse when none exists without creating a half-baked DB.
   openStore: () => KnowledgeStore;
@@ -30,6 +33,18 @@ const GRAPH_VERB_MODE: Record<string, GraphMode> = {
 
 function emit(deps: CliDeps, json: boolean, human: string, data: unknown): void {
   deps.out(json ? JSON.stringify(data) : human);
+}
+
+function progressBar(done: number, total: number): string {
+  const width = 24;
+  const frac = total > 0 ? Math.min(1, done / total) : 1;
+  const filled = Math.round(frac * width);
+  const bar = "█".repeat(filled) + "░".repeat(width - filled);
+  return `[${bar}] ${String(Math.round(frac * 100)).padStart(3)}%  ${done}/${total}`;
+}
+
+function truncPath(p: string, max = 44): string {
+  return p.length <= max ? p : "…" + p.slice(-(max - 1));
 }
 
 const HELP = `penguin — Penguin Knowledge CLI
@@ -69,18 +84,24 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     const rootPath = pos[0] ?? deps.cwd;
     const store = deps.openStore();
     try {
+      const progress = json ? undefined : deps.progress;
+      const step = (total: number) => Math.max(1, Math.floor(total / 100)); // ~1% cadence
       const report = await indexRepo({
         store, rootPath, mode: verb === "rebuild" ? "rebuild" : "incremental",
-        // Progress on stderr (stdout stays clean for --json); shows life on
-        // large repos and pinpoints a file if one ever hangs.
-        onProgress: json
-          ? undefined
-          : ({ scanned, parsed, file }) => {
-              if (scanned % 25 === 0 || parsed === 0) {
-                deps.err(`  indexing… ${parsed} parsed / ${scanned} scanned  (${file})`);
+        // Phased progress bar on stderr (stdout stays clean for --json).
+        onProgress: progress
+          ? (p) => {
+              if (p.phase === "scan") {
+                progress(`  Scanning files — ${p.total} found\n`);
+                return;
               }
-            },
+              if (p.done === p.total || p.done % step(p.total) === 0) {
+                progress(`\r  Indexing  ${progressBar(p.done, p.total)}  ${truncPath(p.file)}\x1b[K`);
+              }
+            }
+          : undefined,
       });
+      if (progress) progress("\n");
       emit(deps, json,
         `${verb}: ${report.branchName} — ${report.parsed} parsed, ${report.skipped} skipped, ${report.deleted} deleted, ${report.renamed} renamed, ${report.errors} errors`,
         report);
