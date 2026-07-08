@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { logger } from "@/lib/logger";
+import { parseRegistryCommand } from "@/lib/registry-command-parse";
 import { cn } from "@/lib/utils";
 type ConfiguredStatus = {
   configured: boolean;
@@ -30,6 +31,7 @@ const INVALID_CREDENTIAL_MESSAGE = "用户名/密码不能包含 `:` `\\n` `\\r`
 const INVALID_URL_MESSAGE = "Registry URL 必须以 http:// 或 https:// 开头";
 const EMPTY_FIELD_MESSAGE = "请输入 URL、用户名和密码";
 const SUCCESS_MESSAGE = "已保存到 ~/.npmrc（并同步 grpc-web / grpc / sdk 三个目录）";
+const PARSED_MESSAGE = "已从命令解析并填入 URL / 用户名 / 密码，请核对后点保存";
 const ERROR_MESSAGE_PREFIX = "保存失败：";
 const CONFIGURED_PREFIX = "✓ 已配置";
 const CONFIGURED_FALLBACK_USERNAME = "";
@@ -106,9 +108,26 @@ export function RegistryAuthSection() {
   }, [clearExistingStatusTimer, loadStatus]);
   const handleRegistryUrlChange = useCallback((event: ChangeEvent<HTMLInputElement>): void => {
     logger.info(LOG_SCOPE, "handleRegistryUrlChange — entry");
-    setRegistryUrl(event.target.value);
-    logger.info(LOG_SCOPE, "handleRegistryUrlChange — exit");
-  }, []);
+    const rawValue = event.target.value;
+    // 业务原因：内部同事拿到的凭证常是一条现成 npm config set 命令，粘进 URL 框时
+    // 自动拆成 URL/用户名/密码三个字段，省去手动抽取也避免拆错；非命令按普通输入处理。
+    // scheme 沿用框里当前协议（命令里的 //host 不含协议），不猜不降级。
+    const currentScheme = registryUrl.startsWith(REGISTRY_URL_HTTPS_PREFIX) ? "https" : "http";
+    const parsed = parseRegistryCommand(rawValue, currentScheme);
+    if (parsed) {
+      logger.info(LOG_SCOPE, "handleRegistryUrlChange — 识别到 npm 命令，自动填充三个字段");
+      clearExistingStatusTimer();
+      setRegistryUrl(parsed.registryUrl);
+      setUsername(parsed.username);
+      setPassword(parsed.password);
+      setStatusMessage(PARSED_MESSAGE);
+      setStatusTone("success");
+      logger.info(LOG_SCOPE, "handleRegistryUrlChange — exit", { outcome: "parsed" });
+      return;
+    }
+    setRegistryUrl(rawValue);
+    logger.info(LOG_SCOPE, "handleRegistryUrlChange — exit", { outcome: "plain" });
+  }, [registryUrl, clearExistingStatusTimer]);
   const handleUsernameChange = useCallback((event: ChangeEvent<HTMLInputElement>): void => {
     logger.info(LOG_SCOPE, "handleUsernameChange — entry");
     setUsername(event.target.value);
