@@ -7,6 +7,7 @@ import { LEGACY_BROWSER_STORAGE_KEYS } from "./persistence-keys";
 
 let cache: Record<string, string> = {};
 let hydratePromise: Promise<Record<string, string>> | null = null;
+const writeTails = new Map<string, Promise<void>>();
 
 function browserStorage(): Storage | null {
   if (typeof window === "undefined") return null;
@@ -56,10 +57,27 @@ export function getPersistedValue(key: string): string | null {
 
 export function setPersistedValue(key: string, value: string): void {
   cache[key] = value;
-  void setAppValueInDatabase(key, value);
+  enqueueWrite(key, () => setAppValueInDatabase(key, value));
 }
 
 export function deletePersistedValue(key: string): void {
   delete cache[key];
-  void deleteAppValueFromDatabase(key);
+  enqueueWrite(key, () => deleteAppValueFromDatabase(key));
+}
+
+function enqueueWrite(key: string, operation: () => Promise<unknown>): void {
+  const previous = writeTails.get(key) ?? Promise.resolve();
+  const next = previous
+    .catch(() => undefined)
+    .then(operation)
+    .then(
+      () => undefined,
+      () => undefined,
+    );
+  writeTails.set(key, next);
+  void next.finally(() => {
+    if (writeTails.get(key) === next) {
+      writeTails.delete(key);
+    }
+  });
 }
