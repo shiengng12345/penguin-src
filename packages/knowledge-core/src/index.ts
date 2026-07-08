@@ -25,6 +25,7 @@ export {
   exploreGraph,
   compareBranches,
   indexStatus,
+  listSuggestions,
   type GraphMode,
   type GraphResult,
   type NodeDetail,

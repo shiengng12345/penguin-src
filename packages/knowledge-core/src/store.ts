@@ -470,6 +470,69 @@ export class KnowledgeStore {
       .all() as Array<{ nodeId: string; title: string; kind: string; createdAt: string }>;
   }
 
+  // —— AI 建议边确认流（§8.2/§11）：建议→队列，确认后才进默认检索 ——
+  // 都走 Ledger（不可再生知识）。suggestEdge 返回事件，其 id 即 acceptSuggestion/
+  // rejectSuggestion 的 suggestion_event_id。
+  suggestEdge(p: {
+    src: string;
+    dst?: string | null;
+    rawTarget?: string | null;
+    edgeType: string;
+    confidence?: number;
+    actorId?: string;
+  }): LedgerEvent {
+    return this.recordKnowledge({
+      type: "ai_suggestion_created",
+      origin: "ai",
+      method: "INFERRED",
+      actor: { type: "ai", id: p.actorId ?? "ai" },
+      target: { node_id: p.src },
+      payload: {
+        src: p.src,
+        dst: p.dst ?? null,
+        raw_target: p.rawTarget ?? null,
+        edge_type: p.edgeType,
+        confidence: p.confidence ?? 0.5,
+      },
+    });
+  }
+
+  acceptSuggestion(suggestionEventId: string, actorId = "user"): void {
+    this.recordKnowledge({
+      type: "ai_suggestion_accepted",
+      origin: "user",
+      method: "ASSERTED",
+      actor: { type: "user", id: actorId },
+      payload: { suggestion_event_id: suggestionEventId },
+    });
+  }
+
+  rejectSuggestion(suggestionEventId: string, actorId = "user"): void {
+    this.recordKnowledge({
+      type: "ai_suggestion_rejected",
+      origin: "user",
+      method: "ASSERTED",
+      actor: { type: "user", id: actorId },
+      payload: { suggestion_event_id: suggestionEventId },
+    });
+  }
+
+  listSuggestions(): Array<{
+    edgeId: string;
+    suggestionEventId: string;
+    src: string;
+    dst: string | null;
+    edgeType: string;
+    confidence: number;
+  }> {
+    const rows = this.db
+      .prepare(
+        "SELECT id AS edgeId, src, dst, edge_type AS edgeType, confidence FROM edges WHERE status = 'suggested' ORDER BY src",
+      )
+      .all() as Array<{ edgeId: string; src: string; dst: string | null; edgeType: string; confidence: number }>;
+    return rows.map((r) => ({ ...r, suggestionEventId: r.edgeId.replace(/^edge_/, "") }));
+  }
+
   // 解析产出的代码边：同 file+branch 全量替换（§6.3 增量语义）。
   // 非 parser 边在这里是实现错误，不是数据——直接抛。
   replaceFileEdges(p: {

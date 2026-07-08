@@ -81,7 +81,8 @@ CREATE TABLE IF NOT EXISTS edges (
   origin TEXT NOT NULL,
   method TEXT NOT NULL,
   confidence REAL NOT NULL DEFAULT 1.0,
-  provenance TEXT NOT NULL DEFAULT '{}'
+  provenance TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'active'   -- active | suggested (pending AI edge) | rejected
 );
 CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src);
 CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst);
@@ -172,7 +173,18 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts_symbols USING fts5(
 );
 `;
 
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
+
+// Idempotent additive migrations for columns introduced after v1 (existing dev
+// dbs have data — never force a rebuild for an additive change).
+function migrate(db: Database.Database): void {
+  const edgeCols = (db.prepare("PRAGMA table_info(edges)").all() as { name: string }[]).map(
+    (c) => c.name,
+  );
+  if (!edgeCols.includes("status")) {
+    db.exec("ALTER TABLE edges ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
+  }
+}
 
 export function openDatabase(path: string): Database.Database {
   const db = new Database(path);
@@ -183,6 +195,7 @@ export function openDatabase(path: string): Database.Database {
   // 「账本 + 全量重建流程」保证，不靠 SQLite 外键（D4）。
   db.pragma("foreign_keys = OFF");
   db.exec(DDL);
+  migrate(db);
   db.prepare(
     "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)",
   ).run(String(SCHEMA_VERSION));

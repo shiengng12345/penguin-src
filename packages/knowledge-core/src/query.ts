@@ -124,16 +124,19 @@ export function exploreGraph(
   const nodeId = resolveNodeId(store, nodeOrKey);
   if (!nodeId) return { mode, nodes: [] };
 
+  // Trust filter (§3.3/§11): default traversal only follows confirmed edges —
+  // unconfirmed AI suggestions (status='suggested') and rejected edges are out.
+  const ACTIVE = "status='active'";
   if (mode === "who_calls") {
-    const rows = store.db.prepare("SELECT DISTINCT src FROM edges WHERE dst=? AND edge_type='calls' LIMIT ?").all(nodeId, limit) as { src: string }[];
+    const rows = store.db.prepare(`SELECT DISTINCT src FROM edges WHERE dst=? AND edge_type='calls' AND ${ACTIVE} LIMIT ?`).all(nodeId, limit) as { src: string }[];
     return { mode, nodes: rows.map((r) => nodeBrief(store, r.src)) };
   }
   if (mode === "calls_of") {
-    const rows = store.db.prepare("SELECT DISTINCT dst FROM edges WHERE src=? AND edge_type='calls' AND dst IS NOT NULL LIMIT ?").all(nodeId, limit) as { dst: string }[];
+    const rows = store.db.prepare(`SELECT DISTINCT dst FROM edges WHERE src=? AND edge_type='calls' AND dst IS NOT NULL AND ${ACTIVE} LIMIT ?`).all(nodeId, limit) as { dst: string }[];
     return { mode, nodes: rows.map((r) => nodeBrief(store, r.dst)) };
   }
   if (mode === "backlinks") {
-    const rows = store.db.prepare("SELECT DISTINCT src FROM edges WHERE dst=? LIMIT ?").all(nodeId, limit) as { src: string }[];
+    const rows = store.db.prepare(`SELECT DISTINCT src FROM edges WHERE dst=? AND ${ACTIVE} LIMIT ?`).all(nodeId, limit) as { src: string }[];
     return { mode, nodes: rows.map((r) => nodeBrief(store, r.src)) };
   }
   if (mode === "impact") {
@@ -144,7 +147,7 @@ export function exploreGraph(
     for (let d = 0; d < depth && frontier.length; d++) {
       const next: string[] = [];
       for (const id of frontier) {
-        const callers = store.db.prepare("SELECT DISTINCT src FROM edges WHERE dst=? AND edge_type='calls'").all(id) as { src: string }[];
+        const callers = store.db.prepare(`SELECT DISTINCT src FROM edges WHERE dst=? AND edge_type='calls' AND ${ACTIVE}`).all(id) as { src: string }[];
         for (const c of callers) if (!seen.has(c.src)) { seen.add(c.src); next.push(c.src); }
       }
       frontier = next;
@@ -155,14 +158,14 @@ export function exploreGraph(
   if (mode === "path") {
     const to = options?.to ? resolveNodeId(store, options.to) : null;
     if (!to) return { mode, nodes: [] };
-    // BFS over calls edges src→dst
+    // BFS over active edges src→dst
     const prev = new Map<string, string>();
     const queue = [nodeId];
     const visited = new Set([nodeId]);
     while (queue.length) {
       const cur = queue.shift()!;
       if (cur === to) break;
-      const outs = store.db.prepare("SELECT DISTINCT dst FROM edges WHERE src=? AND dst IS NOT NULL").all(cur) as { dst: string }[];
+      const outs = store.db.prepare(`SELECT DISTINCT dst FROM edges WHERE src=? AND dst IS NOT NULL AND ${ACTIVE}`).all(cur) as { dst: string }[];
       for (const o of outs) if (!visited.has(o.dst)) { visited.add(o.dst); prev.set(o.dst, cur); queue.push(o.dst); }
     }
     if (!visited.has(to)) return { mode, nodes: [] };
@@ -204,6 +207,11 @@ export interface IndexStatus {
     repoId: string; name: string; rootPath: string;
     branches: Array<{ branchId: string; name: string; status: string; lastIndexedAt: string | null; staleSymbols: number }>;
   }>;
+}
+
+// The pending AI-suggestion queue (edges awaiting accept/reject, §8.2).
+export function listSuggestions(store: KnowledgeStore) {
+  return store.listSuggestions();
 }
 
 // index_status: repos/branches + staleness (answers list_repos/list_branches, §8.1).

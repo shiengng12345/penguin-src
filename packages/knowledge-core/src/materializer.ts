@@ -60,6 +60,17 @@ export function materialize(
     VALUES (@id, @src, @dst, @raw_target, @edge_type,
       @branch_id, @origin, @method, @confidence, @provenance)
   `);
+  // AI suggestion edge (pending confirmation, §8.2/§11): status='suggested' so
+  // queries exclude it by default until accepted.
+  const insertSuggestedEdge = db.prepare(`
+    INSERT INTO edges (id, src, dst, raw_target, edge_type,
+      branch_id, origin, method, confidence, provenance, status)
+    VALUES (@id, @src, @dst, @raw_target, @edge_type,
+      @branch_id, 'ai', 'INFERRED', @confidence, @provenance, 'suggested')
+  `);
+  const setEdgeStatus = db.prepare(
+    "UPDATE edges SET status = @status, method = @method, confidence = @confidence WHERE id = @id",
+  );
   const undoAlias = db.prepare(`
     UPDATE node_aliases SET valid_to = @valid_to
     WHERE node_id = @node_id AND alias_key = @alias_key AND alias_type = @alias_type
@@ -122,6 +133,37 @@ export function materialize(
             method: e.method,
             confidence: typeof p.confidence === "number" ? p.confidence : 1.0,
             provenance: JSON.stringify(e.provenance ?? {}),
+          });
+          break;
+        }
+        case "ai_suggestion_created": {
+          insertSuggestedEdge.run({
+            id: `edge_${e.id}`,
+            src: String(p.src ?? e.target?.node_id ?? ""),
+            dst: p.dst == null ? null : String(p.dst),
+            raw_target: p.raw_target == null ? null : String(p.raw_target),
+            edge_type: String(p.edge_type ?? "wikilink"),
+            branch_id: e.target?.branch_id ?? null,
+            confidence: typeof p.confidence === "number" ? p.confidence : 0.5,
+            provenance: JSON.stringify(e.provenance ?? {}),
+          });
+          break;
+        }
+        case "ai_suggestion_accepted": {
+          setEdgeStatus.run({
+            id: `edge_${String(p.suggestion_event_id ?? "")}`,
+            status: "active",
+            method: "ASSERTED",
+            confidence: 1.0,
+          });
+          break;
+        }
+        case "ai_suggestion_rejected": {
+          setEdgeStatus.run({
+            id: `edge_${String(p.suggestion_event_id ?? "")}`,
+            status: "rejected",
+            method: "INFERRED",
+            confidence: 0.0,
           });
           break;
         }
