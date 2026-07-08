@@ -88,6 +88,8 @@ test("WikiNoteEditor is a CodeMirror editor with search-backed [[ wikilink autoc
   assert.match(source, /noteCompletionTrigger/); // uses the unit-tested trigger
   assert.match(source, /knowledgeSearch/); // wikilink candidates come from search
   assert.match(source, /apply: `\$\{h\.title\}\]\]`/); // completes to [[Title]]
+  assert.match(source, /knowledgeTags/); // # tag candidates come from the tags endpoint
+  assert.match(source, /trig\.kind === "wikilink"/); // both trigger kinds handled
 });
 
 test("WikiPage wires note create/edit/save via the C9 note verbs", async () => {
@@ -106,4 +108,5 @@ test("knowledge-client exposes note new/write/read/list wrappers", async () => {
   assert.match(source, /\["note", "write", slug, body\]/);
   assert.match(source, /\["note", "read", slug\]/);
   assert.match(source, /\["note", "list"\]/);
+  assert.match(source, /\["tags"\]/);
 });

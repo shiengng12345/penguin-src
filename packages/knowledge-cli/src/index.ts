@@ -7,6 +7,7 @@ import {
   listFileSymbols,
   listIndexedFiles,
   listSuggestions,
+  listTags,
   repoGraph,
   search,
   type GraphMode,
@@ -36,7 +37,7 @@ export interface CliDeps {
 const READ_VERBS = new Set([
   "search", "node", "callers", "calls", "impact", "backlinks",
   "path", "recent", "compare", "status", "suggestions", "snapshots", "doctor",
-  "files", "filesymbols", "graph", "repograph",
+  "files", "filesymbols", "graph", "repograph", "tags",
 ]);
 
 // repo/branch args accept an id OR a name (humans pass names; the Wiki passes
@@ -100,6 +101,7 @@ const HELP = `penguin — Penguin Knowledge CLI
   penguin filesymbols <br> <f>  symbols defined in a file (branch id + path)
   penguin graph <node> [depth]  local graph: focus node + neighbours
   penguin repograph <repo> [br] repo/branch graph (top hubs by degree)
+  penguin tags                  distinct tags across all notes
   penguin suggestions           pending AI edge suggestions
   penguin accept <event-id>     accept a suggestion
   penguin reject <event-id>     reject a suggestion
@@ -375,6 +377,11 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
           if (!branchId) { deps.err("branch not found for that repo"); return 1; }
           const g = repoGraph(store, repoId, branchId);
           emit(deps, json, `${g.nodes.length} nodes, ${g.edges.length} edges`, g);
+          return 0;
+        }
+        case "tags": {
+          const tags = listTags(store);
+          emit(deps, json, tags.join("\n") || "(no tags)", tags);
           return 0;
         }
         default: {

@@ -26,6 +26,7 @@ export {
   compareBranches,
   indexStatus,
   listSuggestions,
+  listTags,
   listIndexedFiles,
   listFileSymbols,
   graphNeighborhood,

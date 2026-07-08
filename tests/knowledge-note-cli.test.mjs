@@ -86,6 +86,19 @@ test("note write to a missing note exits 1", async () => {
   assert.equal(await runCli(["note", "write", "ghost", "x"], deps), 1);
 });
 
+test("tags verb lists distinct #tags extracted from note bodies", async () => {
+  const { deps, lines } = harness();
+  await runCli(["note", "new", "Tagged"], deps);
+  await runCli(["note", "write", "tagged", "body with #brazil and #urgent tags"], deps);
+  await runCli(["note", "new", "Also"], deps);
+  await runCli(["note", "write", "also", "another #brazil note"], deps);
+
+  lines.length = 0;
+  assert.equal(await runCli(["tags", "--json"], deps), 0);
+  const tags = JSON.parse(lines[0]);
+  assert.deepEqual(tags, ["brazil", "urgent"], "distinct, sorted");
+});
+
 test("note new never clobbers — duplicate title gets a -2 slug", async () => {
   const { deps, lines } = harness();
   await runCli(["note", "new", "Dup Title"], deps);

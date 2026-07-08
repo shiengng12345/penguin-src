@@ -146,6 +146,11 @@ export function knowledgeNoteList(): Promise<string[]> {
   return query(["note", "list"]);
 }
 
+// Distinct tags across notes — powers the editor's `#` autocomplete.
+export function knowledgeTags(): Promise<string[]> {
+  return query<string[]>(["tags"]);
+}
+
 // Parse the search box's `type:`/`repo:`/`tag:`/`entity:` filter syntax out of
 // the free text (§7). Returns the residual query + parsed filters.
 export function parseSearchFilters(input: string): {

@@ -220,6 +220,20 @@ export function listSuggestions(store: KnowledgeStore) {
   return store.listSuggestions();
 }
 
+// Distinct tags across all nodes (tags live in node meta.tags). Powers the
+// Wiki editor's `#` autocomplete and tag filtering. Uses SQLite JSON1.
+export function listTags(store: KnowledgeStore): string[] {
+  const rows = store.db
+    .prepare(
+      `SELECT DISTINCT je.value AS tag
+         FROM nodes, json_each(json_extract(nodes.meta, '$.tags')) je
+        WHERE je.value IS NOT NULL
+        ORDER BY tag`,
+    )
+    .all() as { tag: string }[];
+  return rows.map((r) => r.tag);
+}
+
 // —— 索引浏览:repo → branch → file → symbol(Wiki 导航树,§8.1）——
 
 export interface IndexedFileRow {

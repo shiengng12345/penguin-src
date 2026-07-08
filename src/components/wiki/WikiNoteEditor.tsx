@@ -4,7 +4,7 @@ import { EditorState } from "@codemirror/state";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { autocompletion, closeBrackets, type CompletionContext } from "@codemirror/autocomplete";
 import { noteCompletionTrigger } from "@/lib/note-autocomplete";
-import { knowledgeSearch } from "@/lib/knowledge-client";
+import { knowledgeSearch, knowledgeTags } from "@/lib/knowledge-client";
 
 // Markdown note editor (Plan 8). CodeMirror with `[[` wikilink autocomplete:
 // typing `[[query` searches the graph and completes to `[[Title]]`. The trigger
@@ -19,23 +19,46 @@ export function WikiNoteEditor({ body, onChange }: { body: string; onChange: (v:
   useEffect(() => {
     if (!ref.current) return;
 
-    const wikilinkSource = async (ctx: CompletionContext) => {
+    // Tags are fetched once and cached (small, changes rarely) for `#` completion.
+    let tagCache: string[] | null = null;
+
+    const completionSource = async (ctx: CompletionContext) => {
       const prefix = ctx.state.sliceDoc(0, ctx.pos);
       const trig = noteCompletionTrigger(prefix);
-      if (!trig || trig.kind !== "wikilink") return null;
-      const q = trig.query.trim();
-      if (!q) return null;
-      let hits: Awaited<ReturnType<typeof knowledgeSearch>> = [];
-      try {
-        hits = await knowledgeSearch(q);
-      } catch {
-        return null;
+      if (!trig) return null;
+
+      if (trig.kind === "wikilink") {
+        const q = trig.query.trim();
+        if (!q) return null;
+        let hits: Awaited<ReturnType<typeof knowledgeSearch>> = [];
+        try {
+          hits = await knowledgeSearch(q);
+        } catch {
+          return null;
+        }
+        if (hits.length === 0) return null;
+        return {
+          from: trig.from,
+          options: hits.slice(0, 20).map((h) => ({ label: h.title, detail: h.nodeType, apply: `${h.title}]]` })),
+          validFor: /[^\]\n]*$/,
+        };
       }
-      if (hits.length === 0) return null;
+
+      // `#` tag completion — offer existing tags, filtered by the partial.
+      if (tagCache === null) {
+        try {
+          tagCache = await knowledgeTags();
+        } catch {
+          tagCache = [];
+        }
+      }
+      const q = trig.query.toLowerCase();
+      const matches = tagCache.filter((t) => t.toLowerCase().includes(q)).slice(0, 20);
+      if (matches.length === 0) return null;
       return {
         from: trig.from,
-        options: hits.slice(0, 20).map((h) => ({ label: h.title, detail: h.nodeType, apply: `${h.title}]]` })),
-        validFor: /[^\]\n]*$/,
+        options: matches.map((t) => ({ label: t, type: "keyword" as const })),
+        validFor: /[A-Za-z0-9_/-]*$/,
       };
     };
 
@@ -44,7 +67,7 @@ export function WikiNoteEditor({ body, onChange }: { body: string; onChange: (v:
       extensions: [
         history(),
         closeBrackets(),
-        autocompletion({ override: [wikilinkSource], activateOnTyping: true }),
+        autocompletion({ override: [completionSource], activateOnTyping: true }),
         keymap.of([...defaultKeymap, ...historyKeymap, indentWithTab]),
         EditorView.lineWrapping,
         cmPlaceholder("写点什么… 用 [[ 链接到符号/笔记,用 # 加标签"),
