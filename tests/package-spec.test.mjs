@@ -207,6 +207,20 @@ test("PackageInstaller auto-refresh is gated to admin tokens; normal users one-s
   assert.match(source, /canAutoRefresh && autoRefresh\) \|\| \(!canAutoRefresh && listLoading\)/);
 });
 
+test("PackageInstaller manual input is a highlighted card that auto-focuses on empty search", async () => {
+  const source = await readFile(
+    new URL("../src/components/packages/PackageInstaller.tsx", import.meta.url),
+    "utf8",
+  );
+  // 行动号召标题 + 青色左边框强调
+  assert.match(source, /搜不到想要的？直接输入包名安装/);
+  assert.match(source, /border-l-cyan-400\/70/);
+  // 无结果标志 + 防抖自动聚焦（停 500ms 且仍无结果才聚焦，不打字途中抢焦点）
+  assert.match(source, /const noSearchResults =/);
+  assert.match(source, /searchResults\.length === 0/);
+  assert.match(source, /setTimeout\(\(\) => manualInputRef\.current\?\.focus\(\), 500\)/);
+});
+
 test("extracts package name from allowed snsoft package specs", async () => {
   const { snsoftPackageNameFromSpec } = await loadPackageSpecModule();
 

@@ -223,6 +223,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
   const [nameSuggestOpen, setNameSuggestOpen] = useState(false);
   const [nameSuggestIdx, setNameSuggestIdx] = useState(-1);
   const nameBlurTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const manualInputRef = useRef<HTMLInputElement>(null);
   const [registryList, setRegistryList] = useState<RegistryPackage[] | null>(null);
   const [listLoading, setListLoading] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
@@ -378,6 +379,17 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
       families: familyFilter,
     });
   }, [registryList, allowedList, searchQuery, effectiveBranch, typeFilter, familyFilter]);
+
+  // 用户搜了但一条没匹配上——此时手动输入区是主路径，高亮并（防抖后）自动聚焦。
+  const noSearchResults =
+    !!registryList && searchQuery.trim().length > 0 && searchResults.length === 0;
+
+  // 停止输入 ~500ms 且仍无结果、手动框还空着，才把光标移过去——避免打字途中抢焦点。
+  useEffect(() => {
+    if (!noSearchResults || isInstalling || manualSpec.trim().length > 0) return;
+    const id = setTimeout(() => manualInputRef.current?.focus(), 500);
+    return () => clearTimeout(id);
+  }, [noSearchResults, isInstalling, manualSpec]);
 
   // 多选下拉展示全部家族（21 个 + js-sdk），所以放开条数上限。
   const nameSuggestions = useMemo(
@@ -952,17 +964,23 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
             </div>
           </section>
 
-          <section className="shrink-0 rounded-lg border border-slate-700/70 bg-slate-900/40 p-3">
+          <section
+            className={cn(
+              "shrink-0 rounded-lg border border-l-2 border-cyan-400/25 border-l-cyan-400/70 bg-cyan-400/[0.04] p-3 transition-all",
+              // 搜索无结果时进一步高亮，配合自动聚焦引导用户直接手输
+              noSearchResults && "border-cyan-400/60 bg-cyan-400/[0.09] ring-1 ring-cyan-400/40",
+            )}
+          >
             <div className="mb-2 flex items-center gap-1.5">
               <Braces className="h-3.5 w-3.5 text-cyan-300" />
-              <span className="text-xs font-semibold text-slate-200">手动输入包规格</span>
-              <span className="text-[11px] font-normal text-slate-500">（可选）</span>
+              <span className="text-xs font-semibold text-cyan-200">搜不到想要的？直接输入包名安装</span>
             </div>
             <div className="relative">
               <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 font-mono text-sm text-slate-500">
                 @
               </span>
               <Input
+                ref={manualInputRef}
                 value={manualSpec}
                 onChange={(e) => {
                   setManualSpec(normalizePackageSpec(e.target.value));
