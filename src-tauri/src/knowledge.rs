@@ -13,6 +13,41 @@ use tauri::Manager;
 
 use crate::mcp::detect_node_path;
 
+// Resolve the Node used to run the knowledge CLI. Unlike the MCP server (pure
+// bundled JS, ABI-agnostic), the CLI loads a NATIVE module (better-sqlite3), so
+// it MUST run under a Node whose ABI matches the installed build. In dev that's
+// the developer's own shell node — the one `pnpm install` built the native
+// module against — so prefer it over homebrew/usr-local (which may be a
+// different major with a mismatched ABI). Override with PENGUIN_NODE; packaged
+// releases ship their own node + rebuilt natives. Cached (login-shell spawn is
+// slow).
+fn resolve_node() -> Option<PathBuf> {
+    static NODE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    NODE.get_or_init(|| {
+        if let Ok(p) = std::env::var("PENGUIN_NODE") {
+            let pb = PathBuf::from(p);
+            if pb.exists() {
+                return Some(pb);
+            }
+        }
+        // The dev's login-shell node (matches the native build's ABI).
+        if let Ok(out) = std::process::Command::new("zsh")
+            .args(["-ilc", "command -v node"])
+            .output()
+        {
+            if out.status.success() {
+                let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                let pb = PathBuf::from(&p);
+                if !p.is_empty() && pb.exists() {
+                    return Some(pb);
+                }
+            }
+        }
+        detect_node_path()
+    })
+    .clone()
+}
+
 fn knowledge_db_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".penguin/knowledge/knowledge.db"))
 }
@@ -46,7 +81,7 @@ fn bundled_cli_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<Path
 // Run the bundled CLI with args and return stdout. Single source of query/index
 // logic — no duplication of the query layer in Rust.
 fn run_cli<R: tauri::Runtime>(app: &tauri::AppHandle<R>, args: &[String]) -> Result<String, String> {
-    let node = detect_node_path().ok_or("Node.js not detected in common paths")?;
+    let node = resolve_node().ok_or("Node.js not detected in common paths")?;
     let cli = bundled_cli_path(app)?;
     let mut cmd = Command::new(node);
     cmd.arg(&cli);
