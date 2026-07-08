@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -104,4 +105,13 @@ test("help + unknown command exit codes", async () => {
   assert.match(lines.join("\n"), /penguin init/);
   assert.equal(await runCli(["frobnicate"], deps), 2);
   assert.match(errs.join("\n"), /unknown command/);
+});
+
+test("bin.ts sets process.exitCode (never process.exit) so piped --json can't truncate", async () => {
+  // Regression: process.exit() drops un-flushed async pipe writes → the app
+  // read truncated JSON ("Unterminated string"). exitCode lets Node drain first.
+  const raw = await readFile(new URL("../packages/knowledge-cli/src/bin.ts", import.meta.url), "utf8");
+  const code = raw.split("\n").filter((l) => !l.trim().startsWith("//")).join("\n"); // drop comments
+  assert.match(code, /process\.exitCode\s*=/);
+  assert.doesNotMatch(code, /process\.exit\(/, "must not call process.exit() — it truncates piped stdout");
 });

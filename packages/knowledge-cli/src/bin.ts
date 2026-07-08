@@ -36,8 +36,16 @@ runCli(process.argv.slice(2), {
     return link;
   },
 })
-  .then((code) => process.exit(code))
+  // Use process.exitCode, NOT process.exit(): the app reads our stdout over a
+  // pipe, and process.exit() drops un-flushed async pipe writes (files flush
+  // synchronously, pipes don't) — which truncated large --json payloads into
+  // "Unterminated string" JSON.parse errors in the Wiki. Setting exitCode lets
+  // Node drain stdout and exit naturally (the store is already closed, so no
+  // handle keeps the loop alive).
+  .then((code) => {
+    process.exitCode = code;
+  })
   .catch((e) => {
     process.stderr.write(String(e?.stack ?? e) + "\n");
-    process.exit(1);
+    process.exitCode = 1;
   });
