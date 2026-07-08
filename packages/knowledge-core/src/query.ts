@@ -220,6 +220,146 @@ export function listSuggestions(store: KnowledgeStore) {
   return store.listSuggestions();
 }
 
+// —— 索引浏览:repo → branch → file → symbol(Wiki 导航树,§8.1）——
+
+export interface IndexedFileRow {
+  filePath: string;
+  lang: string | null;
+  status: string; // indexed | skipped | deleted
+  sizeBytes: number | null;
+  indexedAt: string | null;
+  error: string | null;
+}
+
+// The files captured for a repo/branch (the file-tree source). Ordered by path.
+export function listIndexedFiles(
+  store: KnowledgeStore,
+  repoId: string,
+  branchId: string,
+): IndexedFileRow[] {
+  return store.db
+    .prepare(
+      `SELECT file_path AS filePath, lang, status, size_bytes AS sizeBytes,
+              indexed_at AS indexedAt, error
+       FROM files_index WHERE repo_id=? AND branch_id=? ORDER BY file_path`,
+    )
+    .all(repoId, branchId) as IndexedFileRow[];
+}
+
+export interface FileSymbolRow {
+  nodeId: string;
+  title: string;
+  kind: string;
+  status: string; // fresh | stale
+}
+
+// The symbols defined in one file on one branch (click-a-file → its symbols).
+export function listFileSymbols(
+  store: KnowledgeStore,
+  branchId: string,
+  filePath: string,
+): FileSymbolRow[] {
+  return store.db
+    .prepare(
+      `SELECT sv.node_id AS nodeId, n.title AS title, sv.kind AS kind, sv.status AS status
+       FROM symbol_versions sv JOIN nodes n ON n.id = sv.node_id
+       WHERE sv.branch_id=? AND sv.file_path=? ORDER BY n.title`,
+    )
+    .all(branchId, filePath) as FileSymbolRow[];
+}
+
+// —— 图谱视图:节点-连线(Obsidian 式,§8.1)——
+
+export interface GraphView {
+  focus: string | null; // the centered node (null for repo-scoped view)
+  nodes: Array<{ nodeId: string; title: string; nodeType: string }>;
+  edges: Array<{ src: string; dst: string; edgeType: string }>;
+}
+
+// Local graph: a focus node + its neighbourhood within `depth` hops (both
+// directions over active edges), capped at `limit` nodes. Only active edges
+// (confirmed) are followed — same trust rule as exploreGraph. 22k-node graphs
+// can't render whole, so callers recenter by picking a neighbour as new focus.
+export function graphNeighborhood(
+  store: KnowledgeStore,
+  nodeOrKey: string,
+  options?: { depth?: number; limit?: number },
+): GraphView {
+  const focus = resolveNodeId(store, nodeOrKey);
+  if (!focus) return { focus: null, nodes: [], edges: [] };
+  const depth = options?.depth ?? 1;
+  const limit = options?.limit ?? 150;
+
+  const neighbours = store.db.prepare(
+    `SELECT dst AS other FROM edges WHERE src=? AND dst IS NOT NULL AND status='active'
+     UNION SELECT src AS other FROM edges WHERE dst=? AND status='active'`,
+  );
+  const seen = new Set<string>([focus]);
+  let frontier = [focus];
+  for (let d = 0; d < depth && frontier.length && seen.size < limit; d++) {
+    const next: string[] = [];
+    for (const id of frontier) {
+      if (seen.size >= limit) break;
+      for (const row of neighbours.all(id, id) as { other: string }[]) {
+        if (!seen.has(row.other) && seen.size < limit) {
+          seen.add(row.other);
+          next.push(row.other);
+        }
+      }
+    }
+    frontier = next;
+  }
+  return { focus, ...collectGraph(store, [...seen]) };
+}
+
+// Repo/branch-scoped view: the top-`limit` most-connected nodes (by active
+// branch-scoped edge degree) plus the edges among them. Keeps a big repo's
+// graph readable by showing its hubs rather than every leaf.
+export function repoGraph(
+  store: KnowledgeStore,
+  repoId: string,
+  branchId: string,
+  options?: { limit?: number },
+): GraphView {
+  const limit = options?.limit ?? 200;
+  const top = store.db
+    .prepare(
+      `SELECT d.id AS id FROM (
+         SELECT node AS id, COUNT(*) AS cnt FROM (
+           SELECT src AS node FROM edges WHERE branch_id=? AND status='active'
+           UNION ALL
+           SELECT dst AS node FROM edges WHERE branch_id=? AND status='active' AND dst IS NOT NULL
+         ) GROUP BY node
+       ) d JOIN nodes n ON n.id = d.id
+       WHERE n.repo_id=? ORDER BY d.cnt DESC, d.id LIMIT ?`,
+    )
+    .all(branchId, branchId, repoId, limit) as { id: string }[];
+  const ids = top.map((r) => r.id);
+  if (ids.length === 0) return { focus: null, nodes: [], edges: [] };
+  return { focus: null, ...collectGraph(store, ids, branchId) };
+}
+
+// Build {nodes, edges} for a fixed node-id set — edges only where BOTH ends are
+// in the set (optionally scoped to a branch). Shared by the two graph views.
+function collectGraph(
+  store: KnowledgeStore,
+  ids: string[],
+  branchId?: string,
+): { nodes: GraphView["nodes"]; edges: GraphView["edges"] } {
+  const nodes = ids.map((id) => nodeBrief(store, id));
+  const ph = ids.map(() => "?").join(",");
+  const branchClause = branchId ? "AND branch_id=?" : "";
+  const params = branchId ? [branchId, ...ids, ...ids] : [...ids, ...ids];
+  const edges = store.db
+    .prepare(
+      `SELECT src, dst, edge_type AS edgeType FROM edges
+       WHERE status='active' AND dst IS NOT NULL ${branchClause}
+         AND src IN (${ph}) AND dst IN (${ph})`,
+    )
+    .all(...params) as GraphView["edges"];
+  return { nodes, edges };
+}
+
 // index_status: repos/branches + staleness (answers list_repos/list_branches, §8.1).
 export function indexStatus(store: KnowledgeStore): IndexStatus {
   const repos = store.db.prepare("SELECT id, name, root_path AS rootPath FROM repos ORDER BY name").all() as Array<{ id: string; name: string; rootPath: string }>;

@@ -2,8 +2,12 @@ import {
   compareBranches,
   exploreGraph,
   getNodeDetail,
+  graphNeighborhood,
   indexStatus,
+  listFileSymbols,
+  listIndexedFiles,
   listSuggestions,
+  repoGraph,
   search,
   type GraphMode,
   type KnowledgeStore,
@@ -29,7 +33,30 @@ export interface CliDeps {
 const READ_VERBS = new Set([
   "search", "node", "callers", "calls", "impact", "backlinks",
   "path", "recent", "compare", "status", "suggestions", "snapshots", "doctor",
+  "files", "filesymbols", "graph", "repograph",
 ]);
+
+// repo/branch args accept an id OR a name (humans pass names; the Wiki passes
+// ids from `status`). Branch omitted → the repo's single/first branch.
+function resolveRepoId(store: KnowledgeStore, s: string | undefined): string | null {
+  if (!s) return null;
+  const row = store.db
+    .prepare("SELECT id FROM repos WHERE id=? OR name=? LIMIT 1")
+    .get(s, s) as { id: string } | undefined;
+  return row?.id ?? null;
+}
+function resolveBranchId(store: KnowledgeStore, repoId: string, s: string | undefined): string | null {
+  if (!s) {
+    const row = store.db
+      .prepare("SELECT id FROM branches WHERE repo_id=? ORDER BY name LIMIT 1")
+      .get(repoId) as { id: string } | undefined;
+    return row?.id ?? null;
+  }
+  const row = store.db
+    .prepare("SELECT id FROM branches WHERE repo_id=? AND (id=? OR name=?) LIMIT 1")
+    .get(repoId, s, s) as { id: string } | undefined;
+  return row?.id ?? null;
+}
 const GRAPH_VERB_MODE: Record<string, GraphMode> = {
   callers: "who_calls", calls: "calls_of", impact: "impact",
   backlinks: "backlinks", recent: "recent_changes",
@@ -66,6 +93,10 @@ const HELP = `penguin — Penguin Knowledge CLI
   penguin path <a> <b>          shortest path a→b
   penguin recent                recent changes
   penguin compare <sym> <a> <b> cross-branch diff
+  penguin files <repo> [branch] indexed files for a repo/branch
+  penguin filesymbols <br> <f>  symbols defined in a file (branch id + path)
+  penguin graph <node> [depth]  local graph: focus node + neighbours
+  penguin repograph <repo> [br] repo/branch graph (top hubs by degree)
   penguin suggestions           pending AI edge suggestions
   penguin accept <event-id>     accept a suggestion
   penguin reject <event-id>     reject a suggestion
@@ -237,6 +268,39 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
               (check.ledgerTruncatedAtLine ? ` (ledger truncated @line ${check.ledgerTruncatedAtLine})` : "") +
               `\nnodes ${nodes}, edges ${edges}, pending suggestions ${pending}`,
             report);
+          return 0;
+        }
+        case "files": {
+          const repoId = resolveRepoId(store, pos[0]);
+          if (!repoId) { deps.err("repo not found (pass a repo id or name — see `penguin status`)"); return 1; }
+          const branchId = resolveBranchId(store, repoId, pos[1]);
+          if (!branchId) { deps.err("branch not found for that repo"); return 1; }
+          const files = listIndexedFiles(store, repoId, branchId);
+          emit(deps, json,
+            files.map((f) => `${f.status === "indexed" ? " " : "·"} ${f.filePath}${f.lang ? `  [${f.lang}]` : ""}`).join("\n") || "(no files)",
+            files);
+          return 0;
+        }
+        case "filesymbols": {
+          // filesymbols <branchId> <filePath> — Wiki passes the branch id from `files`.
+          const syms = listFileSymbols(store, pos[0] ?? "", pos[1] ?? "");
+          emit(deps, json, syms.map((s) => `${s.kind}\t${s.title}${s.status === "stale" ? " (stale)" : ""}`).join("\n") || "(no symbols)", syms);
+          return 0;
+        }
+        case "graph": {
+          const depth = pos[1] ? Number(pos[1]) || 1 : 1;
+          const g = graphNeighborhood(store, pos[0] ?? "", { depth });
+          if (!g.focus) { deps.err("node not found"); return 1; }
+          emit(deps, json, `focus + ${g.nodes.length - 1} neighbours, ${g.edges.length} edges`, g);
+          return 0;
+        }
+        case "repograph": {
+          const repoId = resolveRepoId(store, pos[0]);
+          if (!repoId) { deps.err("repo not found (pass a repo id or name — see `penguin status`)"); return 1; }
+          const branchId = resolveBranchId(store, repoId, pos[1]);
+          if (!branchId) { deps.err("branch not found for that repo"); return 1; }
+          const g = repoGraph(store, repoId, branchId);
+          emit(deps, json, `${g.nodes.length} nodes, ${g.edges.length} edges`, g);
           return 0;
         }
         default: {
