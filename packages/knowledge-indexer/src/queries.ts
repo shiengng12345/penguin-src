@@ -74,6 +74,46 @@ const JAVA_QUERY = `
 (import_declaration (scoped_identifier) @reference.import)
 `;
 
+const RUBY_QUERY = `
+(method name: (identifier) @name) @definition.method
+(singleton_method name: (identifier) @name) @definition.method
+(class name: (constant) @name) @definition.class
+(module name: (constant) @name) @definition.module
+(call method: (identifier) @reference.call)
+`;
+
+const PHP_QUERY = `
+(function_definition name: (name) @name) @definition.function
+(method_declaration name: (name) @name) @definition.method
+(class_declaration name: (name) @name) @definition.class
+(interface_declaration name: (name) @name) @definition.interface
+(trait_declaration name: (name) @name) @definition.class
+(function_call_expression function: (name) @reference.call)
+(member_call_expression name: (name) @reference.call)
+`;
+
+const C_QUERY = `
+(function_definition declarator: (function_declarator declarator: (identifier) @name)) @definition.function
+(struct_specifier name: (type_identifier) @name) @definition.struct
+(call_expression function: (identifier) @reference.call)
+`;
+
+const CPP_QUERY = `
+(function_definition declarator: (function_declarator declarator: (identifier) @name)) @definition.function
+(class_specifier name: (type_identifier) @name) @definition.class
+(struct_specifier name: (type_identifier) @name) @definition.struct
+(call_expression function: (identifier) @reference.call)
+`;
+
+const CSHARP_QUERY = `
+(class_declaration name: (identifier) @name) @definition.class
+(interface_declaration name: (identifier) @name) @definition.interface
+(struct_declaration name: (identifier) @name) @definition.struct
+(enum_declaration name: (identifier) @name) @definition.enum
+(method_declaration name: (identifier) @name) @definition.method
+(invocation_expression function: (identifier) @reference.call)
+`;
+
 export const TAGS_QUERY: Partial<Record<Lang, string>> = {
   ts: TS_QUERY,
   tsx: TS_QUERY,
@@ -82,6 +122,11 @@ export const TAGS_QUERY: Partial<Record<Lang, string>> = {
   go: GO_QUERY,
   rust: RUST_QUERY,
   java: JAVA_QUERY,
+  ruby: RUBY_QUERY,
+  php: PHP_QUERY,
+  c: C_QUERY,
+  cpp: CPP_QUERY,
+  csharp: CSHARP_QUERY,
 };
 
 // Per-language nesting nodes that contribute to a qualified name (their `name`
@@ -94,4 +139,9 @@ export const SCOPE_NODES: Partial<Record<Lang, string[]>> = {
   go: [],
   rust: ["mod_item", "impl_item"],
   java: ["class_declaration", "interface_declaration", "enum_declaration"],
+  ruby: ["class", "module"],
+  php: ["class_declaration", "interface_declaration", "trait_declaration"],
+  c: [],
+  cpp: ["class_specifier", "struct_specifier", "namespace_definition"],
+  csharp: ["class_declaration", "interface_declaration", "struct_declaration", "namespace_declaration"],
 };

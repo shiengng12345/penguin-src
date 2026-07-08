@@ -59,6 +59,27 @@ test("multi-language: python, go, rust, java extract symbols", async () => {
   assert.ok(java.symbols.some((s) => s.name === "m" && s.qualifiedName === "C.m"));
 });
 
+test("more languages: ruby, php, c, cpp, csharp extract symbols", async () => {
+  const ruby = await extractSymbols({ lang: "ruby", source: "class Foo\n  def bar\n  end\nend" });
+  assert.ok(ruby.symbols.some((s) => s.name === "Foo" && s.kind === "class"));
+  assert.ok(ruby.symbols.some((s) => s.name === "bar" && s.qualifiedName === "Foo.bar"));
+
+  const php = await extractSymbols({ lang: "php", source: "<?php\nclass Svc { function login(){ return helper(); } }\nfunction helper(){ return 1; }" });
+  assert.ok(php.symbols.some((s) => s.name === "login" && s.qualifiedName === "Svc.login"));
+  assert.ok(php.refs.some((r) => r.kind === "call" && r.rawName === "helper"));
+
+  const c = await extractSymbols({ lang: "c", source: "int add(int a,int b){return a+b;}\nint main(){return add(1,2);}" });
+  assert.ok(c.symbols.some((s) => s.name === "add" && s.kind === "function"));
+  assert.ok(c.refs.some((r) => r.rawName === "add"));
+
+  const cpp = await extractSymbols({ lang: "cpp", source: "class C { public: void m(){} };\nint fn(){return 1;}" });
+  assert.ok(cpp.symbols.some((s) => s.name === "C" && s.kind === "class"));
+
+  const cs = await extractSymbols({ lang: "csharp", source: "class C { void M(){ N(); } void N(){} }" });
+  assert.ok(cs.symbols.some((s) => s.name === "M" && s.qualifiedName === "C.M"));
+  assert.ok(cs.refs.some((r) => r.rawName === "N"));
+});
+
 test("degrade: oversize file and no-tags-query language do not throw", async () => {
   const big = await extractSymbols({ lang: "ts", source: "x", maxBytes: 0 });
   assert.equal(big.symbols.length, 0);
