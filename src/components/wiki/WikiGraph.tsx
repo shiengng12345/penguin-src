@@ -18,6 +18,7 @@ const COL = {
   focus: "#22d3ee",
   note: "#34d399",
   file: "#f59e0b",
+  route: "#fb7185",
   symbol: "#7c8db5",
   focusText: "#e0f7ff",
   text: "#94a3b8",
@@ -35,12 +36,14 @@ const EDGE_COL: Record<string, string> = {
   imports: "rgba(148,163,184,0.35)", // slate — file→file
   defines: "rgba(245,158,11,0.28)", // amber, faint — file→symbol (structural)
   tests: "rgba(52,211,153,0.55)", // green
+  handles: "rgba(251,113,133,0.6)", // rose — route→handler
 };
 const EDGE_LEGEND: Array<{ label: string; color: string }> = [
   { label: "calls", color: "#60a5fa" },
   { label: "references", color: "#a78bfa" },
   { label: "imports", color: "#94a3b8" },
   { label: "tests", color: "#34d399" },
+  { label: "handles", color: "#fb7185" },
   { label: "defines", color: "#f59e0b" },
 ];
 
@@ -159,7 +162,9 @@ export function WikiGraph({
                   ? COL.note
                   : n.type === "file"
                     ? COL.file
-                    : COL.symbol;
+                    : n.type === "route"
+                      ? COL.route
+                      : COL.symbol;
             ctx.fill();
             if (n.isFocus && !faded) {
               ctx.lineWidth = 1.5 / scale;

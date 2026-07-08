@@ -7,6 +7,7 @@ export {
   type ExtractedSymbol,
   type ExtractedRef,
 } from "./extract.js";
+export { extractRoutes, type ExtractedRoute } from "./routes.js";
 export { resolveRefs, type SymbolIndex, type ResolvedEdges } from "./resolve.js";
 export { detectRenames, type RenameAliasEvent } from "./rename.js";
 export { parseNote, indexNote, extractEntities, type ParsedNote } from "./notes.js";

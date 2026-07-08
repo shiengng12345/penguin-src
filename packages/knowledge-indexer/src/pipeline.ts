@@ -266,6 +266,20 @@ async function indexFileWithSource(
         structural.push({ src: fileNodeId, dst, edgeType: "tests", origin: "parser", method: "EXTRACTED" });
       }
     }
+    // routes (NestJS): a `route` node per HTTP endpoint → its handler method
+    // (edge_type 'handles'). Lets AI walk Route → Controller.method → Service…
+    for (const route of extracted.routes) {
+      const handlerId = fileSymbolIds.get(route.handlerQualifiedName);
+      if (!handlerId) continue;
+      const routeNodeId = store.upsertNode({
+        nodeType: "route",
+        identityKey: `${p.repoId}::route::${route.httpMethod} ${route.routePath}`,
+        repoId: p.repoId,
+        title: `${route.httpMethod} ${route.routePath}`,
+        meta: { httpMethod: route.httpMethod, path: route.routePath, controller: route.controllerName },
+      });
+      structural.push({ src: routeNodeId, dst: handlerId, edgeType: "handles", origin: "parser", method: "EXTRACTED" });
+    }
     store.replaceFileEdges({
       branchId: p.branchId, filePath: p.relPath,
       edges: [...resolved.edges, ...structural],
