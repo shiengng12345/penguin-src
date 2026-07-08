@@ -230,7 +230,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
   const [isInstalling, setIsInstalling] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  // 自动刷新开关（绿色=开）：开启即静默重拉一次最新列表，之后每 30s 后台重拉。
+  // 自动刷新开关（绿色=开）：开启即静默重拉一次最新列表，之后每 5s 后台重拉。
   // 后台刷新只替换底层列表，不触碰搜索/勾选/loading UI，不打断用户操作。
   // 权限：仅 admin / super-admin（有效 dev token）可用自动刷新；普通用户该按钮
   // 退化为「点一下刷新一次」。
@@ -275,7 +275,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
     clearInstallLog();
   }, []);
 
-  // 自动刷新开启：立刻静默重拉一次，之后每 30s 后台重拉最新（安装中暂停，
+  // 自动刷新开启：立刻静默重拉一次，之后每 5s 后台重拉最新（安装中暂停，
   // 避免与安装流程抢刷新）。关闭或卸载即停。
   useEffect(() => {
     // While the installer is open, it owns refresh (and pauses during install);
@@ -776,12 +776,12 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
             </div>
             <button
               type="button"
-              // admin/super-admin：自动刷新开关（绿色=开，每 30s 后台拉最新）；
+              // admin/super-admin：自动刷新开关（绿色=开，每 5s 后台拉最新）；
               // 普通用户：点一下刷新一次，无自动。
               title={
                 canAutoRefresh
                   ? autoRefresh
-                    ? "自动刷新：开（每 30s 拉取最新，点击关闭）"
+                    ? "自动刷新：开（每 5s 拉取最新，点击关闭）"
                     : "自动刷新：关（点击开启）"
                   : "刷新"
               }

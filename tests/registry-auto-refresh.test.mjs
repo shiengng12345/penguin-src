@@ -41,6 +41,6 @@ test("a persisted enabled flag alone is not sufficient (non-admin)", () => {
   );
 });
 
-test("interval is 30s", () => {
-  assert.equal(REGISTRY_AUTO_REFRESH_INTERVAL_MS, 30_000);
+test("interval is 5s", () => {
+  assert.equal(REGISTRY_AUTO_REFRESH_INTERVAL_MS, 5_000);
 });

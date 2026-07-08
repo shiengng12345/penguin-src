@@ -18,4 +18,4 @@ export function canBackgroundRefreshRegistry(gate: RegistryAutoRefreshGate): boo
   return gate.enabled && gate.devModeEnabled && gate.hasValidToken;
 }
 
-export const REGISTRY_AUTO_REFRESH_INTERVAL_MS = 30_000;
+export const REGISTRY_AUTO_REFRESH_INTERVAL_MS = 5_000;

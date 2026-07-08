@@ -8,7 +8,7 @@ import {
 } from "@/lib/registry-auto-refresh";
 
 // App-level background poller. While the installer is CLOSED, keep the registry
-// package cache warm every 30s so admins / super-admins reopen to a fresh list.
+// package cache warm every 5s so admins / super-admins reopen to a fresh list.
 // While the installer is OPEN, its own effect owns refresh (and pauses during an
 // install), so this poller stands down to avoid double-fetching. Strictly gated:
 // the moment dev mode is off, the dev token is invalid, or the toggle is off,
