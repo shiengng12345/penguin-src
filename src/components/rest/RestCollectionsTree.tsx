@@ -5,6 +5,7 @@ import { ChevronDown, ChevronRight, Folder, FolderOpen, Pencil, Plus, Trash2 } f
 import { cn } from "@/lib/utils";
 import type { RestCollection, RestRequestRecord } from "./rest-types";
 import { Input } from "@/components/ui/input";
+import { VaultConfirmModal } from "@/components/vault/VaultConfirmModal";
 
 export interface RestCollectionsTreeProps {
   collections: RestCollection[];
@@ -33,6 +34,17 @@ export function RestCollectionsTree(props: RestCollectionsTreeProps) {
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
+  // Delete confirmation via a real modal (VaultConfirmModal) — clearer than the
+  // inline tick, and window.confirm is unreliable in Tauri's webview.
+  const [pendingDelete, setPendingDelete] = useState<
+    { kind: "request" | "collection"; id: string; name: string } | null
+  >(null);
+  const confirmDelete = () => {
+    if (!pendingDelete) return;
+    if (pendingDelete.kind === "request") props.onDeleteRequest(pendingDelete.id);
+    else props.onDeleteCollection(pendingDelete.id);
+    setPendingDelete(null);
+  };
 
   const commitRename = () => {
     if (renamingId && renameDraft.trim()) {
@@ -78,6 +90,7 @@ export function RestCollectionsTree(props: RestCollectionsTreeProps) {
   }
 
   return (
+    <>
     <div className="flex-1 overflow-y-auto py-1">
       {filtered.map(({ collection, requests }) => {
         const isCollapsed = collapsed.has(collection.id);
@@ -158,7 +171,7 @@ export function RestCollectionsTree(props: RestCollectionsTreeProps) {
                   onPointerDown={(e) => e.stopPropagation()}
                   onClick={(e) => {
                     e.stopPropagation();
-                    props.onDeleteCollection(collection.id);
+                    setPendingDelete({ kind: "collection", id: collection.id, name: collection.name });
                   }}
                 >
                   <Trash2 className="h-3 w-3" />
@@ -212,7 +225,7 @@ export function RestCollectionsTree(props: RestCollectionsTreeProps) {
                           onPointerDown={(e) => e.stopPropagation()}
                           onClick={(e) => {
                             e.stopPropagation();
-                            props.onDeleteRequest(r.id);
+                            setPendingDelete({ kind: "request", id: r.id, name: r.name });
                           }}
                         >
                           <Trash2 className="h-3 w-3" />
@@ -227,5 +240,18 @@ export function RestCollectionsTree(props: RestCollectionsTreeProps) {
         );
       })}
     </div>
+    <VaultConfirmModal
+      open={!!pendingDelete}
+      title={pendingDelete?.kind === "collection" ? "Delete collection" : "Delete request"}
+      message={
+        pendingDelete
+          ? `Delete "${pendingDelete.name}"?${pendingDelete.kind === "collection" ? " Its requests will be removed too." : ""}\nThis can't be undone.`
+          : ""
+      }
+      confirmLabel="Delete"
+      onCancel={() => setPendingDelete(null)}
+      onConfirm={confirmDelete}
+    />
+    </>
   );
 }
