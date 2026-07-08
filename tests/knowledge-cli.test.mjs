@@ -57,6 +57,47 @@ test("init indexes a repo, then status + search + callers work", async () => {
   assert.ok(callers.nodes.some((n) => n.title === "outer"), "outer calls inner");
 });
 
+test("suggestion flow via CLI: link/suggestions/accept + doctor + snapshots", async () => {
+  const { dir, deps, lines } = harness();
+  // seed two nodes + a suggested edge directly, then drive accept via CLI
+  const store = deps.openStore();
+  const a = store.upsertNode({ nodeType: "note", identityKey: "a.md", title: "A" });
+  const b = store.upsertNode({ nodeType: "note", identityKey: "b.md", title: "B" });
+  const ev = store.suggestEdge({ src: a, dst: b, edgeType: "wikilink" });
+  store.createSnapshot({ name: "snap1", nodeIds: [a, b] });
+  store.close();
+
+  lines.length = 0;
+  assert.equal(await runCli(["suggestions", "--json"], deps), 0);
+  const q = JSON.parse(lines[0]);
+  assert.equal(q.length, 1);
+  assert.equal(q[0].suggestionEventId, ev.id);
+
+  assert.equal(await runCli(["accept", ev.id], deps), 0);
+  lines.length = 0;
+  assert.equal(await runCli(["suggestions", "--json"], deps), 0);
+  assert.equal(JSON.parse(lines[0]).length, 0, "accepted → queue empty");
+
+  lines.length = 0;
+  assert.equal(await runCli(["snapshots", "--json"], deps), 0);
+  assert.equal(JSON.parse(lines[0])[0].name, "snap1");
+
+  lines.length = 0;
+  assert.equal(await runCli(["doctor", "--json"], deps), 0);
+  const doc = JSON.parse(lines[0]);
+  assert.equal(doc.status, "ok");
+  assert.ok(doc.nodes >= 2);
+
+  // accept/reject without id → usage error (exit 2)
+  assert.equal(await runCli(["accept"], deps), 2);
+});
+
+test("install prints guidance when no installSelf provided", async () => {
+  const { deps, lines } = harness();
+  assert.equal(await runCli(["install"], deps), 0);
+  assert.match(lines.join("\n"), /ln -sf|symlink/i);
+});
+
 test("help + unknown command exit codes", async () => {
   const { deps, lines, errs } = harness();
   assert.equal(await runCli(["help"], deps), 0);

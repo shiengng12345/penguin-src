@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { KnowledgeStore } from "@penguin/knowledge-core";
 import { runCli } from "./index.js";
 
@@ -19,6 +20,15 @@ runCli(process.argv.slice(2), {
   openStore: () => {
     mkdirSync(dirname(DB_PATH), { recursive: true });
     return KnowledgeStore.open({ dbPath: DB_PATH, ledgerPath: LEDGER_PATH });
+  },
+  installSelf: () => {
+    const self = fileURLToPath(import.meta.url);
+    const binDir = join(homedir(), ".local", "bin");
+    mkdirSync(binDir, { recursive: true });
+    const link = join(binDir, "penguin");
+    rmSync(link, { force: true });
+    symlinkSync(self, link);
+    return link;
   },
 })
   .then((code) => process.exit(code))

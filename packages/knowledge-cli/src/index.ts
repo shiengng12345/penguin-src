@@ -3,6 +3,7 @@ import {
   exploreGraph,
   getNodeDetail,
   indexStatus,
+  listSuggestions,
   search,
   type GraphMode,
   type KnowledgeStore,
@@ -20,11 +21,14 @@ export interface CliDeps {
   // read verbs can refuse when none exists without creating a half-baked DB.
   openStore: () => KnowledgeStore;
   storeExists: () => boolean;
+  // Optional install helper: (targetBinName) → creates the PATH symlink,
+  // returns the linked path. Omitted in tests (install then prints guidance).
+  installSelf?: () => string;
 }
 
 const READ_VERBS = new Set([
   "search", "node", "callers", "calls", "impact", "backlinks",
-  "path", "recent", "compare", "status",
+  "path", "recent", "compare", "status", "suggestions", "snapshots", "doctor",
 ]);
 const GRAPH_VERB_MODE: Record<string, GraphMode> = {
   callers: "who_calls", calls: "calls_of", impact: "impact",
@@ -62,6 +66,13 @@ const HELP = `penguin — Penguin Knowledge CLI
   penguin path <a> <b>          shortest path a→b
   penguin recent                recent changes
   penguin compare <sym> <a> <b> cross-branch diff
+  penguin suggestions           pending AI edge suggestions
+  penguin accept <event-id>     accept a suggestion
+  penguin reject <event-id>     reject a suggestion
+  penguin link <src> <dst> [t]  manually link two nodes (Ledger)
+  penguin snapshots             list snapshot manifests
+  penguin doctor                DB / ledger health check
+  penguin install               symlink penguin onto PATH
   penguin help                  this help
 
 Global: --json (machine-readable), --branch <b>`;
@@ -115,6 +126,54 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     }
   }
 
+  // install: symlink penguin onto PATH (system verb)
+  if (verb === "install") {
+    if (deps.installSelf) {
+      try {
+        emit(deps, json, `linked → ${deps.installSelf()}`, { ok: true, path: deps.installSelf() });
+        return 0;
+      } catch (e) {
+        deps.err(`install failed: ${(e as Error).message}`);
+        return 1;
+      }
+    }
+    deps.out("To install: symlink the built CLI onto your PATH, e.g.\n  ln -sf <…>/packages/knowledge-cli/dist/bin.js ~/.local/bin/penguin");
+    return 0;
+  }
+
+  // ledger write verbs (may create the DB, §9)
+  if (verb === "accept" || verb === "reject" || verb === "link" || verb === "snapshot") {
+    const store = deps.openStore();
+    try {
+      if (verb === "link") {
+        const [src, dst, edgeType] = pos;
+        if (!src || !dst) { deps.err("usage: penguin link <src> <dst> [edgeType]"); return 2; }
+        const ev = store.recordKnowledge({
+          type: "manual_edge_created", origin: "user", method: "ASSERTED",
+          actor: { type: "user", id: "cli" }, target: { node_id: src },
+          payload: { src, dst, edge_type: edgeType ?? "wikilink" },
+        });
+        emit(deps, json, `linked ${src} → ${dst}`, { ok: true, eventId: ev.id });
+        return 0;
+      }
+      if (verb === "snapshot") {
+        const [name, ...nodeIds] = pos;
+        if (!name) { deps.err("usage: penguin snapshot <name> <nodeId...>"); return 2; }
+        const ev = store.createSnapshot({ name, nodeIds });
+        emit(deps, json, `snapshot '${name}' (${nodeIds.length} nodes)`, { ok: true, eventId: ev.id });
+        return 0;
+      }
+      const id = pos[0];
+      if (!id) { deps.err(`usage: penguin ${verb} <suggestion-event-id>`); return 2; }
+      if (verb === "accept") store.acceptSuggestion(id);
+      else store.rejectSuggestion(id);
+      emit(deps, json, `${verb}ed ${id}`, { ok: true });
+      return 0;
+    } finally {
+      store.close();
+    }
+  }
+
   // read verbs: never create a DB (§9)
   if (READ_VERBS.has(verb)) {
     if (!deps.storeExists()) {
@@ -151,6 +210,33 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
         case "path": {
           const res = exploreGraph(store, "path", pos[0] ?? "", { to: pos[1] });
           emit(deps, json, res.nodes.map((n) => n.title).join(" → ") || "(no path)", res);
+          return 0;
+        }
+        case "suggestions": {
+          const q = listSuggestions(store);
+          emit(deps, json,
+            q.map((s) => `${s.suggestionEventId}\t${s.src} → ${s.dst ?? "?"}  (${s.edgeType}, conf ${s.confidence})`).join("\n") || "(no pending suggestions)",
+            q);
+          return 0;
+        }
+        case "snapshots": {
+          const snaps = store.listSnapshots();
+          emit(deps, json,
+            snaps.map((s) => `${s.ts}\t${s.name}\t${s.nodeIds.length} nodes`).join("\n") || "(no snapshots)",
+            snaps);
+          return 0;
+        }
+        case "doctor": {
+          const check = store.consistencyCheck();
+          const nodes = (store.db.prepare("SELECT COUNT(*) AS n FROM nodes").get() as { n: number }).n;
+          const edges = (store.db.prepare("SELECT COUNT(*) AS n FROM edges").get() as { n: number }).n;
+          const pending = listSuggestions(store).length;
+          const report = { ...check, nodes, edges, pendingSuggestions: pending, verify: flags.includes("--verify") };
+          emit(deps, json,
+            `ledger seq ${check.ledgerSeq} / materialized ${check.materializedSeq} — ${check.status}` +
+              (check.ledgerTruncatedAtLine ? ` (ledger truncated @line ${check.ledgerTruncatedAtLine})` : "") +
+              `\nnodes ${nodes}, edges ${edges}, pending suggestions ${pending}`,
+            report);
           return 0;
         }
         default: {
