@@ -675,6 +675,11 @@ export const useAppStore = create<AppState>((set, get) => {
     setInstallerOpen: (open) => set({ isInstallerOpen: open, installerPrefill: open ? get().installerPrefill : "" }),
     installerPrefill: "",
     setInstallerPrefill: (value) => set({ installerPrefill: value }),
+    installerAutoRefresh: getPersistedValue(APP_VALUE_KEYS.installerAutoRefresh) === "true",
+    setInstallerAutoRefresh: (value) => {
+      setPersistedValue(APP_VALUE_KEYS.installerAutoRefresh, value ? "true" : "false");
+      set({ installerAutoRefresh: value });
+    },
     installLog: [],
     addInstallLog: (line) =>
       set((s) => ({ installLog: [...s.installLog, line] })),

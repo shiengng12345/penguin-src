@@ -376,6 +376,10 @@ export interface AppState {
   setInstallerOpen: (open: boolean) => void;
   installerPrefill: string;
   setInstallerPrefill: (value: string) => void;
+  // Registry auto-refresh preference (admin/super-admin only). Shared between
+  // the installer toggle and the app-level background poller.
+  installerAutoRefresh: boolean;
+  setInstallerAutoRefresh: (value: boolean) => void;
   installLog: string[];
   addInstallLog: (line: string) => void;
   clearInstallLog: () => void;

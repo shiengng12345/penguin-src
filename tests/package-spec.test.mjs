@@ -185,10 +185,12 @@ test("PackageInstaller auto-refresh is silent and paused while installing", asyn
     new URL("../src/components/packages/PackageInstaller.tsx", import.meta.url),
     "utf8",
   );
-  // 30s 后台静默重拉；不打扰筛选/勾选；安装中暂停；仅 admin 可自动
-  assert.match(source, /if \(!autoRefresh \|\| !canAutoRefresh \|\| isInstalling\) return;/);
+  // 30s 后台静默重拉；不打扰筛选/勾选；安装中暂停；走共享严格门控
+  assert.match(source, /canBackgroundRefreshRegistry\(\{ enabled: autoRefresh, devModeEnabled, hasValidToken \}\)/);
+  assert.match(source, /!isInstalling;/);
+  assert.match(source, /if \(!active\) return;/);
   assert.match(source, /\{ useCache: false, force: true, silent: true \}/);
-  assert.match(source, /30_000/);
+  assert.match(source, /REGISTRY_AUTO_REFRESH_INTERVAL_MS/);
 });
 
 test("PackageInstaller auto-refresh is gated to admin tokens; normal users one-shot", async () => {
@@ -198,7 +200,8 @@ test("PackageInstaller auto-refresh is gated to admin tokens; normal users one-s
   );
   // admin/super-admin = 有效 dev token；普通用户点击 = 单次强制刷新
   assert.match(source, /const canAutoRefresh = devModeEnabled && hasValidToken;/);
-  assert.match(source, /if \(canAutoRefresh\) setAutoRefresh\(\(v\) => !v\);/);
+  // 开关持久化到 store（跨关闭/重开记住，供 app 级后台 poller 共享）
+  assert.match(source, /if \(canAutoRefresh\) setInstallerAutoRefresh\(!autoRefresh\);/);
   assert.match(source, /else void loadRegistryList\(\{ useCache: false, force: true \}\);/);
   // 绿灯常转（admin 开启时）；普通用户仅加载中转
   assert.match(source, /canAutoRefresh && autoRefresh\) \|\| \(!canAutoRefresh && listLoading\)/);

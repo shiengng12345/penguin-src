@@ -25,6 +25,10 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
 import { useAppStore, type InstalledPackage } from "@/lib/store";
+import {
+  canBackgroundRefreshRegistry,
+  REGISTRY_AUTO_REFRESH_INTERVAL_MS,
+} from "@/lib/registry-auto-refresh";
 import { useDeveloperMode } from "@/hooks/useDeveloperMode";
 import {
   completePackageSpec,
@@ -229,7 +233,10 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
   // 后台刷新只替换底层列表，不触碰搜索/勾选/loading UI，不打断用户操作。
   // 权限：仅 admin / super-admin（有效 dev token）可用自动刷新；普通用户该按钮
   // 退化为「点一下刷新一次」。
-  const [autoRefresh, setAutoRefresh] = useState(false);
+  // 持久化到 store：绿灯开关跨「关闭→重开」记住，且 app 级 poller 在关闭期间
+  // 后台续刷（严格门控见 canBackgroundRefreshRegistry）。
+  const autoRefresh = useAppStore((s) => s.installerAutoRefresh);
+  const setInstallerAutoRefresh = useAppStore((s) => s.setInstallerAutoRefresh);
   const { enabled: devModeEnabled, hasValidToken } = useDeveloperMode();
   const canAutoRefresh = devModeEnabled && hasValidToken;
 
@@ -270,13 +277,18 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
   // 自动刷新开启：立刻静默重拉一次，之后每 30s 后台重拉最新（安装中暂停，
   // 避免与安装流程抢刷新）。关闭或卸载即停。
   useEffect(() => {
-    if (!autoRefresh || !canAutoRefresh || isInstalling) return;
+    // While the installer is open, it owns refresh (and pauses during install);
+    // the app-level poller stands down. Same strict gate as the background one.
+    const active =
+      canBackgroundRefreshRegistry({ enabled: autoRefresh, devModeEnabled, hasValidToken }) &&
+      !isInstalling;
+    if (!active) return;
     void loadRegistryList({ useCache: false, force: true, silent: true });
     const id = setInterval(() => {
       void loadRegistryList({ useCache: false, force: true, silent: true });
-    }, 30_000);
+    }, REGISTRY_AUTO_REFRESH_INTERVAL_MS);
     return () => clearInterval(id);
-  }, [autoRefresh, canAutoRefresh, isInstalling]);
+  }, [autoRefresh, devModeEnabled, hasValidToken, isInstalling]);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;
@@ -763,7 +775,7 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
               }
               aria-pressed={canAutoRefresh ? autoRefresh : undefined}
               onClick={() => {
-                if (canAutoRefresh) setAutoRefresh((v) => !v);
+                if (canAutoRefresh) setInstallerAutoRefresh(!autoRefresh);
                 else void loadRegistryList({ useCache: false, force: true });
               }}
               disabled={isInstalling || (!canAutoRefresh && listLoading)}
