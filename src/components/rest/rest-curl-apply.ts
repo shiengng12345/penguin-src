@@ -9,6 +9,7 @@
 // request history regardless of which entry point the user takes.
 
 import { parseCurl, type ParsedCurl } from "@/lib/curl-parser";
+import { jsonToFields } from "@/lib/rest-body-fields";
 import { saveSecret } from "./rest-keychain";
 import type {
   RestAuth,
@@ -42,12 +43,18 @@ export function inferBody(parsed: ParsedCurl): RestBody | undefined {
   const contentType = (
     findHeader(parsed.headers, "Content-Type") ?? ""
   ).toLowerCase();
+  // A JSON-object body → land straight in the editable key-value form (it stays
+  // in sync with the JSON tab). Non-object JSON (array/primitive) → JSON tab.
+  const fields = jsonToFields(parsed.body);
+  if (fields.length > 0) {
+    return { mode: "key-value", fields };
+  }
   if (contentType.includes("application/json")) {
     return { mode: "json", content: parsed.body };
   }
-  // WHY: form-urlencoded imports stay raw — the simplified editor renders
-  // json/raw only, so a fields-based body would be invisible in the UI.
-  // Raw + the preserved Content-Type header sends byte-identical form data.
+  // WHY: form-urlencoded imports stay raw — a fields-based form body would be
+  // invisible here. Raw + the preserved Content-Type header sends byte-identical
+  // form data.
   return { mode: "raw", content: parsed.body };
 }
 
