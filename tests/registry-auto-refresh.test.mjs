@@ -16,7 +16,13 @@ async function loadModule() {
     await unlinkP(tmpUrl);
   }
 }
-const { canBackgroundRefreshRegistry, REGISTRY_AUTO_REFRESH_INTERVAL_MS } = await loadModule();
+const {
+  canBackgroundRefreshRegistry,
+  nextRegistryPollDelay,
+  REGISTRY_AUTO_REFRESH_OPEN_MS,
+  REGISTRY_AUTO_REFRESH_BACKGROUND_MS,
+  REGISTRY_AUTO_REFRESH_MAX_BACKOFF_MS,
+} = await loadModule();
 
 test("allows refresh only when enabled AND devMode AND valid token", () => {
   assert.equal(
@@ -41,6 +47,20 @@ test("a persisted enabled flag alone is not sufficient (non-admin)", () => {
   );
 });
 
-test("interval is 5s", () => {
-  assert.equal(REGISTRY_AUTO_REFRESH_INTERVAL_MS, 5_000);
+test("cadence: 5s while open, 30s in background", () => {
+  assert.equal(REGISTRY_AUTO_REFRESH_OPEN_MS, 5_000);
+  assert.equal(REGISTRY_AUTO_REFRESH_BACKGROUND_MS, 30_000);
+});
+
+test("backoff: base when healthy, doubles per failure, capped", () => {
+  // healthy → base cadence
+  assert.equal(nextRegistryPollDelay(5_000, 0), 5_000);
+  // consecutive failures double
+  assert.equal(nextRegistryPollDelay(5_000, 1), 10_000);
+  assert.equal(nextRegistryPollDelay(5_000, 2), 20_000);
+  assert.equal(nextRegistryPollDelay(5_000, 3), 40_000);
+  // capped at the max
+  assert.equal(nextRegistryPollDelay(5_000, 10), REGISTRY_AUTO_REFRESH_MAX_BACKOFF_MS);
+  // background base backs off too
+  assert.equal(nextRegistryPollDelay(30_000, 1), REGISTRY_AUTO_REFRESH_MAX_BACKOFF_MS);
 });

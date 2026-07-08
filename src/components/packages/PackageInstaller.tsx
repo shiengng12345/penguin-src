@@ -27,8 +27,9 @@ import { cn } from "@/lib/utils";
 import { useAppStore, type InstalledPackage } from "@/lib/store";
 import {
   canBackgroundRefreshRegistry,
-  REGISTRY_AUTO_REFRESH_INTERVAL_MS,
+  REGISTRY_AUTO_REFRESH_OPEN_MS,
 } from "@/lib/registry-auto-refresh";
+import { useRegistryPoll } from "@/hooks/useRegistryPoll";
 import { useDeveloperMode } from "@/hooks/useDeveloperMode";
 import {
   completePackageSpec,
@@ -275,21 +276,13 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
     clearInstallLog();
   }, []);
 
-  // 自动刷新开启：立刻静默重拉一次，之后每 5s 后台重拉最新（安装中暂停，
-  // 避免与安装流程抢刷新）。关闭或卸载即停。
-  useEffect(() => {
-    // While the installer is open, it owns refresh (and pauses during install);
-    // the app-level poller stands down. Same strict gate as the background one.
-    const active =
-      canBackgroundRefreshRegistry({ enabled: autoRefresh, devModeEnabled, hasValidToken }) &&
-      !isInstalling;
-    if (!active) return;
-    void loadRegistryList({ useCache: false, force: true, silent: true });
-    const id = setInterval(() => {
-      void loadRegistryList({ useCache: false, force: true, silent: true });
-    }, REGISTRY_AUTO_REFRESH_INTERVAL_MS);
-    return () => clearInterval(id);
-  }, [autoRefresh, devModeEnabled, hasValidToken, isInstalling]);
+  // 自动刷新（绿灯开）：弹窗开着 5s 一刷，走共享自调度轮询——在途去重（await 上一次
+  // 再排下一次）+ 失败退避；安装中暂停；同一严格门控（admin/super-admin）。开着时列表
+  // 由 registry-search 事件更新；关着时改由 app 级 poller 按 30s 暖缓存。
+  const installerPollActive =
+    canBackgroundRefreshRegistry({ enabled: autoRefresh, devModeEnabled, hasValidToken }) &&
+    !isInstalling;
+  useRegistryPoll(installerPollActive, REGISTRY_AUTO_REFRESH_OPEN_MS);
 
   useEffect(() => {
     let unlisten: (() => void) | undefined;

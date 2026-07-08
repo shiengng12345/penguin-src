@@ -180,17 +180,15 @@ test("registry-search bridges streamed enriched events into memory cache", async
   assert.match(source, /mergeRegistryPackages/);
 });
 
-test("PackageInstaller auto-refresh is silent and paused while installing", async () => {
+test("PackageInstaller auto-refresh delegates to shared poller, 5s, paused while installing", async () => {
   const source = await readFile(
     new URL("../src/components/packages/PackageInstaller.tsx", import.meta.url),
     "utf8",
   );
-  // 30s 后台静默重拉；不打扰筛选/勾选；安装中暂停；走共享严格门控
+  // 严格门控 + 安装中暂停，委托给共享自调度轮询（在途去重 + 退避），开着用 5s
   assert.match(source, /canBackgroundRefreshRegistry\(\{ enabled: autoRefresh, devModeEnabled, hasValidToken \}\)/);
   assert.match(source, /!isInstalling;/);
-  assert.match(source, /if \(!active\) return;/);
-  assert.match(source, /\{ useCache: false, force: true, silent: true \}/);
-  assert.match(source, /REGISTRY_AUTO_REFRESH_INTERVAL_MS/);
+  assert.match(source, /useRegistryPoll\(installerPollActive, REGISTRY_AUTO_REFRESH_OPEN_MS\)/);
 });
 
 test("PackageInstaller auto-refresh is gated to admin tokens; normal users one-shot", async () => {
