@@ -16,7 +16,7 @@ async function load() {
     await unlinkP(tmp);
   }
 }
-const { elideLargeStrings, MAX_DISPLAY_STRING_LEN } = await load();
+const { elideLargeStrings, MAX_DISPLAY_STRING_LEN, capRawBody, MAX_RAW_BODY_LEN } = await load();
 
 test("short strings and non-strings pass through untouched", () => {
   assert.equal(elideLargeStrings("hello"), "hello");
@@ -58,4 +58,13 @@ test("exactly at the threshold is kept; one over is elided", () => {
   const over = "y".repeat(MAX_DISPLAY_STRING_LEN + 1);
   assert.equal(elideLargeStrings(atLimit), atLimit);
   assert.match(elideLargeStrings(over), /elided/);
+});
+
+test("capRawBody leaves small bodies alone and truncates huge non-JSON blobs", () => {
+  assert.equal(capRawBody("small raw body"), "small raw body");
+  const huge = "z".repeat(MAX_RAW_BODY_LEN + 5000);
+  const out = capRawBody(huge);
+  assert.ok(out.length < huge.length, "truncated");
+  assert.match(out, /truncated — showing first \d+ KB of \d+ KB/);
+  assert.ok(out.startsWith("z".repeat(100)), "keeps the head");
 });

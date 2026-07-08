@@ -8,7 +8,7 @@ import { formatGrpcStatusBadgeLabel, summarizeGrpcStatusResponse } from "@/lib/g
 import { cn } from "@/lib/utils";
 import { writeClipboard } from "@/lib/clipboard";
 import { computeResponseMatches, type ResponseLineMatch } from "@/lib/response-search";
-import { elideLargeStrings } from "@/lib/response-body-format";
+import { elideLargeStrings, capRawBody } from "@/lib/response-body-format";
 
 function stripUnderscoreKeys(obj: unknown): unknown {
   if (obj === null || obj === undefined) return obj;
@@ -59,7 +59,9 @@ function formatBody(body: string | undefined, stripInternalKeys = true): string 
     // freeze on a single giant line. REST's "raw" view keeps the full body.
     return JSON.stringify(elideLargeStrings(cleaned), null, 2);
   } catch {
-    return body;
+    // Non-JSON body (raw text/binary): cap it so a huge blob can't garble the
+    // syntax tokenizer / freeze on one giant line.
+    return capRawBody(body);
   }
 }
 

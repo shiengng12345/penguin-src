@@ -35,3 +35,15 @@ export function elideLargeStrings(value: unknown, maxLen: number = MAX_DISPLAY_S
   }
   return value;
 }
+
+// Non-JSON (unparseable) bodies bypass elideLargeStrings, so a raw binary/text
+// blob would still be handed whole to the tokenizer + one giant DOM line. Cap
+// the raw string with a trailing notice so the panel stays responsive.
+export const MAX_RAW_BODY_LEN = 256 * 1024; // 256 KB of raw text is plenty to inspect
+
+export function capRawBody(body: string, maxLen: number = MAX_RAW_BODY_LEN): string {
+  if (body.length <= maxLen) return body;
+  const shown = (maxLen / 1024).toFixed(0);
+  const total = (body.length / 1024).toFixed(0);
+  return `${body.slice(0, maxLen)}\n\n… [truncated — showing first ${shown} KB of ${total} KB]`;
+}
