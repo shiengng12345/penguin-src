@@ -53,6 +53,19 @@ export function fieldsToJson(fields: RestBodyField[]): string {
   return JSON.stringify(obj, null, 2);
 }
 
+// Move a row from one index to another (drag-reorder). Returns a new array;
+// out-of-range / equal indices return the input unchanged. The JSON body key
+// order follows this array order (fieldsToJson emits keys in order).
+export function moveField(fields: RestBodyField[], from: number, to: number): RestBodyField[] {
+  if (from === to || from < 0 || from >= fields.length || to < 0 || to >= fields.length) {
+    return fields;
+  }
+  const next = [...fields];
+  const [moved] = next.splice(from, 1);
+  next.splice(to, 0, moved);
+  return next;
+}
+
 // Infer a row's type + string value from a parsed JSON value (the reverse of
 // coerceFieldValue). object/array become a JSON snippet in `value`.
 function inferField(value: unknown): { type: RestBodyValueType; value: string } {

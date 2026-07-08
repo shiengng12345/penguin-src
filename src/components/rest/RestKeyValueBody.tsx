@@ -1,15 +1,20 @@
-import { useState } from "react";
+import { useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { Plus, X, GripVertical } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
-import { newBodyField } from "@/lib/rest-body-fields";
+import { newBodyField, moveField } from "@/lib/rest-body-fields";
 import type { RestBodyField, RestBodyValueType } from "./rest-types";
 
 // Typed key→value body editor: one row per JSON field (`variableName | type |
 // value`). The type dropdown covers everything JSON can hold; object/array take
 // a JSON snippet in the value. Rows serialize to a JSON body on send
-// (see fieldsToJson). Mirrors the Headers table's row layout.
+// (see fieldsToJson). Rows drag-to-reorder — which reorders the JSON keys too.
+//
+// Reordering uses POINTER events, not HTML5 drag-and-drop: WKWebView (Tauri's
+// macOS webview) needs dataTransfer.setData to even start a native drag and its
+// OS file-drop handler can swallow the events — pointer tracking sidesteps all
+// of that and works everywhere.
 const TYPE_OPTIONS: { value: RestBodyValueType; label: string }[] = [
   { value: "string", label: "string" },
   { value: "number", label: "number" },
@@ -37,53 +42,66 @@ export function RestKeyValueBody({
   fields: RestBodyField[];
   onChange: (fields: RestBodyField[]) => void;
 }) {
-  const [dragIndex, setDragIndex] = useState<number | null>(null);
-  const [overIndex, setOverIndex] = useState<number | null>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const fromRef = useRef<number | null>(null);
+  const [dragFrom, setDragFrom] = useState<number | null>(null);
+  const [dragOver, setDragOver] = useState<number | null>(null);
 
   const update = (i: number, patch: Partial<RestBodyField>) =>
     onChange(fields.map((f, j) => (j === i ? { ...f, ...patch } : f)));
   const remove = (i: number) => onChange(fields.filter((_, j) => j !== i));
   const add = () => onChange([...fields, newBodyField()]);
-  // Reorder rows — the JSON body follows this order (fieldsToJson emits keys in
-  // array order), so dragging here also reorders the JSON tab's keys.
-  const move = (from: number, to: number) => {
-    if (from === to) return;
-    const next = [...fields];
-    const [moved] = next.splice(from, 1);
-    next.splice(to, 0, moved);
-    onChange(next);
+  const move = (from: number, to: number) => onChange(moveField(fields, from, to));
+
+  // The row index whose vertical half the pointer sits in — the drop target.
+  const targetIndexAt = (clientY: number): number => {
+    const rows = containerRef.current?.querySelectorAll<HTMLElement>("[data-kv-row]");
+    if (!rows || rows.length === 0) return 0;
+    for (let i = 0; i < rows.length; i++) {
+      const r = rows[i].getBoundingClientRect();
+      if (clientY < r.top + r.height / 2) return i;
+    }
+    return rows.length - 1;
+  };
+
+  const startDrag = (i: number) => (e: ReactPointerEvent) => {
+    e.preventDefault(); // suppress text selection while dragging
+    fromRef.current = i;
+    setDragFrom(i);
+    setDragOver(i);
+    const onMove = (ev: PointerEvent) => setDragOver(targetIndexAt(ev.clientY));
+    const onUp = (ev: PointerEvent) => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      const from = fromRef.current;
+      const to = targetIndexAt(ev.clientY);
+      fromRef.current = null;
+      setDragFrom(null);
+      setDragOver(null);
+      if (from !== null) move(from, to);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
   };
 
   return (
     <div className="flex flex-col">
       {fields.length > 0 && (
-        <div className="divide-y divide-border">
+        <div ref={containerRef} className="divide-y divide-border">
           {fields.map((f, i) => (
             <div
               key={f.id}
-              onDragOver={(e) => {
-                if (dragIndex === null) return;
-                e.preventDefault();
-                if (overIndex !== i) setOverIndex(i);
-              }}
-              onDrop={(e) => {
-                e.preventDefault();
-                if (dragIndex !== null) move(dragIndex, i);
-                setDragIndex(null);
-                setOverIndex(null);
-              }}
+              data-kv-row
               className={cn(
                 "group flex items-center gap-1.5 px-3 py-1",
-                dragIndex === i && "opacity-50",
-                overIndex === i && dragIndex !== i && "border-t-2 border-primary",
+                dragFrom === i && "opacity-40",
+                dragOver === i && dragFrom !== i && "border-t-2 border-primary",
               )}
             >
               <span
-                draggable
-                onDragStart={() => setDragIndex(i)}
-                onDragEnd={() => { setDragIndex(null); setOverIndex(null); }}
+                onPointerDown={startDrag(i)}
                 title="拖动排序"
-                className="shrink-0 cursor-grab text-muted-foreground/40 hover:text-muted-foreground active:cursor-grabbing"
+                className="shrink-0 touch-none cursor-grab text-muted-foreground/40 hover:text-muted-foreground active:cursor-grabbing"
               >
                 <GripVertical className="h-3.5 w-3.5" />
               </span>

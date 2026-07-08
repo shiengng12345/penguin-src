@@ -18,7 +18,7 @@ async function load() {
     await unlinkP(tmp);
   }
 }
-const { fieldsToJson, coerceFieldValue, newBodyField, jsonToFields } = await load();
+const { fieldsToJson, coerceFieldValue, newBodyField, jsonToFields, moveField } = await load();
 
 const row = (key, type, value, enabled = true) => ({ id: key, key, type, value, enabled });
 
@@ -87,6 +87,19 @@ test("jsonToFields returns [] for non-object / invalid JSON (caller adds a blank
   assert.deepEqual(jsonToFields("[1,2,3]"), []);
   assert.deepEqual(jsonToFields("not json"), []);
   assert.deepEqual(jsonToFields('"a string"'), []);
+});
+
+test("moveField reorders rows (drag), and the JSON key order follows", () => {
+  const f = [row("a", "string", "1"), row("b", "string", "2"), row("c", "string", "3")];
+  // move "a" (0) down to index 2 → [b, c, a]
+  const moved = moveField(f, 0, 2);
+  assert.deepEqual(moved.map((r) => r.key), ["b", "c", "a"]);
+  assert.deepEqual(Object.keys(JSON.parse(fieldsToJson(moved))), ["b", "c", "a"]);
+  // move "c" (2) up to 0 → [c, a, b]
+  assert.deepEqual(moveField(f, 2, 0).map((r) => r.key), ["c", "a", "b"]);
+  // no-op / out-of-range returns input unchanged
+  assert.equal(moveField(f, 1, 1), f);
+  assert.equal(moveField(f, 0, 9), f);
 });
 
 test("newBodyField makes a blank enabled string row with a unique id", () => {
