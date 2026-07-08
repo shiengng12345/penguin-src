@@ -12,7 +12,7 @@ import {
   type GraphMode,
   type KnowledgeStore,
 } from "@penguin/knowledge-core";
-import { indexRepo } from "@penguin/knowledge-indexer";
+import { indexRepo, createNote, appendNote, listNotes, reindexNotesDir } from "@penguin/knowledge-indexer";
 
 export interface CliDeps {
   cwd: string;
@@ -28,6 +28,9 @@ export interface CliDeps {
   // Optional install helper: (targetBinName) → creates the PATH symlink,
   // returns the linked path. Omitted in tests (install then prints guidance).
   installSelf?: () => string;
+  // Directory holding file-backed knowledge notes (*.md). bin.ts sets it to
+  // ~/.penguin/knowledge/notes; the `note` verb reads/writes here.
+  notesDir?: string;
 }
 
 const READ_VERBS = new Set([
@@ -100,6 +103,10 @@ const HELP = `penguin — Penguin Knowledge CLI
   penguin suggestions           pending AI edge suggestions
   penguin accept <event-id>     accept a suggestion
   penguin reject <event-id>     reject a suggestion
+  penguin note new <title>      create a Markdown knowledge note
+  penguin note append <id> <txt> append text to a note (re-indexes)
+  penguin note list             list note files
+  penguin note reindex          re-scan the notes dir into the index
   penguin link <src> <dst> [t]  manually link two nodes (Ledger)
   penguin snapshots             list snapshot manifests
   penguin doctor                DB / ledger health check
@@ -170,6 +177,50 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     }
     deps.out("To install: symlink the built CLI onto your PATH, e.g.\n  ln -sf <…>/packages/knowledge-cli/dist/bin.js ~/.local/bin/penguin");
     return 0;
+  }
+
+  // file-backed knowledge notes (C9): new/append/list/reindex under notesDir.
+  if (verb === "note") {
+    const sub = pos[0];
+    const notesDir = deps.notesDir;
+    if (!notesDir) { deps.err("notes dir not configured"); return 1; }
+    const store = deps.openStore();
+    try {
+      if (sub === "new") {
+        const title = pos.slice(1).join(" ").trim();
+        if (!title) { deps.err("usage: penguin note new <title>"); return 2; }
+        const r = createNote({ store, notesDir, title });
+        emit(deps, json, `created ${r.path}  (id ${r.slug})`, { ok: true, slug: r.slug, path: r.path, nodeId: r.nodeId });
+        return 0;
+      }
+      if (sub === "append") {
+        const slug = pos[1];
+        const text = pos.slice(2).join(" ");
+        if (!slug || !text) { deps.err("usage: penguin note append <slug> <text>"); return 2; }
+        try {
+          const r = appendNote({ store, notesDir, slug, text });
+          emit(deps, json, `appended → ${r.path}`, { ok: true, path: r.path, nodeId: r.nodeId });
+          return 0;
+        } catch (e) {
+          deps.err((e as Error).message);
+          return 1;
+        }
+      }
+      if (sub === "reindex") {
+        const r = reindexNotesDir({ store, notesDir });
+        emit(deps, json, `reindexed ${r.indexed} notes`, r);
+        return 0;
+      }
+      if (sub === "list" || sub === undefined) {
+        const notes = listNotes(notesDir);
+        emit(deps, json, notes.join("\n") || "(no notes)", notes);
+        return 0;
+      }
+      deps.err("usage: penguin note <new|append|list|reindex> …");
+      return 2;
+    } finally {
+      store.close();
+    }
   }
 
   // ledger write verbs (may create the DB, §9)

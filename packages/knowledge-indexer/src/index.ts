@@ -10,6 +10,7 @@ export {
 export { resolveRefs, type SymbolIndex, type ResolvedEdges } from "./resolve.js";
 export { detectRenames, type RenameAliasEvent } from "./rename.js";
 export { parseNote, indexNote, extractEntities, type ParsedNote } from "./notes.js";
+export { createNote, appendNote, listNotes, reindexNotesDir, noteSlug } from "./notes-fs.js";
 export { resolveNoteLinks } from "./fusion.js";
 export { readGitContext, type GitContext } from "./git.js";
 export { walkRepoFiles, type WalkedFile } from "./walk.js";

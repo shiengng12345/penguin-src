@@ -9,6 +9,7 @@ import { runCli } from "./index.js";
 // Default knowledge location (bundled/CLI + app share the same store).
 const DB_PATH = process.env.PENGUIN_KNOWLEDGE_DB ?? join(homedir(), ".penguin", "knowledge", "knowledge.db");
 const LEDGER_PATH = process.env.PENGUIN_KNOWLEDGE_LEDGER ?? join(homedir(), ".penguin", "knowledge", "ledger.jsonl");
+const NOTES_DIR = process.env.PENGUIN_KNOWLEDGE_NOTES ?? join(homedir(), ".penguin", "knowledge", "notes");
 
 runCli(process.argv.slice(2), {
   cwd: process.cwd(),
@@ -17,6 +18,7 @@ runCli(process.argv.slice(2), {
   // Live progress only when stderr is a TTY (don't spew bar frames into pipes/logs).
   progress: process.stderr.isTTY ? (chunk) => process.stderr.write(chunk) : undefined,
   storeExists: () => existsSync(DB_PATH),
+  notesDir: NOTES_DIR,
   openStore: () => {
     mkdirSync(dirname(DB_PATH), { recursive: true });
     return KnowledgeStore.open({ dbPath: DB_PATH, ledgerPath: LEDGER_PATH });
