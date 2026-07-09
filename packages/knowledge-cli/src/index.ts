@@ -21,7 +21,7 @@ import {
   type GraphMode,
   type KnowledgeStore,
 } from "@penguin/knowledge-core";
-import { indexRepo, createNote, createIncident, appendNote, writeNoteBody, readNote, listNotes, reindexNotesDir } from "@penguin/knowledge-indexer";
+import { indexRepo, writeAgentGuidance, createNote, createIncident, appendNote, writeNoteBody, readNote, listNotes, reindexNotesDir } from "@penguin/knowledge-indexer";
 
 export interface CliDeps {
   cwd: string;
@@ -176,9 +176,14 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
           : undefined,
       });
       if (progress) progress("\n");
+      // `init` drops (idempotent) usage guidance into the repo's CLAUDE.md /
+      // AGENTS.md so AI agents query Penguin first. Only on init — index/rebuild
+      // re-run often and shouldn't keep rewriting repo files.
+      const guidance = verb === "init" ? writeAgentGuidance(rootPath).written : [];
       emit(deps, json,
-        `${verb}: ${report.branchName} — ${report.parsed} parsed, ${report.skipped} skipped, ${report.deleted} deleted, ${report.renamed} renamed, ${report.errors} errors`,
-        report);
+        `${verb}: ${report.branchName} — ${report.parsed} parsed, ${report.skipped} skipped, ${report.deleted} deleted, ${report.renamed} renamed, ${report.errors} errors`
+          + (guidance.length ? `\nwrote agent guidance: ${guidance.map((p) => p.replace(/^.*\//, "")).join(", ")}` : ""),
+        { ...report, agentGuidance: guidance });
       return 0;
     } catch (e) {
       const msg = (e as Error).message;
