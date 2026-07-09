@@ -194,6 +194,18 @@ export function knowledgeNoteNew(title: string): Promise<{ ok: boolean; slug: st
   return query(["note", "new", title]);
 }
 
+// Typed note (decision/incident/compliance/bug/requirement/architecture) — the
+// why-layer lifecycle. `incident` uses the structured incident scaffold.
+export type KnowledgeNoteType =
+  | "decision" | "incident" | "compliance" | "bug" | "requirement" | "architecture";
+export function knowledgeNoteNewTyped(
+  title: string,
+  type: KnowledgeNoteType,
+): Promise<{ ok: boolean; slug: string; path: string; nodeId: string; type?: string }> {
+  if (type === "incident") return query(["incident", "new", title]);
+  return query(["note", "new", title, `--type=${type}`]);
+}
+
 export function knowledgeNoteWrite(slug: string, body: string): Promise<{ ok: boolean; path: string; nodeId: string }> {
   return query(["note", "write", slug, body]);
 }

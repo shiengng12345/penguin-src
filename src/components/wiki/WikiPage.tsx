@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { Database, FileText, Box, Loader2, X, Network, FileCode, Save, Pencil, ArrowLeft, Sparkles, Workflow, AlertTriangle } from "lucide-react";
+import { Database, FileText, Box, Loader2, X, Network, FileCode, Save, Pencil, ArrowLeft, Sparkles, Workflow, AlertTriangle, Plus } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { WikiBrowseTree } from "@/components/wiki/WikiBrowseTree";
 import { WikiGraph, type GraphLayout } from "@/components/wiki/WikiGraph";
@@ -16,6 +16,8 @@ import {
   knowledgeFlow,
   knowledgeNoteWrite,
   knowledgeNoteRead,
+  knowledgeNoteNewTyped,
+  type KnowledgeNoteType,
   type KnowledgeDbStatus,
   type KnowledgeFileSymbol,
   type KnowledgeGraphView,
@@ -72,6 +74,9 @@ export function WikiPage({ onClose }: WikiPageProps) {
 
   const [editing, setEditing] = useState<{ slug: string; body: string } | null>(null);
   const [savingNote, setSavingNote] = useState(false);
+  // Typed-note / incident creation (P2 why-layer): an inline form in the Why panel.
+  const [creating, setCreating] = useState<{ type: KnowledgeNoteType; title: string } | null>(null);
+  const [creatingBusy, setCreatingBusy] = useState(false);
 
   const [trail, setTrail] = useState<NavEntry[]>([]);
 
@@ -149,6 +154,19 @@ export function WikiPage({ onClose }: WikiPageProps) {
     if (!editing) return; setSavingNote(true);
     try { await knowledgeNoteWrite(editing.slug, editing.body); refreshStatus(); setEditing(null); } catch (e) { err(e); } finally { setSavingNote(false); }
   }, [editing, refreshStatus]);
+  // Create a typed note/incident, then open it in the editor. Prefix the title
+  // with the focus symbol so its wikilink fusion attaches the note to the code.
+  const submitCreate = useCallback(async () => {
+    if (!creating || !creating.title.trim()) return;
+    setCreatingBusy(true);
+    try {
+      const r = await knowledgeNoteNewTyped(creating.title.trim(), creating.type);
+      setCreating(null);
+      refreshStatus();
+      const rd = await knowledgeNoteRead(r.slug);
+      setEditing({ slug: r.slug, body: noteBodyOf(rd.source) });
+    } catch (e) { err(e); } finally { setCreatingBusy(false); }
+  }, [creating, refreshStatus]);
 
   const Dot = ({ t }: { t: string }) => <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: KIND_COLOR[t] ?? KIND_COLOR.symbol }} />;
 
@@ -366,10 +384,39 @@ export function WikiPage({ onClose }: WikiPageProps) {
                 </div>
               </div>
               <div className="p-4">
-                <div className="mb-2 text-[10px] font-bold uppercase tracking-wide text-slate-500">关联笔记 · why</div>
-                {pack!.notes.length === 0 ? (
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="text-[10px] font-bold uppercase tracking-wide text-slate-500">关联笔记 · why</span>
+                  <button type="button" onClick={() => setCreating(creating ? null : { type: "decision", title: f.title })}
+                    className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-cyan-300 hover:bg-cyan-500/10">
+                    <Plus className="h-3 w-3" />记录
+                  </button>
+                </div>
+                {creating && (
+                  <div className="mb-2 rounded-xl border border-slate-700 bg-slate-800/40 p-2">
+                    <div className="mb-1.5 flex flex-wrap gap-1">
+                      {(["decision", "incident", "bug", "compliance", "requirement", "architecture"] as KnowledgeNoteType[]).map((t) => (
+                        <button key={t} type="button" onClick={() => setCreating((c) => (c ? { ...c, type: t } : c))}
+                          className={cn("rounded px-1.5 py-0.5 text-[10px]", creating.type === t ? "bg-cyan-500/25 text-cyan-100" : "bg-slate-700/50 text-slate-300 hover:bg-slate-700")}>
+                          {t}
+                        </button>
+                      ))}
+                    </div>
+                    <input autoFocus value={creating.title} placeholder="标题…"
+                      onChange={(e) => setCreating((c) => (c ? { ...c, title: e.target.value } : c))}
+                      onKeyDown={(e) => { if (e.key === "Enter") void submitCreate(); if (e.key === "Escape") setCreating(null); }}
+                      className="w-full rounded bg-slate-900/60 px-2 py-1 text-xs text-slate-100 outline-none placeholder:text-slate-600" />
+                    <div className="mt-1.5 flex justify-end gap-1.5">
+                      <button type="button" onClick={() => setCreating(null)} className="rounded px-2 py-0.5 text-[11px] text-slate-400 hover:bg-white/5">取消</button>
+                      <button type="button" onClick={() => void submitCreate()} disabled={creatingBusy || !creating.title.trim()}
+                        className="rounded bg-cyan-500/20 px-2 py-0.5 text-[11px] text-cyan-200 hover:bg-cyan-500/30 disabled:opacity-50">
+                        {creatingBusy ? "创建中" : "创建并编辑"}
+                      </button>
+                    </div>
+                  </div>
+                )}
+                {pack!.notes.length === 0 && !creating ? (
                   <div className="rounded-xl border border-dashed border-slate-700 p-4 text-center text-xs text-slate-500">
-                    还没有关联笔记。<br /><span className="text-cyan-300">用 <code className="font-mono">penguin note new</code> 记录「为什么」</span>,链接代码自动生成。
+                    还没有关联笔记。点 <span className="text-cyan-300">记录</span> 写下「为什么」(决策/事故/合规…),链接代码自动生成。
                   </div>
                 ) : pack!.notes.map((n) => (
                   <button key={n.nodeId} type="button" onClick={() => editNote(n.title)} className="mb-1 flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs hover:bg-white/5">
