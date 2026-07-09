@@ -358,7 +358,12 @@ export async function indexRepo(input: {
 }): Promise<IndexReport> {
   const { store, rootPath, mode } = input;
   const git = readGitContext(rootPath);
-  const repoId = store.registerRepo({ name: basename(rootPath), rootPath: git.checkoutPath });
+  // Prefer the git remote's repo name (e.g. penguin-src); fall back to the local
+  // folder name for non-git checkouts or remote-less repos.
+  const repoId = store.registerRepo({
+    name: git.repoName ?? basename(rootPath),
+    rootPath: git.checkoutPath,
+  });
   const branchId = store.registerBranch({
     repoId, name: git.branch, headCommit: git.commit, checkoutPath: git.checkoutPath, status: "live",
   });

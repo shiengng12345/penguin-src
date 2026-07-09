@@ -50,6 +50,20 @@ test("readGitContext: branch, detached, and non-git degrade", () => {
   assert.equal(gc.commit, null);
 });
 
+test("readGitContext: repoName from origin remote, null without one", () => {
+  const a = tempRepo();
+  writeGit(a, "ref: refs/heads/main\n", { main: "c0" });
+  writeFileSync(
+    join(a, ".git", "config"),
+    '[core]\n\trepositoryformatversion = 0\n[remote "origin"]\n\turl = git@github.com:acme/penguin-src.git\n',
+  );
+  assert.equal(readGitContext(a).repoName, "penguin-src");
+
+  const b = tempRepo();
+  writeGit(b, "ref: refs/heads/main\n", { main: "c0" });
+  assert.equal(readGitContext(b).repoName, null); // no config/remote → fall back to folder name
+});
+
 test("walkRepoFiles skips ignored dirs and oversize files", () => {
   const root = tempRepo();
   mkdirSync(join(root, "src"), { recursive: true });

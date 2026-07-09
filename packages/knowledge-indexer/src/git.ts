@@ -6,6 +6,25 @@ export interface GitContext {
   branch: string; // real branch name, "(detached)", or "(workdir)" for non-git
   commit: string | null;
   checkoutPath: string; // the working directory being indexed
+  // Repo name derived from the `origin` remote URL (e.g. penguin-src), or null
+  // when there's no remote — callers fall back to the local folder name.
+  repoName: string | null;
+}
+
+// Pull the `origin` remote URL out of .git/config and reduce it to a repo name:
+//   git@github.com:org/penguin-src.git  → penguin-src
+//   https://host/org/repo.git           → repo
+function readRepoName(gitDir: string): string | null {
+  const cfg = join(commonDir(gitDir), "config");
+  if (!existsSync(cfg)) return null;
+  const text = readFileSync(cfg, "utf8");
+  // find the origin remote's url (fall back to the first remote url found)
+  const origin = text.match(/\[remote "origin"\][^[]*?url\s*=\s*(.+)/);
+  const any = text.match(/url\s*=\s*(.+)/);
+  const url = (origin?.[1] ?? any?.[1] ?? "").trim();
+  if (!url) return null;
+  const last = url.replace(/\.git$/, "").split(/[/:]/).filter(Boolean).pop();
+  return last || null;
 }
 
 // Resolve the git dir for a path: a `.git` directory, or a `.git` file
@@ -71,18 +90,19 @@ export function readGitContext(rootPath: string): GitContext {
   const checkoutPath = resolve(rootPath);
   const gitDir = findGitDir(rootPath);
   if (!gitDir || !existsSync(join(gitDir, "HEAD"))) {
-    return { isGit: false, branch: "(workdir)", commit: null, checkoutPath };
+    return { isGit: false, branch: "(workdir)", commit: null, checkoutPath, repoName: null };
   }
+  const repoName = readRepoName(gitDir);
   const head = readFileSync(join(gitDir, "HEAD"), "utf8").trim();
   const refMatch = head.match(/^ref:\s*(.+)$/);
   if (refMatch) {
     const ref = refMatch[1].trim(); // refs/heads/<branch>
     const branch = ref.replace(/^refs\/heads\//, "");
-    return { isGit: true, branch, commit: resolveRef(gitDir, ref), checkoutPath };
+    return { isGit: true, branch, commit: resolveRef(gitDir, ref), checkoutPath, repoName };
   }
   // detached HEAD: HEAD is a raw sha
   if (/^[0-9a-f]{7,40}$/i.test(head)) {
-    return { isGit: true, branch: "(detached)", commit: head, checkoutPath };
+    return { isGit: true, branch: "(detached)", commit: head, checkoutPath, repoName };
   }
-  return { isGit: true, branch: "(workdir)", commit: null, checkoutPath };
+  return { isGit: true, branch: "(workdir)", commit: null, checkoutPath, repoName };
 }
