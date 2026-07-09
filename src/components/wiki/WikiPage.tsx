@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { Database, FileText, Box, Loader2, X, Network, FileCode, Save, Pencil, ArrowLeft, Sparkles, Workflow, AlertTriangle, Plus } from "lucide-react";
+import { Database, FileText, Box, Loader2, X, Network, FileCode, Save, Pencil, ArrowLeft, Sparkles, Workflow, AlertTriangle, Plus, Clock, GitMerge } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { WikiBrowseTree } from "@/components/wiki/WikiBrowseTree";
 import { WikiGraph, type GraphLayout } from "@/components/wiki/WikiGraph";
@@ -14,6 +14,8 @@ import {
   knowledgeServiceGraph,
   knowledgeContext,
   knowledgeFlow,
+  knowledgeTimeline,
+  type KnowledgeTimelineEntry,
   knowledgeNoteWrite,
   knowledgeNoteRead,
   knowledgeNoteNewTyped,
@@ -27,7 +29,7 @@ import {
 
 interface WikiPageProps { onClose: () => void }
 
-type CenterTab = "context" | "graph" | "flow";
+type CenterTab = "context" | "graph" | "flow" | "timeline";
 type NavEntry = { kind: "symbol"; id: string } | { kind: "file"; branchId: string; filePath: string };
 
 const KIND_COLOR: Record<string, string> = {
@@ -71,6 +73,8 @@ export function WikiPage({ onClose }: WikiPageProps) {
   const [graphBusy, setGraphBusy] = useState(false);
   const [graphLayout, setGraphLayout] = useState<GraphLayout>("radial");
   const [backlinks, setBacklinks] = useState<{ nodeId: string; title: string; nodeType: string }[]>([]);
+  const [timelineData, setTimelineData] = useState<KnowledgeTimelineEntry[] | null>(null);
+  const [timelineBusy, setTimelineBusy] = useState(false);
 
   const [editing, setEditing] = useState<{ slug: string; body: string } | null>(null);
   const [savingNote, setSavingNote] = useState(false);
@@ -100,6 +104,13 @@ export function WikiPage({ onClose }: WikiPageProps) {
     setFlowBusy(true);
     try { setFlow(await knowledgeFlow(id)); } catch (e) { err(e); } finally { setFlowBusy(false); }
   }, []);
+  // Timeline is a global (not focus-scoped) view — load on first open.
+  const openTimeline = useCallback(async () => {
+    setTab("timeline");
+    if (timelineData) return;
+    setTimelineBusy(true);
+    try { setTimelineData((await knowledgeTimeline(60)).entries); } catch (e) { err(e); } finally { setTimelineBusy(false); }
+  }, [timelineData]);
 
   // Selecting a symbol drives all three panes (context loads eagerly for the
   // right panel; graph/flow load lazily when their tab is active).
@@ -244,6 +255,27 @@ export function WikiPage({ onClose }: WikiPageProps) {
     )
   );
 
+  const timelinePane = (
+    timelineBusy ? <Center><Loader2 className="h-4 w-4 animate-spin" /> 加载时间线…</Center>
+    : !timelineData || timelineData.length === 0 ? <Center>暂无提交记录 — 索引一个 git 仓库后可见</Center>
+    : (
+      <div className="flex-1 overflow-auto p-6">
+        <div className="mb-4 text-xs text-slate-500">最近变更 — 跨仓库提交(按作者日期)</div>
+        <div className="space-y-0.5">
+          {timelineData.map((e, i) => (
+            <div key={i} className="flex items-baseline gap-3 rounded px-2 py-1.5 hover:bg-white/5">
+              <span className="w-20 shrink-0 font-mono text-[10px] text-slate-500">{(e.date ?? "").slice(0, 10)}</span>
+              {e.merge && <GitMerge className="h-3 w-3 shrink-0 text-violet-300" />}
+              <span className="min-w-0 flex-1 truncate text-xs text-slate-200">{e.subject}</span>
+              {e.repo && <span className="shrink-0 rounded bg-slate-800 px-1.5 py-0.5 text-[9px] text-slate-400">{e.repo}</span>}
+              {e.tags.map((t) => <span key={t} className="shrink-0 rounded bg-cyan-500/15 px-1.5 py-0.5 text-[9px] text-cyan-200">{t}</span>)}
+            </div>
+          ))}
+        </div>
+      </div>
+    )
+  );
+
   const graphPane = (
     <div className="relative flex-1">
       {graphBusy ? <Center><Loader2 className="h-4 w-4 animate-spin" /> 加载图谱…</Center>
@@ -338,6 +370,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
             <TabBtn on={tab === "context"} onClick={() => setTab("context")} icon={<Sparkles className="h-3.5 w-3.5" />}>Context</TabBtn>
             <TabBtn on={tab === "graph"} onClick={() => setTab("graph")} icon={<Network className="h-3.5 w-3.5" />}>Graph</TabBtn>
             <TabBtn on={tab === "flow"} onClick={() => setTab("flow")} icon={<Workflow className="h-3.5 w-3.5" />}>Flow</TabBtn>
+            <TabBtn on={tab === "timeline"} onClick={() => void openTimeline()} icon={<Clock className="h-3.5 w-3.5" />}>Timeline</TabBtn>
             <div className="ml-auto flex items-center gap-2">
               {tab === "graph" && graphData && (
                 <div className="flex items-center gap-1 rounded-md border border-slate-800 bg-slate-950/40 p-0.5 text-xs">
@@ -351,7 +384,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
               )}
             </div>
           </div>
-          {tab === "context" ? contextPane : tab === "graph" ? graphPane : flowPane}
+          {tab === "context" ? contextPane : tab === "graph" ? graphPane : tab === "timeline" ? timelinePane : flowPane}
         </section>
 
         {/* RIGHT — why / relations */}
