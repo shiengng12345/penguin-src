@@ -10,6 +10,7 @@ import {
   graphNeighborhood,
   repoGraph,
   exploreGraph,
+  branchFreshness,
 } from "../packages/knowledge-core/dist/index.js";
 
 // Seed a small but realistic graph:
@@ -131,6 +132,17 @@ test("exploreGraph branch-scope: multi-branch repo does not mix branches (Phase 
   assert.ok(onMain.includes(caller) && !onMain.includes(featCaller), "main branch → only main's caller");
   assert.ok(onFeat.includes(featCaller) && !onFeat.includes(caller), "feature branch → only feature's caller");
   assert.ok(noBranch.includes(caller) && noBranch.includes(featCaller), "no branch filter → both (legacy)");
+  store.close();
+});
+
+test("branchFreshness: fresh when HEAD matches indexed, stale when it advanced (Phase 1)", () => {
+  const { store, branchId } = seed();
+  store.recordBranchIndexed({ branchId, commit: "c0" });
+  const fresh = branchFreshness(store, branchId, "c0");
+  assert.equal(fresh.stale, false);
+  const stale = branchFreshness(store, branchId, "c9newhead");
+  assert.equal(stale.stale, true);
+  assert.match(stale.reason, /branch advanced/);
   store.close();
 });
 

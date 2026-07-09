@@ -138,6 +138,40 @@ function nodeBrief(store: KnowledgeStore, id: string) {
 // The live branch of a node's repo — the default "which branch am I answering
 // for" so multi-branch repos never silently mix branches. null for repo-less
 // (global) nodes like cross-repo gRPC endpoints.
+export interface BranchFreshness {
+  branchId: string;
+  name: string;
+  status: string;
+  indexedCommit: string | null;
+  indexedAt: string | null;
+  stale: boolean;
+  reason: string;
+}
+
+// "Which branch am I answering for, and is it current?" — compares the live git
+// HEAD (passed by the caller, which can read .git) against what was indexed.
+// Every Context Pack / answer should carry this so an AI never trusts a stale
+// or wrong-branch view (§ Phase 1).
+export function branchFreshness(
+  store: KnowledgeStore,
+  branchId: string,
+  currentHeadCommit?: string | null,
+): BranchFreshness | null {
+  const b = store.db
+    .prepare("SELECT id, name, status, last_indexed_commit AS ic, last_indexed_at AS ia FROM branches WHERE id=?")
+    .get(branchId) as { id: string; name: string; status: string; ic: string | null; ia: string | null } | undefined;
+  if (!b) return null;
+  const short = (c: string) => c.slice(0, 8);
+  let stale = false;
+  let reason = "fresh";
+  if (!b.ia) { stale = true; reason = "never indexed"; }
+  else if (currentHeadCommit && b.ic && currentHeadCommit !== b.ic) {
+    stale = true;
+    reason = `branch advanced: HEAD ${short(currentHeadCommit)} ≠ indexed ${short(b.ic)} — re-index`;
+  }
+  return { branchId: b.id, name: b.name, status: b.status, indexedCommit: b.ic, indexedAt: b.ia, stale, reason };
+}
+
 export function liveBranchOf(store: KnowledgeStore, nodeId: string): string | null {
   const n = store.getNode(nodeId);
   if (!n?.repo_id) return null;
