@@ -282,7 +282,7 @@ async function indexFileWithSource(
         identityKey,
         repoId: isGrpc ? null : p.repoId, // gRPC endpoints belong to no single repo
         title: ep.key,
-        meta: { protocol: ep.protocol, service: ep.grpcService, method: ep.grpcMethod, controller: ep.controllerName },
+        meta: { protocol: ep.protocol, service: ep.grpcService, method: ep.grpcMethod, controller: ep.controllerName, httpStatus: ep.httpStatus },
       });
       structural.push({ src: endpointId, dst: handlerId, edgeType: "handles", origin: "parser", method: "EXTRACTED" });
     }

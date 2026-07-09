@@ -17,6 +17,10 @@ export interface ExtractedEndpoint {
   // endpoint id so a provider and a consumer in different repos connect.
   grpcService?: string;
   grpcMethod?: string;
+  // HTTP only: the success status this endpoint returns — @HttpCode(n) if
+  // present, else the NestJS default (POST→201, everything else→200). Error
+  // statuses are derived separately from the exceptions the handler throws.
+  httpStatus?: number;
 }
 
 // Back-compat alias (older callers used ExtractedRoute).
@@ -27,27 +31,32 @@ const HTTP_DECORATORS: Record<string, string> = {
   Patch: "PATCH", Options: "OPTIONS", Head: "HEAD", All: "ALL",
 };
 
-// name + all string args of a decorator (`@Foo('a','b')` → {Foo, ['a','b']}).
-function decoratorInfo(dec: Node): { name: string | null; args: string[] } {
+// name + string args + numeric args of a decorator
+// (`@Foo('a', 201)` → {Foo, ['a'], [201]}).
+function decoratorInfo(dec: Node): { name: string | null; args: string[]; nums: number[] } {
   const inner = dec.namedChild(0);
-  if (!inner) return { name: null, args: [] };
-  if (inner.type === "identifier") return { name: inner.text, args: [] };
+  if (!inner) return { name: null, args: [], nums: [] };
+  if (inner.type === "identifier") return { name: inner.text, args: [], nums: [] };
   if (inner.type === "call_expression") {
     const name = inner.childForFieldName("function")?.text ?? null;
     const argsNode = inner.childForFieldName("arguments");
     const args: string[] = [];
+    const nums: number[] = [];
     if (argsNode) {
       for (let i = 0; i < argsNode.namedChildCount; i++) {
         const a = argsNode.namedChild(i)!;
         if (a.type === "string") {
           const frag = a.namedChild(0);
           args.push((frag ? frag.text : a.text.replace(/^['"]|['"]$/g, "")) || "");
+        } else if (a.type === "number") {
+          const n = Number(a.text);
+          if (!Number.isNaN(n)) nums.push(n);
         }
       }
     }
-    return { name, args };
+    return { name, args, nums };
   }
-  return { name: null, args: [] };
+  return { name: null, args: [], nums: [] };
 }
 
 function joinPath(base: string | null, sub: string | null): string {
@@ -91,15 +100,25 @@ export function extractEndpoints(root: Node): ExtractedEndpoint[] {
       const methodName = m.childForFieldName("name")?.text;
       if (!methodName) continue;
       const handlerQualifiedName = `${className}.${methodName}`;
+      // Gather all of the method's decorators first — @HttpCode may sit apart
+      // from the verb decorator, and we need its value when emitting the route.
+      const decs: ReturnType<typeof decoratorInfo>[] = [];
       let sib = m.previousNamedSibling;
       while (sib && sib.type === "decorator") {
-        const info = decoratorInfo(sib);
+        decs.push(decoratorInfo(sib));
+        sib = sib.previousNamedSibling;
+      }
+      const httpCode = decs.find((d) => d.name === "HttpCode")?.nums[0];
+      for (const info of decs) {
         const name = info.name;
         if (name && HTTP_DECORATORS[name]) {
+          const verb = HTTP_DECORATORS[name];
           endpoints.push({
             protocol: "http",
-            key: `${HTTP_DECORATORS[name]} ${joinPath(httpBase, info.args[0] ?? null)}`,
+            key: `${verb} ${joinPath(httpBase, info.args[0] ?? null)}`,
             handlerQualifiedName, controllerName: className,
+            // @HttpCode wins; else NestJS defaults (POST→201, else→200).
+            httpStatus: httpCode ?? (verb === "POST" ? 201 : 200),
           });
         } else if (name === "GrpcMethod" || name === "GrpcStreamMethod") {
           const svc = info.args[0] ?? className;
@@ -118,7 +137,6 @@ export function extractEndpoints(root: Node): ExtractedEndpoint[] {
             handlerQualifiedName, controllerName: className,
           });
         }
-        sib = sib.previousNamedSibling;
       }
     }
   }

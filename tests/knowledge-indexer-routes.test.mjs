@@ -36,6 +36,26 @@ test("extractSymbols: HTTP controller → endpoints (P2)", async () => {
   assert.ok(keys.includes("POST /users"), "POST /users");
 });
 
+test("extractSymbols: HTTP endpoints carry a success status (P2#8)", async () => {
+  const src = [
+    "@Controller('users')",
+    "export class UsersController {",
+    "  @Get(':id')",
+    "  findOne(id) { return id; }",
+    "  @Post()",
+    "  create(dto) { return dto; }",
+    "  @HttpCode(204)",
+    "  @Delete(':id')",
+    "  remove(id) { return id; }",
+    "}",
+  ].join("\n");
+  const out = await extractSymbols({ lang: "ts", source: src });
+  const byKey = Object.fromEntries(out.endpoints.map((e) => [e.key, e.httpStatus]));
+  assert.equal(byKey["GET /users/:id"], 200, "GET defaults to 200");
+  assert.equal(byKey["POST /users"], 201, "POST defaults to 201");
+  assert.equal(byKey["DELETE /users/:id"], 204, "@HttpCode(204) wins");
+});
+
 test("extractSymbols: @GrpcMethod → grpc endpoint with service+method", async () => {
   const src = [
     "@Controller()",
