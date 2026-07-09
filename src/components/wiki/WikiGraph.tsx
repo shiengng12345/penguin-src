@@ -18,7 +18,7 @@ const COL = {
   focus: "#22d3ee",
   note: "#34d399",
   file: "#f59e0b",
-  route: "#fb7185",
+  endpoint: "#fb7185",
   entity: "#e879f9",
   symbol: "#7c8db5",
   focusText: "#e0f7ff",
@@ -37,7 +37,8 @@ const EDGE_COL: Record<string, string> = {
   imports: "rgba(148,163,184,0.35)", // slate — file→file
   defines: "rgba(245,158,11,0.28)", // amber, faint — file→symbol (structural)
   tests: "rgba(52,211,153,0.55)", // green
-  handles: "rgba(251,113,133,0.6)", // rose — route→handler
+  handles: "rgba(251,113,133,0.6)", // rose — endpoint→handler
+  invokes: "rgba(56,189,248,0.7)", // sky — cross-repo service call (consumer→endpoint)
   throws: "rgba(248,113,113,0.55)", // red — symbol→error entity
   uses: "rgba(232,121,249,0.5)", // fuchsia — symbol→env entity
 };
@@ -47,6 +48,7 @@ const EDGE_LEGEND: Array<{ label: string; color: string }> = [
   { label: "imports", color: "#94a3b8" },
   { label: "tests", color: "#34d399" },
   { label: "handles", color: "#fb7185" },
+  { label: "invokes", color: "#38bdf8" },
   { label: "throws", color: "#f87171" },
   { label: "uses", color: "#e879f9" },
   { label: "defines", color: "#f59e0b" },
@@ -167,8 +169,8 @@ export function WikiGraph({
                   ? COL.note
                   : n.type === "file"
                     ? COL.file
-                    : n.type === "route"
-                      ? COL.route
+                    : n.type === "endpoint"
+                      ? COL.endpoint
                       : n.type === "entity"
                         ? COL.entity
                         : COL.symbol;

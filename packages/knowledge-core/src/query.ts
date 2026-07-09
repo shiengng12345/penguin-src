@@ -424,3 +424,206 @@ export function indexStatus(store: KnowledgeStore): IndexStatus {
     }),
   };
 }
+
+// —— AI Context Pack (§ vision主产品): 把富图变现成「AI 写代码前的最小必要上下文」——
+// Not a graph dump: a focused, branch-aware bundle around one target — the code,
+// who calls it, what it calls/uses, the routes that reach it, its tests, the
+// errors/env it touches, linked notes, and risk signals. This is what an AI
+// coding agent should read BEFORE editing (the differentiator over graph tools).
+
+export interface ContextBrief {
+  nodeId: string;
+  title: string;
+  nodeType: string;
+}
+
+export interface ContextPack {
+  target: string;
+  focus:
+    | {
+        nodeId: string;
+        title: string;
+        nodeType: string;
+        kind: string | null;
+        filePath: string | null;
+        signature: string | null;
+        source: string | null;
+        branches: Array<{ branch: string; status: string }>;
+      }
+    | null;
+  callers: ContextBrief[]; // who calls the focus (calls edges in)
+  calls: ContextBrief[]; // what the focus calls (calls edges out)
+  referencedBy: ContextBrief[]; // who uses this as a type (references in)
+  usesTypes: ContextBrief[]; // types the focus uses (references out)
+  routes: Array<{ route: string; via: "direct" | "caller" }>; // HTTP routes reaching the focus
+  tests: ContextBrief[]; // test files that exercise the focus
+  errors: string[]; // error types the focus throws
+  envs: string[]; // env vars the focus reads
+  notes: ContextBrief[]; // notes linked to the focus
+  importers: ContextBrief[]; // files importing the focus's file
+  signals: string[]; // risk/attention heuristics
+}
+
+function briefsFrom(store: KnowledgeStore, rows: Array<{ id: string }>): ContextBrief[] {
+  return rows.map((r) => {
+    const b = nodeBrief(store, r.id);
+    return { nodeId: b.nodeId, title: b.title, nodeType: b.nodeType };
+  });
+}
+
+export function buildContextPack(
+  store: KnowledgeStore,
+  target: string,
+  options?: { branchId?: string; limit?: number },
+): ContextPack {
+  const limit = options?.limit ?? 25;
+  const empty: ContextPack = {
+    target, focus: null, callers: [], calls: [], referencedBy: [], usesTypes: [],
+    routes: [], tests: [], errors: [], envs: [], notes: [], importers: [], signals: [],
+  };
+  const focusId = resolveNodeId(store, target);
+  if (!focusId) return empty;
+
+  const detail = getNodeDetail(store, focusId);
+  const active = "status='active'";
+  const inEdges = (type: string) =>
+    store.db.prepare(`SELECT DISTINCT src AS id FROM edges WHERE dst=? AND edge_type=? AND ${active} LIMIT ?`).all(focusId, type, limit) as { id: string }[];
+  const outEdges = (type: string) =>
+    store.db.prepare(`SELECT DISTINCT dst AS id FROM edges WHERE src=? AND edge_type=? AND dst IS NOT NULL AND ${active} LIMIT ?`).all(focusId, type, limit) as { id: string }[];
+
+  const callers = inEdges("calls");
+  const calls = outEdges("calls");
+  const referencedBy = inEdges("references");
+  const usesTypes = outEdges("references");
+  const tests = inEdges("tests");
+  const errors = outEdges("throws").map((r) => nodeBrief(store, r.id).title);
+  const envs = outEdges("uses").map((r) => nodeBrief(store, r.id).title);
+
+  // routes: directly handled, or handled by a caller (route → handler → focus).
+  const directRoutes = inEdges("handles");
+  const callerIds = callers.map((c) => c.id);
+  const routeSet = new Map<string, "direct" | "caller">();
+  for (const r of directRoutes) routeSet.set(nodeBrief(store, r.id).title, "direct");
+  if (callerIds.length) {
+    const ph = callerIds.map(() => "?").join(",");
+    const viaCaller = store.db
+      .prepare(`SELECT DISTINCT src AS id FROM edges WHERE edge_type='handles' AND ${active} AND dst IN (${ph}) LIMIT ?`)
+      .all(...callerIds, limit) as { id: string }[];
+    for (const r of viaCaller) {
+      const t = nodeBrief(store, r.id).title;
+      if (!routeSet.has(t)) routeSet.set(t, "caller");
+    }
+  }
+  const routes = [...routeSet].map(([route, via]) => ({ route, via }));
+
+  // notes linked to the focus (any incoming edge whose source is a note node).
+  const notes = briefsFrom(
+    store,
+    store.db.prepare(
+      `SELECT DISTINCT e.src AS id FROM edges e JOIN nodes n ON n.id=e.src
+       WHERE e.dst=? AND ${active} AND n.node_type='note' LIMIT ?`,
+    ).all(focusId, limit) as { id: string }[],
+  );
+
+  // importers: files importing the focus's file (focus ← defines ← file → imports).
+  const fileRow = store.db
+    .prepare(`SELECT src AS id FROM edges WHERE dst=? AND edge_type='defines' AND ${active} LIMIT 1`)
+    .get(focusId) as { id: string } | undefined;
+  const importers = fileRow
+    ? briefsFrom(store, store.db.prepare(`SELECT DISTINCT src AS id FROM edges WHERE dst=? AND edge_type='imports' AND ${active} LIMIT ?`).all(fileRow.id, limit) as { id: string }[])
+    : [];
+
+  // risk/attention signals — cheap heuristics from the graph itself.
+  const signals: string[] = [];
+  const stale = (detail?.versions ?? []).filter((v) => v.status !== "fresh");
+  if (stale.length) signals.push(`⚠ ${stale.length} stale version(s) — re-index before trusting`);
+  const fanIn = (store.db.prepare(`SELECT COUNT(*) AS n FROM edges WHERE dst=? AND edge_type='calls' AND ${active}`).get(focusId) as { n: number }).n;
+  if (fanIn >= 10) signals.push(`high fan-in: ${fanIn} callers — changes ripple widely`);
+  const inferred = (store.db.prepare(`SELECT COUNT(*) AS n FROM edges WHERE (src=? OR dst=?) AND method='INFERRED' AND ${active}`).get(focusId, focusId) as { n: number }).n;
+  if (inferred) signals.push(`${inferred} INFERRED edge(s) — some relations are best-guess, verify`);
+  if (routes.length) signals.push(`reachable from ${routes.length} HTTP route(s) — public-facing`);
+
+  return {
+    target,
+    focus: detail
+      ? {
+          nodeId: detail.node.id,
+          title: detail.node.title,
+          nodeType: detail.node.nodeType,
+          kind: detail.versions[0]?.kind ?? null,
+          filePath: detail.versions[0]?.filePath ?? null,
+          signature: (detail.versions.find((v) => v.status === "fresh") ?? detail.versions[0])?.signature ?? null,
+          source: detail.source?.code ?? detail.body ?? null,
+          branches: detail.versions.map((v) => ({ branch: v.branchId, status: v.status })),
+        }
+      : null,
+    callers: briefsFrom(store, callers),
+    calls: briefsFrom(store, calls),
+    referencedBy: briefsFrom(store, referencedBy),
+    usesTypes: briefsFrom(store, usesTypes),
+    routes,
+    tests: briefsFrom(store, tests),
+    errors,
+    envs,
+    notes,
+    importers,
+    signals,
+  };
+}
+
+// Render a Context Pack as Markdown — what an AI coding agent reads before editing.
+export function renderContextPackMarkdown(pack: ContextPack): string {
+  const L: string[] = [];
+  const list = (title: string, items: ContextBrief[]) => {
+    if (!items.length) return;
+    L.push(`### ${title}`);
+    for (const i of items) L.push(`- \`${i.title}\`${i.nodeType !== "symbol" ? ` (${i.nodeType})` : ""}`);
+    L.push("");
+  };
+  if (!pack.focus) {
+    return `# Context Pack: ${pack.target}\n\n_No matching symbol/note found._\n`;
+  }
+  const f = pack.focus;
+  L.push(`# Context Pack: ${f.title}`);
+  L.push("");
+  L.push(`- **type**: ${f.kind ?? f.nodeType}`);
+  if (f.filePath) L.push(`- **file**: \`${f.filePath}\``);
+  if (f.branches.length) L.push(`- **branches**: ${f.branches.map((b) => `${b.branch} (${b.status})`).join(", ")}`);
+  L.push("");
+  if (pack.signals.length) {
+    L.push(`## ⚠ Signals`);
+    for (const s of pack.signals) L.push(`- ${s}`);
+    L.push("");
+  }
+  if (f.signature) {
+    L.push(`## Signature`);
+    L.push("```", f.signature, "```", "");
+  }
+  if (f.source) {
+    L.push(`## Source`);
+    L.push("```", f.source, "```", "");
+  }
+  if (pack.routes.length) {
+    L.push(`## HTTP routes reaching this`);
+    for (const r of pack.routes) L.push(`- ${r.route}${r.via === "caller" ? " (via caller)" : ""}`);
+    L.push("");
+  }
+  list("Called by", pack.callers);
+  list("Calls", pack.calls);
+  list("Used as a type by", pack.referencedBy);
+  list("Uses types", pack.usesTypes);
+  list("Tested by", pack.tests);
+  list("Linked notes", pack.notes);
+  list("Imported by (files)", pack.importers);
+  if (pack.errors.length) {
+    L.push(`### Throws`);
+    for (const e of pack.errors) L.push(`- ${e}`);
+    L.push("");
+  }
+  if (pack.envs.length) {
+    L.push(`### Env vars used`);
+    for (const e of pack.envs) L.push(`- ${e}`);
+    L.push("");
+  }
+  return L.join("\n");
+}

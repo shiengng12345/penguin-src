@@ -3,6 +3,7 @@ import { readFileSync, statSync } from "node:fs";
 import { basename, dirname, relative, resolve as pathResolve } from "node:path";
 import type { KnowledgeStore, ParsedEdge } from "@penguin/knowledge-core";
 import { extractSymbols, type ExtractedSymbol } from "./extract.js";
+import { grpcEndpointKey } from "./grpc-client.js";
 import { readGitContext } from "./git.js";
 import { indexGitObjects } from "./gitgraph.js";
 import { langForExtension } from "./registry.js";
@@ -266,19 +267,38 @@ async function indexFileWithSource(
         structural.push({ src: fileNodeId, dst, edgeType: "tests", origin: "parser", method: "EXTRACTED" });
       }
     }
-    // routes (NestJS): a `route` node per HTTP endpoint → its handler method
-    // (edge_type 'handles'). Lets AI walk Route → Controller.method → Service…
-    for (const route of extracted.routes) {
-      const handlerId = fileSymbolIds.get(route.handlerQualifiedName);
+    // endpoints (NestJS gRPC/kafka/http): an `endpoint` node → its handler method
+    // ('handles'). gRPC endpoints are GLOBAL (cross-repo id = grpc::Svc.method) so
+    // a provider here connects to consumers in OTHER repos. http/kafka stay repo-scoped.
+    for (const ep of extracted.endpoints) {
+      const handlerId = fileSymbolIds.get(ep.handlerQualifiedName);
       if (!handlerId) continue;
-      const routeNodeId = store.upsertNode({
-        nodeType: "route",
-        identityKey: `${p.repoId}::route::${route.httpMethod} ${route.routePath}`,
-        repoId: p.repoId,
-        title: `${route.httpMethod} ${route.routePath}`,
-        meta: { httpMethod: route.httpMethod, path: route.routePath, controller: route.controllerName },
+      const isGrpc = ep.protocol === "grpc" && ep.grpcService && ep.grpcMethod;
+      const identityKey = isGrpc
+        ? grpcEndpointKey(ep.grpcService!, ep.grpcMethod!) // global, cross-repo
+        : `${p.repoId}::endpoint::${ep.key}`;
+      const endpointId = store.upsertNode({
+        nodeType: "endpoint",
+        identityKey,
+        repoId: isGrpc ? null : p.repoId, // gRPC endpoints belong to no single repo
+        title: ep.key,
+        meta: { protocol: ep.protocol, service: ep.grpcService, method: ep.grpcMethod, controller: ep.controllerName },
       });
-      structural.push({ src: routeNodeId, dst: handlerId, edgeType: "handles", origin: "parser", method: "EXTRACTED" });
+      structural.push({ src: endpointId, dst: handlerId, edgeType: "handles", origin: "parser", method: "EXTRACTED" });
+    }
+    // consumer side: inter-service gRPC calls → 'invokes' to the SAME global
+    // endpoint id → the cross-repo service-call graph.
+    for (const gc of extracted.grpcClientCalls) {
+      const src = gc.enclosingQualifiedName ? fileSymbolIds.get(gc.enclosingQualifiedName) : undefined;
+      if (!src) continue;
+      const endpointId = store.upsertNode({
+        nodeType: "endpoint",
+        identityKey: grpcEndpointKey(gc.service, gc.method),
+        repoId: null,
+        title: `gRPC ${gc.service}.${gc.method}`,
+        meta: { protocol: "grpc", service: gc.service, method: gc.method },
+      });
+      structural.push({ src, dst: endpointId, edgeType: "invokes", origin: "parser", method: "EXTRACTED" });
     }
     // code entities: thrown errors + env reads → entity nodes, edges from the
     // enclosing symbol ('throws' / 'uses'). "where is XError thrown / who uses JWT_SECRET".

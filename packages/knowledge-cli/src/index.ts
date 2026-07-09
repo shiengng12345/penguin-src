@@ -1,4 +1,6 @@
 import {
+  buildContextPack,
+  renderContextPackMarkdown,
   compareBranches,
   exploreGraph,
   getNodeDetail,
@@ -41,7 +43,7 @@ export interface CliDeps {
 const READ_VERBS = new Set([
   "search", "node", "callers", "calls", "impact", "backlinks",
   "path", "recent", "compare", "status", "suggestions", "snapshots", "doctor",
-  "files", "filesymbols", "graph", "repograph", "tags",
+  "files", "filesymbols", "graph", "repograph", "tags", "context",
 ]);
 
 // repo/branch args accept an id OR a name (humans pass names; the Wiki passes
@@ -97,6 +99,7 @@ const HELP = `penguin — Penguin Knowledge CLI
   penguin callers <symbol>      who calls it
   penguin calls <symbol>        what it calls
   penguin impact <symbol>       transitive blast radius
+  penguin context <symbol|api>  AI context pack (branch+code+notes+tests+risks); --json for structured
   penguin backlinks <node>      who links it
   penguin path <a> <b>          shortest path a→b
   penguin recent                recent changes
@@ -307,6 +310,13 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
           const detail = getNodeDetail(store, pos[0] ?? "");
           if (!detail) { deps.err("node not found"); return 1; }
           emit(deps, json, `${detail.node.nodeType} ${detail.node.title}\nversions: ${detail.versions.length}\naliases: ${detail.aliases.length}`, detail);
+          return 0;
+        }
+        case "context": {
+          // AI Context Pack: --json → structured; default → Markdown for an agent.
+          const pack = buildContextPack(store, pos.join(" "));
+          if (!pack.focus) { deps.err(`no context for "${pack.target}"`); return 1; }
+          emit(deps, json, renderContextPackMarkdown(pack), pack);
           return 0;
         }
         case "compare": {
