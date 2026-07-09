@@ -57,20 +57,28 @@ const EDGE_LEGEND: Array<{ label: string; color: string }> = [
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type GNode = any;
 
+export type GraphLayout = "radial" | "force";
+
 export function WikiGraph({
   data,
   onNodeClick,
+  layout = "radial",
 }: {
   data: KnowledgeGraphView;
   onNodeClick: (nodeId: string) => void;
+  // "radial" = the clean, intentional layout (focus centered, neighbours on a
+  // ring); "force" = the Obsidian-style force-directed sim. Toggleable in the UI.
+  layout?: GraphLayout;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const graphRef = useRef<any>(null);
   const dataRef = useRef(data);
   const onClickRef = useRef(onNodeClick);
+  const layoutRef = useRef<GraphLayout>(layout);
   dataRef.current = data;
   onClickRef.current = onNodeClick;
+  layoutRef.current = layout;
 
   // Hover-highlight state (kept in refs so the canvas painter reads it without
   // re-instantiating the graph).
@@ -93,16 +101,35 @@ export function WikiGraph({
       neighbours.get(e.dst)!.add(e.src);
     }
     adj.current = neighbours;
+    const nodes: GNode[] = view.nodes.map((n) => ({
+      id: n.nodeId,
+      name: n.title,
+      type: n.nodeType,
+      isFocus: n.nodeId === view.focus,
+      deg: deg.get(n.nodeId) ?? 0,
+    }));
+
+    if (layoutRef.current === "radial") {
+      // Intentional layout: focus pinned at center, everything else on a ring
+      // (sorted by type so same-kind nodes cluster into tidy arcs). Pinning
+      // fx/fy makes the force sim a no-op → deterministic, readable, not a web.
+      const others = nodes.filter((n) => !n.isFocus).sort((a, b) => String(a.type).localeCompare(String(b.type)) || String(a.name).localeCompare(String(b.name)));
+      const R = Math.min(360, 130 + others.length * 6);
+      others.forEach((n, i) => {
+        const a = (i / Math.max(1, others.length)) * 2 * Math.PI - Math.PI / 2;
+        n.fx = Math.cos(a) * R;
+        n.fy = Math.sin(a) * R;
+      });
+      const focus = nodes.find((n) => n.isFocus);
+      if (focus) { focus.fx = 0; focus.fy = 0; }
+    }
+    // force mode: fresh node objects carry no fx/fy → the sim lays them out.
+
     graph.graphData({
-      nodes: view.nodes.map((n) => ({
-        id: n.nodeId,
-        name: n.title,
-        type: n.nodeType,
-        isFocus: n.nodeId === view.focus,
-        deg: deg.get(n.nodeId) ?? 0,
-      })),
+      nodes,
       links: view.edges.map((e) => ({ source: e.src, target: e.dst, edgeType: e.edgeType })),
     });
+    graph.zoomToFit?.(500, 50);
   };
 
   const baseLinkColor = (l: GNode) => EDGE_COL[l.edgeType as string] ?? COL.link;
@@ -239,6 +266,14 @@ export function WikiGraph({
     hiLinks.current = new Set();
     if (graphRef.current) applyData(graphRef.current, data);
   }, [data]);
+
+  // Re-layout when the user toggles radial ↔ force.
+  useEffect(() => {
+    if (graphRef.current) {
+      applyData(graphRef.current, dataRef.current);
+      if (layout === "force") graphRef.current.d3ReheatSimulation?.();
+    }
+  }, [layout]);
 
   return (
     <div className="relative h-full w-full">

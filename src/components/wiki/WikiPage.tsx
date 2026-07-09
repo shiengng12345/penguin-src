@@ -2,7 +2,7 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { Database, FileText, Box, Loader2, X, FolderTree, Network, FileCode, Save, Pencil, ArrowLeft } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { WikiBrowseTree } from "@/components/wiki/WikiBrowseTree";
-import { WikiGraph } from "@/components/wiki/WikiGraph";
+import { WikiGraph, type GraphLayout } from "@/components/wiki/WikiGraph";
 import { WikiNoteEditor } from "@/components/wiki/WikiNoteEditor";
 import {
   knowledgeDbStatus,
@@ -48,6 +48,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
   const [fileSymbols, setFileSymbols] = useState<KnowledgeFileSymbol[]>([]);
   const [graphData, setGraphData] = useState<KnowledgeGraphView | null>(null);
   const [graphLoading, setGraphLoading] = useState(false);
+  const [graphLayout, setGraphLayout] = useState<GraphLayout>("radial");
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<{ slug: string; body: string } | null>(null);
   const [savingNote, setSavingNote] = useState(false);
@@ -364,14 +365,19 @@ export function WikiPage({ onClose }: WikiPageProps) {
                     <button type="button" onClick={() => go({ kind: "node", id: focusNode.nodeId })} className="ml-2 rounded border border-slate-700 px-2 py-0.5 hover:bg-white/5">打开详情</button>
                   </>
                 )}
-                <span className="ml-auto text-slate-600">点节点可重新聚焦</span>
+                <div className="ml-auto flex items-center gap-1 rounded-md border border-slate-800 bg-slate-950/40 p-0.5">
+                  <button type="button" onClick={() => setGraphLayout("radial")} title="整洁放射布局"
+                    className={cn("rounded px-2 py-0.5", graphLayout === "radial" ? "bg-cyan-500/15 text-cyan-200" : "text-slate-400 hover:bg-white/5")}>整洁</button>
+                  <button type="button" onClick={() => setGraphLayout("force")} title="力导向（Obsidian 式）"
+                    className={cn("rounded px-2 py-0.5", graphLayout === "force" ? "bg-cyan-500/15 text-cyan-200" : "text-slate-400 hover:bg-white/5")}>力导向</button>
+                </div>
               </>
             ) : (
               <span>从「浏览」里分支的 ⌗ 按钮,或某个符号详情的「图谱」进入</span>
             )}
           </div>
           <div className="min-h-0 flex-1">
-            {graphData && graphData.nodes.length > 0 && <WikiGraph data={graphData} onNodeClick={(id) => go({ kind: "graph", id })} />}
+            {graphData && graphData.nodes.length > 0 && <WikiGraph data={graphData} layout={graphLayout} onNodeClick={(id) => go({ kind: "graph", id })} />}
           </div>
         </div>
       ) : (
