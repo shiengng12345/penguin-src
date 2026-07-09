@@ -17,25 +17,26 @@
 
 ---
 
-## 1. 四方对比:Penguin vs Understand-Anything / Graphify / CodeGraph
+## 1. 五方对比:Penguin vs Understand-Anything / Graphify / CodeGraph / codebase-memory-mcp
 
-| 维度 | Understand-Anything | Graphify | CodeGraph | **Penguin(现状+规划)** |
-|---|---|---|---|---|
-| **一句话定位** | 代码理解 Dashboard + AI 解释器 | 多模态知识图谱生成器(AI skill) | AI agent 的本地代码结构索引器 | **分支感知的工程记忆引擎** |
-| **代码解析** | LLM/multi-agent pipeline | 本地 tree-sitter(code 不发 LLM) | 本地 SQLite 索引 | ✅ 本地 tree-sitter,确定性,code 不发 LLM |
-| **输入范围** | code/docs/KB | 极广:code/PDF/图/视频/音频/SQL/IaC | code | code + note;多模态**明确不做** |
-| **存储形态** | `knowledge-graph.json`(一次性) | `graph.json/html/md`(一次性) | 本地 SQLite | ✅ 事件溯源 SQLite(可重建/可恢复/长期) |
-| **Branch 感知** | ❌ 非核心 | ❌ 分析当前目录 | ❌ | ✅ **头号差异化**:repo→branch→commit→symbol_version,跨分支 diff |
-| **Note↔Code(why 层)** | 🟡 能分析 docs | 🟡 抽 WHY/NOTE 注释 | ❌ | ✅ fusion 双向链接;规划 typed 笔记 + 生命周期 |
-| **Confidence 标记** | ❌ | ✅ EXTRACTED/INFERRED/AMBIGUOUS | 🟡 | ✅ 边带 origin+method+confidence;歧义直接丢弃 |
-| **Error/Incident 记忆** | ❌ | 🟡 抽 error 文档 | ❌ | ✅ error 实体已有;规划事故生命周期(root cause/fix/retest/PR) |
-| **AI Context Pack** | 🟡 chat/explain | 🟡 GRAPH_REPORT.md | 🟡 explore 工具 | ✅ **主产品**:branch+代码+调用链+route+test+error+note+风险,一键给 AI |
-| **查询接口** | dashboard/chat | query/path/explain + hooks | MCP explore | ✅ CLI + MCP + UI 共享查询层;规划 `penguin_explore` |
-| **典型语义边** | file/func/dep | 调用/引用/社区/god node | 调用/dispatch | ✅ calls/references/imports/defines/tests/handles/throws/uses + git 拓扑 |
-| **产品形态** | Web dashboard | CLI + assistant skill + 静态产物 | CLI/MCP | ✅ Tauri 桌面 app + CLI + MCP |
-| **最强场景** | 新人 onboarding、可视化理解 | 让 AI 用图替代 grep、项目资料整体图 | AI coding agent 本地结构索引 | **AI 改代码前拿到带分支/踩坑史的最小上下文** |
+| 维度 | Understand-Anything | Graphify | CodeGraph | codebase-memory-mcp | **Penguin(现状+规划)** |
+|---|---|---|---|---|---|
+| **一句话定位** | 代码理解 Dashboard + AI 解释器 | 多模态知识图谱生成器 | AI agent 本地代码结构索引器 | 高性能 MCP-first 代码智能后端 | **分支感知的工程记忆引擎** |
+| **代码解析** | LLM/multi-agent | 本地 tree-sitter | 本地 SQLite 索引 | 本地 tree-sitter + **hybrid LSP/类型解析** | ✅ 本地 tree-sitter + import 收窄 |
+| **输入范围** | code/docs/KB | 极广:code/PDF/图/视频/SQL/IaC | code | **code(155+ 语言)** | code + note;多模态不做 |
+| **存储形态** | 一次性 json | 一次性 json/html/md | 本地 SQLite | 本地 SQLite + **可共享 `graph.db.zst`** | ✅ 事件溯源 SQLite(可重建/长期) |
+| **Branch 感知** | ❌ | ❌ | ❌ | ❌(能 detect changes,不建模 symbol version) | ✅ **头号差异化** |
+| **Note↔Code(why)** | 🟡 分析 docs | 🟡 抽 WHY 注释 | ❌ | 🟡 **ADR**(不完整) | ✅ fusion;规划 typed 笔记 |
+| **Confidence 标记** | ❌ | ✅ EXTRACTED/INFERRED | 🟡 | 🟡(dead code 带 risk) | ✅ origin+method+confidence,歧义丢弃 |
+| **Error/Incident** | ❌ | 🟡 抽文档 | ❌ | 🟡 ADR only | ✅ error 实体;规划事故生命周期 |
+| **AI Context Pack** | 🟡 chat | 🟡 REPORT.md | 🟡 explore | 🟡 提供 tools 让 AI 自查 | ✅ **主产品**:一键打包给 AI |
+| **查询接口** | dashboard | query/path/explain+hooks | MCP explore | **MCP-first**(trace/impact/architecture) | ✅ CLI+MCP+UI 共享层 |
+| **跨服务/跨 repo** | ❌ | 🟡 | 🟡 | ✅ **成熟**(HTTP/gRPC/GraphQL/tRPC/pub-sub) | 🟡 gRPC 已建、recall 待调 |
+| **典型语义边** | file/func/dep | 调用/社区/god node | 调用/dispatch | 调用/import/route/community/cross-service | ✅ calls/references/imports/defines/tests/handles/invokes/throws/uses+git |
+| **产品形态** | Web dashboard | CLI+skill+静态产物 | CLI/MCP | **单 binary** + MCP + 3D graph UI | ✅ Tauri 桌面 + CLI + MCP |
+| **最强场景** | 新人 onboarding | AI 用图替代 grep | agent 结构索引 | agent 极快查结构、跨服务、多语言 | **AI 改代码前拿带分支/踩坑史的最小上下文** |
 
-**结论**:三者都**没把 branch-aware、长期工程记忆、Context Pack、error/decision 生命周期**当核心——这正是 Penguin 的空位。Penguin 该**吸收**它们的优点(Graphify 的 confidence 标记与 assistant hooks、Understand-Anything 的 domain/flow 视图与 i18n、CodeGraph 的本地 SQLite + MCP + staleness),但**不复制**它们的形态(一次性图 / 大 dashboard / 多模态)。
+**结论**:四个对手都**没把 branch-aware、长期工程记忆、Context Pack、error/decision 生命周期**当核心——这是 Penguin 的空位。`codebase-memory-mcp` 是其中**底层最强的**(单 binary、155 语言、hybrid LSP、成熟跨服务)——所以**不跟它拼 indexer**;吸收它的优点,在它(和其它引擎)之上做工程记忆产品层。详见 §9。
 
 ---
 
@@ -144,7 +145,44 @@ content-addressed 事实：symbol_impls(content_hash 去重) / edge_facts
 
 ---
 
-## 8. 下一步
+## 8. codebase-memory-mcp:值得抄的 + build-vs-integrate 决策
+
+`codebase-memory-mcp`(DeusData)是目前底层最强的 MCP-first 代码智能后端。**不跟它拼 indexer**;吸收优点 + 在其上做产品层。
+
+### 8.1 值得抄(按价值)
+| 抄什么 | 具体 | 现状 |
+|---|---|---|
+| **单 binary、零依赖安装** | 用户无需 node/pnpm/docker;"install and forget" | ❌ = D13 打包,提到高优先 |
+| **`affected <diff>`(git diff→影响)** | PR diff → 改了哪些符号 / 影响哪些调用链·测试·风险 | 🟡 有 git 拓扑+impact,差入口。PR review 神器 |
+| **architecture 一键总览** | 一调用返回 语言/packages/入口/routes/hotspots/layers | 🟡 有 repoGraph hubs,包装成工具 |
+| **community detection(隐藏模块)** | 按调用密度聚类找 business flow(非文件夹) | ❌ 可抄 Leiden,映射到 business domain |
+| **hybrid LSP/类型解析** | 比纯 tree-sitter 更准的调用解析 | 🟡 已有 import 收窄;后续可加 TS type-checker |
+| **成熟跨服务多协议** | HTTP/gRPC/GraphQL/tRPC/Socket.IO/pub-sub | ⚠️ 我们 gRPC 已建但 recall 低(见 §8.4) |
+| **团队共享 artifact** `graph.db.zst` | 团队不用各自 full index | ❌ = §8.3 双索引 |
+| **dead code(带 confidence)** | 无入边符号=疑似死代码,标 confidence 避 DI 误判 | ❌ 数据现成,包装成 query |
+
+**最该马上抄的 3 个**:① 单 binary 安装 ② `affected <diff>` ③ architecture 一键总览。
+
+### 8.2 build-vs-integrate(决策:自研为主 + adapter 兜底)【已批准】
+- **自研为主**:你们是 TS/NestJS/gRPC/Mongoose 栈,我们的确定性 indexer 已覆盖且 **branch-aware(它没有)**+ 贴着你们栈定制(routes/entities/跨 repo gRPC/Mongoose)。不落后。
+- **留 adapter 接口**:Penguin Core 能吸收**外部图**(codebase-memory-mcp / CodeGraph / Graphify)补足**多语言/高精度/成熟跨服务**,不重写记忆层。便宜的保险。
+
+### 8.3 separate + main full index【已批准】
+- **per-repo 索引**(现状)+ **main/全量索引**(跨所有微服务的统一图,给跨服务查询用)。
+- 打包成可共享 `.penguin/graph.db.zst`,团队共享,不用各自重建。
+
+### 8.4 命令写入并校验 CLAUDE.md/AGENTS.md【已批准】
+- `penguin init/index/setup` **都要**确保 `CLAUDE.md`/`AGENTS.md`(及 `.cursor/rules`/`.codex`)里写死指令:**"改代码前先 `penguin context` 拿 Context Pack、别直接 grep"**。
+- 解决"装了 MCP 但 agent 不主动用"的问题;提供 preflight,并检测 stale context。
+- ⚠️ 现实校验:实测跨服务 **invokes recall 低**(auth 514 处 ClientGrpc → 仅 1 条 invokes)。消费端 `getService` 写法比样本复杂,需调抽取器贴真实写法(字段初始化/onModuleInit/变量名),或此场景接 codebase-memory-mcp。
+
+### 8.5 多 provider AI 路由(BYOK)【已批准】
+- 产品层支持 OpenAI/Anthropic/Gemini/DeepSeek/Kimi/Qwen/Ollama/OpenRouter,BYOK。
+- 按任务路由:复杂 coding→Claude/GPT;低成本摘要→DeepSeek/Qwen;长上下文→Gemini/Kimi;本地隐私→Ollama。
+
+---
+
+## 9. 下一步
 从 **Phase 1(Branch 正确性)** 开工:① 查询强制 branch 过滤 → ② git 拓扑 + branch_bases → ③ Context Pack freshness 标注。存储 delta 化留到分支变多再做。
 
-后续增量(不阻塞 Phase 1):HTTP 契约抽取器(§6)→ response_samples 运行时回灌(§7 ②)→ LLM 摘要懒生成(§7 ④)。
+后续增量(不阻塞 Phase 1):HTTP 契约抽取器(§6)→ response_samples 运行时回灌(§7 ②)→ LLM 摘要懒生成(§7 ④)→ §8 的 affected/architecture/community/dead-code 工具 + 双索引 + init 写 CLAUDE.md + AI 路由。**并修跨服务 invokes recall(§8.4)**。
