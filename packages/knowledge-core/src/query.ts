@@ -690,3 +690,86 @@ export function renderContextPackMarkdown(pack: ContextPack): string {
   }
   return L.join("\n");
 }
+
+// —— Flow Explorer (§ vision #3): a linear execution chain, not a graph blob ——
+// From an endpoint or symbol, walk DOWNSTREAM edges (handles→calls→invokes→
+// reads/writes→throws/uses) branch-scoped, producing an ordered, indented flow:
+//   POST /withdraw → WithdrawController.create → WithdrawService.createWithdraw
+//     → WalletService.freeze → [players] (reads) → RpcException (throws)
+// This is what a developer/AI actually wants to see, not a cloud of dots.
+
+export interface FlowStep {
+  depth: number;
+  nodeId: string;
+  title: string;
+  nodeType: string;
+  via: string; // edge type from its parent ("root" for the entry)
+}
+export interface FlowResult {
+  target: string;
+  root: FlowStep | null;
+  steps: FlowStep[];
+}
+
+const DOWNSTREAM = ["calls", "invokes", "references", "reads", "writes", "throws", "uses", "handles"];
+
+export function buildFlow(
+  store: KnowledgeStore,
+  target: string,
+  options?: { branchId?: string; depth?: number; limit?: number },
+): FlowResult {
+  const focus = resolveNodeId(store, target);
+  if (!focus) return { target, root: null, steps: [] };
+  const depthCap = options?.depth ?? 5;
+  const limit = options?.limit ?? 60;
+  const branchId = options?.branchId ?? liveBranchOf(store, focus);
+  const bx = branchId ? " AND (branch_id = ? OR branch_id IS NULL)" : "";
+  const ph = DOWNSTREAM.map(() => "?").join(",");
+
+  const outEdges = (id: string) => {
+    const params = branchId ? [id, ...DOWNSTREAM, branchId] : [id, ...DOWNSTREAM];
+    return store.db
+      .prepare(
+        `SELECT DISTINCT dst AS id, edge_type AS via FROM edges
+         WHERE src=? AND dst IS NOT NULL AND status='active' AND edge_type IN (${ph})${bx}
+         ORDER BY edge_type`,
+      )
+      .all(...params) as Array<{ id: string; via: string }>;
+  };
+
+  const root: FlowStep = { depth: 0, ...nodeBriefStep(store, focus), via: "root" };
+  const steps: FlowStep[] = [root];
+  const seen = new Set<string>([focus]);
+  // DFS so a chain reads top-to-bottom (controller → service → repo → db).
+  const visit = (id: string, depth: number) => {
+    if (depth >= depthCap || steps.length >= limit) return;
+    for (const e of outEdges(id)) {
+      if (steps.length >= limit) break;
+      const brief = nodeBriefStep(store, e.id);
+      steps.push({ depth: depth + 1, ...brief, via: e.via });
+      if (!seen.has(e.id)) {
+        seen.add(e.id);
+        visit(e.id, depth + 1);
+      }
+    }
+  };
+  visit(focus, 0);
+  return { target, root, steps };
+}
+
+function nodeBriefStep(store: KnowledgeStore, id: string) {
+  const b = nodeBrief(store, id);
+  return { nodeId: b.nodeId, title: b.title, nodeType: b.nodeType };
+}
+
+export function renderFlowMarkdown(flow: FlowResult): string {
+  if (!flow.root) return `# Flow: ${flow.target}\n\n_No matching entry point/symbol._\n`;
+  const L: string[] = [`# Flow: ${flow.root.title}`, ""];
+  for (const s of flow.steps) {
+    const indent = "  ".repeat(s.depth);
+    const arrow = s.via === "root" ? "" : `${s.via} → `;
+    const tag = s.nodeType !== "symbol" ? ` _(${s.nodeType})_` : "";
+    L.push(`${indent}${s.depth === 0 ? "" : "↳ "}${arrow}\`${s.title}\`${tag}`);
+  }
+  return L.join("\n");
+}

@@ -59,3 +59,27 @@ test("buildContextPack: unknown target → empty pack (no focus)", () => {
   assert.equal(pack.focus, null);
   store.close();
 });
+
+test("buildFlow: linear downstream chain from a symbol (Phase 5)", async () => {
+  const { KnowledgeStore, buildFlow, renderFlowMarkdown } = await import("../packages/knowledge-core/dist/index.js");
+  const { mkdtempSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "pk-flow-"));
+  const store = KnowledgeStore.open({ dbPath: join(dir, "k.db"), ledgerPath: join(dir, "l.jsonl") });
+  const repoId = store.registerRepo({ name: "svc", rootPath: "/svc" });
+  const branchId = store.registerBranch({ repoId, name: "main", status: "live" });
+  store.recordBranchIndexed({ branchId, commit: "c0" });
+  const mk = (n) => { const id = store.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::${n}`, title: n, repoId }); store.upsertSymbolVersion({ nodeId: id, branchId, commitSha: "c0", filePath: "a.ts", lang: "ts", kind: "method", contentHash: `h_${n}`, status: "fresh" }); return id; };
+  const ctrl = mk("Ctrl.create"), svc = mk("Svc.createWithdraw"), wallet = mk("Wallet.freeze");
+  store.replaceFileEdges({ branchId, filePath: "a.ts", edges: [
+    { src: ctrl, dst: svc, edgeType: "calls", origin: "parser", method: "EXTRACTED" },
+    { src: svc, dst: wallet, edgeType: "calls", origin: "parser", method: "EXTRACTED" },
+  ] });
+  const flow = buildFlow(store, "Ctrl.create");
+  assert.equal(flow.root.title, "Ctrl.create");
+  const titles = flow.steps.map((s) => s.title);
+  assert.ok(titles.includes("Svc.createWithdraw") && titles.includes("Wallet.freeze"), "downstream chain captured");
+  assert.match(renderFlowMarkdown(flow), /# Flow: Ctrl\.create/);
+  store.close();
+});

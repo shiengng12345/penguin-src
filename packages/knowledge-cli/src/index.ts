@@ -1,6 +1,8 @@
 import {
   buildContextPack,
   renderContextPackMarkdown,
+  buildFlow,
+  renderFlowMarkdown,
   compareBranches,
   exploreGraph,
   getNodeDetail,
@@ -43,7 +45,7 @@ export interface CliDeps {
 const READ_VERBS = new Set([
   "search", "node", "callers", "calls", "impact", "backlinks",
   "path", "recent", "compare", "status", "suggestions", "snapshots", "doctor",
-  "files", "filesymbols", "graph", "repograph", "tags", "context",
+  "files", "filesymbols", "graph", "repograph", "tags", "context", "flow",
 ]);
 
 // repo/branch args accept an id OR a name (humans pass names; the Wiki passes
@@ -100,6 +102,7 @@ const HELP = `penguin — Penguin Knowledge CLI
   penguin calls <symbol>        what it calls
   penguin impact <symbol>       transitive blast radius
   penguin context <symbol|api>  AI context pack (branch+code+notes+tests+risks); --json for structured
+  penguin flow <endpoint|symbol> linear execution chain (endpoint→service→db→…)
   penguin backlinks <node>      who links it
   penguin path <a> <b>          shortest path a→b
   penguin recent                recent changes
@@ -317,6 +320,13 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
           const pack = buildContextPack(store, pos.join(" "));
           if (!pack.focus) { deps.err(`no context for "${pack.target}"`); return 1; }
           emit(deps, json, renderContextPackMarkdown(pack), pack);
+          return 0;
+        }
+        case "flow": {
+          // Flow Explorer: linear execution chain from an endpoint/symbol.
+          const flow = buildFlow(store, pos.join(" "));
+          if (!flow.root) { deps.err(`no flow for "${flow.target}"`); return 1; }
+          emit(deps, json, renderFlowMarkdown(flow), flow);
           return 0;
         }
         case "compare": {
