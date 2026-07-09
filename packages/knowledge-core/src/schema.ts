@@ -185,9 +185,14 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts_symbols USING fts5(
 
 export const SCHEMA_VERSION = 4;
 
-// Idempotent additive migrations for columns introduced after v1 (existing dev
-// dbs have data — never force a rebuild for an additive change).
-function migrate(db: Database.Database): void {
+// Idempotent additive migrations for schemas that predate SCHEMA_VERSION.
+// Each step guards on actual schema state (column presence) rather than the
+// stored version, so a mislabeled version can't corrupt an already-migrated
+// DB — and CREATE TABLE/INDEX IF NOT EXISTS in DDL already covers new *tables*.
+// `from` is the version read from meta; gate future NON-idempotent steps on it
+// (e.g. `if (from < 5) { ...backfill... }`). Additive column adds stay in the
+// idempotent guards below and need no version gate.
+function migrate(db: Database.Database, _from: number): void {
   const edgeCols = (db.prepare("PRAGMA table_info(edges)").all() as { name: string }[]).map(
     (c) => c.name,
   );
@@ -204,10 +209,45 @@ export function openDatabase(path: string): Database.Database {
   // 此时被引用的 nodes 尚未由上层索引器重建——引用完整性由
   // 「账本 + 全量重建流程」保证，不靠 SQLite 外键（D4）。
   db.pragma("foreign_keys = OFF");
+
+  // A fresh DB has no tables yet — DDL below builds it at the current schema,
+  // so only a PRE-EXISTING DB needs the migration ladder. Detect that before
+  // DDL creates `meta`.
+  const preexisting =
+    db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'")
+      .get() != null;
+
   db.exec(DDL);
-  migrate(db);
+
+  const storedVersion = preexisting
+    ? Number(
+        (
+          db.prepare("SELECT value FROM meta WHERE key='schema_version'").get() as
+            | { value: string }
+            | undefined
+        )?.value ?? 1,
+      )
+    : SCHEMA_VERSION;
+
+  // Fail loud on a DB written by a newer build — operating on it with an older
+  // schema would silently drop/misread columns (§9 绝不静默降级).
+  if (storedVersion > SCHEMA_VERSION) {
+    db.close();
+    throw new Error(
+      `knowledge.db schema_version ${storedVersion} is newer than this build ` +
+        `supports (${SCHEMA_VERSION}); upgrade Penguin before opening it.`,
+    );
+  }
+
+  migrate(db, storedVersion);
+
+  // Upsert (NOT INSERT OR IGNORE): after a successful migration the stored
+  // version must actually advance to the code's version, so future opens gate
+  // correctly instead of the number lying forever.
   db.prepare(
-    "INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', ?)",
+    "INSERT INTO meta (key, value) VALUES ('schema_version', ?) " +
+      "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
   ).run(String(SCHEMA_VERSION));
   db.prepare(
     "INSERT OR IGNORE INTO ledger_state (id, materialized_seq) VALUES ('main', 0)",
