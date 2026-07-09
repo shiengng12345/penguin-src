@@ -15,6 +15,18 @@ const ALWAYS_IGNORE = new Set([
 
 const DEFAULT_MAX_BYTES = 1_000_000;
 
+// Minified/generated bundles (`*.min.js`, `vendor.bundle.js`) have no meaningful
+// symbols — indexing them floods the graph with single-letter hubs (n/a/i/$).
+const MINIFIED_NAME = /\.min\.(js|mjs|cjs|css)$|[.-]bundle\.js$|\.bundle\.min\./i;
+
+// Content heuristic for minified/generated files that dodge the name check: a
+// large file whose average line is very long is packed, not hand-written.
+export function isLikelyMinified(source: string): boolean {
+  if (source.length < 3000) return false;
+  const newlines = (source.match(/\n/g) ?? []).length;
+  return source.length / (newlines + 1) > 300; // normal source averages ~30–80
+}
+
 // Minimal .gitignore support: exact names + `dir/` + `*.ext` globs at repo root.
 // Not a full gitignore engine (nested/negation deferred) — enough to skip the
 // common heavy dirs/artifacts beyond ALWAYS_IGNORE (§6.1).
@@ -58,7 +70,7 @@ export function* walkRepoFiles(
         if (ALWAYS_IGNORE.has(entry.name) || ignored(rel, entry.name)) continue;
         yield* walk(abs);
       } else if (entry.isFile()) {
-        if (ignored(rel, entry.name)) continue;
+        if (ignored(rel, entry.name) || MINIFIED_NAME.test(entry.name)) continue;
         let st;
         try {
           st = statSync(abs);

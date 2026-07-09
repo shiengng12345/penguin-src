@@ -9,7 +9,7 @@ import { indexGitObjects } from "./gitgraph.js";
 import { langForExtension } from "./registry.js";
 import { detectRenames } from "./rename.js";
 import { resolveRefs, type SymbolIndex } from "./resolve.js";
-import { walkRepoFiles } from "./walk.js";
+import { walkRepoFiles, isLikelyMinified } from "./walk.js";
 
 export interface IndexReport {
   repoId: string;
@@ -157,7 +157,9 @@ async function indexFileWithSource(
   },
 ): Promise<{ error: string | null; renamed: number }> {
   const lang = langForExtension(p.relPath);
-  if (!lang) {
+  // Skip non-source files AND minified/generated bundles that slipped past the
+  // name filter — parsing them yields single-letter symbols that dominate hubs.
+  if (!lang || isLikelyMinified(p.source)) {
     store.upsertFileCheckpoint({
       repoId: p.repoId, branchId: p.branchId, filePath: p.relPath,
       mtimeMs: p.mtimeMs, sizeBytes: p.sizeBytes, contentHash: p.contentHash, status: "skipped",

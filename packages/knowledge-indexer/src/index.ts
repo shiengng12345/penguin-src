@@ -15,7 +15,7 @@ export { parseNote, indexNote, extractEntities, type ParsedNote } from "./notes.
 export { createNote, createIncident, appendNote, writeNoteBody, readNote, listNotes, reindexNotesDir, noteSlug, type NoteType } from "./notes-fs.js";
 export { resolveNoteLinks } from "./fusion.js";
 export { readGitContext, type GitContext } from "./git.js";
-export { walkRepoFiles, type WalkedFile } from "./walk.js";
+export { walkRepoFiles, isLikelyMinified, type WalkedFile } from "./walk.js";
 export { indexGitObjects, type GitGraphResult } from "./gitgraph.js";
 export { indexRepo, reconcileOnStartup, IndexTaskLock, type IndexReport } from "./pipeline.js";
 export { startWatcher, type WatcherHandle, type WatcherStatus } from "./watcher.js";
