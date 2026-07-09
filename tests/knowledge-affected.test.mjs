@@ -29,3 +29,26 @@ test("affectedByFiles: changed file → its symbols + transitive callers + tests
   assert.ok(a.routes.some((r) => r.includes("S.m")), "reaching route found");
   store.close();
 });
+
+test("architecture + deadCode overviews (§ parity)", async () => {
+  const { KnowledgeStore, architecture, deadCode } = await import("../packages/knowledge-core/dist/index.js");
+  const { mkdtempSync } = await import("node:fs"); const { tmpdir } = await import("node:os"); const { join } = await import("node:path");
+  const dir = mkdtempSync(join(tmpdir(), "pk-arch-"));
+  const store = KnowledgeStore.open({ dbPath: join(dir, "k.db"), ledgerPath: join(dir, "l.jsonl") });
+  const repoId = store.registerRepo({ name: "r", rootPath: "/r" });
+  const branchId = store.registerBranch({ repoId, name: "main", status: "live" });
+  const mk = (n) => { const id = store.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::${n}`, title: n, repoId }); store.upsertSymbolVersion({ nodeId: id, branchId, commitSha: "c0", filePath: "a.ts", lang: "ts", kind: "function", contentHash: `h_${n}`, status: "fresh" }); return id; };
+  const used = mk("used"); const caller = mk("caller"); const orphan = mk("orphan");
+  store.replaceFileEdges({ branchId, filePath: "a.ts", edges: [{ src: caller, dst: used, edgeType: "calls", origin: "parser", method: "EXTRACTED" }] });
+
+  const o = architecture(store);
+  assert.ok(o.repos.some((r) => r.name === "r"));
+  assert.equal(o.nodeCounts.symbol, 3);
+  assert.ok(o.edgeCounts.calls >= 1);
+  assert.ok(o.languages.some((l) => l.lang === "ts"));
+
+  const d = deadCode(store, { limit: 50 });
+  assert.ok(d.candidates.some((c) => c.title === "orphan"), "orphan flagged");
+  assert.ok(!d.candidates.some((c) => c.title === "used"), "used symbol not flagged");
+  store.close();
+});

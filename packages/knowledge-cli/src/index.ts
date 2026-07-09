@@ -4,6 +4,8 @@ import {
   buildFlow,
   renderFlowMarkdown,
   affectedByFiles,
+  architecture,
+  deadCode,
   compareBranches,
   exploreGraph,
   getNodeDetail,
@@ -46,7 +48,7 @@ export interface CliDeps {
 const READ_VERBS = new Set([
   "search", "node", "callers", "calls", "impact", "backlinks",
   "path", "recent", "compare", "status", "suggestions", "snapshots", "doctor",
-  "files", "filesymbols", "graph", "repograph", "tags", "context", "flow", "affected",
+  "files", "filesymbols", "graph", "repograph", "tags", "context", "flow", "affected", "architecture", "deadcode",
 ]);
 
 // repo/branch args accept an id OR a name (humans pass names; the Wiki passes
@@ -105,6 +107,8 @@ const HELP = `penguin — Penguin Knowledge CLI
   penguin context <symbol|api>  AI context pack (branch+code+notes+tests+risks); --json for structured
   penguin flow <endpoint|symbol> linear execution chain (endpoint→service→db→…)
   penguin affected <file>…      blast radius of changed files (impacted symbols/tests/routes)
+  penguin architecture          project overview (repos/nodes/edges/langs/hubs/entrypoints)
+  penguin deadcode              symbols nothing references (candidates; verify DI/reflection)
   penguin incident new <title>  scaffold an error/incident memory note
   penguin note new <title> [--type=decision|incident|compliance|bug|requirement]
   penguin backlinks <node>      who links it
@@ -358,6 +362,24 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
             : `changed ${a.changed.length} · impacted ${a.impacted.length} · tests ${a.tests.length} · routes ${a.routes.length}\n`
               + a.routes.map((r) => `  route: ${r}`).join("\n");
           emit(deps, json, txt, a);
+          return 0;
+        }
+        case "architecture": {
+          const o = architecture(store);
+          const txt = [
+            `repos: ${o.repos.map((r) => `${r.name}(${r.branches}br)`).join(", ")}`,
+            `nodes: ${Object.entries(o.nodeCounts).map(([k, v]) => `${k} ${v}`).join(" · ")}`,
+            `edges: ${Object.entries(o.edgeCounts).map(([k, v]) => `${k} ${v}`).join(" · ")}`,
+            `langs: ${o.languages.map((l) => `${l.lang} ${l.symbols}`).join(" · ")}`,
+            `hubs: ${o.hubs.map((h) => h.title).join(", ")}`,
+            `entrypoints: ${o.entryPoints.length}`,
+          ].join("\n");
+          emit(deps, json, txt, o);
+          return 0;
+        }
+        case "deadcode": {
+          const d = deadCode(store, { limit: 100 });
+          emit(deps, json, `${d.candidates.length} candidate(s) — ${d.note}\n` + d.candidates.slice(0, 40).map((c) => `  ${c.title}`).join("\n"), d);
           return 0;
         }
         case "compare": {

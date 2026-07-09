@@ -842,3 +842,52 @@ export function affectedByFiles(
     routes: routes.map((r) => nodeBrief(store, r.id).title),
   };
 }
+
+// —— architecture: one-call project overview (AI onboarding, § parity) ——
+export interface ArchitectureOverview {
+  repos: Array<{ name: string; branches: number }>;
+  nodeCounts: Record<string, number>;
+  edgeCounts: Record<string, number>;
+  languages: Array<{ lang: string; symbols: number }>;
+  hubs: Array<{ title: string; nodeType: string; degree: number }>;
+  entryPoints: string[];
+}
+export function architecture(store: KnowledgeStore): ArchitectureOverview {
+  const rows = <T,>(sql: string, ...p: unknown[]) => store.db.prepare(sql).all(...p) as T[];
+  const repos = rows<{ name: string; n: number }>(
+    "SELECT r.name AS name, (SELECT COUNT(*) FROM branches b WHERE b.repo_id=r.id) AS n FROM repos r ORDER BY r.name",
+  ).map((r) => ({ name: r.name, branches: r.n }));
+  const countMap = (sql: string) => Object.fromEntries(rows<{ k: string; n: number }>(sql).map((r) => [r.k, r.n]));
+  const nodeCounts = countMap("SELECT node_type AS k, COUNT(*) AS n FROM nodes GROUP BY node_type ORDER BY n DESC");
+  const edgeCounts = countMap("SELECT edge_type AS k, COUNT(*) AS n FROM edges WHERE status='active' GROUP BY edge_type ORDER BY n DESC");
+  const languages = rows<{ lang: string; symbols: number }>(
+    "SELECT lang, COUNT(*) AS symbols FROM symbol_versions WHERE status='fresh' GROUP BY lang ORDER BY symbols DESC LIMIT 12",
+  );
+  const hubs = rows<{ id: string; degree: number }>(
+    `SELECT node AS id, COUNT(*) AS degree FROM (
+        SELECT src AS node FROM edges WHERE status='active' AND edge_type IN ('calls','references')
+        UNION ALL SELECT dst AS node FROM edges WHERE status='active' AND edge_type IN ('calls','references') AND dst IS NOT NULL
+     ) GROUP BY node ORDER BY degree DESC LIMIT 40`,
+  ).map((h) => { const b = nodeBrief(store, h.id); return { title: b.title, nodeType: b.nodeType, degree: h.degree }; })
+   .filter((h) => h.nodeType === "symbol").slice(0, 12);
+  const entryPoints = rows<{ title: string }>("SELECT title FROM nodes WHERE node_type='endpoint' ORDER BY title LIMIT 30").map((r) => r.title);
+  return { repos, nodeCounts, edgeCounts, languages, hubs, entryPoints };
+}
+
+// —— dead code: symbols nothing references (best-effort; DI/reflection/entry
+// points inflate false positives → callers must treat as candidates) ——
+export interface DeadCodeResult { candidates: ContextBrief[]; note: string }
+export function deadCode(store: KnowledgeStore, options?: { limit?: number }): DeadCodeResult {
+  const limit = options?.limit ?? 100;
+  const rows = store.db.prepare(
+    `SELECT n.id AS id FROM nodes n
+      WHERE n.node_type='symbol'
+        AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.dst=n.id AND e.status='active'
+                          AND e.edge_type IN ('calls','references','handles','tests'))
+      LIMIT ?`,
+  ).all(limit) as { id: string }[];
+  return {
+    candidates: rows.map((r) => { const b = nodeBrief(store, r.id); return { nodeId: b.nodeId, title: b.title, nodeType: b.nodeType }; }),
+    note: "no inbound calls/references/handles/tests — verify: DI, reflection, framework magic, dynamic import, and public entry points are false positives.",
+  };
+}
