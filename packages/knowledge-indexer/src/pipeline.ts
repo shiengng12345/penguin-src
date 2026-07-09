@@ -380,9 +380,13 @@ export async function indexRepo(input: {
   const git = readGitContext(rootPath);
   // Prefer the git remote's repo name (e.g. penguin-src); fall back to the local
   // folder name for non-git checkouts or remote-less repos.
+  // Index from the git worktree root (git.checkoutPath), not the passed-in
+  // subdir — so a subdir and its repo root map to ONE repo with consistent
+  // repo-root-relative paths (no duplicate penguin-src).
+  const scanRoot = git.checkoutPath;
   const repoId = store.registerRepo({
-    name: git.repoName ?? basename(rootPath),
-    rootPath: git.checkoutPath,
+    name: git.repoName ?? basename(scanRoot),
+    rootPath: scanRoot,
   });
   const branchId = store.registerBranch({
     repoId, name: git.branch, headCommit: git.commit, checkoutPath: git.checkoutPath, status: "live",
@@ -406,7 +410,7 @@ export async function indexRepo(input: {
     }
 
     // Collect the file list first so progress has a total for a % bar.
-    const files = [...walkRepoFiles(rootPath)];
+    const files = [...walkRepoFiles(scanRoot)];
     input.onProgress?.({ phase: "scan", done: 0, total: files.length, file: "" });
 
     const seen = new Set<string>();
@@ -446,7 +450,7 @@ export async function indexRepo(input: {
 
       const r = await indexFileWithSource(store, {
         repoId, branchId, commit: git.commit, relPath: file.relPath,
-        absPath: file.absPath, rootPath,
+        absPath: file.absPath, rootPath: scanRoot,
         source, contentHash, mtimeMs: file.mtimeMs, sizeBytes: file.sizeBytes,
       });
       if (r.error) report.errors += 1;

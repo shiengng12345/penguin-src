@@ -29,18 +29,19 @@ function readRepoName(gitDir: string): string | null {
 
 // Resolve the git dir for a path: a `.git` directory, or a `.git` file
 // ("gitdir: <path>" — submodule/worktree), searching upward (§4.8). null = non-git.
-function findGitDir(rootPath: string): string | null {
+function findGitDir(rootPath: string): { gitDir: string; worktreeRoot: string } | null {
   let dir = resolve(rootPath);
   for (;;) {
     const dotgit = join(dir, ".git");
     if (existsSync(dotgit)) {
       const st = statSync(dotgit);
-      if (st.isDirectory()) return dotgit;
+      // `dir` is the working-tree root regardless of .git being a dir or a file.
+      if (st.isDirectory()) return { gitDir: dotgit, worktreeRoot: dir };
       if (st.isFile()) {
         const m = readFileSync(dotgit, "utf8").match(/^gitdir:\s*(.+)\s*$/m);
         if (m) {
           const target = m[1].trim();
-          return isAbsolute(target) ? target : resolve(dir, target);
+          return { gitDir: isAbsolute(target) ? target : resolve(dir, target), worktreeRoot: dir };
         }
       }
     }
@@ -87,11 +88,15 @@ function resolveRef(gitDir: string, ref: string): string | null {
 // CLI, §4.8). Non-git → implicit "(workdir)" branch so downstream code has one
 // path (the "code edges carry branch_id" rule needs no special-case).
 export function readGitContext(rootPath: string): GitContext {
-  const checkoutPath = resolve(rootPath);
-  const gitDir = findGitDir(rootPath);
-  if (!gitDir || !existsSync(join(gitDir, "HEAD"))) {
+  const found = findGitDir(rootPath);
+  // A git repo's identity is its WORKTREE ROOT, not the arbitrary subdir passed
+  // in — so indexing repo/ and repo/src-tauri/ resolve to the same repo (no
+  // duplicate). Non-git falls back to the given path.
+  const checkoutPath = found ? found.worktreeRoot : resolve(rootPath);
+  if (!found || !existsSync(join(found.gitDir, "HEAD"))) {
     return { isGit: false, branch: "(workdir)", commit: null, checkoutPath, repoName: null };
   }
+  const gitDir = found.gitDir;
   const repoName = readRepoName(gitDir);
   const head = readFileSync(join(gitDir, "HEAD"), "utf8").trim();
   const refMatch = head.match(/^ref:\s*(.+)$/);

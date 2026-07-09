@@ -57,7 +57,7 @@ const EDGE_LEGEND: Array<{ label: string; color: string }> = [
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type GNode = any;
 
-export type GraphLayout = "radial" | "force";
+export type GraphLayout = "radial" | "force" | "3d";
 
 export function WikiGraph({
   data,

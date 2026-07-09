@@ -3,6 +3,7 @@ import { Database, FileText, Box, Loader2, X, Network, FileCode, Save, Pencil, A
 import { cn } from "@/lib/utils";
 import { WikiBrowseTree } from "@/components/wiki/WikiBrowseTree";
 import { WikiGraph, type GraphLayout } from "@/components/wiki/WikiGraph";
+import { WikiGraph3D } from "@/components/wiki/WikiGraph3D";
 import { WikiNoteEditor } from "@/components/wiki/WikiNoteEditor";
 import {
   knowledgeDbStatus,
@@ -222,7 +223,9 @@ export function WikiPage({ onClose }: WikiPageProps) {
     <div className="relative flex-1">
       {graphBusy ? <Center><Loader2 className="h-4 w-4 animate-spin" /> 加载图谱…</Center>
         : graphData && graphData.nodes.length > 0
-          ? <WikiGraph data={graphData} layout={graphLayout} onNodeClick={(id) => selectSymbol(id)} />
+          ? (graphLayout === "3d"
+              ? <WikiGraph3D data={graphData} onNodeClick={(id) => selectSymbol(id)} />
+              : <WikiGraph data={graphData} layout={graphLayout} onNodeClick={(id) => selectSymbol(id)} />)
           : <Center>选中一个符号看它的关系图</Center>}
     </div>
   );
@@ -309,6 +312,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
                 <div className="flex items-center gap-1 rounded-md border border-slate-800 bg-slate-950/40 p-0.5 text-xs">
                   <button type="button" onClick={() => setGraphLayout("radial")} className={cn("rounded px-2 py-0.5", graphLayout === "radial" ? "bg-cyan-500/15 text-cyan-200" : "text-slate-400 hover:bg-white/5")}>整洁</button>
                   <button type="button" onClick={() => setGraphLayout("force")} className={cn("rounded px-2 py-0.5", graphLayout === "force" ? "bg-cyan-500/15 text-cyan-200" : "text-slate-400 hover:bg-white/5")}>力导向</button>
+                  <button type="button" onClick={() => setGraphLayout("3d")} className={cn("rounded px-2 py-0.5", graphLayout === "3d" ? "bg-cyan-500/15 text-cyan-200" : "text-slate-400 hover:bg-white/5")}>3D</button>
                 </div>
               )}
               {tab === "context" && f && (
