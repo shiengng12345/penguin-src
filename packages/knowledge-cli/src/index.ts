@@ -26,6 +26,7 @@ import {
   type KnowledgeStore,
 } from "@penguin/knowledge-core";
 import { indexRepo, writeAgentGuidance, createNote, createIncident, appendNote, writeNoteBody, readNote, listNotes, reindexNotesDir } from "@penguin/knowledge-indexer";
+import { resolveProvider, aiComplete } from "./ai.js";
 
 export interface CliDeps {
   cwd: string;
@@ -110,6 +111,7 @@ const HELP = `penguin — Penguin Knowledge CLI
   penguin calls <symbol>        what it calls
   penguin impact <symbol>       transitive blast radius
   penguin context <symbol|api>  AI context pack (branch+code+notes+tests+risks); --json for structured
+  penguin explain <symbol>      plain-English summary via BYOK AI (--provider/--model/--key)
   penguin flow <endpoint|symbol> linear execution chain (endpoint→service→db→…)
   penguin affected <file>…      blast radius of changed files (impacted symbols/tests/routes)
   penguin architecture          project overview (repos/nodes/edges/langs/hubs/entrypoints)
@@ -297,6 +299,34 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
       const r = createIncident({ store, notesDir, title });
       emit(deps, json, `incident created ${r.path}  (id ${r.slug})\nfill in root cause / fix, link code with [[Name]]`, { ok: true, slug: r.slug, path: r.path, nodeId: r.nodeId });
       return 0;
+    } finally {
+      store.close();
+    }
+  }
+
+  // AI explain (optional BYOK layer): plain-English "what does this do", grounded
+  // in the deterministic Context Pack. No AI in the graph itself — this just
+  // routes the pack to a provider (DeepSeek default). `explain <symbol>`.
+  if (verb === "explain") {
+    if (!deps.storeExists()) { deps.err("no knowledge database — run `penguin init` first"); return 3; }
+    const target = pos.join(" ").trim();
+    if (!target) { deps.err("usage: penguin explain <symbol|endpoint> [--provider=deepseek|openai] [--model=…] [--key=…]"); return 2; }
+    const flagVal = (name: string) => flags.find((fl) => fl.startsWith(`--${name}=`))?.slice(name.length + 3);
+    const store = deps.openStore();
+    try {
+      const pack = buildContextPack(store, target);
+      if (!pack.focus) { deps.err(`no context for "${target}"`); return 1; }
+      const cfg = resolveProvider({ provider: flagVal("provider"), model: flagVal("model"), apiKey: flagVal("key") });
+      const md = renderContextPackMarkdown(pack);
+      const answer = await aiComplete(cfg, [
+        { role: "system", content: "You are a senior engineer. Explain what the given code symbol does in plain English: purpose, key behaviour, inputs/outputs, and notable risks. Be concise (a short paragraph + bullet points). Ground every claim in the provided context; do not invent APIs." },
+        { role: "user", content: `Explain \`${pack.focus.title}\`.\n\nContext:\n${md}` },
+      ]);
+      emit(deps, json, answer, { target, provider: cfg.provider, model: cfg.model, explanation: answer });
+      return 0;
+    } catch (e) {
+      deps.err((e as Error).message);
+      return 1;
     } finally {
       store.close();
     }
