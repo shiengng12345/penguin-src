@@ -34,6 +34,18 @@ const VIA_COLOR: Record<string, string> = {
   tests: "#34d399", handles: "#fb7185", invokes: "#38bdf8", throws: "#f87171", uses: "#e879f9", root: "#22d3ee",
 };
 
+// NestJS built-in exceptions → the HTTP status they produce, so "会抛出" reads as
+// the possible error responses of an endpoint.
+const EXC_STATUS: Record<string, string> = {
+  BadRequestException: "400", UnauthorizedException: "401", ForbiddenException: "403",
+  NotFoundException: "404", MethodNotAllowedException: "405", NotAcceptableException: "406",
+  RequestTimeoutException: "408", ConflictException: "409", GoneException: "410",
+  PayloadTooLargeException: "413", UnsupportedMediaTypeException: "415", UnprocessableEntityException: "422",
+  InternalServerErrorException: "500", NotImplementedException: "501", BadGatewayException: "502",
+  ServiceUnavailableException: "503", GatewayTimeoutException: "504", RpcException: "gRPC",
+};
+const withStatus = (exc: string) => (EXC_STATUS[exc] ? `${EXC_STATUS[exc]} · ${exc}` : exc);
+
 // Penguin Knowledge Wiki — a 4-pane code-intelligence surface:
 //   left Explorer (repo→branch→file→symbol) · centre Context/Graph/Flow for the
 //   selected symbol · right "why" panel (linked notes + relations + freshness).
@@ -199,7 +211,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
           {briefCard("测试覆盖", pack!.tests)}
           {briefCard("被这些文件 import", pack!.importers)}
           {pack!.routes.length > 0 && chipList("HTTP / gRPC 入口", pack!.routes.map((r) => r.route), "#22d3ee")}
-          {pack!.errors.length > 0 && chipList("会抛出", pack!.errors, "#f87171")}
+          {pack!.errors.length > 0 && chipList("可能错误响应", pack!.errors.map(withStatus), "#f87171")}
           {pack!.envs.length > 0 && chipList("用到 env", pack!.envs, "#e879f9")}
         </div>
       </div>
