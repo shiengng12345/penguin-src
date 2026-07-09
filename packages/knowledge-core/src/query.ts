@@ -1044,6 +1044,36 @@ export function timeline(store: KnowledgeStore, opts: { limit?: number; repoId?:
   };
 }
 
+export interface ResponseSample {
+  id: string;
+  endpointKey: string;
+  status: string | null;
+  contentType: string | null;
+  sample: string;
+  capturedAt: string;
+}
+
+// Resolve an endpoint node id from an id or its title (e.g. "gRPC Svc.method",
+// "GET /users"). Returns the raw string if no node matches (samples may be
+// keyed by a global gRPC id).
+export function resolveEndpointId(store: KnowledgeStore, endpoint: string): string {
+  const row = store.db
+    .prepare("SELECT id FROM nodes WHERE node_type='endpoint' AND (id=? OR title=?) LIMIT 1")
+    .get(endpoint, endpoint) as { id: string } | undefined;
+  return row?.id ?? endpoint;
+}
+
+// Captured runtime responses for an endpoint, newest first (§P2 runtime channel).
+export function endpointSamples(store: KnowledgeStore, endpoint: string): ResponseSample[] {
+  const endpointId = resolveEndpointId(store, endpoint);
+  const rows = store.db
+    .prepare(
+      "SELECT id, endpoint_key AS endpointKey, status, content_type AS contentType, sample, captured_at AS capturedAt FROM response_samples WHERE endpoint_id=? ORDER BY captured_at DESC",
+    )
+    .all(endpointId) as ResponseSample[];
+  return rows;
+}
+
 // —— dead code: symbols nothing references (best-effort; DI/reflection/entry
 // points inflate false positives → callers must treat as candidates) ——
 export interface DeadCodeResult { candidates: ContextBrief[]; note: string }

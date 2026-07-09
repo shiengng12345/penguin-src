@@ -267,3 +267,16 @@ export function parseSearchFilters(input: string): {
   }
   return { query: residual.join(" "), filters };
 }
+
+// Captured runtime responses for an endpoint (Penguin's REST/gRPC channel).
+export interface KnowledgeResponseSample {
+  id: string;
+  endpointKey: string;
+  status: string | null;
+  contentType: string | null;
+  sample: string;
+  capturedAt: string;
+}
+export function knowledgeEndpointSamples(endpoint: string): Promise<KnowledgeResponseSample[]> {
+  return query<KnowledgeResponseSample[]>(["samples", endpoint]);
+}

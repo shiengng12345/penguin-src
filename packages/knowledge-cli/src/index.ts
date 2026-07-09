@@ -7,6 +7,8 @@ import {
   architecture,
   communities,
   timeline,
+  endpointSamples,
+  resolveEndpointId,
   deadCode,
   compareBranches,
   exploreGraph,
@@ -51,7 +53,7 @@ export interface CliDeps {
 const READ_VERBS = new Set([
   "search", "node", "callers", "calls", "impact", "backlinks",
   "path", "recent", "compare", "status", "suggestions", "snapshots", "doctor",
-  "files", "filesymbols", "graph", "repograph", "services", "tags", "context", "flow", "affected", "architecture", "communities", "timeline", "deadcode",
+  "files", "filesymbols", "graph", "repograph", "services", "tags", "context", "flow", "affected", "architecture", "communities", "timeline", "samples", "deadcode",
 ]);
 
 // repo/branch args accept an id OR a name (humans pass names; the Wiki passes
@@ -113,6 +115,8 @@ const HELP = `penguin — Penguin Knowledge CLI
   penguin architecture          project overview (repos/nodes/edges/langs/hubs/entrypoints)
   penguin communities [limit]   module/community clusters (label propagation; god node first)
   penguin timeline [limit]      recent commits across repos (date/author/merge/tags)
+  penguin sample <ep> <status> <json>  capture a real response for an endpoint
+  penguin samples <endpoint>    captured runtime responses for an endpoint
   penguin deadcode              symbols nothing references (candidates; verify DI/reflection)
   penguin incident new <title>  scaffold an error/incident memory note
   penguin note new <title> [--type=decision|incident|compliance|bug|requirement]
@@ -298,6 +302,26 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     }
   }
 
+  // response sample capture (P2 runtime channel): record a real REST/gRPC
+  // response for an endpoint. `sample <endpoint> <status> <json> [contentType]`.
+  if (verb === "sample") {
+    const [endpoint, statusArg, payload, contentType] = pos;
+    if (!endpoint || !payload) { deps.err("usage: penguin sample <endpoint> <status> <json-or-text> [contentType]"); return 2; }
+    const store = deps.openStore();
+    try {
+      const endpointId = resolveEndpointId(store, endpoint);
+      const ev = store.recordKnowledge({
+        type: "response_sample_captured", origin: "user", method: "ASSERTED",
+        actor: { type: "user", id: "cli" }, target: { node_id: endpointId },
+        payload: { endpoint_id: endpointId, endpoint_key: endpoint, status: statusArg ?? null, content_type: contentType ?? null, sample: payload },
+      });
+      emit(deps, json, `captured sample for ${endpoint}${statusArg ? ` (${statusArg})` : ""}`, { ok: true, eventId: ev.id, endpointId });
+      return 0;
+    } finally {
+      store.close();
+    }
+  }
+
   // ledger write verbs (may create the DB, §9)
   if (verb === "accept" || verb === "reject" || verb === "link" || verb === "snapshot") {
     const store = deps.openStore();
@@ -403,6 +427,12 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
           const t = timeline(store, { limit: pos[0] ? Number(pos[0]) || 50 : 50 });
           const txt = t.entries.map((e) => `${(e.date ?? "").slice(0, 10)}  ${e.repo ?? "?"}  ${e.merge ? "⑃ " : ""}${e.subject}${e.tags.length ? ` [${e.tags.join(",")}]` : ""}`).join("\n") || "(no commits indexed)";
           emit(deps, json, txt, t);
+          return 0;
+        }
+        case "samples": {
+          const rows = endpointSamples(store, pos.join(" "));
+          const txt = rows.map((r) => `${(r.capturedAt ?? "").slice(0, 19)}  ${r.status ?? ""}  ${r.contentType ?? ""}\n${r.sample.slice(0, 400)}`).join("\n---\n") || "(no samples — capture with `penguin sample <endpoint> <status> <json>`)";
+          emit(deps, json, txt, rows);
           return 0;
         }
         case "deadcode": {

@@ -68,6 +68,10 @@ export function materialize(
     VALUES (@id, @src, @dst, @raw_target, @edge_type,
       @branch_id, 'ai', 'INFERRED', @confidence, @provenance, 'suggested')
   `);
+  const insertResponseSample = db.prepare(`
+    INSERT INTO response_samples (id, endpoint_id, endpoint_key, status, content_type, sample, captured_at)
+    VALUES (@id, @endpoint_id, @endpoint_key, @status, @content_type, @sample, @captured_at)
+  `);
   const setEdgeStatus = db.prepare(
     "UPDATE edges SET status = @status, method = @method, confidence = @confidence WHERE id = @id",
   );
@@ -164,6 +168,18 @@ export function materialize(
             status: "rejected",
             method: "INFERRED",
             confidence: 0.0,
+          });
+          break;
+        }
+        case "response_sample_captured": {
+          insertResponseSample.run({
+            id: `sample_${e.id}`,
+            endpoint_id: String(p.endpoint_id ?? ""),
+            endpoint_key: String(p.endpoint_key ?? ""),
+            status: p.status == null ? null : String(p.status),
+            content_type: p.content_type == null ? null : String(p.content_type),
+            sample: String(p.sample ?? ""),
+            captured_at: e.ts,
           });
           break;
         }

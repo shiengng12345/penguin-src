@@ -167,6 +167,21 @@ CREATE TABLE IF NOT EXISTS entities (
   UNIQUE (entity_type, normalized_value)
 );
 
+-- Runtime response samples captured for an endpoint (Penguin is itself a
+-- REST/gRPC client, so it can feed REAL responses back into the graph). Not
+-- parser-derivable → written only via the ledger (response_sample_captured),
+-- materialized here; survives a parser rebuild like notes/manual edges.
+CREATE TABLE IF NOT EXISTS response_samples (
+  id TEXT PRIMARY KEY,
+  endpoint_id TEXT NOT NULL,
+  endpoint_key TEXT NOT NULL,
+  status TEXT,
+  content_type TEXT,
+  sample TEXT NOT NULL,
+  captured_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_response_samples_endpoint ON response_samples(endpoint_id);
+
 CREATE TABLE IF NOT EXISTS credential_entries (
   node_id TEXT PRIMARY KEY REFERENCES nodes(id),
   title TEXT NOT NULL,
@@ -183,7 +198,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts_symbols USING fts5(
 );
 `;
 
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 // Idempotent additive migrations for schemas that predate SCHEMA_VERSION.
 // Each step guards on actual schema state (column presence) rather than the

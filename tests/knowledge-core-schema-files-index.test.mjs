@@ -9,12 +9,11 @@ function tempDbPath() {
   return join(mkdtempSync(join(tmpdir(), "pk-fidx-")), "knowledge.db");
 }
 
-test("schema version is 4 and meta records it", () => {
-  assert.equal(SCHEMA_VERSION, 4);
+test("meta records the current schema version", () => {
   const db = openDatabase(tempDbPath());
   const row = db.prepare("SELECT value FROM meta WHERE key = 'schema_version'").get();
-  // meta seeds on first create; version constant is the source of truth
-  assert.ok(row.value === "4" || row.value === "1");
+  // A fresh DB stamps the current constant (source of truth).
+  assert.equal(row.value, String(SCHEMA_VERSION));
   db.close();
 });
 
