@@ -129,7 +129,11 @@ export function WikiGraph({
       nodes,
       links: view.edges.map((e) => ({ source: e.src, target: e.dst, edgeType: e.edgeType })),
     });
-    graph.zoomToFit?.(500, 50);
+    // Fit AFTER positions exist. Radial pins fx/fy so the sim may settle in one
+    // tick and onEngineStop can fire before layout paints — a delayed fit is the
+    // reliable one (the synchronous fit was zooming to an unpositioned graph →
+    // focus stuck in a corner).
+    setTimeout(() => graph.zoomToFit?.(400, 60), 90);
   };
 
   const baseLinkColor = (l: GNode) => EDGE_COL[l.edgeType as string] ?? COL.link;
@@ -275,9 +279,26 @@ export function WikiGraph({
     }
   }, [layout]);
 
+  const zoomBy = (f: number) => {
+    const g = graphRef.current;
+    if (g?.zoom) g.zoom(Math.max(0.2, g.zoom() * f), 200);
+  };
+
   return (
     <div className="relative h-full w-full">
       <div ref={containerRef} className="h-full w-full" />
+      <div className="absolute left-3 top-3 flex flex-col gap-1.5">
+        {[
+          { t: "放大", on: () => zoomBy(1.3), d: "M12 5v14M5 12h14" },
+          { t: "缩小", on: () => zoomBy(0.77), d: "M5 12h14" },
+          { t: "适配", on: () => graphRef.current?.zoomToFit?.(400, 60), d: "M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4" },
+        ].map((b) => (
+          <button key={b.t} type="button" title={b.t} onClick={b.on}
+            className="grid h-7 w-7 place-items-center rounded-md border border-slate-700 bg-slate-950/70 text-slate-300 backdrop-blur hover:bg-white/5">
+            <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d={b.d} /></svg>
+          </button>
+        ))}
+      </div>
       <div className="pointer-events-none absolute bottom-3 left-3 flex flex-wrap gap-x-3 gap-y-1 rounded-md bg-black/30 px-2.5 py-1.5 text-[10px] text-slate-300 backdrop-blur-sm">
         {EDGE_LEGEND.map((e) => (
           <span key={e.label} className="flex items-center gap-1">
