@@ -35,6 +35,8 @@ export {
   renderContextPackMarkdown,
   buildFlow,
   renderFlowMarkdown,
+  affectedByFiles,
+  type AffectedResult,
   branchFreshness,
   liveBranchOf,
   type BranchFreshness,

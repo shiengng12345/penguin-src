@@ -783,3 +783,62 @@ export function renderFlowMarkdown(flow: FlowResult): string {
   }
   return L.join("\n");
 }
+
+// —— affected: git-diff blast radius (§ codebase-memory-mcp parity) ——
+// Given changed files, return the symbols they define, the transitive callers
+// (blast radius), the tests that cover any of them, and the routes that reach
+// them — so a PR review / AI edit knows "what could this break".
+export interface AffectedResult {
+  files: string[];
+  changed: ContextBrief[];
+  impacted: ContextBrief[];
+  tests: ContextBrief[];
+  routes: string[];
+}
+export function affectedByFiles(
+  store: KnowledgeStore,
+  files: string[],
+  options?: { depth?: number; limit?: number },
+): AffectedResult {
+  const depth = options?.depth ?? 3;
+  const limit = options?.limit ?? 200;
+  if (files.length === 0) return { files, changed: [], impacted: [], tests: [], routes: [] };
+  const ph = files.map(() => "?").join(",");
+  const changedIds = (store.db
+    .prepare(`SELECT DISTINCT node_id AS id FROM symbol_versions WHERE file_path IN (${ph})`)
+    .all(...files) as { id: string }[]).map((r) => r.id);
+
+  // transitive who_calls from the changed set = blast radius.
+  const seen = new Set(changedIds);
+  let frontier = [...changedIds];
+  for (let d = 0; d < depth && frontier.length && seen.size < limit; d++) {
+    const next: string[] = [];
+    for (const id of frontier) {
+      if (seen.size >= limit) break;
+      // both "calls" and "references" mean "depends on this" — a DTO/type change
+      // ripples through its type-users just as a fn change ripples through callers.
+      const callers = store.db.prepare("SELECT DISTINCT src FROM edges WHERE dst=? AND edge_type IN ('calls','references') AND status='active'").all(id) as { src: string }[];
+      for (const c of callers) if (!seen.has(c.src)) { seen.add(c.src); next.push(c.src); }
+    }
+    frontier = next;
+  }
+  const impactedIds = [...seen].filter((id) => !changedIds.includes(id));
+
+  const allIds = [...seen];
+  const p2 = allIds.map(() => "?").join(",");
+  const tests = allIds.length
+    ? (store.db.prepare(`SELECT DISTINCT src AS id FROM edges WHERE edge_type='tests' AND status='active' AND dst IN (${p2}) LIMIT ?`).all(...allIds, limit) as { id: string }[])
+    : [];
+  const routes = allIds.length
+    ? (store.db.prepare(`SELECT DISTINCT src AS id FROM edges WHERE edge_type='handles' AND status='active' AND dst IN (${p2}) LIMIT ?`).all(...allIds, limit) as { id: string }[])
+    : [];
+
+  const brief = (ids: string[]): ContextBrief[] => ids.map((id) => { const b = nodeBrief(store, id); return { nodeId: b.nodeId, title: b.title, nodeType: b.nodeType }; });
+  return {
+    files,
+    changed: brief(changedIds),
+    impacted: brief(impactedIds),
+    tests: brief(tests.map((t) => t.id)),
+    routes: routes.map((r) => nodeBrief(store, r.id).title),
+  };
+}

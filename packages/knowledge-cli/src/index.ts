@@ -3,6 +3,7 @@ import {
   renderContextPackMarkdown,
   buildFlow,
   renderFlowMarkdown,
+  affectedByFiles,
   compareBranches,
   exploreGraph,
   getNodeDetail,
@@ -45,7 +46,7 @@ export interface CliDeps {
 const READ_VERBS = new Set([
   "search", "node", "callers", "calls", "impact", "backlinks",
   "path", "recent", "compare", "status", "suggestions", "snapshots", "doctor",
-  "files", "filesymbols", "graph", "repograph", "tags", "context", "flow",
+  "files", "filesymbols", "graph", "repograph", "tags", "context", "flow", "affected",
 ]);
 
 // repo/branch args accept an id OR a name (humans pass names; the Wiki passes
@@ -103,6 +104,7 @@ const HELP = `penguin — Penguin Knowledge CLI
   penguin impact <symbol>       transitive blast radius
   penguin context <symbol|api>  AI context pack (branch+code+notes+tests+risks); --json for structured
   penguin flow <endpoint|symbol> linear execution chain (endpoint→service→db→…)
+  penguin affected <file>…      blast radius of changed files (impacted symbols/tests/routes)
   penguin incident new <title>  scaffold an error/incident memory note
   penguin note new <title> [--type=decision|incident|compliance|bug|requirement]
   penguin backlinks <node>      who links it
@@ -347,6 +349,15 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
           const flow = buildFlow(store, pos.join(" "));
           if (!flow.root) { deps.err(`no flow for "${flow.target}"`); return 1; }
           emit(deps, json, renderFlowMarkdown(flow), flow);
+          return 0;
+        }
+        case "affected": {
+          // Blast radius of changed files (pass paths, or a git diff piped in).
+          const a = affectedByFiles(store, pos);
+          const txt = pos.length === 0 ? "usage: penguin affected <file>…"
+            : `changed ${a.changed.length} · impacted ${a.impacted.length} · tests ${a.tests.length} · routes ${a.routes.length}\n`
+              + a.routes.map((r) => `  route: ${r}`).join("\n");
+          emit(deps, json, txt, a);
           return 0;
         }
         case "compare": {
