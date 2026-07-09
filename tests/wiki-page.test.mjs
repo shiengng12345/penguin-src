@@ -26,13 +26,13 @@ test("parseSearchFilters splits type:/repo:/tag:/entity: from free text", async 
   assert.deepEqual(plain.filters, {});
 });
 
-test("WikiPage wires the knowledge client (node/explore/context/flow/status)", async () => {
+test("WikiPage wires the knowledge client (explore/context/flow/status)", async () => {
   const source = await readFile(new URL("../src/components/wiki/WikiPage.tsx", import.meta.url), "utf8");
-  for (const fn of ["knowledgeNode", "knowledgeExplore", "knowledgeContext", "knowledgeFlow", "knowledgeDbStatus"]) {
+  for (const fn of ["knowledgeExplore", "knowledgeContext", "knowledgeFlow", "knowledgeDbStatus", "knowledgeFileSymbols"]) {
     assert.match(source, new RegExp(fn), `WikiPage should use ${fn}`);
   }
   assert.match(source, /backlinks/);
-  assert.match(source, /Context Pack|Copy for AI/); // context pack view
+  assert.match(source, /Copy for AI/); // context pack view
 });
 
 test("knowledge-client routes through the Rust bridge commands", async () => {
@@ -52,10 +52,10 @@ test("knowledge-client exposes index-browse + graph wrappers over the CLI verbs"
   assert.match(source, /query<KnowledgeGraphView>\(\["repograph", repoId, branchId\]\)/);
 });
 
-test("WikiPage has browse/graph/context/flow modes wiring the tree + graph", async () => {
+test("WikiPage: 4-pane layout with Context/Graph/Flow centre tabs", async () => {
   const source = await readFile(new URL("../src/components/wiki/WikiPage.tsx", import.meta.url), "utf8");
-  assert.match(source, /type Mode = "browse" \| "graph" \| "context" \| "flow"/);
-  assert.match(source, /useState<Mode>\("browse"\)/); // default = browse
+  assert.match(source, /type CenterTab = "context" \| "graph" \| "flow"/);
+  assert.match(source, /gridTemplateColumns: "280px 1fr 320px"/); // explorer | centre | why
   assert.match(source, /<WikiBrowseTree/);
   assert.match(source, /<WikiGraph/);
   assert.match(source, /layout=\{graphLayout\}/); // radial ↔ force toggle
