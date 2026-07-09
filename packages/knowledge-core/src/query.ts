@@ -62,6 +62,8 @@ export interface NodeDetail {
   // range (the graph stores only a content hash, not the text). null if the
   // file is unreadable or the node is a note (use body instead).
   source: { code: string; lang: string; filePath: string; startLine: number } | null;
+  // For typed notes (Phase 3 why-layer): kind + lifecycle from frontmatter.
+  note: { type: string; status: string | null; owner: string | null } | null;
 }
 
 // get_node: node + versions (symbol) or body (note, respects mcp_access) + aliases (§8.1).
@@ -81,14 +83,22 @@ export function getNodeDetail(store: KnowledgeStore, idOrKey: string): NodeDetai
     .map((a) => ({ aliasKey: a.aliasKey, reason: a.reason, validTo: a.validTo }));
 
   let body: string | null = null;
+  let note: NodeDetail["note"] = null;
   const noteRow = store.db
-    .prepare("SELECT mcp_access FROM notes_index WHERE node_id=?")
-    .get(nodeId) as { mcp_access: string } | undefined;
+    .prepare("SELECT mcp_access, frontmatter FROM notes_index WHERE node_id=?")
+    .get(nodeId) as { mcp_access: string; frontmatter: string | null } | undefined;
   if (noteRow && noteRow.mcp_access !== "denied") {
     const fts = store.db
       .prepare("SELECT body FROM fts_notes WHERE node_id=?")
       .get(nodeId) as { body: string } | undefined;
     body = fts?.body ?? null;
+    try {
+      const fm = noteRow.frontmatter ? (JSON.parse(noteRow.frontmatter) as Record<string, unknown>) : {};
+      const s = (v: unknown) => (typeof v === "string" ? v : null);
+      note = { type: s(fm.type) ?? "note", status: s(fm.status), owner: s(fm.owner) };
+    } catch {
+      note = { type: "note", status: null, owner: null };
+    }
   }
 
   // Symbol source: prefer the fresh version, read [startLine, endLine] off disk.
@@ -117,7 +127,7 @@ export function getNodeDetail(store: KnowledgeStore, idOrKey: string): NodeDetai
       id: node.id, nodeType: node.node_type, identityKey: node.identity_key,
       title: node.title, repoId: node.repo_id,
     },
-    versions, aliases, body, source,
+    versions, aliases, body, source, note,
   };
 }
 

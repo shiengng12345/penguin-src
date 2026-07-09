@@ -271,6 +271,11 @@ export function WikiPage({ onClose }: WikiPageProps) {
         {primary && (
           <span className="shrink-0 rounded bg-slate-800 px-1.5 py-0.5 text-[10px] uppercase text-slate-300">{primary.kind}</span>
         )}
+        {detail.note && detail.note.type !== "note" && (
+          <span className="shrink-0 rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] uppercase text-emerald-300">
+            {detail.note.type}{detail.note.status ? ` · ${detail.note.status}` : ""}
+          </span>
+        )}
         {detail.node.nodeType === "note" && (
           <button
             type="button"

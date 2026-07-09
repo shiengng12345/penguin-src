@@ -29,6 +29,8 @@ export interface KnowledgeNodeDetail {
   body: string | null;
   // Code symbols: the declaration's source read off disk (null for notes/unreadable).
   source: { code: string; lang: string; filePath: string; startLine: number } | null;
+  // Typed notes (why-layer): kind + lifecycle from frontmatter (null for symbols).
+  note: { type: string; status: string | null; owner: string | null } | null;
 }
 
 export interface KnowledgeGraphResult {

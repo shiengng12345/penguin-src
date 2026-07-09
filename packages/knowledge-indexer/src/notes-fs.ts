@@ -29,21 +29,71 @@ function indexFile(store: KnowledgeStore, notesDir: string, fileName: string): s
 
 // Create `<slug>.md` with id/title frontmatter, then index it. If the slug is
 // taken, suffix -2, -3, … so `note new` never clobbers an existing note.
+// Typed-note kinds (Phase 3 why-layer): the "why" behind code, each with a
+// status/owner lifecycle and links to code via [[wikilinks]] (fusion resolves).
+export type NoteType =
+  | "note" | "decision" | "incident" | "compliance" | "bug" | "requirement" | "architecture" | "migration";
+
 export function createNote(input: {
   store: KnowledgeStore;
   notesDir: string;
   title: string;
   body?: string;
+  // Extra frontmatter (type/status/owner/…) written after id/title. Parsed back
+  // into notes_index.frontmatter, so it's queryable + shown in the detail panel.
+  frontmatter?: Record<string, string>;
 }): { slug: string; path: string; nodeId: string } {
   ensureDir(input.notesDir);
   const base = noteSlug(input.title);
   let slug = base;
   for (let i = 2; existsSync(join(input.notesDir, `${slug}.md`)); i++) slug = `${base}-${i}`;
   const fileName = `${slug}.md`;
-  const content = `---\nid: ${slug}\ntitle: ${input.title}\n---\n\n${input.body ?? ""}`;
+  const extra = Object.entries(input.frontmatter ?? {})
+    .map(([k, v]) => `${k}: ${v}`)
+    .join("\n");
+  const fm = `id: ${slug}\ntitle: ${input.title}${extra ? `\n${extra}` : ""}`;
+  const content = `---\n${fm}\n---\n\n${input.body ?? ""}`;
   writeFileSync(join(input.notesDir, fileName), content);
   const nodeId = indexFile(input.store, input.notesDir, fileName);
   return { slug, path: join(input.notesDir, fileName), nodeId };
+}
+
+// Error/Incident memory (Phase 4): a structured incident note. AI later answers
+// "how did we fix Mongo TLS ECONNRESET?" from these. Links to code via [[…]].
+export function createIncident(input: {
+  store: KnowledgeStore;
+  notesDir: string;
+  title: string;
+  fields?: Partial<{
+    service: string; environment: string; errorMessage: string;
+    rootCause: string; fix: string; relatedCode: string; retest: string;
+  }>;
+}): { slug: string; path: string; nodeId: string } {
+  const f = input.fields ?? {};
+  const body = [
+    `## Error`,
+    f.errorMessage ?? "_(paste the error message / stack)_",
+    ``,
+    `- **service**: ${f.service ?? "?"}`,
+    `- **environment**: ${f.environment ?? "?"}`,
+    ``,
+    `## Root cause`,
+    f.rootCause ?? "_(why it happened)_",
+    ``,
+    `## Fix`,
+    f.fix ?? "_(what resolved it)_",
+    ``,
+    `## Related code`,
+    f.relatedCode ?? "_(link symbols with [[Name]])_",
+    ``,
+    `## Retest`,
+    f.retest ?? "_(steps/command to verify)_",
+    ``,
+  ].join("\n");
+  return createNote({
+    store: input.store, notesDir: input.notesDir, title: input.title, body,
+    frontmatter: { type: "incident", status: "open", ...(f.service ? { service: f.service } : {}) },
+  });
 }
 
 // Append text to an existing note (by slug) and re-index it (same identity).

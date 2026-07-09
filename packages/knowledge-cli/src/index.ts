@@ -17,7 +17,7 @@ import {
   type GraphMode,
   type KnowledgeStore,
 } from "@penguin/knowledge-core";
-import { indexRepo, createNote, appendNote, writeNoteBody, readNote, listNotes, reindexNotesDir } from "@penguin/knowledge-indexer";
+import { indexRepo, createNote, createIncident, appendNote, writeNoteBody, readNote, listNotes, reindexNotesDir } from "@penguin/knowledge-indexer";
 
 export interface CliDeps {
   cwd: string;
@@ -103,6 +103,8 @@ const HELP = `penguin — Penguin Knowledge CLI
   penguin impact <symbol>       transitive blast radius
   penguin context <symbol|api>  AI context pack (branch+code+notes+tests+risks); --json for structured
   penguin flow <endpoint|symbol> linear execution chain (endpoint→service→db→…)
+  penguin incident new <title>  scaffold an error/incident memory note
+  penguin note new <title> [--type=decision|incident|compliance|bug|requirement]
   penguin backlinks <node>      who links it
   penguin path <a> <b>          shortest path a→b
   penguin recent                recent changes
@@ -204,9 +206,10 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     try {
       if (sub === "new") {
         const title = pos.slice(1).join(" ").trim();
-        if (!title) { deps.err("usage: penguin note new <title>"); return 2; }
-        const r = createNote({ store, notesDir, title });
-        emit(deps, json, `created ${r.path}  (id ${r.slug})`, { ok: true, slug: r.slug, path: r.path, nodeId: r.nodeId });
+        if (!title) { deps.err("usage: penguin note new <title> [--type=decision|incident|compliance|bug|requirement|architecture]"); return 2; }
+        const type = flags.find((f) => f.startsWith("--type="))?.slice("--type=".length);
+        const r = createNote({ store, notesDir, title, frontmatter: type ? { type, status: "open" } : undefined });
+        emit(deps, json, `created ${r.path}  (id ${r.slug}${type ? `, type ${type}` : ""})`, { ok: true, slug: r.slug, path: r.path, nodeId: r.nodeId, type });
         return 0;
       }
       if (sub === "append") {
@@ -257,6 +260,23 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
       }
       deps.err("usage: penguin note <new|append|list|reindex> …");
       return 2;
+    } finally {
+      store.close();
+    }
+  }
+
+  // Error/Incident memory (Phase 4): scaffold a structured incident note.
+  if (verb === "incident") {
+    const notesDir = deps.notesDir;
+    if (!notesDir) { deps.err("notes dir not configured"); return 1; }
+    const sub = pos[0];
+    const title = pos.slice(1).join(" ").trim();
+    if (sub !== "new" || !title) { deps.err("usage: penguin incident new <title>"); return 2; }
+    const store = deps.openStore();
+    try {
+      const r = createIncident({ store, notesDir, title });
+      emit(deps, json, `incident created ${r.path}  (id ${r.slug})\nfill in root cause / fix, link code with [[Name]]`, { ok: true, slug: r.slug, path: r.path, nodeId: r.nodeId });
+      return 0;
     } finally {
       store.close();
     }

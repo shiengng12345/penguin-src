@@ -12,7 +12,7 @@ export { extractGrpcClientCalls, grpcEndpointKey, type GrpcClientCall } from "./
 export { resolveRefs, type SymbolIndex, type ResolvedEdges } from "./resolve.js";
 export { detectRenames, type RenameAliasEvent } from "./rename.js";
 export { parseNote, indexNote, extractEntities, type ParsedNote } from "./notes.js";
-export { createNote, appendNote, writeNoteBody, readNote, listNotes, reindexNotesDir, noteSlug } from "./notes-fs.js";
+export { createNote, createIncident, appendNote, writeNoteBody, readNote, listNotes, reindexNotesDir, noteSlug, type NoteType } from "./notes-fs.js";
 export { resolveNoteLinks } from "./fusion.js";
 export { readGitContext, type GitContext } from "./git.js";
 export { walkRepoFiles, type WalkedFile } from "./walk.js";
