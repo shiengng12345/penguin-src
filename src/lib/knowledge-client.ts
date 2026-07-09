@@ -130,6 +130,38 @@ export function knowledgeGraph(node: string, depth = 1): Promise<KnowledgeGraphV
   return query<KnowledgeGraphView>(["graph", node, String(depth)]);
 }
 
+// —— AI Context Pack + Flow (the hero views) ——
+
+export interface ContextBrief { nodeId: string; title: string; nodeType: string }
+export interface ContextPack {
+  target: string;
+  focus: {
+    nodeId: string; title: string; nodeType: string; kind: string | null;
+    filePath: string | null; signature: string | null; source: string | null;
+    branches: Array<{ branch: string; status: string }>;
+  } | null;
+  callers: ContextBrief[];
+  calls: ContextBrief[];
+  referencedBy: ContextBrief[];
+  usesTypes: ContextBrief[];
+  routes: Array<{ route: string; via: "direct" | "caller" }>;
+  tests: ContextBrief[];
+  errors: string[];
+  envs: string[];
+  notes: ContextBrief[];
+  importers: ContextBrief[];
+  signals: string[];
+}
+export function knowledgeContext(target: string): Promise<ContextPack> {
+  return query<ContextPack>(["context", target]);
+}
+
+export interface FlowStep { depth: number; nodeId: string; title: string; nodeType: string; via: string }
+export interface FlowResult { target: string; root: FlowStep | null; steps: FlowStep[] }
+export function knowledgeFlow(target: string): Promise<FlowResult> {
+  return query<FlowResult>(["flow", target]);
+}
+
 // Repo/branch-scoped graph (top-degree hubs).
 export function knowledgeRepoGraph(repoId: string, branchId: string): Promise<KnowledgeGraphView> {
   return query<KnowledgeGraphView>(["repograph", repoId, branchId]);

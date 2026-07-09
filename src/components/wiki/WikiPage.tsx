@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { Database, FileText, Box, Loader2, X, FolderTree, Network, FileCode, Save, Pencil, ArrowLeft } from "lucide-react";
+import { Database, FileText, Box, Loader2, X, FolderTree, Network, FileCode, Save, Pencil, ArrowLeft, Sparkles, Workflow, AlertTriangle } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { WikiBrowseTree } from "@/components/wiki/WikiBrowseTree";
 import { WikiGraph, type GraphLayout } from "@/components/wiki/WikiGraph";
@@ -11,6 +11,8 @@ import {
   knowledgeFileSymbols,
   knowledgeGraph,
   knowledgeRepoGraph,
+  knowledgeContext,
+  knowledgeFlow,
   knowledgeNoteWrite,
   knowledgeNoteRead,
   type KnowledgeDbStatus,
@@ -18,20 +20,34 @@ import {
   type KnowledgeGraphResult,
   type KnowledgeFileSymbol,
   type KnowledgeGraphView,
+  type ContextPack,
+  type FlowResult,
 } from "@/lib/knowledge-client";
 
 interface WikiPageProps {
   onClose: () => void;
 }
 
-type Mode = "browse" | "graph";
+type Mode = "browse" | "graph" | "context" | "flow";
 
 // One step in the Wiki navigation history (for the ← 返回 button).
 type NavEntry =
   | { kind: "node"; id: string }
   | { kind: "graph"; id: string }
+  | { kind: "context"; id: string }
+  | { kind: "flow"; id: string }
   | { kind: "file"; branchId: string; filePath: string }
   | { kind: "repograph"; repoId: string; branchId: string };
+
+// edge/kind → dot colour, shared by graph + context + flow so a symbol reads the
+// same everywhere.
+const KIND_COLOR: Record<string, string> = {
+  note: "#34d399", file: "#f59e0b", endpoint: "#fb7185", entity: "#e879f9", symbol: "#7c8db5",
+};
+const VIA_COLOR: Record<string, string> = {
+  calls: "#60a5fa", references: "#a78bfa", imports: "#94a3b8", defines: "#f59e0b",
+  tests: "#34d399", handles: "#fb7185", invokes: "#38bdf8", throws: "#f87171", uses: "#e879f9", root: "#22d3ee",
+};
 
 // Penguin Knowledge Wiki (§7). Two views over the shared query layer:
 //  - Browse: repo → branch → file → symbol navigation tree + symbol detail (default)
@@ -49,6 +65,9 @@ export function WikiPage({ onClose }: WikiPageProps) {
   const [graphData, setGraphData] = useState<KnowledgeGraphView | null>(null);
   const [graphLoading, setGraphLoading] = useState(false);
   const [graphLayout, setGraphLayout] = useState<GraphLayout>("radial");
+  const [pack, setPack] = useState<ContextPack | null>(null);
+  const [flow, setFlow] = useState<FlowResult | null>(null);
+  const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<{ slug: string; body: string } | null>(null);
   const [savingNote, setSavingNote] = useState(false);
@@ -128,15 +147,31 @@ export function WikiPage({ onClose }: WikiPageProps) {
     }
   }, []);
 
+  const loadContext = useCallback(async (id: string) => {
+    setError(null); setMode("context"); setBusy(true);
+    try { setPack(await knowledgeContext(id)); }
+    catch (e) { setError(String((e as Error).message ?? e)); }
+    finally { setBusy(false); }
+  }, []);
+
+  const loadFlow = useCallback(async (id: string) => {
+    setError(null); setMode("flow"); setBusy(true);
+    try { setFlow(await knowledgeFlow(id)); }
+    catch (e) { setError(String((e as Error).message ?? e)); }
+    finally { setBusy(false); }
+  }, []);
+
   // —— Navigation history: every drill-in (symbol detail / graph recenter / file /
-  // relation jump) is recorded so ← 返回 restores the previous view.
+  // relation jump / context / flow) is recorded so ← 返回 restores the previous view.
   const [trail, setTrail] = useState<NavEntry[]>([]);
   const applyEntry = useCallback((e: NavEntry) => {
-    if (e.kind === "node") { setMode((m) => (m === "graph" ? "browse" : m)); void openNode(e.id); }
+    if (e.kind === "node") { setMode((m) => (m === "graph" || m === "context" || m === "flow" ? "browse" : m)); void openNode(e.id); }
     else if (e.kind === "graph") void focusGraph(e.id);
+    else if (e.kind === "context") void loadContext(e.id);
+    else if (e.kind === "flow") void loadFlow(e.id);
     else if (e.kind === "file") void selectFile(e.branchId, e.filePath);
     else if (e.kind === "repograph") void openRepoGraph(e.repoId, e.branchId);
-  }, [openNode, focusGraph, selectFile, openRepoGraph]);
+  }, [openNode, focusGraph, loadContext, loadFlow, selectFile, openRepoGraph]);
   const go = useCallback((e: NavEntry) => { setTrail((t) => [...t, e]); applyEntry(e); }, [applyEntry]);
   const back = useCallback(() => {
     setTrail((t) => {
@@ -247,6 +282,14 @@ export function WikiPage({ onClose }: WikiPageProps) {
             <Pencil className="h-3.5 w-3.5" /> 编辑
           </button>
         )}
+        <button type="button" onClick={() => go({ kind: "context", id: detail.node.id })}
+          className="flex h-7 items-center gap-1 rounded border border-cyan-500/40 bg-cyan-500/10 px-2 text-xs text-cyan-200 hover:bg-cyan-500/20">
+          <Sparkles className="h-3.5 w-3.5" /> Context
+        </button>
+        <button type="button" onClick={() => go({ kind: "flow", id: detail.node.id })}
+          className="flex h-7 items-center gap-1 rounded border border-slate-700 px-2 text-xs text-slate-300 hover:bg-white/5">
+          <Workflow className="h-3.5 w-3.5" /> Flow
+        </button>
         <button
           type="button"
           onClick={() => go({ kind: "graph", id: detail.node.id })}
@@ -321,6 +364,135 @@ export function WikiPage({ onClose }: WikiPageProps) {
     </div>
   );
 
+  // Brief-list card used across the Context Pack columns.
+  const briefCard = (label: string, items: { nodeId: string; title: string; nodeType: string }[], via?: string) =>
+    items.length === 0 ? null : (
+      <div className="rounded-xl border border-slate-800 bg-slate-900/40">
+        <div className="flex items-center gap-2 border-b border-slate-800 px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-slate-400">
+          {label}<span className="ml-auto rounded-full bg-slate-800 px-1.5 font-mono text-[10px] text-slate-500">{items.length}</span>
+        </div>
+        <div className="p-2">
+          {items.slice(0, 12).map((n) => (
+            <button key={n.nodeId} type="button" onClick={() => go({ kind: "node", id: n.nodeId })}
+              className="flex w-full items-center gap-2 rounded px-1.5 py-1 text-left font-mono text-xs text-slate-200 hover:bg-white/5">
+              <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: KIND_COLOR[n.nodeType] ?? KIND_COLOR.symbol }} />
+              <span className="min-w-0 flex-1 truncate">{n.title}</span>
+              {via && <span className="shrink-0 text-[9px] text-slate-500">{via}</span>}
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+
+  const chipList = (label: string, items: string[], color: string) =>
+    items.length === 0 ? null : (
+      <div className="rounded-xl border border-slate-800 bg-slate-900/40">
+        <div className="border-b border-slate-800 px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-slate-400">{label}</div>
+        <div className="flex flex-wrap gap-1.5 p-2.5">
+          {items.map((s) => (
+            <span key={s} className="rounded-md border border-slate-700 bg-slate-800/50 px-2 py-1 font-mono text-[11px]" style={{ color }}>{s}</span>
+          ))}
+        </div>
+      </div>
+    );
+
+  const copyPack = () => {
+    if (!pack?.focus) return;
+    const L = [`# ${pack.focus.title} (${pack.focus.kind ?? pack.focus.nodeType})`, `file: ${pack.focus.filePath ?? "?"}`,
+      `branch: ${pack.focus.branches.map((b) => `${b.branch} (${b.status})`).join(", ")}`, ""];
+    if (pack.signals.length) L.push("## Signals", ...pack.signals.map((s) => `- ${s}`), "");
+    if (pack.focus.source) L.push("## Source", "```", pack.focus.source, "```", "");
+    const sec = (t: string, a: { title: string }[]) => a.length && L.push(`## ${t}`, ...a.map((x) => `- ${x.title}`), "");
+    sec("Called by", pack.callers); sec("Calls", pack.calls); sec("Used by (type)", pack.referencedBy);
+    sec("Tested by", pack.tests); sec("Imported by", pack.importers);
+    if (pack.routes.length) L.push("## Routes", ...pack.routes.map((r) => `- ${r.route}`), "");
+    if (pack.errors.length) L.push("## Throws", ...pack.errors.map((e) => `- ${e}`), "");
+    if (pack.envs.length) L.push("## Env", ...pack.envs.map((e) => `- ${e}`), "");
+    void navigator.clipboard?.writeText(L.join("\n"));
+  };
+
+  const contextView = (
+    <div className="flex min-h-0 flex-1 flex-col">
+      {busy ? (
+        <div className="flex flex-1 items-center justify-center gap-2 text-sm text-slate-500"><Loader2 className="h-4 w-4 animate-spin" /> 生成 Context Pack…</div>
+      ) : !pack?.focus ? (
+        <div className="flex flex-1 items-center justify-center text-sm text-slate-500">选中一个符号,点 Context</div>
+      ) : (
+        <div className="flex-1 space-y-4 overflow-auto p-5">
+          <div className="flex items-center gap-3">
+            <span className="grid h-9 w-9 place-items-center rounded-lg bg-emerald-500/15 text-emerald-300"><Box className="h-4 w-4" /></span>
+            <span className="font-mono text-lg font-bold">{pack.focus.title}</span>
+            <span className="rounded-full bg-emerald-500/12 px-2 py-0.5 text-[10px] font-bold uppercase text-emerald-300">{pack.focus.kind ?? pack.focus.nodeType}</span>
+            {pack.focus.branches[0] && (
+              <span className="ml-auto flex items-center gap-1.5 rounded-full border border-slate-700 px-2.5 py-1 font-mono text-[11px] text-slate-300">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />{pack.focus.branches[0].branch} · {pack.focus.branches[0].status}
+              </span>
+            )}
+            <button type="button" onClick={copyPack} className="flex h-8 items-center gap-2 rounded-lg bg-gradient-to-br from-cyan-400 to-teal-400 px-3 text-xs font-bold text-[#04121a]">
+              <Sparkles className="h-3.5 w-3.5" /> Copy for AI
+            </button>
+          </div>
+          {pack.focus.filePath && <div className="font-mono text-xs text-slate-500">{pack.focus.filePath}</div>}
+          {pack.signals.length > 0 && (
+            <div className="space-y-1.5 rounded-xl border border-amber-500/20 bg-amber-500/[0.04] p-3">
+              {pack.signals.map((s, i) => (
+                <div key={i} className="flex items-start gap-2 text-xs text-slate-300"><AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" />{s}</div>
+              ))}
+            </div>
+          )}
+          {pack.focus.source && (
+            <div className="overflow-hidden rounded-xl border border-slate-800">
+              <div className="border-b border-slate-800 bg-slate-900/60 px-3 py-1.5 text-[10px] font-bold uppercase text-slate-400">源码</div>
+              <pre className="max-h-72 overflow-auto bg-slate-950/70 p-3 text-xs leading-relaxed text-slate-200"><code className="font-mono">{pack.focus.source}</code></pre>
+            </div>
+          )}
+          <div className="grid grid-cols-2 gap-3">
+            {briefCard("被调用 · 被引用", [...pack.callers, ...pack.referencedBy])}
+            {briefCard("调用 · 用到类型", [...pack.calls, ...pack.usesTypes])}
+            {briefCard("测试覆盖", pack.tests)}
+            {briefCard("被这些文件 import", pack.importers)}
+            {pack.notes.length > 0 && briefCard("关联笔记", pack.notes)}
+            {pack.routes.length > 0 && chipList("HTTP / gRPC 入口", pack.routes.map((r) => r.route), "#22d3ee")}
+            {pack.errors.length > 0 && chipList("会抛出", pack.errors, "#f87171")}
+            {pack.envs.length > 0 && chipList("用到 env", pack.envs, "#e879f9")}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
+  const flowView = (
+    <div className="flex min-h-0 flex-1 flex-col">
+      {busy ? (
+        <div className="flex flex-1 items-center justify-center gap-2 text-sm text-slate-500"><Loader2 className="h-4 w-4 animate-spin" /> 追踪执行链…</div>
+      ) : !flow?.root ? (
+        <div className="flex flex-1 items-center justify-center text-sm text-slate-500">选中一个符号 / endpoint,点 Flow</div>
+      ) : (
+        <div className="flex-1 overflow-auto p-6">
+          <div className="mb-1 font-mono text-base font-bold">{flow.root.title}</div>
+          <div className="mb-5 text-xs text-slate-500">执行链 — 由静态边推导(handles → calls → reads/writes/throws/uses)</div>
+          <div className="space-y-1">
+            {flow.steps.map((s, i) => (
+              <div key={i} className="flex items-center" style={{ paddingLeft: s.depth * 26 }}>
+                {Array.from({ length: s.depth }).map((_, d) => (
+                  <span key={d} className="self-stretch border-l border-slate-800" style={{ marginLeft: d === 0 ? 0 : 18, width: 1 }} />
+                ))}
+                {s.via !== "root" && <span className="px-2 font-mono text-[10px] text-slate-500">↳ {s.via} →</span>}
+                <button type="button" onClick={() => go({ kind: "flow", id: s.nodeId })}
+                  className={cn("flex items-center gap-2 rounded-lg border px-3 py-2 font-mono text-xs",
+                    s.depth === 0 ? "border-emerald-500/50 bg-emerald-500/10 text-emerald-100" : "border-slate-700 bg-slate-900/50 text-slate-200 hover:bg-white/5")}>
+                  <span className="h-2 w-2 rounded-full" style={{ background: VIA_COLOR[s.via] ?? KIND_COLOR[s.nodeType] ?? KIND_COLOR.symbol }} />
+                  {s.title}
+                  <span className="text-[9px] uppercase text-slate-500">{s.nodeType}</span>
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+
   return (
     <div className="flex h-full flex-col bg-[#0b111a] text-slate-100">
       <header className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-slate-800 px-6 py-4">
@@ -380,6 +552,10 @@ export function WikiPage({ onClose }: WikiPageProps) {
             {graphData && graphData.nodes.length > 0 && <WikiGraph data={graphData} layout={graphLayout} onNodeClick={(id) => go({ kind: "graph", id })} />}
           </div>
         </div>
+      ) : mode === "context" ? (
+        contextView
+      ) : mode === "flow" ? (
+        flowView
       ) : (
         <div className="flex min-h-0 flex-1">
           {/* LEFT: browse tree */}

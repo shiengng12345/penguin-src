@@ -26,15 +26,13 @@ test("parseSearchFilters splits type:/repo:/tag:/entity: from free text", async 
   assert.deepEqual(plain.filters, {});
 });
 
-test("WikiPage wires the knowledge client (search/node/backlinks/reindex/status)", async () => {
+test("WikiPage wires the knowledge client (node/explore/context/flow/status)", async () => {
   const source = await readFile(new URL("../src/components/wiki/WikiPage.tsx", import.meta.url), "utf8");
-  for (const fn of ["knowledgeSearch", "knowledgeNode", "knowledgeExplore", "knowledgeReindex", "knowledgeDbStatus", "parseSearchFilters"]) {
+  for (const fn of ["knowledgeNode", "knowledgeExplore", "knowledgeContext", "knowledgeFlow", "knowledgeDbStatus"]) {
     assert.match(source, new RegExp(fn), `WikiPage should use ${fn}`);
   }
-  // read-first: reindex button + search-on-Enter + backlinks panel
-  assert.match(source, /重建索引/);
-  assert.match(source, /runSearch/);
   assert.match(source, /backlinks/);
+  assert.match(source, /Context Pack|Copy for AI/); // context pack view
 });
 
 test("knowledge-client routes through the Rust bridge commands", async () => {
@@ -54,12 +52,13 @@ test("knowledge-client exposes index-browse + graph wrappers over the CLI verbs"
   assert.match(source, /query<KnowledgeGraphView>\(\["repograph", repoId, branchId\]\)/);
 });
 
-test("WikiPage has browse/search/graph modes wiring the tree + graph", async () => {
+test("WikiPage has browse/graph/context/flow modes wiring the tree + graph", async () => {
   const source = await readFile(new URL("../src/components/wiki/WikiPage.tsx", import.meta.url), "utf8");
-  assert.match(source, /type Mode = "browse" \| "search" \| "graph"/);
-  assert.match(source, /useState<Mode>\("browse"\)/); // default = browse, not a blank search box
+  assert.match(source, /type Mode = "browse" \| "graph" \| "context" \| "flow"/);
+  assert.match(source, /useState<Mode>\("browse"\)/); // default = browse
   assert.match(source, /<WikiBrowseTree/);
   assert.match(source, /<WikiGraph/);
+  assert.match(source, /layout=\{graphLayout\}/); // radial ↔ force toggle
   assert.match(source, /knowledgeFileSymbols/);
   assert.match(source, /knowledgeRepoGraph/);
   assert.match(source, /knowledgeGraph/);
@@ -92,14 +91,12 @@ test("WikiNoteEditor is a CodeMirror editor with search-backed [[ wikilink autoc
   assert.match(source, /trig\.kind === "wikilink"/); // both trigger kinds handled
 });
 
-test("WikiPage wires note create/edit/save via the C9 note verbs", async () => {
+test("WikiPage wires note edit/save via the C9 note verbs", async () => {
   const source = await readFile(new URL("../src/components/wiki/WikiPage.tsx", import.meta.url), "utf8");
-  assert.match(source, /knowledgeNoteNew/);
   assert.match(source, /knowledgeNoteWrite/);
   assert.match(source, /knowledgeNoteRead/);
   assert.match(source, /<WikiNoteEditor/);
-  assert.match(source, /新建笔记/); // create affordance
-  assert.match(source, /editing/); // edit state
+  assert.match(source, /editing/); // edit state (create/reindex moved to CLI)
 });
 
 test("knowledge-client exposes note new/write/read/list wrappers", async () => {
