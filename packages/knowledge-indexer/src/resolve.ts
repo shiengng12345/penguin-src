@@ -26,6 +26,23 @@ function bareOf(qualifiedName: string): string {
 // swamp the graph. Above the cap we drop rather than force-resolve (§6.2.3).
 const MAX_BARE_CANDIDATES = 6;
 
+// Names so generic that a repo-wide bare match is almost never the real target
+// (`.map()`/`.get()`/`logger.error()` are builtins/framework, not a call to a
+// user symbol that happens to share the name). For these we resolve ONLY via
+// same-file (tier 1), exact qualified name (tier 2), or import scoping (tier
+// 3a); we never take a bare-unique or best-guess hit — that is what piled
+// hundreds of edges onto fake `error`/`map`/`get` mega-hubs (P1 precision).
+const GENERIC_NAMES = new Set([
+  "get", "set", "has", "add", "remove", "delete", "update", "create", "find",
+  "list", "map", "filter", "reduce", "forEach", "some", "every", "includes",
+  "push", "pop", "shift", "unshift", "concat", "join", "slice", "splice",
+  "log", "error", "warn", "info", "debug", "trace",
+  "then", "catch", "finally", "next", "emit", "on", "off", "once", "subscribe",
+  "toString", "valueOf", "init", "run", "execute", "handle", "call", "apply",
+  "bind", "record", "send", "start", "stop", "close", "open", "load", "save",
+  "read", "write", "parse", "format", "validate", "build", "of", "from", "to",
+]);
+
 // Resolve call + type refs to graph edges (§6.2 + Plan B):
 //   - `call` ref → `calls` edge (a function/method invocation)
 //   - `type` ref → `references` edge (a type annotation/generic/extends/impl —
@@ -93,16 +110,14 @@ export function resolveRefs(input: {
       continue;
     }
 
-    // tier 3: same-repo bare name
+    // tier 3: same-repo bare name.
     const candidates = input.lookup.bareNameCandidates(bare);
-    if (candidates.length === 1) {
-      push(src, candidates[0].id, edgeType, "EXTRACTED");
-      continue;
-    }
+    const generic = GENERIC_NAMES.has(bare);
 
-    // tier 3a: narrow an ambiguous name to the current file + its imports. An
-    // imported symbol is the strongly-likely target; a unique scoped hit wins.
-    if (candidates.length > 1 && (input.importedFiles || input.currentFile)) {
+    // tier 3a: narrow to the current file + its imports. An imported symbol is
+    // the strongly-likely target; a unique scoped hit wins. Import evidence is
+    // strong enough to trust even for generic names, so this runs first.
+    if (candidates.length >= 1 && (input.importedFiles || input.currentFile)) {
       const scope = input.importedFiles ?? new Set<string>();
       const scoped = candidates.filter(
         (c) => c.filePath && (c.filePath === input.currentFile || scope.has(c.filePath)),
@@ -118,8 +133,22 @@ export function resolveRefs(input: {
       }
     }
 
-    // tier 3b: no import evidence — cautious best-guess, but only when the name
-    // is not wildly ambiguous (else it's a common name → drop, no fake hub).
+    // Generic names get no bare-unique/best-guess hit — without import evidence
+    // a repo-wide match is almost certainly a builtin/framework call, not this
+    // user symbol. Dropping here is what removes the fake mega-hubs.
+    if (generic) {
+      unresolved += 1;
+      continue;
+    }
+
+    // tier 3b: unique same-repo bare hit.
+    if (candidates.length === 1) {
+      push(src, candidates[0].id, edgeType, "EXTRACTED");
+      continue;
+    }
+
+    // tier 3c: no import evidence — cautious best-guess, but only when the name
+    // is not wildly ambiguous (else drop, no fake hub).
     if (candidates.length > 1 && candidates.length <= MAX_BARE_CANDIDATES) {
       push(src, candidates[0].id, edgeType, "INFERRED", 1 / candidates.length);
     } else {

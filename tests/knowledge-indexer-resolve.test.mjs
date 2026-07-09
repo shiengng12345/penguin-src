@@ -47,6 +47,37 @@ test("resolveRefs tier 3: unique bare hit EXTRACTED, multi INFERRED conf<1, none
   assert.ok(r.unresolved >= 1); // three() had no candidate
 });
 
+test("resolveRefs drops generic-name bare hits (no fake mega-hubs)", async () => {
+  // .get()/.map()/logger.error() must NOT resolve to a same-named user symbol
+  // via a bare-unique or best-guess hit — only import scoping could rescue them.
+  const src = "function caller() { get(); map(); error(); }";
+  const out = await extractSymbols({ lang: "ts", source: src });
+  const ids = new Map([["caller", "n_caller"]]);
+  // Each generic name has a unique repo-wide candidate — pre-fix this would
+  // have produced 3 edges onto get/map/error hubs.
+  const lookup = fakeLookup({
+    bare: { get: ["n_get"], map: ["n_map"], error: ["n_err"] },
+  });
+  const r = resolveRefs({ refs: out.refs, fileSymbols: out.symbols, fileSymbolIds: ids, lookup });
+  assert.equal(r.edges.length, 0, "no edges for generic bare names");
+  assert.ok(r.unresolved >= 3);
+});
+
+test("resolveRefs still resolves a generic name when it is import-scoped", async () => {
+  // If `create` is defined in an imported file, calling create() is intentional.
+  const src = "function caller() { create(); }";
+  const out = await extractSymbols({ lang: "ts", source: src });
+  const ids = new Map([["caller", "n_caller"]]);
+  const lookup = fakeLookup({
+    bare: { create: [{ id: "n_create", filePath: "svc/factory.ts" }] },
+  });
+  const r = resolveRefs({
+    refs: out.refs, fileSymbols: out.symbols, fileSymbolIds: ids, lookup,
+    currentFile: "svc/caller.ts", importedFiles: new Set(["svc/factory.ts"]),
+  });
+  assert.ok(r.edges.some((e) => e.dst === "n_create" && e.method === "EXTRACTED"));
+});
+
 test("resolveRefs drops calls with no enclosing symbol (no caller)", async () => {
   const src = "topLevel();"; // call at file top level, not inside a symbol
   const out = await extractSymbols({ lang: "ts", source: src });
