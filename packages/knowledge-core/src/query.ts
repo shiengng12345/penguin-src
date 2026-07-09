@@ -135,12 +135,24 @@ function nodeBrief(store: KnowledgeStore, id: string) {
   return { nodeId: id, title: n?.title ?? id, nodeType: n?.node_type ?? "unknown" };
 }
 
+// The live branch of a node's repo — the default "which branch am I answering
+// for" so multi-branch repos never silently mix branches. null for repo-less
+// (global) nodes like cross-repo gRPC endpoints.
+export function liveBranchOf(store: KnowledgeStore, nodeId: string): string | null {
+  const n = store.getNode(nodeId);
+  if (!n?.repo_id) return null;
+  const b = store.db
+    .prepare("SELECT id FROM branches WHERE repo_id=? AND status='live' ORDER BY last_indexed_at DESC LIMIT 1")
+    .get(n.repo_id) as { id: string } | undefined;
+  return b?.id ?? null;
+}
+
 // explore_graph: one traversal entry point across modes (§8.1).
 export function exploreGraph(
   store: KnowledgeStore,
   mode: GraphMode,
   nodeOrKey: string,
-  options?: { depth?: number; limit?: number; to?: string },
+  options?: { depth?: number; limit?: number; to?: string; branchId?: string },
 ): GraphResult {
   const limit = options?.limit ?? 100;
 
@@ -164,16 +176,23 @@ export function exploreGraph(
   // Trust filter (§3.3/§11): default traversal only follows confirmed edges —
   // unconfirmed AI suggestions (status='suggested') and rejected edges are out.
   const ACTIVE = "status='active'";
+  // Branch-scope (correctness): when a branch is given, only follow edges on that
+  // branch (plus branch-less edges like git topology / cross-repo endpoints).
+  // Without it, a repo indexed on multiple branches would silently mix branches.
+  const branchId = options?.branchId ?? null;
+  const bx = branchId ? " AND (branch_id = ? OR branch_id IS NULL)" : "";
+  const P = (nid: string) => (branchId ? [nid, branchId, limit] : [nid, limit]);
+  const Pd = (nid: string) => (branchId ? [nid, branchId] : [nid]); // no LIMIT (impact/path)
   if (mode === "who_calls") {
-    const rows = store.db.prepare(`SELECT DISTINCT src FROM edges WHERE dst=? AND edge_type='calls' AND ${ACTIVE} LIMIT ?`).all(nodeId, limit) as { src: string }[];
+    const rows = store.db.prepare(`SELECT DISTINCT src FROM edges WHERE dst=? AND edge_type='calls' AND ${ACTIVE}${bx} LIMIT ?`).all(...P(nodeId)) as { src: string }[];
     return { mode, nodes: rows.map((r) => nodeBrief(store, r.src)) };
   }
   if (mode === "calls_of") {
-    const rows = store.db.prepare(`SELECT DISTINCT dst FROM edges WHERE src=? AND edge_type='calls' AND dst IS NOT NULL AND ${ACTIVE} LIMIT ?`).all(nodeId, limit) as { dst: string }[];
+    const rows = store.db.prepare(`SELECT DISTINCT dst FROM edges WHERE src=? AND edge_type='calls' AND dst IS NOT NULL AND ${ACTIVE}${bx} LIMIT ?`).all(...P(nodeId)) as { dst: string }[];
     return { mode, nodes: rows.map((r) => nodeBrief(store, r.dst)) };
   }
   if (mode === "backlinks") {
-    const rows = store.db.prepare(`SELECT DISTINCT src FROM edges WHERE dst=? AND ${ACTIVE} LIMIT ?`).all(nodeId, limit) as { src: string }[];
+    const rows = store.db.prepare(`SELECT DISTINCT src FROM edges WHERE dst=? AND ${ACTIVE}${bx} LIMIT ?`).all(...P(nodeId)) as { src: string }[];
     return { mode, nodes: rows.map((r) => nodeBrief(store, r.src)) };
   }
   if (mode === "impact") {
@@ -184,7 +203,7 @@ export function exploreGraph(
     for (let d = 0; d < depth && frontier.length; d++) {
       const next: string[] = [];
       for (const id of frontier) {
-        const callers = store.db.prepare(`SELECT DISTINCT src FROM edges WHERE dst=? AND edge_type='calls' AND ${ACTIVE}`).all(id) as { src: string }[];
+        const callers = store.db.prepare(`SELECT DISTINCT src FROM edges WHERE dst=? AND edge_type='calls' AND ${ACTIVE}${bx}`).all(...Pd(id)) as { src: string }[];
         for (const c of callers) if (!seen.has(c.src)) { seen.add(c.src); next.push(c.src); }
       }
       frontier = next;
@@ -202,7 +221,7 @@ export function exploreGraph(
     while (queue.length) {
       const cur = queue.shift()!;
       if (cur === to) break;
-      const outs = store.db.prepare(`SELECT DISTINCT dst FROM edges WHERE src=? AND dst IS NOT NULL AND ${ACTIVE}`).all(cur) as { dst: string }[];
+      const outs = store.db.prepare(`SELECT DISTINCT dst FROM edges WHERE src=? AND dst IS NOT NULL AND ${ACTIVE}${bx}`).all(...Pd(cur)) as { dst: string }[];
       for (const o of outs) if (!visited.has(o.dst)) { visited.add(o.dst); prev.set(o.dst, cur); queue.push(o.dst); }
     }
     if (!visited.has(to)) return { mode, nodes: [] };
@@ -328,24 +347,27 @@ export interface GraphView {
 export function graphNeighborhood(
   store: KnowledgeStore,
   nodeOrKey: string,
-  options?: { depth?: number; limit?: number },
+  options?: { depth?: number; limit?: number; branchId?: string },
 ): GraphView {
   const focus = resolveNodeId(store, nodeOrKey);
   if (!focus) return { focus: null, nodes: [], edges: [] };
   const depth = options?.depth ?? 1;
   const limit = options?.limit ?? 150;
+  const branchId = options?.branchId ?? null;
+  const bx = branchId ? " AND (branch_id = ? OR branch_id IS NULL)" : "";
 
   const neighbours = store.db.prepare(
-    `SELECT dst AS other FROM edges WHERE src=? AND dst IS NOT NULL AND status='active'
-     UNION SELECT src AS other FROM edges WHERE dst=? AND status='active'`,
+    `SELECT dst AS other FROM edges WHERE src=? AND dst IS NOT NULL AND status='active'${bx}
+     UNION SELECT src AS other FROM edges WHERE dst=? AND status='active'${bx}`,
   );
+  const nParams = (id: string) => (branchId ? [id, branchId, id, branchId] : [id, id]);
   const seen = new Set<string>([focus]);
   let frontier = [focus];
   for (let d = 0; d < depth && frontier.length && seen.size < limit; d++) {
     const next: string[] = [];
     for (const id of frontier) {
       if (seen.size >= limit) break;
-      for (const row of neighbours.all(id, id) as { other: string }[]) {
+      for (const row of neighbours.all(...nParams(id)) as { other: string }[]) {
         if (!seen.has(row.other) && seen.size < limit) {
           seen.add(row.other);
           next.push(row.other);
@@ -486,10 +508,17 @@ export function buildContextPack(
 
   const detail = getNodeDetail(store, focusId);
   const active = "status='active'";
+  // Branch-scope to the focus's live branch (or an explicit one) so a repo indexed
+  // on multiple branches doesn't mix them. branch-less edges (git / global gRPC
+  // endpoints) always pass so cross-repo links aren't dropped.
+  const branchId = options?.branchId ?? liveBranchOf(store, focusId);
+  const bx = branchId ? " AND (branch_id = ? OR branch_id IS NULL)" : "";
   const inEdges = (type: string) =>
-    store.db.prepare(`SELECT DISTINCT src AS id FROM edges WHERE dst=? AND edge_type=? AND ${active} LIMIT ?`).all(focusId, type, limit) as { id: string }[];
+    store.db.prepare(`SELECT DISTINCT src AS id FROM edges WHERE dst=? AND edge_type=? AND ${active}${bx} LIMIT ?`)
+      .all(...(branchId ? [focusId, type, branchId, limit] : [focusId, type, limit])) as { id: string }[];
   const outEdges = (type: string) =>
-    store.db.prepare(`SELECT DISTINCT dst AS id FROM edges WHERE src=? AND edge_type=? AND dst IS NOT NULL AND ${active} LIMIT ?`).all(focusId, type, limit) as { id: string }[];
+    store.db.prepare(`SELECT DISTINCT dst AS id FROM edges WHERE src=? AND edge_type=? AND dst IS NOT NULL AND ${active}${bx} LIMIT ?`)
+      .all(...(branchId ? [focusId, type, branchId, limit] : [focusId, type, limit])) as { id: string }[];
 
   const callers = inEdges("calls");
   const calls = outEdges("calls");

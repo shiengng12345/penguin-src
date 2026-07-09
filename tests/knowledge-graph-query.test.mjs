@@ -9,6 +9,7 @@ import {
   listFileSymbols,
   graphNeighborhood,
   repoGraph,
+  exploreGraph,
 } from "../packages/knowledge-core/dist/index.js";
 
 // Seed a small but realistic graph:
@@ -110,6 +111,26 @@ test("repoGraph limit keeps the highest-degree hubs", () => {
   const g = repoGraph(store, repoId, branchId, { limit: 1 });
   assert.equal(g.nodes.length, 1);
   assert.equal(g.edges.length, 0);
+  store.close();
+});
+
+test("exploreGraph branch-scope: multi-branch repo does not mix branches (Phase 1)", () => {
+  const { store, repoId, branchId, login, caller } = seed();
+  // second branch of the SAME repo with a different caller of `login`.
+  const featBranch = store.registerBranch({ repoId, name: "feature", status: "live" });
+  const featCaller = store.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::featCaller`, title: "featCaller", repoId });
+  store.upsertSymbolVersion({ nodeId: featCaller, branchId: featBranch, commitSha: "c1", filePath: "f.ts", lang: "ts", kind: "function", contentHash: "h_f", status: "fresh" });
+  store.replaceFileEdges({ branchId: featBranch, filePath: "f.ts", edges: [
+    { src: featCaller, dst: login, edgeType: "calls", origin: "parser", method: "EXTRACTED" },
+  ] });
+
+  const onMain = exploreGraph(store, "who_calls", login, { branchId }).nodes.map((n) => n.nodeId);
+  const onFeat = exploreGraph(store, "who_calls", login, { branchId: featBranch }).nodes.map((n) => n.nodeId);
+  const noBranch = exploreGraph(store, "who_calls", login, {}).nodes.map((n) => n.nodeId);
+
+  assert.ok(onMain.includes(caller) && !onMain.includes(featCaller), "main branch → only main's caller");
+  assert.ok(onFeat.includes(featCaller) && !onFeat.includes(caller), "feature branch → only feature's caller");
+  assert.ok(noBranch.includes(caller) && noBranch.includes(featCaller), "no branch filter → both (legacy)");
   store.close();
 });
 
