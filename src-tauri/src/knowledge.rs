@@ -97,52 +97,69 @@ fn ensure_executable(_path: &std::path::Path) {}
 fn resolve_invocation<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
 ) -> Result<CliInvocation, String> {
-    if let Some(dir) = bundled_runtime_dir(app) {
-        let node = dir.join("node");
-        let cli = dir.join("penguin.mjs");
-        if node.exists() && cli.exists() {
-            ensure_executable(&node);
-            return Ok(CliInvocation {
-                node,
-                cli,
-                wasm_dir: Some(dir.join("wasm")),
-            });
+    // Debug builds prefer the LIVE tsc dist (its schema stays in lockstep with
+    // the dev CLI — a stale packaged bundle would otherwise trip the schema
+    // downgrade guard on a dev-upgraded DB). Release builds prefer the
+    // self-contained bundle. Either way, fall back to the other.
+    if cfg!(debug_assertions) {
+        if let Some(inv) = dev_invocation(app) {
+            return Ok(inv);
+        }
+        if let Some(inv) = bundled_invocation(app) {
+            return Ok(inv);
+        }
+    } else {
+        if let Some(inv) = bundled_invocation(app) {
+            return Ok(inv);
+        }
+        if let Some(inv) = dev_invocation(app) {
+            return Ok(inv);
         }
     }
-    // Dev: the tsc-built entry, resolved from packaged Resources or a cwd walk-up.
-    let cli = {
-        let mut found: Option<PathBuf> = None;
-        if let Ok(resource_dir) = app.path().resource_dir() {
-            for c in [
-                resource_dir.join("_up_/packages/knowledge-cli/dist/bin.js"),
-                resource_dir.join("packages/knowledge-cli/dist/bin.js"),
-                resource_dir.join("bin.js"),
-            ] {
-                if c.exists() {
-                    found = Some(c);
+    Err("penguin CLI not found (no dev dist/bin.js, no packaged bundle)".to_string())
+}
+
+// The packaged self-contained runtime (own node + vendored native + wasm).
+fn bundled_invocation<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<CliInvocation> {
+    let dir = bundled_runtime_dir(app)?;
+    let node = dir.join("node");
+    let cli = dir.join("penguin.mjs");
+    if node.exists() && cli.exists() {
+        ensure_executable(&node);
+        Some(CliInvocation { node, cli, wasm_dir: Some(dir.join("wasm")) })
+    } else {
+        None
+    }
+}
+
+// Dev: the tsc-built entry (from packaged Resources or a cwd walk-up) run under
+// the developer's own ABI-matched Node.
+fn dev_invocation<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<CliInvocation> {
+    let mut cli: Option<PathBuf> = None;
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        for c in [
+            resource_dir.join("_up_/packages/knowledge-cli/dist/bin.js"),
+            resource_dir.join("packages/knowledge-cli/dist/bin.js"),
+            resource_dir.join("bin.js"),
+        ] {
+            if c.exists() {
+                cli = Some(c);
+                break;
+            }
+        }
+    }
+    if cli.is_none() {
+        if let Ok(cwd) = std::env::current_dir() {
+            for ancestor in cwd.ancestors() {
+                let candidate = ancestor.join("packages/knowledge-cli/dist/bin.js");
+                if candidate.exists() {
+                    cli = Some(candidate);
                     break;
                 }
             }
         }
-        if found.is_none() {
-            if let Ok(cwd) = std::env::current_dir() {
-                for ancestor in cwd.ancestors() {
-                    let candidate = ancestor.join("packages/knowledge-cli/dist/bin.js");
-                    if candidate.exists() {
-                        found = Some(candidate);
-                        break;
-                    }
-                }
-            }
-        }
-        found.ok_or("Bundled penguin CLI (packages/knowledge-cli/dist/bin.js) not found")?
-    };
-    let node = resolve_node().ok_or("Node.js not detected in common paths")?;
-    Ok(CliInvocation {
-        node,
-        cli,
-        wasm_dir: None,
-    })
+    }
+    Some(CliInvocation { node: resolve_node()?, cli: cli?, wasm_dir: None })
 }
 
 // Run the bundled CLI with args and return stdout. Single source of query/index
