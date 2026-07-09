@@ -93,5 +93,58 @@ content-addressed 事实：symbol_impls(content_hash 去重) / edge_facts
 
 ---
 
-## 5. 下一步
+## 5. `/understand`(Understand-Anything)机制 vs Penguin
+
+`/understand` 是一个 **Claude Code skill**——让 **AI 自己**跑 7 阶段流水线(SCAN→BATCH→**ANALYZE(LLM 子agent 读文件写 nodes/edges)**→分层→导览→校验→SAVE),产出一次性 `knowledge-graph.json`(13 节点/26 边)+ dashboard。
+
+| | `/understand` | **Penguin** |
+|---|---|---|
+| 谁建图 | **LLM 建**(可能编造边、烧 token、不可复现) | **tree-sitter 确定性建**(精确、便宜、可复现) |
+| 形态 | 一次性 json + dashboard,会腐烂 | 常驻 SQLite,增量/可重建/可查 |
+| 谁用 | AI 跑一遍给人看 | AI 随时查(MCP),写代码前用 |
+| Branch | ❌(worktree 强制重定向 main) | ✅ 分支感知 |
+
+**取舍**:借鉴它的**呈现层**(更丰富节点类型 table/endpoint/config、分层 layers、导览 tour、i18n),但用**确定性方式**做;**LLM 只用于摘要,绝不用于建图**(它做对但用错了地方)。坚持我们的护城河:分支感知 + 确定性 + 常驻 + Context Pack。
+
+---
+
+## 6. 能力边界:静态能拿什么、什么需运行时/LLM
+
+`penguin index`(纯 tree-sitter,**无 AI**)能确定性拿到的 = **代码里写死的结构(事实)**:
+
+| 想知道 | 静态能拿? |
+|---|---|
+| API flow(Route→Controller→Service→Repo→DB) | ✅ 靠 handles+calls+references 边追完整链 |
+| 会抛哪些 error 类型 | ✅ 静态 `throw new XError`(throws 边) |
+| 请求/响应 DTO 结构(shape) | ✅ references 边 → DTO 是 symbol,可读字段/源码 |
+| 可能的状态码 + 错误响应(`@HttpCode`/`HttpException(x,403)`/`throw ...Exception`) | 🟡 静态可提取,**需加一个 HTTP 契约抽取器**(做法同 route/entity) |
+| env/config 使用点、测试覆盖 | ✅ uses / tests 边 |
+| **真实 JSON 响应值 / 实际发生的 error / 实际状态码** | ❌ 运行时才有 |
+| **纯英文「这段代码干嘛」摘要** | ❌ 需 LLM |
+| **动态派发 / DI / feature flag 真实路径** | 🟡 DI 大半静态可解(构造器类型);纯动态需运行时/推断 |
+
+**结论**:一个 API 的**契约级 response**(shape + 可能状态码 + 可能 error)静态就能给全;只有「跑起来实际返回什么」拿不到。
+
+---
+
+## 7. 四层知识模型(每层标来源 + 可信度)
+
+拿不到的那几项,靠分层补——**关键差异化:Penguin 本身是 API 客户端,运行时真相本来就经手它**。
+
+| 层 | 来源 | 拿什么 | 可信度 | 优化方案 |
+|---|---|---|---|---|
+| **① 静态事实** | tree-sitter | flow / 声明 error / DTO shape / env / test | 事实(EXTRACTED) | 已有;加 HTTP 契约抽取器 |
+| **② 运行时观测** | REST/gRPC 调用 + 请求历史 + error_log | **真实响应体 / 实际状态码 / 实际 error**,按 env·branch 累积 | 观测样本 | **回灌**:`response_samples(route, method, status, 脱敏 body, env, branch, ts)` 连 route 节点 |
+| **③ 人的 why** | 笔记(fusion) | 为什么这样设计、业务规则、踩坑 | 人工 | 已有;补 typed 笔记 + 生命周期 |
+| **④ LLM 摘要** | DeepSeek(懒生成+缓存) | 「这段干嘛」1 行解释 | AI 生成 | 打开/进 Context Pack 才生成,按 content_hash 失效;**只摘要不建图** |
+
+**动态派发/DI 单独处理**:构造器注入 → 静态 `depends_on` 边;provider 绑定 → 加 module-provider 抽取器;纯动态 → AI 推断成 `suggested` 边(走已有建议流,人工 accept/reject,永不自动信)+ 笔记补充。
+
+**运行时通道是最大护城河**:Understand-Anything / Graphify / CodeGraph 都没有运行时数据;Penguin 的 REST/gRPC 客户端天然经手真实响应与错误,回灌进图后能回答「这个 API 实际返回过什么、报过什么错」——静态工具永远做不到。
+
+---
+
+## 8. 下一步
 从 **Phase 1(Branch 正确性)** 开工:① 查询强制 branch 过滤 → ② git 拓扑 + branch_bases → ③ Context Pack freshness 标注。存储 delta 化留到分支变多再做。
+
+后续增量(不阻塞 Phase 1):HTTP 契约抽取器(§6)→ response_samples 运行时回灌(§7 ②)→ LLM 摘要懒生成(§7 ④)。
