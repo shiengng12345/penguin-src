@@ -167,6 +167,11 @@ export function knowledgeRepoGraph(repoId: string, branchId: string): Promise<Kn
   return query<KnowledgeGraphView>(["repograph", repoId, branchId]);
 }
 
+// System-level microservice map: services + cross-service gRPC links.
+export function knowledgeServiceGraph(): Promise<KnowledgeGraphView> {
+  return query<KnowledgeGraphView>(["services"]);
+}
+
 // —— File-backed notes (C9): create / read / overwrite / list ——
 
 export function knowledgeNoteNew(title: string): Promise<{ ok: boolean; slug: string; path: string; nodeId: string }> {

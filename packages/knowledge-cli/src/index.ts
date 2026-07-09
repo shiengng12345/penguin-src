@@ -10,6 +10,7 @@ import {
   exploreGraph,
   getNodeDetail,
   graphNeighborhood,
+  serviceGraph,
   indexStatus,
   listFileSymbols,
   listIndexedFiles,
@@ -48,7 +49,7 @@ export interface CliDeps {
 const READ_VERBS = new Set([
   "search", "node", "callers", "calls", "impact", "backlinks",
   "path", "recent", "compare", "status", "suggestions", "snapshots", "doctor",
-  "files", "filesymbols", "graph", "repograph", "tags", "context", "flow", "affected", "architecture", "deadcode",
+  "files", "filesymbols", "graph", "repograph", "services", "tags", "context", "flow", "affected", "architecture", "deadcode",
 ]);
 
 // repo/branch args accept an id OR a name (humans pass names; the Wiki passes
@@ -375,6 +376,11 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
             `entrypoints: ${o.entryPoints.length}`,
           ].join("\n");
           emit(deps, json, txt, o);
+          return 0;
+        }
+        case "services": {
+          const sg = serviceGraph(store);
+          emit(deps, json, `${sg.nodes.length} services/endpoints · ${sg.edges.length} cross-service links`, sg);
           return 0;
         }
         case "deadcode": {

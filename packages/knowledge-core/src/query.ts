@@ -891,3 +891,43 @@ export function deadCode(store: KnowledgeStore, options?: { limit?: number }): D
     note: "no inbound calls/references/handles/tests — verify: DI, reflection, framework magic, dynamic import, and public entry points are false positives.",
   };
 }
+
+// —— serviceGraph: the system-level microservice map ("main graph") ——
+// Nodes = repos (services) + external gRPC endpoints they consume but whose
+// provider isn't indexed. Edges = consumer→provider (a real cross-service call,
+// via a shared global endpoint) or consumer→external-endpoint. This answers
+// "how do the services relate" without needing a symbol focus.
+export function serviceGraph(store: KnowledgeStore): GraphView {
+  const repos = store.db.prepare("SELECT id, name FROM repos").all() as { id: string; name: string }[];
+  const repoName = new Map(repos.map((r) => [r.id, r.name]));
+  const providers = store.db.prepare(
+    "SELECT e.src AS endpoint, n.repo_id AS repo FROM edges e JOIN nodes n ON n.id=e.dst WHERE e.edge_type='handles' AND e.status='active' AND n.repo_id IS NOT NULL",
+  ).all() as { endpoint: string; repo: string }[];
+  const consumers = store.db.prepare(
+    "SELECT e.dst AS endpoint, n.repo_id AS repo FROM edges e JOIN nodes n ON n.id=e.src WHERE e.edge_type='invokes' AND e.status='active' AND n.repo_id IS NOT NULL",
+  ).all() as { endpoint: string; repo: string }[];
+
+  const provBy = new Map<string, Set<string>>();
+  for (const p of providers) { (provBy.get(p.endpoint) ?? provBy.set(p.endpoint, new Set()).get(p.endpoint)!).add(p.repo); }
+
+  const nodes = new Map<string, GraphView["nodes"][number]>();
+  const useRepo = (id: string) => { if (!nodes.has(id)) nodes.set(id, { nodeId: id, title: repoName.get(id) ?? id, nodeType: "service" }); };
+  const edgeSet = new Map<string, GraphView["edges"][number]>();
+  const addEdge = (src: string, dst: string, t: string) => { const k = `${src}|${dst}|${t}`; if (!edgeSet.has(k)) edgeSet.set(k, { src, dst, edgeType: t }); };
+
+  for (const c of consumers) {
+    useRepo(c.repo);
+    const provs = provBy.get(c.endpoint);
+    if (provs && provs.size) {
+      for (const p of provs) if (p !== c.repo) { useRepo(p); addEdge(c.repo, p, "invokes"); }
+    } else {
+      // provider not indexed → show the external endpoint node
+      const b = nodeBrief(store, c.endpoint);
+      if (!nodes.has(c.endpoint)) nodes.set(c.endpoint, { nodeId: c.endpoint, title: b.title, nodeType: "endpoint" });
+      addEdge(c.repo, c.endpoint, "invokes");
+    }
+  }
+  // always include every repo as a node (even isolated ones)
+  for (const r of repos) useRepo(r.id);
+  return { focus: null, nodes: [...nodes.values()], edges: [...edgeSet.values()] };
+}

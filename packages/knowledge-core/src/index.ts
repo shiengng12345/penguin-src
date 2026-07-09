@@ -31,6 +31,7 @@ export {
   listFileSymbols,
   graphNeighborhood,
   repoGraph,
+  serviceGraph,
   buildContextPack,
   renderContextPackMarkdown,
   buildFlow,

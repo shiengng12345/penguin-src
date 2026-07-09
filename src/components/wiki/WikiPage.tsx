@@ -11,6 +11,7 @@ import {
   knowledgeFileSymbols,
   knowledgeGraph,
   knowledgeRepoGraph,
+  knowledgeServiceGraph,
   knowledgeContext,
   knowledgeFlow,
   knowledgeNoteWrite,
@@ -112,6 +113,12 @@ export function WikiPage({ onClose }: WikiPageProps) {
   const openRepoGraph = useCallback(async (repoId: string, branchId: string) => {
     setError(null); setFocusId(null); setTab("graph"); setGraphBusy(true);
     try { setGraphData(await knowledgeRepoGraph(repoId, branchId)); } catch (e) { err(e); } finally { setGraphBusy(false); }
+  }, []);
+
+  // System-level microservice map (no symbol focus).
+  const openServiceGraph = useCallback(async () => {
+    setError(null); setFocusId(null); setTab("graph"); setGraphBusy(true);
+    try { setGraphData(await knowledgeServiceGraph()); } catch (e) { err(e); } finally { setGraphBusy(false); }
   }, []);
 
   // lazily fetch the active tab's data for the focused symbol
@@ -274,7 +281,13 @@ export function WikiPage({ onClose }: WikiPageProps) {
       <div className="grid min-h-0 flex-1" style={{ gridTemplateColumns: "280px 1fr 320px" }}>
         {/* LEFT — Explorer */}
         <aside className="flex min-h-0 min-w-0 flex-col border-r border-slate-800 bg-[#0e131c]">
-          <div className="flex h-9 items-center gap-2 border-b border-slate-800 px-3 text-xs font-bold text-slate-200"><FileCode className="h-3.5 w-3.5 text-cyan-300" />Explorer</div>
+          <div className="flex h-9 items-center gap-2 border-b border-slate-800 px-3 text-xs font-bold text-slate-200">
+            <FileCode className="h-3.5 w-3.5 text-cyan-300" />Explorer
+            <button type="button" onClick={() => void openServiceGraph()} title="服务关系图（跨微服务）"
+              className="ml-auto flex items-center gap-1 rounded-md border border-slate-700 px-2 py-0.5 text-[11px] font-semibold text-slate-300 hover:bg-white/5">
+              <Network className="h-3 w-3 text-cyan-300" />服务图
+            </button>
+          </div>
           <div className="min-h-0 flex-1 overflow-auto p-1.5">
             <WikiBrowseTree onSelectFile={(b, fp) => selectFile(b, fp)} onOpenRepoGraph={(r, b) => openRepoGraph(r, b)} selected={selectedFile} />
           </div>
