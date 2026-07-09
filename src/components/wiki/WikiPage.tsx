@@ -1,37 +1,30 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { Search, RefreshCw, Database, FileText, Box, Loader2, X, FolderTree, Network, FileCode, FilePlus, Save, Pencil, ArrowLeft } from "lucide-react";
+import { Database, FileText, Box, Loader2, X, FolderTree, Network, FileCode, Save, Pencil, ArrowLeft } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { WikiBrowseTree } from "@/components/wiki/WikiBrowseTree";
 import { WikiGraph } from "@/components/wiki/WikiGraph";
 import { WikiNoteEditor } from "@/components/wiki/WikiNoteEditor";
 import {
   knowledgeDbStatus,
-  knowledgeSearch,
   knowledgeNode,
   knowledgeExplore,
-  knowledgeReindex,
   knowledgeFileSymbols,
   knowledgeGraph,
   knowledgeRepoGraph,
-  knowledgeNoteNew,
   knowledgeNoteWrite,
   knowledgeNoteRead,
-  onIndexProgress,
-  parseSearchFilters,
   type KnowledgeDbStatus,
-  type KnowledgeSearchHit,
   type KnowledgeNodeDetail,
   type KnowledgeGraphResult,
   type KnowledgeFileSymbol,
   type KnowledgeGraphView,
-  type IndexProgress,
 } from "@/lib/knowledge-client";
 
 interface WikiPageProps {
   onClose: () => void;
 }
 
-type Mode = "browse" | "search" | "graph";
+type Mode = "browse" | "graph";
 
 // One step in the Wiki navigation history (for the ← 返回 button).
 type NavEntry =
@@ -40,17 +33,13 @@ type NavEntry =
   | { kind: "file"; branchId: string; filePath: string }
   | { kind: "repograph"; repoId: string; branchId: string };
 
-// Penguin Knowledge Wiki (§7). Three views over the shared query layer:
-//  - Browse: repo → branch → file → symbol navigation tree (default)
-//  - Search: unified keyword search
+// Penguin Knowledge Wiki (§7). Two views over the shared query layer:
+//  - Browse: repo → branch → file → symbol navigation tree + symbol detail (default)
 //  - Graph: Obsidian-style force-directed local/repo graph
 // No query logic here — all data via the Rust bridge → bundled CLI.
 export function WikiPage({ onClose }: WikiPageProps) {
   const [mode, setMode] = useState<Mode>("browse");
   const [status, setStatus] = useState<KnowledgeDbStatus | null>(null);
-  const [raw, setRaw] = useState("");
-  const [hits, setHits] = useState<KnowledgeSearchHit[]>([]);
-  const [searching, setSearching] = useState(false);
   const [detail, setDetail] = useState<KnowledgeNodeDetail | null>(null);
   const [backlinks, setBacklinks] = useState<KnowledgeGraphResult | null>(null);
   const [calls, setCalls] = useState<KnowledgeGraphResult | null>(null);
@@ -59,35 +48,14 @@ export function WikiPage({ onClose }: WikiPageProps) {
   const [fileSymbols, setFileSymbols] = useState<KnowledgeFileSymbol[]>([]);
   const [graphData, setGraphData] = useState<KnowledgeGraphView | null>(null);
   const [graphLoading, setGraphLoading] = useState(false);
-  const [reindexing, setReindexing] = useState(false);
-  const [indexProgress, setIndexProgress] = useState<IndexProgress | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [editing, setEditing] = useState<{ slug: string; body: string } | null>(null);
-  const [creating, setCreating] = useState(false);
-  const [newTitle, setNewTitle] = useState("");
   const [savingNote, setSavingNote] = useState(false);
 
   const refreshStatus = useCallback(() => {
     knowledgeDbStatus().then(setStatus).catch(() => setStatus(null));
   }, []);
   useEffect(refreshStatus, [refreshStatus]);
-
-  const runSearch = useCallback(async () => {
-    setError(null);
-    setSearching(true);
-    setMode("search");
-    try {
-      const { query, filters } = parseSearchFilters(raw);
-      let results = await knowledgeSearch(query || raw);
-      if (filters.type) results = results.filter((h) => h.nodeType === filters.type);
-      setHits(results);
-    } catch (e) {
-      setError(String((e as Error).message ?? e));
-      setHits([]);
-    } finally {
-      setSearching(false);
-    }
-  }, [raw]);
 
   const openNode = useCallback(async (nodeId: string) => {
     setError(null);
@@ -160,8 +128,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
   }, []);
 
   // —— Navigation history: every drill-in (symbol detail / graph recenter / file /
-  // relation jump) is recorded so ← 返回 restores the previous view. Fixes the
-  // "clicked into the graph / a symbol and can't go back" dead-end.
+  // relation jump) is recorded so ← 返回 restores the previous view.
   const [trail, setTrail] = useState<NavEntry[]>([]);
   const applyEntry = useCallback((e: NavEntry) => {
     if (e.kind === "node") { setMode((m) => (m === "graph" ? "browse" : m)); void openNode(e.id); }
@@ -179,45 +146,12 @@ export function WikiPage({ onClose }: WikiPageProps) {
     });
   }, [applyEntry]);
 
-  const reindex = useCallback(async () => {
-    setReindexing(true);
-    setError(null);
-    setIndexProgress(null);
-    const unlisten = await onIndexProgress(setIndexProgress);
-    try {
-      await knowledgeReindex();
-      refreshStatus();
-    } catch (e) {
-      setError(String((e as Error).message ?? e));
-    } finally {
-      unlisten();
-      setReindexing(false);
-      setIndexProgress(null);
-    }
-  }, [refreshStatus]);
-
   // Strip the leading `--- … ---` frontmatter so the editor shows just the body.
   const noteBodyOf = (source: string): string => {
     if (!source.startsWith("---")) return source;
     const end = source.indexOf("\n---", 3);
     return end === -1 ? source : source.slice(end + 4).replace(/^\r?\n+/, "");
   };
-
-  const createNote = useCallback(async () => {
-    const title = newTitle.trim();
-    if (!title) return;
-    setError(null);
-    try {
-      const r = await knowledgeNoteNew(title);
-      setCreating(false);
-      setNewTitle("");
-      setDetail(null);
-      setEditing({ slug: r.slug, body: "" });
-      refreshStatus();
-    } catch (e) {
-      setError(String((e as Error).message ?? e));
-    }
-  }, [newTitle, refreshStatus]);
 
   const editNote = useCallback(async (slug: string) => {
     setError(null);
@@ -388,66 +322,29 @@ export function WikiPage({ onClose }: WikiPageProps) {
 
   return (
     <div className="flex h-full flex-col bg-[#0b111a] text-slate-100">
-      <header className="flex shrink-0 items-center gap-3 border-b border-slate-800 px-6 py-4">
-        <Database className="h-5 w-5 text-cyan-300" />
-        <h1 className="text-lg font-semibold">知识 Wiki</h1>
-        <span className="ml-2 text-xs text-slate-400">
-          {status?.exists ? `${status.repos} repos · ${status.symbols} symbols · ${status.notes} notes` : "未初始化 — 运行 penguin init 或点重建"}
+      <header className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-2 border-b border-slate-800 px-6 py-4">
+        <Database className="h-5 w-5 shrink-0 text-cyan-300" />
+        <h1 className="shrink-0 text-lg font-semibold">知识 Wiki</h1>
+        <span className="ml-2 min-w-0 flex-1 truncate text-xs text-slate-400">
+          {status?.exists ? `${status.repos} repos · ${status.symbols} symbols · ${status.notes} notes` : "未初始化 — 运行 penguin init"}
         </span>
         <button
           type="button"
           onClick={back}
           disabled={trail.length <= 1}
           title="返回上一步"
-          className="ml-4 flex h-8 items-center gap-1 rounded-md border border-slate-800 px-2 text-xs text-slate-300 hover:bg-white/5 disabled:opacity-30"
+          className="flex h-8 items-center gap-1 rounded-md border border-slate-800 px-2 text-xs text-slate-300 hover:bg-white/5 disabled:opacity-30"
         >
           <ArrowLeft className="h-3.5 w-3.5" /> 返回
         </button>
-        <div className="ml-1 flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-950/40 p-0.5">
+        <div className="flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-950/40 p-0.5">
           <ModeButton m="browse" icon={<FolderTree className="h-3.5 w-3.5" />} label="浏览" />
-          <ModeButton m="search" icon={<Search className="h-3.5 w-3.5" />} label="搜索" />
           <ModeButton m="graph" icon={<Network className="h-3.5 w-3.5" />} label="图谱" />
         </div>
-        <div className="ml-auto flex items-center gap-2">
-          <button
-            type="button"
-            onClick={() => { setCreating(true); setEditing(null); setNewTitle(""); }}
-            className="flex h-9 items-center gap-2 rounded-md border border-slate-700 px-3 text-sm hover:bg-white/5"
-          >
-            <FilePlus className="h-4 w-4" /> 新建笔记
-          </button>
-          <button type="button" onClick={reindex} disabled={reindexing} className="flex h-9 items-center gap-2 rounded-md border border-slate-700 px-3 text-sm hover:bg-white/5 disabled:opacity-50">
-            <RefreshCw className={cn("h-4 w-4", reindexing && "animate-spin")} />
-            {reindexing
-              ? indexProgress
-                ? indexProgress.phase === "scan"
-                  ? `扫描 ${indexProgress.total}`
-                  : `${Math.round((indexProgress.done / Math.max(1, indexProgress.total)) * 100)}%`
-                : "重建中"
-              : "重建索引"}
-          </button>
-          <button type="button" onClick={onClose} className="rounded p-1.5 hover:bg-white/5" aria-label="关闭">
-            <X className="h-4 w-4" />
-          </button>
-        </div>
+        <button type="button" onClick={onClose} className="ml-auto rounded p-1.5 hover:bg-white/5" aria-label="关闭">
+          <X className="h-4 w-4" />
+        </button>
       </header>
-
-      {mode === "search" && (
-        <div className="border-b border-slate-800 px-6 py-3">
-          <div className="relative">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-500" />
-            <input
-              value={raw}
-              onChange={(e) => setRaw(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && void runSearch()}
-              placeholder="搜索知识（支持 type: repo: tag: entity: 过滤）"
-              className="h-9 w-full rounded-md border border-slate-700 bg-slate-950/40 pl-10 pr-3 text-sm outline-none focus:border-cyan-400/60"
-              autoFocus
-            />
-            {searching && <Loader2 className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-cyan-300" />}
-          </div>
-        </div>
-      )}
 
       {error && <div className="mx-6 mt-3 rounded-md border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-sm text-yellow-200">{error}</div>}
 
@@ -479,29 +376,16 @@ export function WikiPage({ onClose }: WikiPageProps) {
         </div>
       ) : (
         <div className="flex min-h-0 flex-1">
-          {/* LEFT: browse tree OR search results */}
+          {/* LEFT: browse tree */}
           <div className="min-h-0 w-1/2 overflow-y-auto border-r border-slate-800 p-2">
-            {mode === "browse" ? (
-              <WikiBrowseTree onSelectFile={(branchId, filePath) => go({ kind: "file", branchId, filePath })} onOpenRepoGraph={(repoId, branchId) => go({ kind: "repograph", repoId, branchId })} selected={selectedFile} />
-            ) : hits.length === 0 ? (
-              <p className="px-2 py-6 text-sm text-slate-500">输入关键字后回车搜索</p>
-            ) : (
-              hits.map((h) => (
-                <button
-                  key={h.nodeId}
-                  type="button"
-                  onClick={() => go({ kind: "node", id: h.nodeId })}
-                  className={cn("flex w-full items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-white/5", detail?.node.id === h.nodeId && "bg-cyan-500/10")}
-                >
-                  <TypeIcon t={h.nodeType} />
-                  <span className="min-w-0 flex-1 truncate font-mono text-sm">{h.title}</span>
-                  <span className="text-[11px] text-slate-500">{h.nodeType}</span>
-                </button>
-              ))
-            )}
+            <WikiBrowseTree
+              onSelectFile={(branchId, filePath) => go({ kind: "file", branchId, filePath })}
+              onOpenRepoGraph={(repoId, branchId) => go({ kind: "repograph", repoId, branchId })}
+              selected={selectedFile}
+            />
           </div>
 
-          {/* RIGHT: node detail, or (browse + file selected) the file's symbols */}
+          {/* RIGHT: node detail, or (file selected) the file's symbols, or note editor */}
           <div className="min-h-0 w-1/2 overflow-y-auto p-4">
             {editing ? (
               <div className="flex h-full flex-col gap-2">
@@ -517,25 +401,9 @@ export function WikiPage({ onClose }: WikiPageProps) {
                   <WikiNoteEditor body={editing.body} onChange={(v) => setEditing((e) => (e ? { ...e, body: v } : e))} />
                 </div>
               </div>
-            ) : creating ? (
-              <div className="space-y-3">
-                <h3 className="text-sm font-medium">新建笔记</h3>
-                <input
-                  value={newTitle}
-                  onChange={(e) => setNewTitle(e.target.value)}
-                  onKeyDown={(e) => { if (e.key === "Enter") void createNote(); if (e.key === "Escape") setCreating(false); }}
-                  placeholder="笔记标题"
-                  autoFocus
-                  className="h-9 w-full rounded-md border border-slate-700 bg-slate-950/40 px-3 text-sm outline-none focus:border-cyan-400/60"
-                />
-                <div className="flex gap-2">
-                  <button type="button" onClick={() => void createNote()} disabled={!newTitle.trim()} className="rounded bg-cyan-500/20 px-3 py-1.5 text-sm text-cyan-200 hover:bg-cyan-500/30 disabled:opacity-50">创建并编辑</button>
-                  <button type="button" onClick={() => setCreating(false)} className="rounded border border-slate-700 px-3 py-1.5 text-sm hover:bg-white/5">取消</button>
-                </div>
-              </div>
             ) : detailPane ? (
               detailPane
-            ) : mode === "browse" && selectedFile ? (
+            ) : selectedFile ? (
               <div className="space-y-2">
                 <div className="flex items-center gap-2 border-b border-slate-800 pb-2">
                   <FileCode className="h-4 w-4 text-slate-400" />
@@ -555,7 +423,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
                 )}
               </div>
             ) : (
-              <p className="px-2 py-6 text-sm text-slate-500">{mode === "browse" ? "从左侧选择文件查看符号" : "选择左侧结果查看详情"}</p>
+              <p className="px-2 py-6 text-sm text-slate-500">从左侧选择文件查看符号</p>
             )}
           </div>
         </div>
