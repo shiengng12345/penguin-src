@@ -188,6 +188,20 @@ export function knowledgeCommunities(limit = 20): Promise<KnowledgeCommunityResu
   return query<KnowledgeCommunityResult>(["communities", String(limit)]);
 }
 
+// Recent commits across repos (timeline view).
+export interface KnowledgeTimelineEntry {
+  sha: string;
+  subject: string;
+  author: string | null;
+  date: string | null;
+  merge: boolean;
+  repo: string | null;
+  tags: string[];
+}
+export function knowledgeTimeline(limit = 50): Promise<{ entries: KnowledgeTimelineEntry[] }> {
+  return query<{ entries: KnowledgeTimelineEntry[] }>(["timeline", String(limit)]);
+}
+
 // —— File-backed notes (C9): create / read / overwrite / list ——
 
 export function knowledgeNoteNew(title: string): Promise<{ ok: boolean; slug: string; path: string; nodeId: string }> {

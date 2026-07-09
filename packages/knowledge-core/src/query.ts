@@ -982,6 +982,68 @@ export function communities(store: KnowledgeStore, opts: { limit?: number; minSi
   return { communities: communitiesOut, totalNodes: nodes.length, totalCommunities: groups.size };
 }
 
+export interface TimelineEntry {
+  sha: string;
+  subject: string;
+  author: string | null;
+  date: string | null; // ISO
+  merge: boolean;
+  repo: string | null;
+  tags: string[];
+}
+export interface TimelineResult {
+  entries: TimelineEntry[];
+}
+
+// Recent history across the graph (§P3 timeline): commit nodes ordered by their
+// authored date, newest first, with author/merge flag/repo and any tags that
+// point at them. Optional repo filter.
+export function timeline(store: KnowledgeStore, opts: { limit?: number; repoId?: string } = {}): TimelineResult {
+  const limit = opts.limit ?? 50;
+  const rows = store.db
+    .prepare(
+      `SELECT n.id AS id, n.title AS subject, n.repo_id AS repoId,
+              json_extract(n.meta,'$.author') AS author,
+              json_extract(n.meta,'$.date')   AS date,
+              json_extract(n.meta,'$.merge')  AS merge
+         FROM nodes n
+        WHERE n.node_type='commit' ${opts.repoId ? "AND n.repo_id = @repoId" : ""}
+        ORDER BY date DESC NULLS LAST
+        LIMIT @limit`,
+    )
+    .all({ limit, repoId: opts.repoId }) as Array<{
+    id: string; subject: string; repoId: string | null;
+    author: string | null; date: string | null; merge: number | null;
+  }>;
+
+  const repoName = new Map<string, string>(
+    (store.db.prepare("SELECT id, name FROM repos").all() as { id: string; name: string }[]).map((r) => [r.id, r.name]),
+  );
+  const tagRows = store.db
+    .prepare(
+      "SELECT e.dst AS commitId, t.title AS tag FROM edges e JOIN nodes t ON t.id=e.src WHERE e.edge_type='tagged' AND e.status='active'",
+    )
+    .all() as { commitId: string; tag: string }[];
+  const tagsByCommit = new Map<string, string[]>();
+  for (const t of tagRows) {
+    const arr = tagsByCommit.get(t.commitId) ?? [];
+    arr.push(t.tag);
+    tagsByCommit.set(t.commitId, arr);
+  }
+
+  return {
+    entries: rows.map((r) => ({
+      sha: r.subject.length > 12 && /^[0-9a-f]{7,}$/i.test(r.subject) ? r.subject.slice(0, 10) : r.id.slice(0, 10),
+      subject: r.subject,
+      author: r.author,
+      date: r.date,
+      merge: r.merge === 1,
+      repo: r.repoId ? repoName.get(r.repoId) ?? null : null,
+      tags: tagsByCommit.get(r.id) ?? [],
+    })),
+  };
+}
+
 // —— dead code: symbols nothing references (best-effort; DI/reflection/entry
 // points inflate false positives → callers must treat as candidates) ——
 export interface DeadCodeResult { candidates: ContextBrief[]; note: string }

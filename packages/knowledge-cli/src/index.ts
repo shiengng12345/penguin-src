@@ -6,6 +6,7 @@ import {
   affectedByFiles,
   architecture,
   communities,
+  timeline,
   deadCode,
   compareBranches,
   exploreGraph,
@@ -50,7 +51,7 @@ export interface CliDeps {
 const READ_VERBS = new Set([
   "search", "node", "callers", "calls", "impact", "backlinks",
   "path", "recent", "compare", "status", "suggestions", "snapshots", "doctor",
-  "files", "filesymbols", "graph", "repograph", "services", "tags", "context", "flow", "affected", "architecture", "communities", "deadcode",
+  "files", "filesymbols", "graph", "repograph", "services", "tags", "context", "flow", "affected", "architecture", "communities", "timeline", "deadcode",
 ]);
 
 // repo/branch args accept an id OR a name (humans pass names; the Wiki passes
@@ -111,6 +112,7 @@ const HELP = `penguin — Penguin Knowledge CLI
   penguin affected <file>…      blast radius of changed files (impacted symbols/tests/routes)
   penguin architecture          project overview (repos/nodes/edges/langs/hubs/entrypoints)
   penguin communities [limit]   module/community clusters (label propagation; god node first)
+  penguin timeline [limit]      recent commits across repos (date/author/merge/tags)
   penguin deadcode              symbols nothing references (candidates; verify DI/reflection)
   penguin incident new <title>  scaffold an error/incident memory note
   penguin note new <title> [--type=decision|incident|compliance|bug|requirement]
@@ -395,6 +397,12 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
           const txt = `${c.totalCommunities} communities across ${c.totalNodes} connected nodes; top ${c.communities.length}:\n`
             + c.communities.map((m) => `  #${m.id} (${m.size}) ${m.repos.slice(0, 3).join("/")} — ${m.topMembers.map((t) => t.title).slice(0, 4).join(", ")}`).join("\n");
           emit(deps, json, txt, c);
+          return 0;
+        }
+        case "timeline": {
+          const t = timeline(store, { limit: pos[0] ? Number(pos[0]) || 50 : 50 });
+          const txt = t.entries.map((e) => `${(e.date ?? "").slice(0, 10)}  ${e.repo ?? "?"}  ${e.merge ? "⑃ " : ""}${e.subject}${e.tags.length ? ` [${e.tags.join(",")}]` : ""}`).join("\n") || "(no commits indexed)";
+          emit(deps, json, txt, t);
           return 0;
         }
         case "deadcode": {
