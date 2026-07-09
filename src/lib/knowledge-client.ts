@@ -172,6 +172,22 @@ export function knowledgeServiceGraph(): Promise<KnowledgeGraphView> {
   return query<KnowledgeGraphView>(["services"]);
 }
 
+// Module/community clusters (label propagation), each with its god node first.
+export interface KnowledgeCommunity {
+  id: number;
+  size: number;
+  repos: string[];
+  topMembers: Array<{ title: string; nodeType: string; degree: number }>;
+}
+export interface KnowledgeCommunityResult {
+  communities: KnowledgeCommunity[];
+  totalNodes: number;
+  totalCommunities: number;
+}
+export function knowledgeCommunities(limit = 20): Promise<KnowledgeCommunityResult> {
+  return query<KnowledgeCommunityResult>(["communities", String(limit)]);
+}
+
 // —— File-backed notes (C9): create / read / overwrite / list ——
 
 export function knowledgeNoteNew(title: string): Promise<{ ok: boolean; slug: string; path: string; nodeId: string }> {

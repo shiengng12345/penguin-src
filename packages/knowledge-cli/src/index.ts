@@ -5,6 +5,7 @@ import {
   renderFlowMarkdown,
   affectedByFiles,
   architecture,
+  communities,
   deadCode,
   compareBranches,
   exploreGraph,
@@ -49,7 +50,7 @@ export interface CliDeps {
 const READ_VERBS = new Set([
   "search", "node", "callers", "calls", "impact", "backlinks",
   "path", "recent", "compare", "status", "suggestions", "snapshots", "doctor",
-  "files", "filesymbols", "graph", "repograph", "services", "tags", "context", "flow", "affected", "architecture", "deadcode",
+  "files", "filesymbols", "graph", "repograph", "services", "tags", "context", "flow", "affected", "architecture", "communities", "deadcode",
 ]);
 
 // repo/branch args accept an id OR a name (humans pass names; the Wiki passes
@@ -109,6 +110,7 @@ const HELP = `penguin — Penguin Knowledge CLI
   penguin flow <endpoint|symbol> linear execution chain (endpoint→service→db→…)
   penguin affected <file>…      blast radius of changed files (impacted symbols/tests/routes)
   penguin architecture          project overview (repos/nodes/edges/langs/hubs/entrypoints)
+  penguin communities [limit]   module/community clusters (label propagation; god node first)
   penguin deadcode              symbols nothing references (candidates; verify DI/reflection)
   penguin incident new <title>  scaffold an error/incident memory note
   penguin note new <title> [--type=decision|incident|compliance|bug|requirement]
@@ -386,6 +388,13 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
         case "services": {
           const sg = serviceGraph(store);
           emit(deps, json, `${sg.nodes.length} services/endpoints · ${sg.edges.length} cross-service links`, sg);
+          return 0;
+        }
+        case "communities": {
+          const c = communities(store, { limit: pos[0] ? Number(pos[0]) || 20 : 20 });
+          const txt = `${c.totalCommunities} communities across ${c.totalNodes} connected nodes; top ${c.communities.length}:\n`
+            + c.communities.map((m) => `  #${m.id} (${m.size}) ${m.repos.slice(0, 3).join("/")} — ${m.topMembers.map((t) => t.title).slice(0, 4).join(", ")}`).join("\n");
+          emit(deps, json, txt, c);
           return 0;
         }
         case "deadcode": {

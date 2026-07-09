@@ -874,6 +874,114 @@ export function architecture(store: KnowledgeStore): ArchitectureOverview {
   return { repos, nodeCounts, edgeCounts, languages, hubs, entryPoints };
 }
 
+export interface Community {
+  id: number;
+  size: number;
+  repos: string[]; // repo names the community spans, most-represented first
+  topMembers: Array<{ title: string; nodeType: string; degree: number }>; // god node first
+}
+export interface CommunityResult {
+  communities: Community[];
+  totalNodes: number;
+  totalCommunities: number;
+}
+
+// Module/community detection over the active structural graph via label
+// propagation (§P3): each node adopts the majority label among its neighbours,
+// iterated to convergence. Deterministic (smallest-label tie-break) so repeated
+// runs agree. Returns the largest communities, each with its highest-degree
+// "god node" first and the repos it spans.
+export function communities(store: KnowledgeStore, opts: { limit?: number; minSize?: number } = {}): CommunityResult {
+  const limit = opts.limit ?? 20;
+  const minSize = opts.minSize ?? 3;
+  const edges = store.db
+    .prepare(
+      "SELECT src, dst FROM edges WHERE status='active' AND dst IS NOT NULL AND edge_type IN ('calls','references','imports','defines')",
+    )
+    .all() as { src: string; dst: string }[];
+
+  const adj = new Map<string, string[]>();
+  const degree = new Map<string, number>();
+  const link = (a: string, b: string) => {
+    let n = adj.get(a);
+    if (!n) adj.set(a, (n = []));
+    n.push(b);
+    degree.set(a, (degree.get(a) ?? 0) + 1);
+  };
+  for (const e of edges) {
+    link(e.src, e.dst);
+    link(e.dst, e.src);
+  }
+  const nodes = [...adj.keys()];
+
+  const label = new Map<string, string>();
+  for (const n of nodes) label.set(n, n);
+  for (let iter = 0; iter < 8; iter++) {
+    let changed = false;
+    for (const n of nodes) {
+      const counts = new Map<string, number>();
+      for (const m of adj.get(n)!) {
+        const l = label.get(m)!;
+        counts.set(l, (counts.get(l) ?? 0) + 1);
+      }
+      let best = label.get(n)!;
+      let bestC = -1;
+      for (const [l, c] of counts) {
+        if (c > bestC || (c === bestC && l < best)) {
+          best = l;
+          bestC = c;
+        }
+      }
+      if (best !== label.get(n)) {
+        label.set(n, best);
+        changed = true;
+      }
+    }
+    if (!changed) break;
+  }
+
+  const groups = new Map<string, string[]>();
+  for (const n of nodes) {
+    const l = label.get(n)!;
+    let g = groups.get(l);
+    if (!g) groups.set(l, (g = []));
+    g.push(n);
+  }
+
+  // node → repo name (one pass, avoids a huge IN clause per community).
+  const repoName = new Map<string, string>(
+    (store.db.prepare("SELECT id, name FROM repos").all() as { id: string; name: string }[]).map((r) => [r.id, r.name]),
+  );
+  const nodeRepo = new Map<string, string | null>(
+    (store.db.prepare("SELECT id, repo_id FROM nodes").all() as { id: string; repo_id: string | null }[]).map((r) => [
+      r.id,
+      r.repo_id,
+    ]),
+  );
+
+  const chosen = [...groups.values()].filter((g) => g.length >= minSize).sort((a, b) => b.length - a.length).slice(0, limit);
+  const communitiesOut: Community[] = chosen.map((members, i) => {
+    const topMembers = members
+      .map((id) => ({ id, deg: degree.get(id) ?? 0 }))
+      .sort((a, b) => b.deg - a.deg)
+      .slice(0, 6)
+      .map((x) => {
+        const b = nodeBrief(store, x.id);
+        return { title: b.title, nodeType: b.nodeType, degree: x.deg };
+      });
+    const repoCount = new Map<string, number>();
+    for (const id of members) {
+      const rid = nodeRepo.get(id);
+      const name = rid ? repoName.get(rid) : undefined;
+      if (name) repoCount.set(name, (repoCount.get(name) ?? 0) + 1);
+    }
+    const repos = [...repoCount.entries()].sort((a, b) => b[1] - a[1]).map(([n]) => n);
+    return { id: i + 1, size: members.length, repos, topMembers };
+  });
+
+  return { communities: communitiesOut, totalNodes: nodes.length, totalCommunities: groups.size };
+}
+
 // —— dead code: symbols nothing references (best-effort; DI/reflection/entry
 // points inflate false positives → callers must treat as candidates) ——
 export interface DeadCodeResult { candidates: ContextBrief[]; note: string }
