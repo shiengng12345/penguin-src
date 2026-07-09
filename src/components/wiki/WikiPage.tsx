@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type ReactNode } from "react";
-import { Search, RefreshCw, Database, FileText, Box, Loader2, X, FolderTree, Network, FileCode, FilePlus, Save, Pencil } from "lucide-react";
+import { Search, RefreshCw, Database, FileText, Box, Loader2, X, FolderTree, Network, FileCode, FilePlus, Save, Pencil, ArrowLeft } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { WikiBrowseTree } from "@/components/wiki/WikiBrowseTree";
 import { WikiGraph } from "@/components/wiki/WikiGraph";
@@ -32,6 +32,13 @@ interface WikiPageProps {
 }
 
 type Mode = "browse" | "search" | "graph";
+
+// One step in the Wiki navigation history (for the ← 返回 button).
+type NavEntry =
+  | { kind: "node"; id: string }
+  | { kind: "graph"; id: string }
+  | { kind: "file"; branchId: string; filePath: string }
+  | { kind: "repograph"; repoId: string; branchId: string };
 
 // Penguin Knowledge Wiki (§7). Three views over the shared query layer:
 //  - Browse: repo → branch → file → symbol navigation tree (default)
@@ -152,6 +159,26 @@ export function WikiPage({ onClose }: WikiPageProps) {
     }
   }, []);
 
+  // —— Navigation history: every drill-in (symbol detail / graph recenter / file /
+  // relation jump) is recorded so ← 返回 restores the previous view. Fixes the
+  // "clicked into the graph / a symbol and can't go back" dead-end.
+  const [trail, setTrail] = useState<NavEntry[]>([]);
+  const applyEntry = useCallback((e: NavEntry) => {
+    if (e.kind === "node") { setMode((m) => (m === "graph" ? "browse" : m)); void openNode(e.id); }
+    else if (e.kind === "graph") void focusGraph(e.id);
+    else if (e.kind === "file") void selectFile(e.branchId, e.filePath);
+    else if (e.kind === "repograph") void openRepoGraph(e.repoId, e.branchId);
+  }, [openNode, focusGraph, selectFile, openRepoGraph]);
+  const go = useCallback((e: NavEntry) => { setTrail((t) => [...t, e]); applyEntry(e); }, [applyEntry]);
+  const back = useCallback(() => {
+    setTrail((t) => {
+      if (t.length <= 1) return [];
+      const next = t.slice(0, -1);
+      applyEntry(next[next.length - 1]);
+      return next;
+    });
+  }, [applyEntry]);
+
   const reindex = useCallback(async () => {
     setReindexing(true);
     setError(null);
@@ -240,7 +267,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
   const RelRow = ({ id, title, type, meta }: { id: string; title: string; type: string; meta?: string }) => (
     <button
       type="button"
-      onClick={() => void openNode(id)}
+      onClick={() => go({ kind: "node", id })}
       className="group flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-white/5"
     >
       <TypeIcon t={type} />
@@ -287,7 +314,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
         )}
         <button
           type="button"
-          onClick={() => void focusGraph(detail.node.id)}
+          onClick={() => go({ kind: "graph", id: detail.node.id })}
           className="flex h-7 items-center gap-1 rounded border border-slate-700 px-2 text-xs text-slate-300 hover:bg-white/5"
         >
           <Network className="h-3.5 w-3.5" /> 图谱
@@ -367,7 +394,16 @@ export function WikiPage({ onClose }: WikiPageProps) {
         <span className="ml-2 text-xs text-slate-400">
           {status?.exists ? `${status.repos} repos · ${status.symbols} symbols · ${status.notes} notes` : "未初始化 — 运行 penguin init 或点重建"}
         </span>
-        <div className="ml-4 flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-950/40 p-0.5">
+        <button
+          type="button"
+          onClick={back}
+          disabled={trail.length <= 1}
+          title="返回上一步"
+          className="ml-4 flex h-8 items-center gap-1 rounded-md border border-slate-800 px-2 text-xs text-slate-300 hover:bg-white/5 disabled:opacity-30"
+        >
+          <ArrowLeft className="h-3.5 w-3.5" /> 返回
+        </button>
+        <div className="ml-1 flex items-center gap-1 rounded-lg border border-slate-800 bg-slate-950/40 p-0.5">
           <ModeButton m="browse" icon={<FolderTree className="h-3.5 w-3.5" />} label="浏览" />
           <ModeButton m="search" icon={<Search className="h-3.5 w-3.5" />} label="搜索" />
           <ModeButton m="graph" icon={<Network className="h-3.5 w-3.5" />} label="图谱" />
@@ -428,7 +464,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
                   <>
                     <span className="text-slate-600">·</span>
                     <span className="font-mono text-cyan-200">焦点 {focusNode.title}</span>
-                    <button type="button" onClick={() => void openNode(focusNode.nodeId)} className="ml-2 rounded border border-slate-700 px-2 py-0.5 hover:bg-white/5">打开详情</button>
+                    <button type="button" onClick={() => go({ kind: "node", id: focusNode.nodeId })} className="ml-2 rounded border border-slate-700 px-2 py-0.5 hover:bg-white/5">打开详情</button>
                   </>
                 )}
                 <span className="ml-auto text-slate-600">点节点可重新聚焦</span>
@@ -438,7 +474,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
             )}
           </div>
           <div className="min-h-0 flex-1">
-            {graphData && graphData.nodes.length > 0 && <WikiGraph data={graphData} onNodeClick={(id) => void focusGraph(id)} />}
+            {graphData && graphData.nodes.length > 0 && <WikiGraph data={graphData} onNodeClick={(id) => go({ kind: "graph", id })} />}
           </div>
         </div>
       ) : (
@@ -446,7 +482,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
           {/* LEFT: browse tree OR search results */}
           <div className="min-h-0 w-1/2 overflow-y-auto border-r border-slate-800 p-2">
             {mode === "browse" ? (
-              <WikiBrowseTree onSelectFile={selectFile} onOpenRepoGraph={openRepoGraph} selected={selectedFile} />
+              <WikiBrowseTree onSelectFile={(branchId, filePath) => go({ kind: "file", branchId, filePath })} onOpenRepoGraph={(repoId, branchId) => go({ kind: "repograph", repoId, branchId })} selected={selectedFile} />
             ) : hits.length === 0 ? (
               <p className="px-2 py-6 text-sm text-slate-500">输入关键字后回车搜索</p>
             ) : (
@@ -454,7 +490,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
                 <button
                   key={h.nodeId}
                   type="button"
-                  onClick={() => void openNode(h.nodeId)}
+                  onClick={() => go({ kind: "node", id: h.nodeId })}
                   className={cn("flex w-full items-center gap-2 rounded-md px-2 py-2 text-left hover:bg-white/5", detail?.node.id === h.nodeId && "bg-cyan-500/10")}
                 >
                   <TypeIcon t={h.nodeType} />
@@ -510,7 +546,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
                   <p className="px-1 py-4 text-sm text-slate-500">该文件没有可索引的符号</p>
                 ) : (
                   fileSymbols.map((s) => (
-                    <button key={s.nodeId} type="button" onClick={() => void openNode(s.nodeId)} className="flex w-full items-center gap-2 rounded px-1.5 py-1.5 text-left hover:bg-white/5">
+                    <button key={s.nodeId} type="button" onClick={() => go({ kind: "node", id: s.nodeId })} className="flex w-full items-center gap-2 rounded px-1.5 py-1.5 text-left hover:bg-white/5">
                       <Box className="h-3.5 w-3.5 text-cyan-300" />
                       <span className="min-w-0 flex-1 truncate font-mono text-sm">{s.title}</span>
                       <span className="text-[11px] text-slate-500">{s.kind}{s.status === "stale" ? " · stale" : ""}</span>
