@@ -106,9 +106,16 @@ test("Tauri release resources include the MCP ESM package marker", async () => {
     await readFile(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"),
   );
 
-  assert.deepEqual(tauriConfig.bundle.resources, [
+  // The MCP ESM markers must ship; assert inclusion (not exact equality) so
+  // unrelated resources (e.g. the knowledge CLI bundle) don't break this.
+  for (const marker of [
     "../.penguin.config.json",
     "../packages/mcp/package.json",
     "../packages/mcp/dist/index.js",
-  ]);
+  ]) {
+    assert.ok(
+      tauriConfig.bundle.resources.includes(marker),
+      `missing release resource: ${marker}`,
+    );
+  }
 });

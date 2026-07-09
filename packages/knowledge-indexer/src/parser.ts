@@ -8,16 +8,30 @@ import { WASM_FILE, type Lang } from "./registry.js";
 // indexer is bundled as a sidecar).
 const require = createRequire(import.meta.url);
 
-function wasmsOutDir(): string {
+// A packaged app has no node_modules, so require.resolve("tree-sitter-wasms")
+// fails there. The Tauri bridge sets PENGUIN_WASM_DIR to the resource dir that
+// holds tree-sitter.wasm (web-tree-sitter runtime) + the grammar *.wasm files;
+// dev falls back to the installed package.
+function wasmDir(): string {
+  const override = process.env.PENGUIN_WASM_DIR;
+  if (override) return override;
   return join(dirname(require.resolve("tree-sitter-wasms/package.json")), "out");
 }
 
 let initPromise: Promise<void> | null = null;
 const languageCache = new Map<Lang, Language>();
 
-// web-tree-sitter's runtime must be initialized once per process.
+// web-tree-sitter's runtime must be initialized once per process. When bundled
+// there is no module-adjacent tree-sitter.wasm to auto-locate, so point
+// emscripten's locateFile at PENGUIN_WASM_DIR (no-op in dev — the default
+// resolution still works).
 async function ensureInit(): Promise<void> {
-  if (!initPromise) initPromise = Parser.init();
+  if (!initPromise) {
+    const override = process.env.PENGUIN_WASM_DIR;
+    initPromise = override
+      ? Parser.init({ locateFile: (name: string) => join(override, name) })
+      : Parser.init();
+  }
   await initPromise;
 }
 
@@ -26,7 +40,7 @@ export async function loadLanguage(lang: Lang): Promise<Language> {
   await ensureInit();
   let language = languageCache.get(lang);
   if (!language) {
-    language = await Language.load(join(wasmsOutDir(), WASM_FILE[lang]));
+    language = await Language.load(join(wasmDir(), WASM_FILE[lang]));
     languageCache.set(lang, language);
   }
   return language;

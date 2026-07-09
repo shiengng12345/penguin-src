@@ -52,39 +52,108 @@ fn knowledge_db_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".penguin/knowledge/knowledge.db"))
 }
 
-// Resolve the bundled penguin CLI entry (mirrors bundled_mcp_server_path):
-// packaged Resources first, then a dev-workspace walk-up.
-fn bundled_cli_path<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
-    if let Ok(resource_dir) = app.path().resource_dir() {
-        let candidates = [
-            resource_dir.join("_up_/packages/knowledge-cli/dist/bin.js"),
-            resource_dir.join("packages/knowledge-cli/dist/bin.js"),
-            resource_dir.join("bin.js"),
-        ];
-        for c in candidates {
-            if c.exists() {
-                return Ok(c);
-            }
+// A fully self-contained CLI invocation: the Node to run, the CLI entry, and
+// (packaged only) the wasm resource dir tree-sitter loads from.
+struct CliInvocation {
+    node: PathBuf,
+    cli: PathBuf,
+    wasm_dir: Option<PathBuf>,
+}
+
+// The packaged self-contained runtime dir (esbuild bundle + vendored node +
+// node_modules + wasm), shipped as a Tauri resource. Tauri rewrites `../foo`
+// resources to `_up_/foo` under Resources; probe both layouts.
+fn bundled_runtime_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<PathBuf> {
+    let resource_dir = app.path().resource_dir().ok()?;
+    let candidates = [
+        resource_dir.join("_up_/packages/knowledge-cli/bundle"),
+        resource_dir.join("packages/knowledge-cli/bundle"),
+        resource_dir.join("bundle"),
+    ];
+    candidates
+        .into_iter()
+        .find(|c| c.join("penguin.mjs").exists())
+}
+
+// Resources may be copied without the executable bit; restore it so the
+// vendored node can be spawned.
+#[cfg(unix)]
+fn ensure_executable(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = std::fs::metadata(path) {
+        let mut perms = meta.permissions();
+        if perms.mode() & 0o111 == 0 {
+            perms.set_mode(0o755);
+            let _ = std::fs::set_permissions(path, perms);
         }
     }
-    if let Ok(cwd) = std::env::current_dir() {
-        for ancestor in cwd.ancestors() {
-            let candidate = ancestor.join("packages/knowledge-cli/dist/bin.js");
-            if candidate.exists() {
-                return Ok(candidate);
-            }
+}
+#[cfg(not(unix))]
+fn ensure_executable(_path: &std::path::Path) {}
+
+// Resolve how to run the CLI: prefer the packaged self-contained bundle (its
+// own node + vendored native + wasm), else dev mode (system node + the
+// tsc-built dist/bin.js walked up from cwd).
+fn resolve_invocation<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<CliInvocation, String> {
+    if let Some(dir) = bundled_runtime_dir(app) {
+        let node = dir.join("node");
+        let cli = dir.join("penguin.mjs");
+        if node.exists() && cli.exists() {
+            ensure_executable(&node);
+            return Ok(CliInvocation {
+                node,
+                cli,
+                wasm_dir: Some(dir.join("wasm")),
+            });
         }
     }
-    Err("Bundled penguin CLI (packages/knowledge-cli/dist/bin.js) not found".to_string())
+    // Dev: the tsc-built entry, resolved from packaged Resources or a cwd walk-up.
+    let cli = {
+        let mut found: Option<PathBuf> = None;
+        if let Ok(resource_dir) = app.path().resource_dir() {
+            for c in [
+                resource_dir.join("_up_/packages/knowledge-cli/dist/bin.js"),
+                resource_dir.join("packages/knowledge-cli/dist/bin.js"),
+                resource_dir.join("bin.js"),
+            ] {
+                if c.exists() {
+                    found = Some(c);
+                    break;
+                }
+            }
+        }
+        if found.is_none() {
+            if let Ok(cwd) = std::env::current_dir() {
+                for ancestor in cwd.ancestors() {
+                    let candidate = ancestor.join("packages/knowledge-cli/dist/bin.js");
+                    if candidate.exists() {
+                        found = Some(candidate);
+                        break;
+                    }
+                }
+            }
+        }
+        found.ok_or("Bundled penguin CLI (packages/knowledge-cli/dist/bin.js) not found")?
+    };
+    let node = resolve_node().ok_or("Node.js not detected in common paths")?;
+    Ok(CliInvocation {
+        node,
+        cli,
+        wasm_dir: None,
+    })
 }
 
 // Run the bundled CLI with args and return stdout. Single source of query/index
 // logic — no duplication of the query layer in Rust.
 fn run_cli<R: tauri::Runtime>(app: &tauri::AppHandle<R>, args: &[String]) -> Result<String, String> {
-    let node = resolve_node().ok_or("Node.js not detected in common paths")?;
-    let cli = bundled_cli_path(app)?;
-    let mut cmd = Command::new(node);
-    cmd.arg(&cli);
+    let inv = resolve_invocation(app)?;
+    let mut cmd = Command::new(&inv.node);
+    cmd.arg(&inv.cli);
+    if let Some(wasm) = &inv.wasm_dir {
+        cmd.env("PENGUIN_WASM_DIR", wasm);
+    }
     for a in args {
         cmd.arg(a);
     }
@@ -110,10 +179,13 @@ fn run_cli_streaming<R: tauri::Runtime>(app: &tauri::AppHandle<R>, args: &[Strin
     use std::process::Stdio;
     use tauri::Emitter;
 
-    let node = resolve_node().ok_or("Node.js not detected in common paths")?;
-    let cli = bundled_cli_path(app)?;
-    let mut child = Command::new(node)
-        .arg(&cli)
+    let inv = resolve_invocation(app)?;
+    let mut cmd = Command::new(&inv.node);
+    cmd.arg(&inv.cli);
+    if let Some(wasm) = &inv.wasm_dir {
+        cmd.env("PENGUIN_WASM_DIR", wasm);
+    }
+    let mut child = cmd
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
