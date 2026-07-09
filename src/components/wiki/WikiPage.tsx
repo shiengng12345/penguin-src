@@ -270,7 +270,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
 
       <div className="grid min-h-0 flex-1" style={{ gridTemplateColumns: "280px 1fr 320px" }}>
         {/* LEFT — Explorer */}
-        <aside className="flex min-h-0 flex-col border-r border-slate-800 bg-[#0e131c]">
+        <aside className="flex min-h-0 min-w-0 flex-col border-r border-slate-800 bg-[#0e131c]">
           <div className="flex h-9 items-center gap-2 border-b border-slate-800 px-3 text-xs font-bold text-slate-200"><FileCode className="h-3.5 w-3.5 text-cyan-300" />Explorer</div>
           <div className="min-h-0 flex-1 overflow-auto p-1.5">
             <WikiBrowseTree onSelectFile={(b, fp) => selectFile(b, fp)} onOpenRepoGraph={(r, b) => openRepoGraph(r, b)} selected={selectedFile} />
@@ -292,7 +292,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
         </aside>
 
         {/* CENTER — Context / Graph / Flow */}
-        <section className="flex min-h-0 flex-col bg-gradient-to-b from-[#090d13] to-[#0b0f16]">
+        <section className="flex min-h-0 min-w-0 flex-col bg-gradient-to-b from-[#090d13] to-[#0b0f16]">
           <div className="flex h-11 shrink-0 items-center gap-1 border-b border-slate-800 bg-[#0e131c] px-3">
             {f && (
               <>
@@ -320,7 +320,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
         </section>
 
         {/* RIGHT — why / relations */}
-        <aside className="flex min-h-0 flex-col overflow-auto border-l border-slate-800 bg-[#0e131c]">
+        <aside className="flex min-h-0 min-w-0 flex-col overflow-auto border-l border-slate-800 bg-[#0e131c]">
           {editing ? (
             <div className="flex h-full flex-col gap-2 p-3">
               <div className="flex items-center gap-2 border-b border-slate-800 pb-2">
