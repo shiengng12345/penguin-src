@@ -4,6 +4,20 @@
 // query logic — it's a view over the shared implementation.
 import { invoke } from "@tauri-apps/api/core";
 
+export function formatKnowledgeError(error: unknown): string {
+  const raw = String((error as Error).message ?? error);
+  const abi = raw.match(/NODE_MODULE_VERSION\s+(\d+).*?NODE_MODULE_VERSION\s+(\d+)/s);
+  if (raw.includes("better-sqlite3") && raw.includes("NODE_MODULE_VERSION")) {
+    const detail = abi ? `built ABI ${abi[1]}, runtime ABI ${abi[2]}` : "Node ABI mismatch";
+    return `Knowledge index dependency mismatch (${detail}). Run pnpm rebuild better-sqlite3, then reopen Penguin.`;
+  }
+  if (raw.startsWith("penguin CLI exit")) {
+    const firstLine = raw.split(/\r?\n/).find((line) => line.trim().length > 0) ?? raw;
+    return firstLine.length > 220 ? `${firstLine.slice(0, 217)}...` : firstLine;
+  }
+  return raw.length > 260 ? `${raw.slice(0, 257)}...` : raw;
+}
+
 export interface KnowledgeDbStatus {
   db_path: string;
   exists: boolean;
@@ -142,6 +156,8 @@ export interface ContextPack {
   } | null;
   callers: ContextBrief[];
   calls: ContextBrief[];
+  remoteCalls: ContextBrief[];
+  invokedBy: ContextBrief[];
   referencedBy: ContextBrief[];
   usesTypes: ContextBrief[];
   routes: Array<{ route: string; via: "direct" | "caller" }>;

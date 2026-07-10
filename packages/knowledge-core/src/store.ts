@@ -15,6 +15,12 @@ export interface ParsedEdge {
   origin: "parser";
   method: "EXTRACTED" | "INFERRED";
   confidence?: number;
+  // Cross-service edges to a GLOBAL (repo-less) gRPC endpoint are persisted
+  // branch-less (branch_id IS NULL) so branch-scoped traversal — which each
+  // microservice is indexed on a *different* branch — can still cross the
+  // service boundary (query layer allows `branch_id IS NULL` through). Cleaned
+  // up per (repo, file) on re-index since branch_id can't scope them.
+  branchless?: boolean;
 }
 
 export interface NodeRow {
@@ -604,6 +610,7 @@ export class KnowledgeStore {
   // 解析产出的代码边：同 file+branch 全量替换（§6.3 增量语义）。
   // 非 parser 边在这里是实现错误，不是数据——直接抛。
   replaceFileEdges(p: {
+    repoId: string;
     branchId: string;
     filePath: string;
     edges: ParsedEdge[];
@@ -615,8 +622,17 @@ export class KnowledgeStore {
         );
       }
     }
-    const del = this.db.prepare(
+    // Branch-scoped parser edges for this file (identity = branch + file).
+    const delScoped = this.db.prepare(
       `DELETE FROM edges WHERE branch_id = ? AND origin = 'parser'
+       AND json_extract(provenance, '$.file') = ?`,
+    );
+    // Branch-less cross-service edges (global gRPC endpoints, branch_id IS NULL)
+    // can't be scoped by branch, and relative file paths collide across repos —
+    // so key their cleanup on (repo, file) from provenance.
+    const delGlobal = this.db.prepare(
+      `DELETE FROM edges WHERE branch_id IS NULL AND origin = 'parser'
+       AND json_extract(provenance, '$.repo') = ?
        AND json_extract(provenance, '$.file') = ?`,
     );
     const ins = this.db.prepare(
@@ -625,7 +641,8 @@ export class KnowledgeStore {
        VALUES (?, ?, ?, ?, ?, ?, 'parser', ?, ?, ?)`,
     );
     const tx = this.db.transaction(() => {
-      del.run(p.branchId, p.filePath);
+      delScoped.run(p.branchId, p.filePath);
+      delGlobal.run(p.repoId, p.filePath);
       for (const e of p.edges) {
         ins.run(
           `edge_${randomUUID()}`,
@@ -633,10 +650,10 @@ export class KnowledgeStore {
           e.dst,
           e.rawTarget ?? null,
           e.edgeType,
-          p.branchId,
+          e.branchless ? null : p.branchId,
           e.method,
           e.confidence ?? 1.0,
-          JSON.stringify({ file: p.filePath }),
+          JSON.stringify({ file: p.filePath, repo: p.repoId }),
         );
       }
     });

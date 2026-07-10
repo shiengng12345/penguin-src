@@ -33,30 +33,53 @@ const HTTP_DECORATORS: Record<string, string> = {
 
 // name + string args + numeric args of a decorator
 // (`@Foo('a', 201)` → {Foo, ['a'], [201]}).
-function decoratorInfo(dec: Node): { name: string | null; args: string[]; nums: number[] } {
+// A decorator's string value at a node (drops the surrounding quotes).
+function stringVal(node: Node): string {
+  const frag = node.namedChild(0);
+  return (frag ? frag.text : node.text.replace(/^['"]|['"]$/g, "")) || "";
+}
+
+function decoratorInfo(dec: Node): { name: string | null; args: string[]; nums: number[]; argNodes: Node[] } {
   const inner = dec.namedChild(0);
-  if (!inner) return { name: null, args: [], nums: [] };
-  if (inner.type === "identifier") return { name: inner.text, args: [], nums: [] };
+  if (!inner) return { name: null, args: [], nums: [], argNodes: [] };
+  if (inner.type === "identifier") return { name: inner.text, args: [], nums: [], argNodes: [] };
   if (inner.type === "call_expression") {
     const name = inner.childForFieldName("function")?.text ?? null;
     const argsNode = inner.childForFieldName("arguments");
     const args: string[] = [];
     const nums: number[] = [];
+    const argNodes: Node[] = []; // every arg, any type, positionally faithful
     if (argsNode) {
       for (let i = 0; i < argsNode.namedChildCount; i++) {
         const a = argsNode.namedChild(i)!;
+        argNodes.push(a);
         if (a.type === "string") {
-          const frag = a.namedChild(0);
-          args.push((frag ? frag.text : a.text.replace(/^['"]|['"]$/g, "")) || "");
+          args.push(stringVal(a));
         } else if (a.type === "number") {
           const n = Number(a.text);
           if (!Number.isNaN(n)) nums.push(n);
         }
       }
     }
-    return { name, args, nums };
+    return { name, args, nums, argNodes };
   }
-  return { name: null, args: [], nums: [] };
+  return { name: null, args: [], nums: [], argNodes: [] };
+}
+
+// Resolve a class's `static [readonly] NAME = '<value>'` string constant. NestJS
+// controllers commonly pass the gRPC service name as `Ctrl.SERVICE` rather than a
+// string literal; without this the decorator's service name can't be read.
+function resolveClassConst(cls: Node, constName: string): string | null {
+  const body = cls.childForFieldName("body");
+  if (!body) return null;
+  for (let i = 0; i < body.namedChildCount; i++) {
+    const f = body.namedChild(i)!;
+    if (f.type !== "public_field_definition" && f.type !== "field_definition") continue;
+    if (f.childForFieldName("name")?.text !== constName) continue;
+    const val = f.childForFieldName("value");
+    if (val?.type === "string") return stringVal(val);
+  }
+  return null;
 }
 
 function joinPath(base: string | null, sub: string | null): string {
@@ -121,8 +144,23 @@ export function extractEndpoints(root: Node): ExtractedEndpoint[] {
             httpStatus: httpCode ?? (verb === "POST" ? 201 : 200),
           });
         } else if (name === "GrpcMethod" || name === "GrpcStreamMethod") {
-          const svc = info.args[0] ?? className;
-          const rpc = info.args[1] ?? methodName;
+          // Arg 0 = service, arg 1 = rpc method. Arg 0 is often a static-constant
+          // reference (`Ctrl.SERVICE`) rather than a string literal — resolve it,
+          // else the method name leaks into the service slot and the endpoint id
+          // won't match the consumer's `grpc::<Service>.<method>`.
+          const svcNode = info.argNodes[0];
+          const rpcNode = info.argNodes[1];
+          let svc: string | undefined;
+          if (svcNode?.type === "string") {
+            svc = stringVal(svcNode);
+          } else if (svcNode?.type === "member_expression") {
+            const constName = svcNode.childForFieldName("property")?.text;
+            if (constName) svc = resolveClassConst(cls, constName) ?? undefined;
+          } else if (svcNode?.type === "identifier") {
+            svc = resolveClassConst(cls, svcNode.text) ?? undefined;
+          }
+          const rpc = (rpcNode?.type === "string" ? stringVal(rpcNode) : undefined) ?? methodName;
+          svc = svc ?? className;
           endpoints.push({
             protocol: "grpc",
             key: `gRPC ${svc}.${rpc}`,

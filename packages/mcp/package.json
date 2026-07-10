@@ -7,7 +7,7 @@
     "penguin-mcp": "./dist/index.js"
   },
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --platform=node --target=node18 --format=esm --outfile=dist/index.js --sourcemap",
+    "build": "esbuild src/index.ts --bundle --platform=node --target=node18 --format=esm --outfile=dist/index.js --sourcemap --banner:js='import { createRequire as __pgvCreateRequire } from \"node:module\"; import { fileURLToPath as __pgvFileURLToPath } from \"node:url\"; import { dirname as __pgvDirname } from \"node:path\"; const require = __pgvCreateRequire(import.meta.url); const __filename = __pgvFileURLToPath(import.meta.url); const __dirname = __pgvDirname(__filename);'",
     "start": "node dist/index.js"
   },
   "dependencies": {

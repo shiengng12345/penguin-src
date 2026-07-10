@@ -1,17 +1,37 @@
-import { useCallback, useEffect, useState } from "react";
-import { ChevronRight, ChevronDown, Boxes, GitBranch, FileCode, Network, Loader2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Boxes, ChevronDown, ChevronRight, FileCode, GitBranch, Loader2, Network, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
+  formatKnowledgeError,
   knowledgeIndexStatus,
   knowledgeFiles,
   type KnowledgeIndexStatus,
   type KnowledgeFileRow,
 } from "@/lib/knowledge-client";
 
-// The "what did I index" navigation tree: repo → branch → file. Levels load
-// lazily (a repo can hold thousands of files) so opening the Wiki is instant.
-// Clicking a file hands (branchId, filePath) up; the branch's ⌗ button opens
-// its repo-scoped graph.
+function ExplorerError({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <div className="m-2 rounded-xl border border-amber-500/25 bg-amber-500/[0.06] p-3">
+      <div className="text-sm font-semibold text-amber-200">Explorer unavailable</div>
+      <p className="mt-1 text-xs leading-relaxed text-amber-100/80">{message}</p>
+      <div className="mt-3 flex items-center gap-2">
+        <button
+          type="button"
+          onClick={onRetry}
+          className="rounded-md bg-amber-200 px-2.5 py-1 text-xs font-bold text-slate-950 hover:bg-amber-100"
+        >
+          Retry
+        </button>
+        {message.includes("pnpm rebuild") && (
+          <code className="min-w-0 flex-1 truncate rounded-md border border-amber-500/20 bg-slate-950/50 px-2 py-1.5 text-[11px] text-amber-100">
+            pnpm rebuild better-sqlite3
+          </code>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function WikiBrowseTree({
   onSelectFile,
   onOpenRepoGraph,
@@ -27,13 +47,16 @@ export function WikiBrowseTree({
   const [files, setFiles] = useState<Record<string, KnowledgeFileRow[]>>({});
   const [loading, setLoading] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState<Record<string, string>>({});
+  const [repoFilter, setRepoFilter] = useState("");
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const loadStatus = useCallback(() => {
+    setError(null);
     knowledgeIndexStatus()
       .then(setStatus)
-      .catch((e) => setError(String((e as Error).message ?? e)));
+      .catch((e) => setError(formatKnowledgeError(e)));
   }, []);
+  useEffect(loadStatus, [loadStatus]);
 
   const toggle = (setter: typeof setOpenRepos, id: string) =>
     setter((s) => {
@@ -52,7 +75,7 @@ export function WikiBrowseTree({
         const rows = await knowledgeFiles(repoId, branchId);
         setFiles((f) => ({ ...f, [branchId]: rows }));
       } catch (e) {
-        setError(String((e as Error).message ?? e));
+        setError(formatKnowledgeError(e));
       } finally {
         setLoading((s) => {
           const n = new Set(s);
@@ -64,8 +87,19 @@ export function WikiBrowseTree({
     [files, loading],
   );
 
+  const visibleRepos = useMemo(() => {
+    if (!status) return [];
+    const q = repoFilter.trim().toLowerCase();
+    if (!q) return status.repos;
+    return status.repos.filter((repo) =>
+      repo.name.toLowerCase().includes(q) ||
+      repo.rootPath.toLowerCase().includes(q) ||
+      repo.branches.some((br) => br.name.toLowerCase().includes(q)),
+    );
+  }, [repoFilter, status]);
+
   if (error) {
-    return <p className="px-3 py-6 text-sm text-yellow-200">{error}</p>;
+    return <ExplorerError message={error} onRetry={loadStatus} />;
   }
   if (!status) {
     return (
@@ -75,93 +109,117 @@ export function WikiBrowseTree({
     );
   }
   if (status.repos.length === 0) {
-    return <p className="px-3 py-6 text-sm text-slate-500">还没有索引任何 repo — 运行 penguin init 或点「重建索引」</p>;
+    return <p className="px-3 py-6 text-sm text-slate-500">还没有索引任何 repo。运行 penguin init 后这里会显示工程地图。</p>;
   }
 
   return (
-    <div className="py-1 text-sm">
-      {status.repos.map((repo) => (
-        <div key={repo.repoId}>
-          <button
-            type="button"
-            onClick={() => toggle(setOpenRepos, repo.repoId)}
-            className="flex w-full items-center gap-1.5 rounded px-2 py-1.5 text-left hover:bg-white/5"
-          >
-            {openRepos.has(repo.repoId) ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-slate-500" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-slate-500" />}
-            <Boxes className="h-4 w-4 shrink-0 text-cyan-300" />
-            <span className="min-w-0 flex-1 truncate font-medium">{repo.name}</span>
-            <span className="text-[11px] text-slate-500">{repo.branches.length} br</span>
-          </button>
-
-          {openRepos.has(repo.repoId) &&
-            repo.branches.map((br) => (
-              <div key={br.branchId}>
-                <div className="flex items-center gap-1 pl-5">
-                  <button
-                    type="button"
-                    onClick={() => void openBranch(repo.repoId, br.branchId)}
-                    className="flex min-w-0 flex-1 items-center gap-1.5 rounded px-2 py-1 text-left hover:bg-white/5"
-                  >
-                    {openBranches.has(br.branchId) ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-slate-500" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-slate-500" />}
-                    <GitBranch className="h-3.5 w-3.5 shrink-0 text-slate-400" />
-                    <span className="min-w-0 flex-1 truncate font-mono text-[13px]">{br.name}</span>
-                    {loading.has(br.branchId) && <Loader2 className="h-3 w-3 shrink-0 animate-spin text-cyan-300" />}
-                  </button>
-                  <button
-                    type="button"
-                    title="打开该分支的图谱"
-                    onClick={() => onOpenRepoGraph(repo.repoId, br.branchId)}
-                    className="mr-1 rounded p-1 text-slate-500 hover:bg-white/5 hover:text-cyan-300"
-                  >
-                    <Network className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-
-                {openBranches.has(br.branchId) && files[br.branchId] && (
-                  <div className="pl-6">
-                    {files[br.branchId].length > 40 && (
-                      <input
-                        value={filter[br.branchId] ?? ""}
-                        onChange={(e) => setFilter((f) => ({ ...f, [br.branchId]: e.target.value }))}
-                        placeholder={`过滤 ${files[br.branchId].length} 个文件…`}
-                        className="my-1 ml-1 h-7 w-[calc(100%-0.5rem)] rounded border border-slate-800 bg-slate-950/40 px-2 text-xs outline-none focus:border-cyan-400/50"
-                      />
-                    )}
-                    {files[br.branchId]
-                      .filter((f) => !filter[br.branchId] || f.filePath.toLowerCase().includes(filter[br.branchId].toLowerCase()))
-                      .slice(0, 500)
-                      .map((f) => {
-                        const isSel = selected?.branchId === br.branchId && selected?.filePath === f.filePath;
-                        const dim = f.status !== "indexed";
-                        return (
-                          <button
-                            key={f.filePath}
-                            type="button"
-                            disabled={f.status === "skipped"}
-                            onClick={() => onSelectFile(br.branchId, f.filePath)}
-                            title={f.error ?? f.status}
-                            className={cn(
-                              "flex w-full items-center gap-1.5 rounded px-2 py-1 text-left hover:bg-white/5",
-                              isSel && "bg-cyan-500/10",
-                              dim && "opacity-50",
-                            )}
-                          >
-                            <FileCode className={cn("h-3.5 w-3.5 shrink-0", f.status === "error" ? "text-yellow-400" : "text-slate-500")} />
-                            <span className="min-w-0 flex-1 truncate font-mono text-xs">{f.filePath}</span>
-                            {f.lang && <span className="shrink-0 text-[10px] text-slate-600">{f.lang}</span>}
-                          </button>
-                        );
-                      })}
-                    {(() => {
-                      const shown = files[br.branchId].filter((f) => !filter[br.branchId] || f.filePath.toLowerCase().includes(filter[br.branchId].toLowerCase()));
-                      return shown.length > 500 ? <p className="px-2 py-1 text-[11px] text-slate-600">… 还有 {shown.length - 500} 个,输入过滤词缩小范围</p> : null;
-                    })()}
-                  </div>
-                )}
-              </div>
-            ))}
+    <div className="space-y-2 text-sm">
+      <div className="sticky top-0 z-10 border-b border-slate-800 bg-[#0c121b] pb-2">
+        <div className="flex items-center rounded-lg border border-slate-800 bg-slate-950/45 px-2 focus-within:border-cyan-500/40">
+          <Search className="h-3.5 w-3.5 shrink-0 text-slate-500" />
+          <input
+            value={repoFilter}
+            onChange={(e) => setRepoFilter(e.target.value)}
+            placeholder="Filter repos, branches, files"
+            className="h-8 min-w-0 flex-1 bg-transparent px-2 text-xs text-slate-200 outline-none placeholder:text-slate-600"
+          />
         </div>
-      ))}
+        <div className="mt-2 flex items-center justify-between text-[10px] uppercase tracking-wide text-slate-600">
+          <span>{visibleRepos.length} repos</span>
+          <span>{status.repos.reduce((n, repo) => n + repo.branches.length, 0)} branches</span>
+        </div>
+      </div>
+
+      {visibleRepos.map((repo) => {
+        const open = openRepos.has(repo.repoId);
+        return (
+          <div key={repo.repoId} className="rounded-lg border border-slate-800/70 bg-slate-950/20">
+            <button
+              type="button"
+              onClick={() => toggle(setOpenRepos, repo.repoId)}
+              className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left hover:bg-white/[0.04]"
+            >
+              {open ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-slate-500" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-slate-500" />}
+              <Boxes className="h-4 w-4 shrink-0 text-cyan-300" />
+              <span className="min-w-0 flex-1 truncate font-semibold text-slate-200">{repo.name}</span>
+              <span className="rounded bg-slate-900 px-1.5 py-0.5 font-mono text-[10px] text-slate-500">{repo.branches.length} br</span>
+            </button>
+
+            {open &&
+              repo.branches.map((br) => {
+                const branchFiles = files[br.branchId];
+                const fileFilter = filter[br.branchId] ?? "";
+                const shown = branchFiles?.filter((f) => !fileFilter || f.filePath.toLowerCase().includes(fileFilter.toLowerCase())) ?? [];
+                return (
+                  <div key={br.branchId} className="border-t border-slate-800/70">
+                    <div className="flex items-center gap-1 px-2 py-1">
+                      <button
+                        type="button"
+                        onClick={() => void openBranch(repo.repoId, br.branchId)}
+                        className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1.5 py-1 text-left hover:bg-white/5"
+                      >
+                        {openBranches.has(br.branchId) ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-slate-500" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-slate-500" />}
+                        <GitBranch className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+                        <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-slate-300">{br.name}</span>
+                        <span className={cn("h-1.5 w-1.5 rounded-full", br.status === "live" || br.status === "fresh" ? "bg-emerald-400" : "bg-slate-600")} />
+                        {loading.has(br.branchId) && <Loader2 className="h-3 w-3 shrink-0 animate-spin text-cyan-300" />}
+                      </button>
+                      <button
+                        type="button"
+                        title="打开该分支的图谱"
+                        onClick={() => onOpenRepoGraph(repo.repoId, br.branchId)}
+                        className="rounded-md p-1 text-slate-500 hover:bg-white/5 hover:text-cyan-300"
+                      >
+                        <Network className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                    {br.staleSymbols > 0 && (
+                      <div className="px-9 pb-1 font-mono text-[10px] text-amber-300/80">{br.staleSymbols} stale symbols</div>
+                    )}
+
+                    {openBranches.has(br.branchId) && branchFiles && (
+                      <div className="px-2 pb-2 pl-7">
+                        {branchFiles.length > 20 && (
+                          <input
+                            value={fileFilter}
+                            onChange={(e) => setFilter((f) => ({ ...f, [br.branchId]: e.target.value }))}
+                            placeholder={`Filter ${branchFiles.length} files`}
+                            className="mb-1 h-7 w-full rounded-md border border-slate-800 bg-slate-950/45 px-2 font-mono text-xs text-slate-200 outline-none placeholder:text-slate-600 focus:border-cyan-400/50"
+                          />
+                        )}
+                        <div className="space-y-0.5">
+                          {shown.slice(0, 500).map((f) => {
+                            const isSel = selected?.branchId === br.branchId && selected?.filePath === f.filePath;
+                            const dim = f.status !== "indexed";
+                            return (
+                              <button
+                                key={f.filePath}
+                                type="button"
+                                disabled={f.status === "skipped"}
+                                onClick={() => onSelectFile(br.branchId, f.filePath)}
+                                title={f.error ?? f.status}
+                                className={cn(
+                                  "flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left hover:bg-white/5",
+                                  isSel && "bg-cyan-500/12 text-cyan-100",
+                                  dim && "opacity-50",
+                                )}
+                              >
+                                <FileCode className={cn("h-3.5 w-3.5 shrink-0", f.status === "error" ? "text-yellow-400" : "text-slate-500")} />
+                                <span className="min-w-0 flex-1 truncate font-mono text-xs">{f.filePath}</span>
+                                {f.lang && <span className="shrink-0 rounded bg-slate-900 px-1 py-0.5 text-[9px] text-slate-600">{f.lang}</span>}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        {shown.length > 500 && <p className="px-2 py-1 text-[11px] text-slate-600">还有 {shown.length - 500} 个，输入过滤词缩小范围</p>}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+          </div>
+        );
+      })}
     </div>
   );
 }

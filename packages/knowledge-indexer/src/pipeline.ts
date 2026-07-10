@@ -10,6 +10,9 @@ import { langForExtension } from "./registry.js";
 import { detectRenames } from "./rename.js";
 import { resolveRefs, type SymbolIndex } from "./resolve.js";
 import { walkRepoFiles, isLikelyMinified } from "./walk.js";
+import { parseProtoEndpoints } from "./proto-parser.js";
+import { extractFpmsGrpcCalls } from "./grpc-js-client.js";
+import { detectPackages, flyoverPackageNames } from "./package-detect.js";
 
 export interface IndexReport {
   repoId: string;
@@ -286,7 +289,9 @@ async function indexFileWithSource(
         title: ep.key,
         meta: { protocol: ep.protocol, service: ep.grpcService, method: ep.grpcMethod, controller: ep.controllerName, httpStatus: ep.httpStatus },
       });
-      structural.push({ src: endpointId, dst: handlerId, edgeType: "handles", origin: "parser", method: "EXTRACTED" });
+      // gRPC endpoints are global (repo-less) → branch-less so cross-service
+      // traversal survives branch-scoping. http/kafka stay repo/branch-scoped.
+      structural.push({ src: endpointId, dst: handlerId, edgeType: "handles", origin: "parser", method: "EXTRACTED", branchless: !!isGrpc });
     }
     // consumer side: inter-service gRPC calls → 'invokes' to the SAME global
     // endpoint id → the cross-repo service-call graph.
@@ -300,7 +305,29 @@ async function indexFileWithSource(
         title: `gRPC ${gc.service}.${gc.method}`,
         meta: { protocol: "grpc", service: gc.service, method: gc.method },
       });
-      structural.push({ src, dst: endpointId, edgeType: "invokes", origin: "parser", method: "EXTRACTED" });
+      structural.push({ src, dst: endpointId, edgeType: "invokes", origin: "parser", method: "EXTRACTED", branchless: true });
+    }
+    // FPMS-style JS gRPC client calls (serviceRegistry + grpcClientCall pattern).
+    // Detected via regex on the source for non-NestJS, bare grpc-js patterns.
+    if (lang === "js") {
+      const jsCalls = extractFpmsGrpcCalls(p.source);
+      for (const jc of jsCalls) {
+        // Match the function name to an extracted symbol (e.g. "AdminUnlockPlayer"
+        // → qualifiedName "fpmsNTApi.AdminUnlockPlayer").
+        const matching = extracted.symbols.find((s) =>
+          s.qualifiedName === jc.functionName || s.qualifiedName.endsWith(`.${jc.functionName}`)
+        );
+        const src = matching ? fileSymbolIds.get(matching.qualifiedName) : undefined;
+        if (!src) continue;
+        const endpointId = store.upsertNode({
+          nodeType: "endpoint",
+          identityKey: grpcEndpointKey(jc.service, jc.method),
+          repoId: null,
+          title: `gRPC ${jc.service}.${jc.method}`,
+          meta: { protocol: "grpc", service: jc.service, method: jc.method },
+        });
+        structural.push({ src, dst: endpointId, edgeType: "invokes", origin: "parser", method: "EXTRACTED", branchless: true });
+      }
     }
     // code entities: thrown errors + env reads → entity nodes, edges from the
     // enclosing symbol ('throws' / 'uses'). "where is XError thrown / who uses JWT_SECRET".
@@ -323,7 +350,7 @@ async function indexFileWithSource(
       });
     }
     store.replaceFileEdges({
-      branchId: p.branchId, filePath: p.relPath,
+      repoId: p.repoId, branchId: p.branchId, filePath: p.relPath,
       edges: [...resolved.edges, ...structural],
     });
 
@@ -465,7 +492,7 @@ export async function indexRepo(input: {
       if (seen.has(cp.file_path) || cp.status === "deleted") continue;
       store.markFileDeleted({ repoId, branchId, filePath: cp.file_path });
       store.markFileSymbolsStale({ branchId, filePath: cp.file_path });
-      store.replaceFileEdges({ branchId, filePath: cp.file_path, edges: [] });
+      store.replaceFileEdges({ repoId, branchId, filePath: cp.file_path, edges: [] });
       store.db
         .prepare(
           `DELETE FROM fts_symbols WHERE node_id IN (
@@ -474,6 +501,119 @@ export async function indexRepo(input: {
         )
         .run(branchId, cp.file_path);
       report.deleted += 1;
+    }
+
+    // ── Proto file processing: extract gRPC service/method definitions from .proto
+    // files and create endpoint + service nodes with handles edges. This powers the
+    // service graph for repos that have proto definitions (e.g. flyover proto monorepo,
+    // FPMS's @snsoft/*-grpc packages in node_modules).
+    const protoModules = new Set<string>();
+    for (const file of walkRepoFiles(scanRoot)) {
+      if (!file.relPath.endsWith(".proto")) continue;
+      let protoSource: string;
+      try {
+        protoSource = readFileSync(file.absPath, "utf8");
+      } catch { continue; }
+      const eps = parseProtoEndpoints(protoSource, file.relPath);
+      if (eps.length === 0) continue;
+
+      for (const ep of eps) protoModules.add(ep.module);
+
+      const tx = store.db.transaction(() => {
+        const svcId = store.upsertNode({
+          nodeType: "service",
+          identityKey: `grpc-module::${repoId}::${eps[0].module}`,
+          repoId,
+          title: eps[0].module,
+          meta: { module: eps[0].module },
+        });
+
+        const edges: ParsedEdge[] = [];
+        for (const ep of eps) {
+          const endpointId = store.upsertNode({
+            nodeType: "endpoint",
+            identityKey: grpcEndpointKey(ep.service, ep.method),
+            repoId: null,
+            title: `${ep.service}.${ep.method}`,
+            meta: { protocol: "grpc", service: ep.service, method: ep.method, source: ep.filePath },
+          });
+          edges.push({
+            src: endpointId, dst: svcId,
+            edgeType: "handles", origin: "parser", method: "EXTRACTED", branchless: true,
+          });
+        }
+        store.replaceFileEdges({
+          repoId, branchId, filePath: file.relPath, edges,
+        });
+      });
+      tx();
+    }
+
+    // ── Package dependency detection: npm package ↔ repo mapping for the
+    // cross-repo service graph. Creates service nodes for published packages
+    // and depends_on edges for @snsoft-scoped dependencies.
+    const pkg = detectPackages(scanRoot, repoId);
+    if (pkg) {
+      const extraMappings: Array<{ name: string; repoId: string }> = [];
+      if (protoModules.size > 0) {
+        for (const n of flyoverPackageNames([...protoModules])) {
+          extraMappings.push({ name: n, repoId });
+        }
+      }
+
+      const allPkgs: Array<{ name: string; repoId: string }> = [];
+      if (pkg.name) allPkgs.push({ name: pkg.name, repoId: pkg.repoId });
+      for (const sub of pkg.subPackages ?? []) {
+        if (sub.name) allPkgs.push({ name: sub.name, repoId: sub.repoId });
+      }
+      for (const e of extraMappings) {
+        if (!allPkgs.some((a) => a.name === e.name)) allPkgs.push(e);
+      }
+
+      if (allPkgs.length > 0 || pkg.dependencies.length > 0) {
+        const tx = store.db.transaction(() => {
+          const consumerName = pkg.name || repoId;
+          const consumerId = store.upsertNode({
+            nodeType: "service",
+            identityKey: `npm-package::${consumerName}`,
+            repoId,
+            title: consumerName,
+            meta: { package: consumerName },
+          });
+
+          for (const api of allPkgs) {
+            store.upsertNode({
+              nodeType: "service",
+              identityKey: `npm-package::${api.name}`,
+              repoId: api.repoId,
+              title: api.name,
+              meta: { package: api.name },
+            });
+          }
+
+          const dt: ParsedEdge[] = [];
+          for (const dep of pkg.dependencies) {
+            const depId = store.upsertNode({
+              nodeType: "service",
+              identityKey: `npm-package::${dep}`,
+              repoId: null,
+              title: dep,
+              meta: { package: dep },
+            });
+            dt.push({
+              src: consumerId, dst: depId,
+              edgeType: "depends_on",
+              origin: "parser", method: "EXTRACTED",
+            });
+          }
+          if (dt.length > 0) {
+            store.replaceFileEdges({
+              repoId, branchId, filePath: "~package.json", edges: dt,
+            });
+          }
+        });
+        tx();
+      }
     }
 
     // git topology (commits/tags) into the graph — on-demand, bounded (§11).

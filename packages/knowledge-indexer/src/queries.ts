@@ -23,6 +23,8 @@ const TS_QUERY = `
 (enum_declaration name: (identifier) @name) @definition.enum
 (variable_declarator name: (identifier) @name value: (arrow_function)) @definition.function
 (variable_declarator name: (identifier) @name value: (function_expression)) @definition.function
+(pair key: (property_identifier) @name value: (function_expression)) @definition.method
+(pair key: (property_identifier) @name value: (arrow_function)) @definition.method
 (call_expression function: (identifier) @reference.call)
 (call_expression function: (member_expression property: (property_identifier) @reference.call))
 (import_statement source: (string (string_fragment) @reference.import))
@@ -41,6 +43,8 @@ const JS_QUERY = `
 (class_declaration name: (identifier) @name) @definition.class
 (variable_declarator name: (identifier) @name value: (arrow_function)) @definition.function
 (variable_declarator name: (identifier) @name value: (function_expression)) @definition.function
+(pair key: (property_identifier) @name value: (function_expression)) @definition.method
+(pair key: (property_identifier) @name value: (arrow_function)) @definition.method
 (call_expression function: (identifier) @reference.call)
 (call_expression function: (member_expression property: (property_identifier) @reference.call))
 (import_statement source: (string (string_fragment) @reference.import))

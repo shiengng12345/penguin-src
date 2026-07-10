@@ -26,13 +26,19 @@ test("parseSearchFilters splits type:/repo:/tag:/entity: from free text", async 
   assert.deepEqual(plain.filters, {});
 });
 
-test("WikiPage wires the knowledge client (explore/context/flow/status)", async () => {
+test("WikiPage wires the knowledge client (search/explore/context/flow/status)", async () => {
   const source = await readFile(new URL("../src/components/wiki/WikiPage.tsx", import.meta.url), "utf8");
-  for (const fn of ["knowledgeExplore", "knowledgeContext", "knowledgeFlow", "knowledgeDbStatus", "knowledgeFileSymbols"]) {
+  for (const fn of ["knowledgeSearch", "knowledgeExplore", "knowledgeContext", "knowledgeFlow", "knowledgeDbStatus", "knowledgeFileSymbols"]) {
     assert.match(source, new RegExp(fn), `WikiPage should use ${fn}`);
   }
   assert.match(source, /backlinks/);
   assert.match(source, /Copy for AI/); // context pack view
+  assert.match(source, /Knowledge command center/); // search-first home view
+  assert.match(source, /File overview/); // file-click view
+  assert.match(source, /setSearchResults\(null\); setSearchBusy\(false\); setSelectedFile/); // file click clears old search state
+  assert.match(source, /setFileSymbolsBusy\(true\)/); // file click shows loading feedback
+  assert.match(source, /GraphStatsOverlay/); // graph mode + node/link counts
+  assert.match(source, /Only cross-service invokes and package dependencies/); // service graph scope is explicit
 });
 
 test("knowledge-client routes through the Rust bridge commands", async () => {
@@ -55,7 +61,7 @@ test("knowledge-client exposes index-browse + graph wrappers over the CLI verbs"
 test("WikiPage: 4-pane layout with Context/Graph/Flow centre tabs", async () => {
   const source = await readFile(new URL("../src/components/wiki/WikiPage.tsx", import.meta.url), "utf8");
   assert.match(source, /type CenterTab = "context" \| "graph" \| "flow"/);
-  assert.match(source, /gridTemplateColumns: "280px 1fr 320px"/); // explorer | centre | why
+  assert.match(source, /gridTemplateColumns: "320px minmax\(0,1fr\) 360px"/); // explorer | centre | why
   assert.match(source, /<WikiBrowseTree/);
   assert.match(source, /<WikiGraph/);
   assert.match(source, /layout=\{graphLayout\}/); // radial ↔ force toggle
@@ -70,6 +76,8 @@ test("WikiBrowseTree lazy-loads repo→branch→file and can open a repo graph",
   assert.match(source, /knowledgeFiles\(repoId, branchId\)/); // files lazy per branch
   assert.match(source, /onSelectFile/);
   assert.match(source, /onOpenRepoGraph/);
+  assert.match(source, /Filter repos, branches, files/);
+  assert.match(source, /Explorer unavailable/);
 });
 
 test("WikiGraph renders via a dynamically-imported force-graph (code-split, defensive)", async () => {
@@ -95,8 +103,11 @@ test("WikiPage wires note edit/save via the C9 note verbs", async () => {
   const source = await readFile(new URL("../src/components/wiki/WikiPage.tsx", import.meta.url), "utf8");
   assert.match(source, /knowledgeNoteWrite/);
   assert.match(source, /knowledgeNoteRead/);
-  assert.match(source, /<WikiNoteEditor/);
+  assert.match(source, /<WikiWhyPanel/); // editor is now in WikiWhyPanel sub-component
   assert.match(source, /editing/); // edit state (create/reindex moved to CLI)
+  // Verify the why panel itself wires WikiNoteEditor
+  const whySource = await readFile(new URL("../src/components/wiki/WikiWhyPanel.tsx", import.meta.url), "utf8");
+  assert.match(whySource, /<WikiNoteEditor/);
 });
 
 test("knowledge-client exposes note new/write/read/list wrappers", async () => {

@@ -455,20 +455,29 @@ export function repoGraph(
 
 // Build {nodes, edges} for a fixed node-id set — edges only where BOTH ends are
 // in the set (optionally scoped to a branch). Shared by the two graph views.
+// Edges are capped (dense hub nodes can otherwise yield tens of thousands of
+// edges — a force/3D layout that freezes the UI) and ordered so the meaningful
+// relations survive the cap: cross-service (invokes/handles) first, then calls,
+// with `defines`/`imports` noise last.
 function collectGraph(
   store: KnowledgeStore,
   ids: string[],
   branchId?: string,
+  edgeLimit = 2000,
 ): { nodes: GraphView["nodes"]; edges: GraphView["edges"] } {
   const nodes = ids.map((id) => nodeBrief(store, id));
   const ph = ids.map(() => "?").join(",");
   const branchClause = branchId ? "AND branch_id=?" : "";
-  const params = branchId ? [branchId, ...ids, ...ids] : [...ids, ...ids];
+  const params = branchId ? [branchId, ...ids, ...ids, edgeLimit] : [...ids, ...ids, edgeLimit];
   const edges = store.db
     .prepare(
       `SELECT src, dst, edge_type AS edgeType FROM edges
        WHERE status='active' AND dst IS NOT NULL ${branchClause}
-         AND src IN (${ph}) AND dst IN (${ph})`,
+         AND src IN (${ph}) AND dst IN (${ph})
+       ORDER BY CASE edge_type
+         WHEN 'invokes' THEN 0 WHEN 'handles' THEN 1 WHEN 'calls' THEN 2
+         WHEN 'references' THEN 3 WHEN 'tests' THEN 4 WHEN 'imports' THEN 5 ELSE 6 END
+       LIMIT ?`,
     )
     .all(...params) as GraphView["edges"];
   return { nodes, edges };
@@ -519,6 +528,8 @@ export interface ContextPack {
     | null;
   callers: ContextBrief[]; // who calls the focus (calls edges in)
   calls: ContextBrief[]; // what the focus calls (calls edges out)
+  remoteCalls: ContextBrief[]; // gRPC services the focus invokes (invokes edges out, cross-service)
+  invokedBy: ContextBrief[]; // symbols in OTHER services that invoke an endpoint this focus handles
   referencedBy: ContextBrief[]; // who uses this as a type (references in)
   usesTypes: ContextBrief[]; // types the focus uses (references out)
   routes: Array<{ route: string; via: "direct" | "caller" }>; // HTTP routes reaching the focus
@@ -544,7 +555,8 @@ export function buildContextPack(
 ): ContextPack {
   const limit = options?.limit ?? 25;
   const empty: ContextPack = {
-    target, focus: null, callers: [], calls: [], referencedBy: [], usesTypes: [],
+    target, focus: null, callers: [], calls: [], remoteCalls: [], invokedBy: [],
+    referencedBy: [], usesTypes: [],
     routes: [], tests: [], errors: [], envs: [], notes: [], importers: [], signals: [],
   };
   const focusId = resolveNodeId(store, target);
@@ -566,6 +578,23 @@ export function buildContextPack(
 
   const callers = inEdges("calls");
   const calls = outEdges("calls");
+  // Cross-service: gRPC endpoints this focus invokes (branch-less edges pass bx).
+  const remoteCalls = outEdges("invokes");
+  // Cross-service reverse: symbols in OTHER services that invoke an endpoint this
+  // focus handles (focus ← handles ← endpoint ← invokes ← caller). Endpoints are
+  // global + edges branch-less, so no branch scoping here.
+  const handledEndpoints = store.db
+    .prepare(`SELECT DISTINCT src AS id FROM edges WHERE dst=? AND edge_type='handles' AND ${active}`)
+    .all(focusId) as { id: string }[];
+  const invokedBy = handledEndpoints.length
+    ? (store.db
+        .prepare(
+          `SELECT DISTINCT src AS id FROM edges
+           WHERE edge_type='invokes' AND ${active} AND src != ?
+           AND dst IN (${handledEndpoints.map(() => "?").join(",")}) LIMIT ?`,
+        )
+        .all(focusId, ...handledEndpoints.map((e) => e.id), limit) as { id: string }[])
+    : [];
   const referencedBy = inEdges("references");
   const usesTypes = outEdges("references");
   const tests = inEdges("tests");
@@ -615,6 +644,8 @@ export function buildContextPack(
   const inferred = (store.db.prepare(`SELECT COUNT(*) AS n FROM edges WHERE (src=? OR dst=?) AND method='INFERRED' AND ${active}`).get(focusId, focusId) as { n: number }).n;
   if (inferred) signals.push(`${inferred} INFERRED edge(s) — some relations are best-guess, verify`);
   if (routes.length) signals.push(`reachable from ${routes.length} HTTP route(s) — public-facing`);
+  if (remoteCalls.length) signals.push(`calls ${remoteCalls.length} remote gRPC endpoint(s) — cross-service dependency`);
+  if (invokedBy.length) signals.push(`invoked by ${invokedBy.length} caller(s) in other services — cross-service contract`);
 
   return {
     target,
@@ -632,6 +663,8 @@ export function buildContextPack(
       : null,
     callers: briefsFrom(store, callers),
     calls: briefsFrom(store, calls),
+    remoteCalls: briefsFrom(store, remoteCalls),
+    invokedBy: briefsFrom(store, invokedBy),
     referencedBy: briefsFrom(store, referencedBy),
     usesTypes: briefsFrom(store, usesTypes),
     routes,
@@ -683,6 +716,8 @@ export function renderContextPackMarkdown(pack: ContextPack): string {
   }
   list("Called by", pack.callers);
   list("Calls", pack.calls);
+  list("Calls remote services (gRPC)", pack.remoteCalls);
+  list("Invoked by other services (gRPC)", pack.invokedBy);
   list("Used as a type by", pack.referencedBy);
   list("Uses types", pack.usesTypes);
   list("Tested by", pack.tests);
@@ -1129,5 +1164,26 @@ export function serviceGraph(store: KnowledgeStore): GraphView {
   }
   // always include every repo as a node (even isolated ones)
   for (const r of repos) useRepo(r.id);
+
+  // ── Package dependency edges: npm-package → npm-package (depends_on) ──
+  // Resolves each @snsoft/* dependency to a provider repo, creating cross-repo
+  // links for the service graph (e.g. auth depends_on @snsoft/player-grpc →
+  // link auth repo → flyover repo).
+  const pkgDeps = store.db.prepare(
+    `SELECT sn.repo_id AS consumerRepo, dn.repo_id AS providerRepo
+     FROM edges e
+     JOIN nodes sn ON sn.id = e.src
+     JOIN nodes dn ON dn.id = e.dst
+     WHERE e.edge_type='depends_on' AND e.status='active'
+       AND sn.repo_id IS NOT NULL AND dn.repo_id IS NOT NULL`,
+  ).all() as { consumerRepo: string; providerRepo: string }[];
+  for (const d of pkgDeps) {
+    if (d.consumerRepo !== d.providerRepo) {
+      useRepo(d.consumerRepo);
+      useRepo(d.providerRepo);
+      addEdge(d.consumerRepo, d.providerRepo, "depends_on");
+    }
+  }
+
   return { focus: null, nodes: [...nodes.values()], edges: [...edgeSet.values()] };
 }
