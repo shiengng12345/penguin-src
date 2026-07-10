@@ -524,10 +524,6 @@ export function WikiPage({ onClose }: WikiPageProps) {
     } catch (e) { err(e); } finally { setSearchBusy(false); }
   }, [searchQuery]);
 
-  const addSearchToken = useCallback((token: string) => {
-    setSearchQuery((q) => (q.includes(token) ? q : `${q ? `${q} ` : ""}${token}`));
-  }, []);
-
   const openTimeline = useCallback(async () => {
     setTab("timeline");
     if (timelineData) return;
@@ -680,18 +676,6 @@ export function WikiPage({ onClose }: WikiPageProps) {
               Search
             </button>
           </div>
-          <div className="flex flex-wrap items-center gap-1.5">
-            {["repo:", "type:", "tag:", "entity:"].map((token) => (
-              <button
-                key={token}
-                type="button"
-                onClick={() => addSearchToken(token)}
-                className="rounded-md border border-slate-800 bg-slate-950/40 px-2 py-1 font-mono text-[11px] text-slate-500 hover:border-cyan-500/30 hover:text-cyan-200"
-              >
-                {token}
-              </button>
-            ))}
-          </div>
         </div>
       </header>
 
@@ -745,10 +729,10 @@ export function WikiPage({ onClose }: WikiPageProps) {
             <TabBtn on={tab === "timeline"} onClick={() => void openTimeline()} icon={<Clock className="h-3.5 w-3.5" />}>Timeline</TabBtn>
             <div className="ml-auto flex items-center gap-2">
               {tab === "graph" && graphData && (
-                <div className="flex items-center gap-1 rounded-md border border-slate-800 bg-slate-950/40 p-0.5 text-xs">
-                  <button type="button" onClick={() => setGraphLayout("radial")} className={cn("rounded px-2 py-0.5", graphLayout === "radial" ? "bg-cyan-500/15 text-cyan-200" : "text-slate-400 hover:bg-white/5")}>整洁</button>
-                  <button type="button" onClick={() => setGraphLayout("force")} className={cn("rounded px-2 py-0.5", graphLayout === "force" ? "bg-cyan-500/15 text-cyan-200" : "text-slate-400 hover:bg-white/5")}>力导向</button>
-                  <button type="button" onClick={() => setGraphLayout("3d")} className={cn("rounded px-2 py-0.5", graphLayout === "3d" ? "bg-cyan-500/15 text-cyan-200" : "text-slate-400 hover:bg-white/5")}>3D</button>
+                <div className="flex shrink-0 items-center gap-1 rounded-md border border-slate-800 bg-slate-950/40 p-0.5 text-xs">
+                  <button type="button" onClick={() => setGraphLayout("radial")} className={cn("whitespace-nowrap rounded px-2 py-0.5", graphLayout === "radial" ? "bg-cyan-500/15 text-cyan-200" : "text-slate-400 hover:bg-white/5")}>整洁</button>
+                  <button type="button" onClick={() => setGraphLayout("force")} className={cn("whitespace-nowrap rounded px-2 py-0.5", graphLayout === "force" ? "bg-cyan-500/15 text-cyan-200" : "text-slate-400 hover:bg-white/5")}>力导向</button>
+                  <button type="button" onClick={() => setGraphLayout("3d")} className={cn("whitespace-nowrap rounded px-2 py-0.5", graphLayout === "3d" ? "bg-cyan-500/15 text-cyan-200" : "text-slate-400 hover:bg-white/5")}>3D</button>
                 </div>
               )}
               {tab === "context" && f && (
