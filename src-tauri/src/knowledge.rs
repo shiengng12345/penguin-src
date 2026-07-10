@@ -303,7 +303,7 @@ fn run_cli_streaming<R: tauri::Runtime>(app: &tauri::AppHandle<R>, args: &[Strin
 // or ["callers","GetLoginURL"]. Always JSON. Returns the CLI's raw JSON string
 // (the webview parses it) so the UI shares the CLI/MCP query semantics exactly.
 #[tauri::command]
-pub(crate) fn knowledge_query<R: tauri::Runtime>(
+pub(crate) async fn knowledge_query<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     args: Vec<String>,
 ) -> Result<String, String> {
@@ -311,12 +311,18 @@ pub(crate) fn knowledge_query<R: tauri::Runtime>(
     if !full.iter().any(|a| a == "--json") {
         full.push("--json".to_string());
     }
-    run_cli(&app, &full)
+    // run_cli spawns a Node process and blocks until it exits. A *sync*
+    // #[tauri::command] runs on the main thread, so that block froze the whole
+    // webview for the query's duration (the "服务图 freezes the app" bug). Async
+    // + spawn_blocking moves it to a worker thread; the UI stays responsive.
+    tauri::async_runtime::spawn_blocking(move || run_cli(&app, &full))
+        .await
+        .map_err(|e| format!("knowledge query task failed: {e}"))?
 }
 
 // One-shot incremental index of a repo (headless), returns the JSON report.
 #[tauri::command]
-pub(crate) fn knowledge_reindex<R: tauri::Runtime>(
+pub(crate) async fn knowledge_reindex<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     path: Option<String>,
 ) -> Result<String, String> {
@@ -326,8 +332,11 @@ pub(crate) fn knowledge_reindex<R: tauri::Runtime>(
     }
     args.push("--json".to_string());
     args.push("--progress-events".to_string());
-    // Streams knowledge-index-progress events while running; returns the report.
-    run_cli_streaming(&app, &args)
+    // Indexing can run for minutes — never on the main thread, or the whole UI
+    // freezes for the entire index. Streams knowledge-index-progress events.
+    tauri::async_runtime::spawn_blocking(move || run_cli_streaming(&app, &args))
+        .await
+        .map_err(|e| format!("knowledge reindex task failed: {e}"))?
 }
 
 #[derive(Serialize)]
@@ -340,9 +349,23 @@ pub(crate) struct KnowledgeDbStatus {
 }
 
 // Cheap status pill: a direct rusqlite read (no Node spawn) so the UI can show
-// "initialized?" + counts instantly.
+// "initialized?" + counts. The COUNTs still touch a large table (~0.3s on a big
+// DB), so run off the main thread — a sync command would freeze the UI on every
+// Wiki mount.
 #[tauri::command]
-pub(crate) fn knowledge_db_status() -> KnowledgeDbStatus {
+pub(crate) async fn knowledge_db_status() -> KnowledgeDbStatus {
+    tauri::async_runtime::spawn_blocking(db_status_blocking)
+        .await
+        .unwrap_or(KnowledgeDbStatus {
+            db_path: String::new(),
+            exists: false,
+            repos: 0,
+            symbols: 0,
+            notes: 0,
+        })
+}
+
+fn db_status_blocking() -> KnowledgeDbStatus {
     let path = knowledge_db_path();
     let db_path = path
         .as_ref()
