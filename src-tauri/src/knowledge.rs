@@ -187,6 +187,19 @@ fn run_cli<R: tauri::Runtime>(app: &tauri::AppHandle<R>, args: &[String]) -> Res
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+// Warm the knowledge CLI path off the UI thread at startup. The first query
+// otherwise pays, on the Wiki-open critical path: login-shell node resolution
+// (`zsh -ilc`, seconds on a heavy .zshrc), node cold-start, better-sqlite3
+// native load, and paging in a large knowledge.db — which made first entry into
+// the Wiki feel very slow. A cheap `status` call at launch pre-pays all of it
+// (populating the resolve_node cache + OS file cache) so the first real query is
+// warm. Best-effort: failures (no DB yet, etc.) are ignored.
+pub(crate) fn prewarm<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    std::thread::spawn(move || {
+        let _ = run_cli(&app, &["status".to_string(), "--json".to_string()]);
+    });
+}
+
 // Like run_cli but streams stderr: lines `PENGUIN_PROGRESS {json}` (emitted by
 // the CLI under --progress-events) become `knowledge-index-progress` Tauri
 // events so the Wiki can show a live bar; stdout is collected as the final
