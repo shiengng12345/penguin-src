@@ -524,10 +524,6 @@ export function WikiPage({ onClose }: WikiPageProps) {
     } catch (e) { err(e); } finally { setSearchBusy(false); }
   }, [searchQuery]);
 
-  const addSearchToken = useCallback((token: string) => {
-    setSearchQuery((q) => (q.includes(token) ? q : `${q ? `${q} ` : ""}${token}`));
-  }, []);
-
   const openTimeline = useCallback(async () => {
     setTab("timeline");
     if (timelineData) return;
@@ -679,18 +675,6 @@ export function WikiPage({ onClose }: WikiPageProps) {
             >
               Search
             </button>
-          </div>
-          <div className="flex flex-wrap items-center gap-1.5">
-            {["repo:", "type:", "tag:", "entity:"].map((token) => (
-              <button
-                key={token}
-                type="button"
-                onClick={() => addSearchToken(token)}
-                className="rounded-md border border-slate-800 bg-slate-950/40 px-2 py-1 font-mono text-[11px] text-slate-500 hover:border-cyan-500/30 hover:text-cyan-200"
-              >
-                {token}
-              </button>
-            ))}
           </div>
         </div>
       </header>
