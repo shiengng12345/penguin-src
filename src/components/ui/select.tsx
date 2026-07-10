@@ -112,7 +112,7 @@ const Select = React.forwardRef<HTMLDivElement, SelectProps>(
     };
 
     return (
-      <div ref={containerRef} className={cn("relative", className)}>
+      <div ref={containerRef} className={cn("relative h-8", className)}>
         <button
           ref={ref as React.Ref<HTMLButtonElement>}
           type="button"
@@ -120,7 +120,7 @@ const Select = React.forwardRef<HTMLDivElement, SelectProps>(
           onClick={() => !disabled && setOpen((o) => !o)}
           onKeyDown={onKeyDown}
           className={cn(
-            "flex h-8 w-full items-center justify-between rounded-md border border-input bg-transparent px-2.5 text-xs transition-colors",
+            "flex h-full w-full items-center justify-between rounded-md border border-input bg-transparent px-2.5 text-xs transition-colors",
             "hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
             "disabled:cursor-not-allowed disabled:opacity-50",
             open && "ring-1 ring-ring"
