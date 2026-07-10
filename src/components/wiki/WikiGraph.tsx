@@ -237,6 +237,11 @@ export function WikiGraph({
           })
           .onNodeClick((n: GNode) => onClickRef.current(String(n.id)))
           .onEngineStop(() => graph.zoomToFit(400, 40))
+          // Stop the sim once it settles. Default cooldownTime is 15s, so a dense
+          // repo graph (200 nodes / 2000 edges) churned the CPU — repainting every
+          // node + edge each frame — for 15s straight ("super slow"). A tick cap
+          // settles the layout then freezes it (radial pins fx/fy → stops at once).
+          .cooldownTicks(160)
           .width(el.clientWidth)
           .height(el.clientHeight);
 

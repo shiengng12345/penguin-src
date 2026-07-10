@@ -435,7 +435,7 @@ export function repoGraph(
   branchId: string,
   options?: { limit?: number },
 ): GraphView {
-  const limit = options?.limit ?? 200;
+  const limit = options?.limit ?? 150;
   const top = store.db
     .prepare(
       `SELECT d.id AS id FROM (
@@ -463,7 +463,7 @@ function collectGraph(
   store: KnowledgeStore,
   ids: string[],
   branchId?: string,
-  edgeLimit = 2000,
+  edgeLimit = 1000,
 ): { nodes: GraphView["nodes"]; edges: GraphView["edges"] } {
   const nodes = ids.map((id) => nodeBrief(store, id));
   const ph = ids.map(() => "?").join(",");
