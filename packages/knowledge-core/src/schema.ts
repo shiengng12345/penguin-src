@@ -91,6 +91,11 @@ CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst);
 CREATE INDEX IF NOT EXISTS idx_edges_dst_type_status ON edges(dst, edge_type, status);
 CREATE INDEX IF NOT EXISTS idx_edges_src_type_status ON edges(src, edge_type, status);
 CREATE INDEX IF NOT EXISTS idx_edges_branch_status ON edges(branch_id, status);
+-- serviceGraph filters edges by edge_type + status alone (handles/invokes/
+-- depends_on, no src/dst anchor). The composite indexes above lead with src/dst
+-- so they can't serve it — without this the query full-scans the whole edges
+-- table (~240k rows → the "服务图" froze for ~2.7s). Leads with edge_type.
+CREATE INDEX IF NOT EXISTS idx_edges_type_status ON edges(edge_type, status);
 
 CREATE TABLE IF NOT EXISTS files_index (
   id TEXT PRIMARY KEY,

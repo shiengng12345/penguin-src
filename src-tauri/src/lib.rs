@@ -144,6 +144,9 @@ pub fn run() {
         .manage(redis::RedisRegistry::default())
         .setup(|app| {
             packages::start_package_watcher(app.handle().clone());
+            // Warm the knowledge CLI (node resolution + cold-start + DB) in the
+            // background so first entry into the Wiki isn't slow (perf).
+            knowledge::prewarm(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

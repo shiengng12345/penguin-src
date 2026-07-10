@@ -21,6 +21,38 @@ use crate::mcp::detect_node_path;
 // different major with a mismatched ABI). Override with PENGUIN_NODE; packaged
 // releases ship their own node + rebuilt natives. Cached (login-shell spawn is
 // slow).
+// Disk cache for the resolved dev node path. The login-shell probe below
+// (`zsh -ilc`) can take seconds on a heavy .zshrc and ran on EVERY app launch —
+// the biggest slice of "first Wiki entry is slow" in dev builds. Persisting the
+// path lets every launch after the first skip the shell entirely. Busted
+// (`clear_node_cache`) if a CLI call later fails like a stale/ABI-wrong node.
+fn node_cache_file() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".penguin").join("node-path"))
+}
+
+pub(crate) fn clear_node_cache() {
+    if let Some(f) = node_cache_file() {
+        let _ = std::fs::remove_file(f);
+    }
+}
+
+fn probe_node() -> Option<PathBuf> {
+    // The dev's login-shell node (matches the native build's ABI).
+    if let Ok(out) = std::process::Command::new("zsh")
+        .args(["-ilc", "command -v node"])
+        .output()
+    {
+        if out.status.success() {
+            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let pb = PathBuf::from(&p);
+            if !p.is_empty() && pb.exists() {
+                return Some(pb);
+            }
+        }
+    }
+    detect_node_path()
+}
+
 fn resolve_node() -> Option<PathBuf> {
     static NODE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     NODE.get_or_init(|| {
@@ -30,20 +62,26 @@ fn resolve_node() -> Option<PathBuf> {
                 return Some(pb);
             }
         }
-        // The dev's login-shell node (matches the native build's ABI).
-        if let Ok(out) = std::process::Command::new("zsh")
-            .args(["-ilc", "command -v node"])
-            .output()
-        {
-            if out.status.success() {
-                let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                let pb = PathBuf::from(&p);
-                if !p.is_empty() && pb.exists() {
+        // Prior launch's resolution — validated, so an upgraded/removed node
+        // falls through to a fresh probe.
+        if let Some(cache) = node_cache_file() {
+            if let Ok(raw) = std::fs::read_to_string(&cache) {
+                let pb = PathBuf::from(raw.trim());
+                if pb.exists() {
                     return Some(pb);
                 }
             }
         }
-        detect_node_path()
+        let resolved = probe_node();
+        if let Some(ref pb) = resolved {
+            if let Some(cache) = node_cache_file() {
+                if let Some(dir) = cache.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                let _ = std::fs::write(&cache, pb.to_string_lossy().as_bytes());
+            }
+        }
+        resolved
     })
     .clone()
 }
@@ -178,13 +216,30 @@ fn run_cli<R: tauri::Runtime>(app: &tauri::AppHandle<R>, args: &[String]) -> Res
         .output()
         .map_err(|e| format!("penguin CLI failed to launch: {e}"))?;
     if !out.status.success() {
-        return Err(format!(
-            "penguin CLI exit {}: {}",
-            out.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        let code = out.status.code().unwrap_or(-1);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // A wrong/stale cached node surfaces as command-not-found (127) or a
+        // better-sqlite3 ABI mismatch — drop the cache so the next launch
+        // re-probes instead of failing forever.
+        if code == 127 || stderr.contains("NODE_MODULE_VERSION") {
+            clear_node_cache();
+        }
+        return Err(format!("penguin CLI exit {}: {}", code, stderr.trim()));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+// Warm the knowledge CLI path off the UI thread at startup. The first query
+// otherwise pays, on the Wiki-open critical path: login-shell node resolution
+// (`zsh -ilc`, seconds on a heavy .zshrc), node cold-start, better-sqlite3
+// native load, and paging in a large knowledge.db — which made first entry into
+// the Wiki feel very slow. A cheap `status` call at launch pre-pays all of it
+// (populating the resolve_node cache + OS file cache) so the first real query is
+// warm. Best-effort: failures (no DB yet, etc.) are ignored.
+pub(crate) fn prewarm<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    std::thread::spawn(move || {
+        let _ = run_cli(&app, &["status".to_string(), "--json".to_string()]);
+    });
 }
 
 // Like run_cli but streams stderr: lines `PENGUIN_PROGRESS {json}` (emitted by
@@ -248,7 +303,7 @@ fn run_cli_streaming<R: tauri::Runtime>(app: &tauri::AppHandle<R>, args: &[Strin
 // or ["callers","GetLoginURL"]. Always JSON. Returns the CLI's raw JSON string
 // (the webview parses it) so the UI shares the CLI/MCP query semantics exactly.
 #[tauri::command]
-pub(crate) fn knowledge_query<R: tauri::Runtime>(
+pub(crate) async fn knowledge_query<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     args: Vec<String>,
 ) -> Result<String, String> {
@@ -256,12 +311,18 @@ pub(crate) fn knowledge_query<R: tauri::Runtime>(
     if !full.iter().any(|a| a == "--json") {
         full.push("--json".to_string());
     }
-    run_cli(&app, &full)
+    // run_cli spawns a Node process and blocks until it exits. A *sync*
+    // #[tauri::command] runs on the main thread, so that block froze the whole
+    // webview for the query's duration (the "服务图 freezes the app" bug). Async
+    // + spawn_blocking moves it to a worker thread; the UI stays responsive.
+    tauri::async_runtime::spawn_blocking(move || run_cli(&app, &full))
+        .await
+        .map_err(|e| format!("knowledge query task failed: {e}"))?
 }
 
 // One-shot incremental index of a repo (headless), returns the JSON report.
 #[tauri::command]
-pub(crate) fn knowledge_reindex<R: tauri::Runtime>(
+pub(crate) async fn knowledge_reindex<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     path: Option<String>,
 ) -> Result<String, String> {
@@ -271,8 +332,11 @@ pub(crate) fn knowledge_reindex<R: tauri::Runtime>(
     }
     args.push("--json".to_string());
     args.push("--progress-events".to_string());
-    // Streams knowledge-index-progress events while running; returns the report.
-    run_cli_streaming(&app, &args)
+    // Indexing can run for minutes — never on the main thread, or the whole UI
+    // freezes for the entire index. Streams knowledge-index-progress events.
+    tauri::async_runtime::spawn_blocking(move || run_cli_streaming(&app, &args))
+        .await
+        .map_err(|e| format!("knowledge reindex task failed: {e}"))?
 }
 
 #[derive(Serialize)]
@@ -285,9 +349,23 @@ pub(crate) struct KnowledgeDbStatus {
 }
 
 // Cheap status pill: a direct rusqlite read (no Node spawn) so the UI can show
-// "initialized?" + counts instantly.
+// "initialized?" + counts. The COUNTs still touch a large table (~0.3s on a big
+// DB), so run off the main thread — a sync command would freeze the UI on every
+// Wiki mount.
 #[tauri::command]
-pub(crate) fn knowledge_db_status() -> KnowledgeDbStatus {
+pub(crate) async fn knowledge_db_status() -> KnowledgeDbStatus {
+    tauri::async_runtime::spawn_blocking(db_status_blocking)
+        .await
+        .unwrap_or(KnowledgeDbStatus {
+            db_path: String::new(),
+            exists: false,
+            repos: 0,
+            symbols: 0,
+            notes: 0,
+        })
+}
+
+fn db_status_blocking() -> KnowledgeDbStatus {
     let path = knowledge_db_path();
     let db_path = path
         .as_ref()
