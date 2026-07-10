@@ -21,6 +21,38 @@ use crate::mcp::detect_node_path;
 // different major with a mismatched ABI). Override with PENGUIN_NODE; packaged
 // releases ship their own node + rebuilt natives. Cached (login-shell spawn is
 // slow).
+// Disk cache for the resolved dev node path. The login-shell probe below
+// (`zsh -ilc`) can take seconds on a heavy .zshrc and ran on EVERY app launch —
+// the biggest slice of "first Wiki entry is slow" in dev builds. Persisting the
+// path lets every launch after the first skip the shell entirely. Busted
+// (`clear_node_cache`) if a CLI call later fails like a stale/ABI-wrong node.
+fn node_cache_file() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".penguin").join("node-path"))
+}
+
+pub(crate) fn clear_node_cache() {
+    if let Some(f) = node_cache_file() {
+        let _ = std::fs::remove_file(f);
+    }
+}
+
+fn probe_node() -> Option<PathBuf> {
+    // The dev's login-shell node (matches the native build's ABI).
+    if let Ok(out) = std::process::Command::new("zsh")
+        .args(["-ilc", "command -v node"])
+        .output()
+    {
+        if out.status.success() {
+            let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            let pb = PathBuf::from(&p);
+            if !p.is_empty() && pb.exists() {
+                return Some(pb);
+            }
+        }
+    }
+    detect_node_path()
+}
+
 fn resolve_node() -> Option<PathBuf> {
     static NODE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
     NODE.get_or_init(|| {
@@ -30,20 +62,26 @@ fn resolve_node() -> Option<PathBuf> {
                 return Some(pb);
             }
         }
-        // The dev's login-shell node (matches the native build's ABI).
-        if let Ok(out) = std::process::Command::new("zsh")
-            .args(["-ilc", "command -v node"])
-            .output()
-        {
-            if out.status.success() {
-                let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                let pb = PathBuf::from(&p);
-                if !p.is_empty() && pb.exists() {
+        // Prior launch's resolution — validated, so an upgraded/removed node
+        // falls through to a fresh probe.
+        if let Some(cache) = node_cache_file() {
+            if let Ok(raw) = std::fs::read_to_string(&cache) {
+                let pb = PathBuf::from(raw.trim());
+                if pb.exists() {
                     return Some(pb);
                 }
             }
         }
-        detect_node_path()
+        let resolved = probe_node();
+        if let Some(ref pb) = resolved {
+            if let Some(cache) = node_cache_file() {
+                if let Some(dir) = cache.parent() {
+                    let _ = std::fs::create_dir_all(dir);
+                }
+                let _ = std::fs::write(&cache, pb.to_string_lossy().as_bytes());
+            }
+        }
+        resolved
     })
     .clone()
 }
@@ -178,11 +216,15 @@ fn run_cli<R: tauri::Runtime>(app: &tauri::AppHandle<R>, args: &[String]) -> Res
         .output()
         .map_err(|e| format!("penguin CLI failed to launch: {e}"))?;
     if !out.status.success() {
-        return Err(format!(
-            "penguin CLI exit {}: {}",
-            out.status.code().unwrap_or(-1),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+        let code = out.status.code().unwrap_or(-1);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        // A wrong/stale cached node surfaces as command-not-found (127) or a
+        // better-sqlite3 ABI mismatch — drop the cache so the next launch
+        // re-probes instead of failing forever.
+        if code == 127 || stderr.contains("NODE_MODULE_VERSION") {
+            clear_node_cache();
+        }
+        return Err(format!("penguin CLI exit {}: {}", code, stderr.trim()));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
