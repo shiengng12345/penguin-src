@@ -24,6 +24,14 @@ const TYPE_OPTIONS: { value: RestBodyValueType; label: string }[] = [
   { value: "array", label: "array" },
 ];
 
+// Shared field styling so key + value inputs read as one consistent set of
+// boxes, aligned with the type Select (all h-7). Subtle resting border, brighter
+// on hover, primary ring on focus.
+const FIELD_CLS =
+  "h-7 min-w-0 rounded-md border border-input bg-transparent px-2 font-mono text-xs text-foreground " +
+  "placeholder:text-muted-foreground/40 transition-colors hover:bg-accent/50 " +
+  "focus:border-primary/60 focus:outline-none focus:ring-1 focus:ring-primary/20";
+
 function valuePlaceholder(type: RestBodyValueType): string {
   switch (type) {
     case "number": return "0";
@@ -87,13 +95,13 @@ export function RestKeyValueBody({
   return (
     <div className="flex flex-col">
       {fields.length > 0 && (
-        <div ref={containerRef} className="divide-y divide-border">
+        <div ref={containerRef} className="flex flex-col gap-0.5 pt-1">
           {fields.map((f, i) => (
             <div
               key={f.id}
               data-kv-row
               className={cn(
-                "group flex items-center gap-1.5 px-3 py-1",
+                "group flex items-center gap-2 px-3 py-1.5",
                 dragFrom === i && "opacity-40",
                 dragOver === i && dragFrom !== i && "border-t-2 border-primary",
               )}
@@ -118,13 +126,13 @@ export function RestKeyValueBody({
                 autoCorrect="off"
                 autoCapitalize="off"
                 spellCheck={false}
-                className="h-7 min-w-0 flex-1 rounded border border-transparent bg-transparent px-1.5 font-mono text-xs focus:border-border focus:outline-none"
+                className={cn(FIELD_CLS, "flex-1")}
               />
               <Select
                 value={f.type}
                 onChange={(e) => update(i, { type: e.target.value as RestBodyValueType })}
                 options={TYPE_OPTIONS}
-                className="h-7 w-[86px] shrink-0 font-mono text-xs"
+                className="h-7 w-24 shrink-0 font-mono text-xs"
               />
               <input
                 value={f.type === "null" ? "" : f.value}
@@ -134,7 +142,7 @@ export function RestKeyValueBody({
                 autoCorrect="off"
                 autoCapitalize="off"
                 spellCheck={false}
-                className="h-7 min-w-0 flex-[2] rounded border border-transparent bg-transparent px-1.5 font-mono text-xs focus:border-border focus:outline-none disabled:opacity-40"
+                className={cn(FIELD_CLS, "flex-[2] disabled:opacity-40")}
               />
               <button
                 onClick={() => remove(i)}

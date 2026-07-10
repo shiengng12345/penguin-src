@@ -19,6 +19,9 @@ export const NODE_PATH_SETUP = [
   'export VOLTA_HOME="$HOME/.volta"',
   'export PATH="$VOLTA_HOME/bin:$HOME/.fnm:/opt/homebrew/bin:/usr/local/bin:$PATH"',
   'command -v fnm >/dev/null 2>&1 && eval "$(fnm env 2>/dev/null)"',
+  // 业务原因：npm install -g 若配了自定义 prefix（npm config set prefix …），全局 bin
+  // 不在上面任何路径里（如 ~/.npm-global/bin）。直接问 npm 拿全局 prefix，覆盖所有安装方式。
+  'command -v npm >/dev/null 2>&1 && export PATH="$(npm prefix -g)/bin:$PATH" || true',
 ].join("; ");
 
 export interface SidecarResult {
