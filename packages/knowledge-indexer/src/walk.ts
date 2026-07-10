@@ -10,7 +10,8 @@ export interface WalkedFile {
 
 const ALWAYS_IGNORE = new Set([
   ".git", "node_modules", "target", "dist", "build", ".next", ".turbo",
-  "vendor", "bower_components", "__pycache__", ".venv", "venv", ".idea", ".vscode",
+  "vendor", "bower_components", "coverage", ".nyc_output",
+  "__pycache__", ".venv", "venv", ".idea", ".vscode",
 ]);
 
 const DEFAULT_MAX_BYTES = 1_000_000;
