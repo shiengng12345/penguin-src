@@ -20,6 +20,15 @@ const DEFAULT_MAX_BYTES = 1_000_000;
 // symbols — indexing them floods the graph with single-letter hubs (n/a/i/$).
 const MINIFIED_NAME = /\.min\.(js|mjs|cjs|css)$|[.-]bundle\.js$|\.bundle\.min\./i;
 
+// Third-party library SOURCE served as static assets (jQuery, Angular, Flot,
+// require.js…) is readable — normal ~30-char lines — so it dodges both the
+// minified-name and minified-content checks, then floods the graph with junk
+// nodes ("T", "map", "on") and false call edges (`.filter()` → jQuery's filter).
+// It always lives under a static-asset dir though. Match the RELATIVE PATH so
+// real source `libs/`/`src/lib/` (no public/static/... ancestor) is untouched.
+const VENDOR_PATH_RE =
+  /(^|\/)(?:public|static|assets|www|TestPage)\/(?:[^/]+\/)*(?:lib|libs|vendor|common)\//i;
+
 // Content heuristic for minified/generated files that dodge the name check: a
 // large file whose average line is very long is packed, not hand-written.
 export function isLikelyMinified(source: string): boolean {
@@ -68,10 +77,10 @@ export function* walkRepoFiles(
       const abs = join(dir, entry.name);
       const rel = relative(rootPath, abs).split("\\").join("/");
       if (entry.isDirectory()) {
-        if (ALWAYS_IGNORE.has(entry.name) || ignored(rel, entry.name)) continue;
+        if (ALWAYS_IGNORE.has(entry.name) || ignored(rel, entry.name) || VENDOR_PATH_RE.test(`${rel}/`)) continue;
         yield* walk(abs);
       } else if (entry.isFile()) {
-        if (ignored(rel, entry.name) || MINIFIED_NAME.test(entry.name)) continue;
+        if (ignored(rel, entry.name) || MINIFIED_NAME.test(entry.name) || VENDOR_PATH_RE.test(rel)) continue;
         let st;
         try {
           st = statSync(abs);
