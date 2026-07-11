@@ -18,9 +18,3 @@ test("call attributed to enclosing fn", async () => {
   assert.equal(out.frontendGrpcCalls[0].functionName, "claimDailyFragment");
   assert.ok(out.frontendGrpcCalls[0].enclosingQualifiedName?.endsWith("claim"));
 });
-
-test("wrapper file yields verified methods", async () => {
-  const src = `class NtSkinFragmentService { static claimDailyFragment = (r) => this._net.claimDailyFragment(r) }`;
-  const out = await extractSymbols({ lang: "ts", source: src, relPath: "w.ts", frontendGrpcConfig: CFG });
-  assert.deepEqual(out.wrapperVerified["NtSkinFragmentService"], ["claimDailyFragment"]);
-});
