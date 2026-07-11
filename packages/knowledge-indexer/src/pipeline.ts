@@ -719,10 +719,16 @@ export async function indexRepo(input: {
         // only-correct edges).
         if (!verifiedUniquenessMethods.has(fc.functionName)) continue; // not a verified forwarding method
         const services = store.findEndpointServicesByMethod(fc.functionName.toLowerCase());
-        if (services.length !== 1) continue; // 0 (missing) or >1 (ambiguous) → no edge
+        if (services.length > 1) continue; // ambiguous → never link
+        // 0 services: the backend endpoint isn't indexed YET (this repo may
+        // have been indexed BEFORE its backend — order-independence). Persist
+        // with service="" as a "resolve-by-method-later" marker so a later
+        // replayPendingFrontendEdges() (run on every indexRepo call) can
+        // re-resolve it once the endpoint appears, instead of silently
+        // dropping the call site the way a bare `continue` would.
         store.enqueuePendingFrontendEdge({
           repoId, filePath: fc.filePath, srcNodeId: fc.src,
-          service: services[0], functionName: fc.functionName, sourceType: "frontend_web",
+          service: services.length === 1 ? services[0] : "", functionName: fc.functionName, sourceType: "frontend_web",
         });
         continue;
       }

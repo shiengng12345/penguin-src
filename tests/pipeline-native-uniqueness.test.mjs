@@ -139,6 +139,91 @@ test("idempotent: index twice → exactly one edge", async () => {
   store.close();
 });
 
+// ── Order-independence: a native frontend repo may be indexed BEFORE its
+// backend (fresh-clone / new-user scenario). The uniqueness-mode stitch must
+// persist a deferred row (service="") rather than silently dropping the call
+// site, so a LATER backend index recovers the edge — same guarantee EXACT
+// mode already has via pending_frontend_edges + replayPendingFrontendEdges().
+test("ORDER-INDEPENDENCE: frontend indexed before backend → deferred row, then replay materializes edge", async () => {
+  const store = openStore();
+  // No backend endpoint exists yet at index time.
+  await indexRepo({ store, rootPath: nativeRepo(), mode: "incremental" });
+  const before = store.db.prepare("SELECT COUNT(*) c FROM edges WHERE source_type = 'frontend_web'").get();
+  assert.equal(before.c, 0, "no edge yet: backend not indexed");
+  const pendingBefore = store.db
+    .prepare("SELECT * FROM pending_frontend_edges WHERE function_name = ?")
+    .all("getCurrentMissionConfig");
+  assert.equal(pendingBefore.length, 1, "deferred pending row persisted for the UNIQUE-but-missing method");
+  assert.equal(pendingBefore[0].service, "", 'service="" is the resolve-by-method-later marker');
+
+  // Backend now appears (e.g. a later index of the backend repo).
+  const ep = store.upsertNode({
+    nodeType: "endpoint",
+    identityKey: grpcEndpointKey("FrontendSpecialEventService", "GetCurrentMissionConfig"),
+    repoId: null, title: "ep",
+  });
+  const replayed = store.replayPendingFrontendEdges();
+  assert.ok(replayed >= 1);
+  const edges = store.db.prepare("SELECT edge_type, source_type FROM edges WHERE dst = ?").all(ep);
+  assert.ok(edges.some((e) => e.edge_type === "invokes" && e.source_type === "frontend_web"), "edge now exists");
+  const pendingAfter = store.db
+    .prepare("SELECT * FROM pending_frontend_edges WHERE function_name = ?")
+    .all("getCurrentMissionConfig");
+  assert.equal(pendingAfter.length, 0, "pending row consumed");
+  store.close();
+});
+
+test("ORDER-INDEPENDENCE: deferred miss that later becomes AMBIGUOUS → row deleted, no edge", async () => {
+  const store = openStore();
+  // No backend endpoint exists yet → deferred row queued for getCurrentMissionConfig.
+  await indexRepo({ store, rootPath: nativeRepo(), mode: "incremental" });
+  const pendingBefore = store.db
+    .prepare("SELECT * FROM pending_frontend_edges WHERE function_name = ?")
+    .all("getCurrentMissionConfig");
+  assert.equal(pendingBefore.length, 1);
+
+  // TWO backend services now define this method → ambiguous.
+  const epA = store.upsertNode({
+    nodeType: "endpoint",
+    identityKey: grpcEndpointKey("ServiceX", "GetCurrentMissionConfig"),
+    repoId: null, title: "epA",
+  });
+  const epB = store.upsertNode({
+    nodeType: "endpoint",
+    identityKey: grpcEndpointKey("ServiceY", "GetCurrentMissionConfig"),
+    repoId: null, title: "epB",
+  });
+  store.replayPendingFrontendEdges();
+
+  const pendingAfter = store.db
+    .prepare("SELECT * FROM pending_frontend_edges WHERE function_name = ?")
+    .all("getCurrentMissionConfig");
+  assert.equal(pendingAfter.length, 0, "ambiguous deferred row is dropped, not left pending forever");
+  const edgesA = store.db.prepare("SELECT COUNT(*) c FROM edges WHERE dst = ?").get(epA);
+  const edgesB = store.db.prepare("SELECT COUNT(*) c FROM edges WHERE dst = ?").get(epB);
+  assert.equal(edgesA.c, 0, "never link an ambiguous edge");
+  assert.equal(edgesB.c, 0, "never link an ambiguous edge");
+  store.close();
+});
+
+test("ORDER-INDEPENDENCE: deferred miss still missing on replay → row remains for later", async () => {
+  const store = openStore();
+  await indexRepo({ store, rootPath: nativeRepo(), mode: "incremental" });
+  const pendingBefore = store.db
+    .prepare("SELECT * FROM pending_frontend_edges WHERE function_name = ?")
+    .all("getCurrentMissionConfig");
+  assert.equal(pendingBefore.length, 1);
+
+  // No backend endpoint appears — replay again, still 0 services.
+  const replayed = store.replayPendingFrontendEdges();
+  const pendingAfter = store.db
+    .prepare("SELECT * FROM pending_frontend_edges WHERE function_name = ?")
+    .all("getCurrentMissionConfig");
+  assert.equal(pendingAfter.length, 1, "row kept for a still-later replay");
+  assert.equal(pendingAfter[0].service, "");
+  store.close();
+});
+
 test("store unit: findEndpointServicesByMethod — unique / ambiguous / none", () => {
   const store = openStore();
   store.upsertNode({ nodeType: "endpoint", identityKey: grpcEndpointKey("UniqueSvc", "SoloMethod"), repoId: null, title: "ep1" });

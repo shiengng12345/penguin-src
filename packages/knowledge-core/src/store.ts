@@ -749,6 +749,13 @@ export class KnowledgeStore {
   // knowledge-indexer's grpcEndpointKey() (`grpc::${service}.${method.toLowerCase()}`)
   // — inlined here rather than imported, since store.ts (core) must not
   // depend on the indexer package (wrong dependency direction).
+  //
+  // service === "" is the native-uniqueness-mode "resolve-by-method-later"
+  // marker (pipeline.ts enqueues it when a method-name resolution found ZERO
+  // backend services at stitch time — the backend repo may not be indexed
+  // yet). Such rows are re-resolved here via findEndpointServicesByMethod()
+  // on every replay rather than looked up by a fixed identity key, since no
+  // single service was known when the row was queued.
   replayPendingFrontendEdges(): number {
     const rows = this.db
       .prepare("SELECT * FROM pending_frontend_edges")
@@ -769,9 +776,23 @@ export class KnowledgeStore {
     const del = this.db.prepare("DELETE FROM pending_frontend_edges WHERE id = ?");
     let replayed = 0;
     for (const row of rows) {
-      const key = `grpc::${row.service}.${String(row.function_name).toLowerCase()}`;
-      const endpointId = this.findNodeIdByIdentity(key);
-      if (!endpointId) continue;
+      let endpointId: string | null;
+      if (row.service !== "") {
+        const key = `grpc::${row.service}.${String(row.function_name).toLowerCase()}`;
+        endpointId = this.findNodeIdByIdentity(key);
+        if (!endpointId) continue; // still deferred: leave the row
+      } else {
+        const services = this.findEndpointServicesByMethod(String(row.function_name).toLowerCase());
+        if (services.length > 1) {
+          // became ambiguous since it was queued → drop, never link
+          del.run(row.id);
+          continue;
+        }
+        if (services.length === 0) continue; // still missing: leave the row
+        const key = `grpc::${services[0]}.${String(row.function_name).toLowerCase()}`;
+        endpointId = this.findNodeIdByIdentity(key);
+        if (!endpointId) continue; // defensive: leave the row
+      }
       ins.run(
         `edge_${randomUUID()}`,
         row.src_node_id,
