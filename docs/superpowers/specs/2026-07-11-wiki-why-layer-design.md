@@ -46,6 +46,21 @@ Therefore every WHY claim carries source, verification state, verbatim evidence
 never shown as fact; a PRD citation is never shown as verified-against-code
 unless it actually is.
 
+## MVP scope & phasing (post landing-review)
+
+Both reviewers (code-cited) converged: ship the smallest TRUSTWORTHY slice first.
+
+- **MVP (phase 1) — NO PRD.** Endpoint-bound WHY cards from graph + git + tests
+  only. FACTS = `code_observed` from `handles`/`invokes`/`tests` edges; AI prose
+  demoted to `ai_inferred`; human confirm/reject; code-fingerprint staleness.
+- **Phase 2 — PRD layer.** AC binding (proto-comment + human map) + feature-scoped
+  coverage check. Deferred because it needs new scoped-AC extraction, binding
+  storage, and false-positive controls — high effort, and cards are already
+  useful without it.
+
+The rest of this doc describes the full design; the `## Data model & storage` and
+`## penguin why` sections below mark what is MVP vs phase 2.
+
 ## Layered WHY model
 
 - **L0 Structure** — the graph (have it; Spec A extends it full-stack).
@@ -168,15 +183,46 @@ penguin index            # marks cards whose fingerprint drifted as "stale" (fre
 penguin why              # re-run regenerates only stale cards; fresh ones skipped
 ```
 
-Generation engine = the existing `penguin explain` BYOK router → LOCAL Claude,
-fed the evidence pack; reuses the `understand-explain` methodology. Cost trap:
-never auto-fill the whole repo (paraphrase noise) — only the evidence-gated MVP set.
+Generation engine — VERIFIED: `penguin explain` + a BYOK, OpenAI-compatible
+provider router already exist in `packages/knowledge-cli` (`ai.ts` `aiComplete`,
+`index.ts` builds one Context Pack), but only as a SINGLE-TARGET explainer;
+`penguin why` does NOT exist. MVP path: add a CLI `penguin why` that reuses
+`buildContextPack` + `aiComplete`. It lives in the CLI, NOT the deterministic
+indexer, and does NOT use MCP `write_note` (that only records ledger intent; the
+Markdown file + FTS sync is app/wiki-layer work). Cost trap: never auto-fill the
+whole repo — only the evidence-gated MVP set.
+
+**Hallucination guardrail (mandatory):** the LLM output is structured JSON
+(claims + evidence IDs + confidence), validated before persistence. Every claim's
+evidence IDs must resolve to a real artifact (a `tests`/`handles`/`invokes` edge,
+a git SHA, a source span). A claim whose evidence cannot be located → demoted to
+`ai_inferred`/`unchecked` (never `code_observed`). A card with zero grounded FACTS
+or all-below-confidence-floor claims is not written (logged for human review).
 
 ### Target gate (seed quality over coverage)
 
 Only seed edges that HAVE citable evidence — handler + consumer + at least one of
 {covering test, git history, PRD binding}. Edges with none are QUEUED as
 "insufficient evidence", not written as hollow cards. Rank by importance/churn.
+
+## Data model & storage (corrected — reviewers, code-cited)
+
+The existing "typed notes + content_hash + explain" is NOT a durable
+contract-claim system: `notes_index` is one row per `node_id` with a flat
+frontmatter parser (no nested claim arrays), `content_hash` is only the Markdown
+source hash, and `explain` emits a one-off answer, not persisted claims. So:
+
+- **Human-facing card** = a Markdown WHY note bound to the **global endpoint
+  node** (`grpc::Service.method`, repo-less). Frontmatter holds card-level flat
+  fields only: `type: why`, `status`, `endpoint_id`, `contract_key`.
+- **Machine claim state** = a NEW queryable table `why_claims`:
+  `note_node_id, claim_id, claim_kind (fact|inference|evidence|gap), source_type,
+  verification_state, status, evidence_ids_json, code_fingerprint, prd_fingerprint
+  (phase 2), confidence, last_checked_at`. Staleness/discrepancy scans query this
+  table — NOT by parsing note files.
+- **Contract refs** (consumer/handler edges) are stored as STABLE SELECTORS
+  (node identity keys / grpcEndpointKey), NEVER parser edge IDs (parser edges are
+  deleted+reinserted with random IDs on re-index).
 
 ## Data flow (per target)
 
@@ -185,11 +231,15 @@ Only seed edges that HAVE citable evidence — handler + consumer + at least one
    tests + bound PRD chunks), each item with a stable evidence ID.
 3. **Generate** (local Claude): FACTS (each cites an evidence ID or demotes to
    INFERENCE), INFERENCE (labelled), EVIDENCE, CONFIDENCE, GAPS + fingerprints.
-4. **Store** as a why-note bound to the contract subject (reuse existing typed
-   notes + MCP + content-hash). MCP-queryable (AI) + Wiki-shown (human).
-5. **Serve** in the Wiki as an overlay on the edge/node (augments, never replaces
-   the structure graph).
-6. **Govern** (below).
+4. **Store** the Markdown note bound to the endpoint node + the per-claim rows in
+   `why_claims` (see Data model above), with initial fingerprints. This is
+   generation time.
+5. **Serve** in the Wiki as an overlay on the endpoint/edge (render reads stored
+   `why_claims` state only — no graph/test/PRD parsing at render time).
+6. **Check** on a separate pass (`penguin why --check` / background): recompute
+   code fingerprints + FACT-vs-graph discrepancy, mark impacted claims stale.
+   Never at render time. Index time stays deterministic (no AI/PRD).
+7. **Govern** (below).
 
 ## Governance / Wiki trust UX (make-or-break)
 
