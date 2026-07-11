@@ -108,17 +108,24 @@ evidence IDs:
 ### PRD matching (no hallucinated mapping)
 
 Rank of signals (most → least reliable), each emits CANDIDATES only:
-1. **proto-comment AC annotations** — VERIFIED in this repo: the flyover
-   promotion protos already cite ACs directly, e.g.
-   `skin-fragment-frontend.proto: // AC-028: risk-hit ...`,
-   `skin-fragment-admin.proto: // ListRedemptions (AC-021 玩家兑换表)`. Since the
-   proto defines the `Service.Method` and carries the AC in a nearby comment, this
-   is a HIGH-reliability, machine-extractable `endpoint → AC` binding — often
-   removing the need for a hand-authored map. Parse proto comments per rpc.
+1. **proto-comment AC annotations** — VERIFIED in this repo but PARTIAL. The
+   promotion protos DO cite ACs, but measured coverage is low and uneven:
+   skin-fragment-frontend.proto = 9 rpc, ~0–1 bindable (its AC mentions are a
+   file-header note (AC-028) and a deep message comment (AC-038), NOT on the rpc
+   lines); skin-fragment-admin.proto = 7 rpc, ~3 bindable (AC co-mentioned in the
+   comments of UpdateActivity / ListFragmentLedger / ListRedemptions). Net ≈ 3–4
+   of 16 rpc, concentrated in admin. Crucially the KEY frontend rpcs
+   (`ClaimDailyFragment`, `SettlePendingInvites`, …) — the full-stack WHY targets
+   — mostly LACK a proto AC comment (their ACs live in the PRD body:
+   AC-003/004 daily draw, AC-039 lazy settlement, AC-011/012 gift). So proto
+   comments are an OPPORTUNISTIC high-reliability binding WHERE PRESENT; they do
+   NOT replace the binding map. Extraction: a comment co-mentioning a method name
+   + an AC, wherever it appears in the file (not just above the rpc line).
 2. explicit human-confirmed binding `{edge/entity → AC_id | domain-row}` (a small
-   static map) for contracts whose proto is NOT AC-annotated.
+   static map). Still needed for the MAJORITY of rpcs (esp. frontend). This is
+   the workhorse, seeded from proto comments (#1) where available.
 3. proto message / DTO / entity name overlap (`inviteRecord` ↔ `InviteRecord`,
-   `SkinFragment` service ↔ PRD domain rows). Candidate generator.
+   `SkinFragment` service ↔ PRD domain rows). Candidate generator for #2.
 4. lexical (AC id / entity / service-name) match over pre-parsed PRD chunks.
 5. embeddings — MAY WIDEN candidates, NEVER creates a cited fact.
 
