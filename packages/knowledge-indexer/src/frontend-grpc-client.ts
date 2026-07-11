@@ -86,6 +86,16 @@ export async function extractFrontendCallsFromSource(
 // exactly one such call AND it calls <name> — i.e. the body is a SOLE forward
 // to the same-named RPC. Rejects rename (calls something else), batching
 // (more than one _net call), and any transform beyond forwarding args/return.
+//
+// Optional chaining (`this._net?.<X>(...)`, real in native wrappers e.g.
+// casino-plus-app PromotionService) is handled for free here: tree-sitter
+// inserts an anonymous `optional_chain` ("?.") node as a sibling between the
+// member_expression's `object` and `property` children, but `object`/
+// `property` are grammar FIELDS, not positional children — childForFieldName
+// resolves straight to `this._net` / the property name in both the plain-dot
+// and optional-chain forms. Confirmed by dumping the parse tree for both
+// `this._net.X(r)` and `this._net?.X(r)`: identical field structure, only an
+// extra `optional_chain` named node appears in the optional-chain case.
 function soleNetForward(body: Node, name: string): boolean {
   let netCalls = 0;
   let matchesName = false;
@@ -95,7 +105,7 @@ function soleNetForward(body: Node, name: string): boolean {
     if (!fn || fn.type !== "member_expression") return;
     const obj = fn.childForFieldName("object");
     const prop = fn.childForFieldName("property")?.text;
-    // obj is `this._net`
+    // obj is `this._net` (works for both `this._net.X(` and `this._net?.X(`)
     if (
       obj?.type === "member_expression" &&
       obj.childForFieldName("object")?.type === "this" &&
