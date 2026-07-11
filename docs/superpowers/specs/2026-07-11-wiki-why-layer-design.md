@@ -1,155 +1,239 @@
-# Wiki WHY Layer — Design
+# Wiki WHY Layer — Design (Spec B)
 
 Date: 2026-07-11
-Status: Approved (brainstorm) — pending implementation plan
+Status: Approved (brainstorm, 3 review rounds w/ Codex + DeepSeek) — pending plan
 Branch: feature/knowledge-core
+Depends on: Spec A (full-stack graph linking, 2026-07-11) — the WHY layer's MVP
+targets are the cross-service / full-stack edges Spec A produces.
 
 ## Problem
 
-The knowledge Wiki indexes real code into a graph (symbols, calls, cross-service
-gRPC edges). Audited structural accuracy ≈ 95% (cross-service/endpoint edges
-100%). It is excellent at **structure/navigation** — "who calls X", "which
-services depend on Y", "change here breaks what" — but it has **no WHY**: design
-intent, business reason, why a line is written a certain way, the root cause when
-something breaks. An AI (or human) using it can locate code fast but does not
-*understand* the project.
+The knowledge graph is excellent at STRUCTURE/NAVIGATION — who calls X, which
+services depend on Y, change-here-breaks-what, and (after Spec A) the full-stack
+trace from a UI action to a backend handler. But it has NO WHY: design intent,
+business reason, why a line is written a certain way, root cause on breakage.
+An AI or human can locate code fast but does not *understand* the project.
 
-Empirically confirmed this session by asking DeepSeek project questions grounded
-in the graph: it answered structural questions well, but for "why is this
-designed this way" it correctly said **"the graph has no such information"**.
+Empirically confirmed this session: DeepSeek, asked "why is this designed this
+way" over the graph, correctly answered "the graph has no such information".
 
 ## The ceiling (three-way agreement: DeepSeek + Codex + our audit)
 
-An AI reading **code alone** produces **evidence-based hypotheses, not
-historical facts**. Code stores results and constraints; it does not reliably
-store *motive*.
+Code alone yields **evidence-based hypotheses, not historical facts**. Code
+stores results and constraints, not motive.
+- Derivable from code (with evidence): local patterns, defensive guards, perf
+  tradeoffs, "this edge means a business flow depends on that service".
+- NOT derivable from code (needs git / PR / a human / a **PRD**): why this
+  approach, what pitfall was hit, business/compliance pressure, incident root
+  cause, future-plan placeholders.
 
-- **Derivable from code** (with evidence): local design patterns, defensive
-  guards, performance tradeoffs, adapter/compat intent, "this gRPC edge means a
-  business flow depends on that service".
-- **NOT derivable from code** (needs git history / PR / incident / a human):
-  why this approach over another, what pitfall was hit, business/compliance/
-  launch pressure, a specific incident's root cause, future-plan placeholders.
-
-**The under-used goldmine already in the repo:** `git blame` + recent commits +
-tests. Signal ranking: ADR/PR/incident > tests (state what must not break) >
-high-quality commit messages > code comments (rot). Local first priority:
-`blame + recent related commits + covering tests` — cheapest, closest to code.
+Under-used goldmine in the repo: `git blame` + recent commits + tests + **the
+PRD**. This project ships a real 52KB PRD (numbered AC-001..AC-048, a domain
+model table, cross-repo responsibility table, explicit constraints) describing
+the exact activity the indexed repos implement — the highest-quality business
+WHY available, better than git blame.
 
 ## The make-or-break: governance, not generation
 
-Both external models flagged the same top risk: an AI will write a
-*plausible-sounding explanation* as if it were *real history*, and the Wiki
-degrades into pretty-but-unaccountable noise. Second risk: staleness — code
-changes, the WHY does not invalidate, and it now misleads.
+Both models flagged the same top risk: an AI writes a *plausible explanation* as
+if it were *real history*, and the Wiki degrades into pretty, unaccountable
+noise. With PRD added, a second variant appears: **authority laundering** — a
+wrong PRD↔edge match looks *more* trustworthy because it is "human-authored",
+even when the AC was never implemented or is stale/aspirational.
 
-Therefore every WHY entry MUST carry: **source, confidence, verbatim evidence,
-human-confirmation status, and a content-hash binding for staleness.** AI
-inference is never presented as fact. This is exactly the audit discipline used
-this session (verify against source, separate fact from inference, label
-confidence).
+Therefore every WHY claim carries source, verification state, verbatim evidence
+(citable), confidence, declared gaps, and a staleness fingerprint. Inference is
+never shown as fact; a PRD citation is never shown as verified-against-code
+unless it actually is.
 
-## Design: the "WHY card"
+## Layered WHY model
 
-For each targeted symbol or edge, produce a structured card (NOT prose):
+- **L0 Structure** — the graph (have it; Spec A extends it full-stack).
+- **L1 Semantic WHY** — "what this does & how it fits", AI-generated, grounded in
+  the graph neighbourhood. (card INFERENCE)
+- **L2 Intent/History WHY** — git blame/commits + tests. (card EVIDENCE)
+- **L3 Business/Decision WHY** — the PRD (declared intent) + human notes for what
+  is nowhere in code/git. (card EVIDENCE: PRD citation; GAPS prompts a human)
 
-| Field | Source | Trust |
-|-------|--------|-------|
-| **Facts** | knowledge graph (95% accurate) | high |
-| **Inference** | AI reading the code + graph neighbourhood | hypothesis, labelled |
-| **Evidence** | `git blame`/recent commits (SHA) + covering tests, verbatim | citable |
-| **Confidence** | derived (clear code + evidence → higher) | — |
-| **Gaps** | AI self-declared "couldn't determine — needs a human" | — |
-| **Bound hash** | target's content-hash (+ branch) | staleness signal |
-| **Status** | `draft` (AI) → `confirmed` (human one-click) | — |
+## The WHY card
 
-Inference is ALWAYS shown as "hypothesis, confidence X, evidence Y, gaps Z". A
-human one-click confirm/correct promotes `draft → confirmed`.
+### Subject = a cross-service CONTRACT, not a note bolted to one node (Codex)
 
-## Layered model (the WHY card is L1–L2; the vision is all four)
+The card's subject is the full-stack contract, not a single handler symbol:
+- the global endpoint node (`grpc::Service.Method`),
+- consumer edge(s) — backend AND, after Spec A, frontend (`source_type` tagged),
+- the server handler edge,
+- source spans, covering test edges, git evidence,
+- per-claim evidence IDs, confirmation status, staleness fingerprints.
 
-- **L0 Structure** — the existing graph. Navigation/impact. (Have it.)
-- **L1 Semantic WHY** — "what this does & how it fits", AI-generated grounded in
-  the graph neighbourhood (Context Pack). Cheap, broad. (WHY card "inference".)
-- **L2 Intent/History WHY** — mined from git blame/commits + tests. Real intent
-  trail. (WHY card "evidence".)
-- **L3 Decisions/Incidents** — human-authored notes for the business "why" that
-  is nowhere in code or git. AI *prompts* for these on high-value, unconfirmed
-  targets. (Existing why-layer notes.)
+### Claim-level structure (each field is a set of CLAIMS, each claim cited)
 
-## MVP (first, and only, implementation slice)
+| Field | Source type | Trust |
+|-------|-------------|-------|
+| FACTS | `code_observed` (graph) | high; each FACT must cite an evidence ID or it becomes INFERENCE |
+| INFERENCE | `ai_inferred` (AI reading code + neighbourhood) | hypothesis, always labelled |
+| EVIDENCE | git SHA + msg, covering tests, source file:line, **PRD AC/domain-row** | citable |
+| CONFIDENCE | derived | — |
+| GAPS | AI self-declared "needs a human" | — |
 
-**Cross-service gRPC edges.** Rationale: (1) the graph already has these edges,
-audited to 100% structural accuracy this session; (2) "why does this edge exist"
-is exactly what people most need and cannot get from structure; (3) small,
-bounded set (~tens), high value.
+### Trust = two independent axes (not one scale)
 
-For each cross-service edge (consumer stub call site → endpoint → server
-handler), generate one WHY card:
-- **Facts**: from the graph (consumer repo/symbol, endpoint, provider handler).
-- **Inference**: AI reads the stub call site + the handler body + graph
-  neighbourhood → "what this call is for" (labelled hypothesis).
-- **Evidence**: recent commits touching the handler (SHA + message), covering
-  tests (the graph already has `tests` edges), the stub/handler source.
-- **Confidence / Gaps**: e.g. "business reason for gRPC-vs-sync not in code".
+- **source type**: `code_observed` | `prd_declared` | `ai_inferred`
+- **verification state**: `verified_against_code` | `conflicts_with_code` |
+  `unchecked` | `stale`
 
-Do NOT auto-fill the whole repo. Do NOT generate for symbols outside the MVP set.
+A `prd_declared` claim starts `unchecked`. It is NOT elevated to
+`verified_against_code` just because it is human-authored — see PRD coverage
+check below. A `conflicts_with_code` claim (FACT contradicts the current graph)
+is surfaced as a red `FACT DISCREPANCY`, auto-detected by a cheap background
+recompute of the graph query behind the FACT.
 
-## Architecture (reuse, don't rebuild)
+### Status lifecycle
 
-- **Storage/serving**: reuse the existing Wiki **why-notes** (typed notes:
-  incident/decision/architecture) + **MCP** + **content-hash**. A WHY card is a
-  note bound to a target node, MCP-queryable (AI recall) and Wiki-displayed
-  (humans). No new store.
-- **Generation**: a **local Claude session** for the high-value MVP cards
-  (quality, code stays local, can read `git`). A cloud API (e.g. DeepSeek) is an
-  option only later, for cheap bulk of the L1 semantic layer — out of scope now.
-- **Selection**: computed from the graph (cross-service edges) + git (recent
-  churn), the same queries used in this session's audit.
+`draft` (AI) → `confirmed` (human one-click) — or `rejected` ("mark as noise",
+one click). Confirm is BLOCKED / visibly degraded when the FACTS lack evidence
+citations (you cannot "confirm" an ungrounded card).
 
-## Data flow (MVP)
+## Evidence sources & the PRD
 
-1. **Select** cross-service edges from the graph.
-2. **Gather evidence** per edge: stub call site + handler source (have via graph
-   file paths) + graph neighbourhood (Context Pack) + `git log/blame` for the
-   handler file/lines + covering tests (graph `tests` edges).
-3. **Generate** the card (local Claude): facts / inference (labelled) / evidence
-   (verbatim SHAs + test names) / confidence / gaps / bound content-hash.
-4. **Store** as a why-note bound to the edge's endpoint/handler node + branch.
-5. **Serve**: MCP for AI recall; Wiki overlay for humans (does NOT replace the
-   structure graph — it augments it).
-6. **Govern**: content-hash mismatch → flag "may be outdated"; human confirm →
-   `draft → confirmed`.
+Per target, the generator assembles a deterministic evidence pack with STABLE
+evidence IDs:
+- graph Context Pack (get_node + explore_graph) + the proto message + a 1-hop
+  subgraph (add proto & neighbours so the AI doesn't hallucinate from a bare
+  stub+handler snippet),
+- `git log`/`blame` for the handler file/lines,
+- covering tests (graph `tests` edges),
+- **PRD chunks** (see matching).
 
-## Error handling / failure modes
+### PRD matching (no hallucinated mapping)
 
-- **Hallucinated history**: mitigated by the card format — inference is a
-  labelled hypothesis with confidence + declared gaps; never prose-as-fact.
-- **Staleness**: content-hash binding; mismatch flags the card. Regeneration is
-  incremental (only changed targets).
-- **Generation failure** (git/test missing, unparseable): the card still shows
-  Facts (from the graph) + a "no evidence found" note; never a fabricated
-  evidence section.
+Rank of signals (most → least reliable), each emits CANDIDATES only:
+1. explicit human-confirmed binding `{edge/entity → AC_id | domain-row}` (a small
+   static map, 10–50 entries for the real edges). Authoritative.
+2. proto message / DTO / entity name overlap (`inviteRecord` ↔ `InviteRecord`,
+   `SkinFragment` service ↔ PRD domain rows). Strong candidate generator.
+3. lexical (AC id / entity / service-name) match over pre-parsed PRD chunks.
+4. embeddings — MAY WIDEN candidates, NEVER creates a cited fact.
+
+A PRD citation appears on a card ONLY through a stored binding (candidate →
+human-confirmed). No auto-asserted PRD match becomes evidence.
+
+### PRD implementation coverage check (defeats authority laundering)
+
+For each cited AC, auto-check whether a code/integration test references that AC
+label (test name / annotation). If NO test covers it, the PRD claim is demoted
+to `unchecked`/UNVERIFIED — trust no higher than AI inference — and flagged
+"PRD-declared, not verified in code". (First: confirm whether this repo's tests
+actually carry AC labels; if not, coverage = "no AC-labelled tests found" and all
+PRD claims stay `unchecked` until a human confirms.)
+
+## `penguin why` — the batch enricher (NOT a Q&A tool)
+
+Like `penguin index` but for WHY: auto-scan → generate → write cards INTO the
+Wiki. Humans read & confirm in the Wiki.
+
+```
+penguin why              # auto-scan, MVP scope = cross-service / full-stack edges
+penguin why --scope <repo>
+penguin index            # marks cards whose fingerprint drifted as "stale" (free)
+penguin why              # re-run regenerates only stale cards; fresh ones skipped
+```
+
+Generation engine = the existing `penguin explain` BYOK router → LOCAL Claude,
+fed the evidence pack; reuses the `understand-explain` methodology. Cost trap:
+never auto-fill the whole repo (paraphrase noise) — only the evidence-gated MVP set.
+
+### Target gate (seed quality over coverage)
+
+Only seed edges that HAVE citable evidence — handler + consumer + at least one of
+{covering test, git history, PRD binding}. Edges with none are QUEUED as
+"insufficient evidence", not written as hollow cards. Rank by importance/churn.
+
+## Data flow (per target)
+
+1. **Select** a cross-service / full-stack edge (Spec A gives full-stack ones).
+2. **Gather** the deterministic evidence pack (graph + proto + 1-hop + git +
+   tests + bound PRD chunks), each item with a stable evidence ID.
+3. **Generate** (local Claude): FACTS (each cites an evidence ID or demotes to
+   INFERENCE), INFERENCE (labelled), EVIDENCE, CONFIDENCE, GAPS + fingerprints.
+4. **Store** as a why-note bound to the contract subject (reuse existing typed
+   notes + MCP + content-hash). MCP-queryable (AI) + Wiki-shown (human).
+5. **Serve** in the Wiki as an overlay on the edge/node (augments, never replaces
+   the structure graph).
+6. **Govern** (below).
+
+## Governance / Wiki trust UX (make-or-break)
+
+- **Visual isolation**: FACTS and INFERENCE never share the same card weight.
+  INFERENCE is a separate, collapsed-by-default block (grey, italic, warning
+  icon), expanded on click. A prominent `DRAFT — needs review` banner until
+  confirmed.
+- **Evidence-coverage gating**: show each claim's evidence coverage before
+  confirm; block/degrade confirm when FACTS are uncited.
+- **One-click reject** ("mark as noise") beside one-click confirm — else humans
+  ignore the whole overlay.
+- **Diff-since-confirmed**: on a stale/regenerated card, show what changed in
+  FACTS/INFERENCE vs the last confirmed version.
+- **FACT discrepancy check**: background recompute of each FACT's graph query;
+  mismatch → red flag on that claim.
+- After confirm: banner removed, FACTS/EVIDENCE read-only, inference stays
+  collapsed.
+
+## Staleness — per-claim, multi-source fingerprints
+
+Two independent moving sources: code and PRD. Do NOT hash the 52KB doc into every
+card, and do NOT invalidate on every PRD edit.
+
+Per-claim fingerprint components:
+- **code**: contract/proto fingerprint + handler impl + consumer (incl. frontend
+  call site) + endpoint meta (service/method).
+- **PRD**: per-cited-span — doc id/version, section id (AC anchor), span hash,
+  extracted-quote hash, binding id.
+
+Rules:
+- Mark only IMPACTED claims stale, roll up to card status.
+- Code fingerprint change → card `stale`.
+- Cited PRD span changes/deletes (via PRD-file git blame on the bound region) →
+  claim badge `PRD updated — verify alignment`. Do NOT auto-reject on PRD-only
+  change unless the code fingerprint also changed; other PRD edits update doc
+  freshness metadata only.
+
+## Failure modes
+
+- Hallucinated history → card format (labelled hypothesis + confidence + gaps),
+  FACTS-cite-or-demote.
+- PRD authority laundering → coverage check demotes uncovered ACs; bindings must
+  be human-confirmed; two-axis trust prevents "human-authored ⇒ verified".
+- Staleness → per-claim fingerprints; incremental regen (only changed targets).
+- Generation failure (no git/test/PRD) → card shows FACTS + "no evidence found";
+  never a fabricated evidence section.
 
 ## Testing / verification
 
-- Same discipline as this session's audit: for a sample of generated cards,
-  verify each Fact against the graph and each Evidence citation against the
-  actual source/commit. Report accuracy + how many inferences were later
-  human-confirmed vs corrected. A card whose "evidence" can't be located in the
-  repo is a bug.
+- Same audit discipline as this session: for a sample of cards, verify each FACT
+  against the graph and each EVIDENCE citation against the actual source / commit
+  / test / PRD span. A card whose evidence can't be located is a bug.
+- Report accuracy + how many inferences were later human-confirmed vs corrected +
+  how many PRD claims passed the coverage check.
+- Regression: no PRD citation without a stored binding; no `verified_against_code`
+  without an actual code check.
 
 ## Out of scope (YAGNI)
 
-- Auto-generating WHY for the whole repo / all symbols (both models warned this
-  degrades to code-paraphrase noise).
-- Cloud-API bulk generation (L1 semantic for everything).
-- PR/issue-tracker integration (no linked PR data locally yet).
-- L3 human-note authoring UX beyond the existing note editor + an AI prompt.
+- Auto-generating WHY for the whole repo / all symbols (paraphrase noise).
+- Cloud-API bulk generation.
+- A full RAG stack for PRD retrieval (pre-parsed chunks + binding map instead).
+- PR / issue-tracker integration (no linked PR data locally yet).
+- New storage (reuse notes + MCP + content-hash).
 
 ## Open questions for the plan
 
-- Exact card schema stored in the note frontmatter (source/confidence/status/
-  bound_hash fields).
-- How the local Claude session is invoked/driven for a batch of edges.
-- Wiki overlay presentation (where the card renders relative to the edge).
+- Exact card schema in the note frontmatter (subject id, per-claim source
+  type/verification state/evidence IDs/fingerprints/status).
+- How the local Claude session is driven for a batch (a `/penguin` slash command
+  vs a headless BYOK-router batch call).
+- Wiki overlay presentation (where the card renders on the edge/node; the
+  collapse/diff/discrepancy UI in `WikiWhyPanel`).
+- PRD parser: chunking by AC anchor + domain-row; where the PRD file(s) live and
+  how the binding map is stored/edited.
+- Whether this repo's tests carry AC labels (drives the coverage check design).
