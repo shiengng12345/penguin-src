@@ -21,6 +21,9 @@ export interface ParsedEdge {
   // service boundary (query layer allows `branch_id IS NULL` through). Cleaned
   // up per (repo, file) on re-index since branch_id can't scope them.
   branchless?: boolean;
+  // Frontend-origin provenance tag (e.g. "frontend_web" / "frontend_mobile")
+  // for cross-service invokes edges parsed out of client code.
+  sourceType?: string;
 }
 
 export interface NodeRow {
@@ -414,9 +417,12 @@ export class KnowledgeStore {
     const del = this.db.prepare(
       "DELETE FROM edges WHERE src = ? AND origin = 'parser' AND branch_id IS NULL",
     );
+    // source_type is always NULL here: note wikilinks are never frontend-code
+    // provenance, so there is no per-edge value to bind — kept as an explicit
+    // literal (like branch_id) rather than a bound param.
     const ins = this.db.prepare(
-      `INSERT INTO edges (id, src, dst, raw_target, edge_type, branch_id, origin, method, confidence, provenance)
-       VALUES (?, ?, ?, ?, ?, NULL, 'parser', 'EXTRACTED', ?, '{}')`,
+      `INSERT INTO edges (id, src, dst, raw_target, edge_type, branch_id, origin, method, confidence, provenance, source_type)
+       VALUES (?, ?, ?, ?, ?, NULL, 'parser', 'EXTRACTED', ?, '{}', NULL)`,
     );
     const tx = this.db.transaction(() => {
       del.run(srcNodeId);
@@ -637,8 +643,8 @@ export class KnowledgeStore {
     );
     const ins = this.db.prepare(
       `INSERT INTO edges (id, src, dst, raw_target, edge_type, branch_id,
-         origin, method, confidence, provenance)
-       VALUES (?, ?, ?, ?, ?, ?, 'parser', ?, ?, ?)`,
+         origin, method, confidence, provenance, source_type)
+       VALUES (?, ?, ?, ?, ?, ?, 'parser', ?, ?, ?, ?)`,
     );
     const tx = this.db.transaction(() => {
       delScoped.run(p.branchId, p.filePath);
@@ -654,10 +660,92 @@ export class KnowledgeStore {
           e.method,
           e.confidence ?? 1.0,
           JSON.stringify({ file: p.filePath, repo: p.repoId }),
+          e.sourceType ?? null,
         );
       }
     });
     tx();
+  }
+
+  // Direct identity lookup (no alias fallback) — used to check whether a
+  // gRPC endpoint node has appeared yet before replaying a pending frontend
+  // edge; resolveIdentity() is the fuller alias-aware variant used elsewhere.
+  findNodeIdByIdentity(identityKey: string): string | null {
+    const r = this.db
+      .prepare("SELECT id FROM nodes WHERE identity_key = ?")
+      .get(identityKey) as { id: string } | undefined;
+    return r?.id ?? null;
+  }
+
+  // Frontend and backend repos index independently, so a frontend call site
+  // may be parsed before its backend gRPC endpoint node exists. Queue it here;
+  // replayPendingFrontendEdges() links it once the endpoint shows up.
+  enqueuePendingFrontendEdge(p: {
+    repoId: string;
+    filePath: string;
+    srcNodeId: string;
+    service: string;
+    functionName: string;
+    sourceType: string;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO pending_frontend_edges
+           (id, repo_id, file_path, src_node_id, service, function_name, source_type)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        `pfe_${randomUUID()}`,
+        p.repoId,
+        p.filePath,
+        p.srcNodeId,
+        p.service,
+        p.functionName,
+        p.sourceType,
+      );
+  }
+
+  // For every pending row whose gRPC endpoint node now exists, insert the
+  // branch-less `invokes` edge and delete the row. Returns count replayed.
+  // NOTE: the key formula below must stay byte-identical to
+  // knowledge-indexer's grpcEndpointKey() (`grpc::${service}.${method.toLowerCase()}`)
+  // — inlined here rather than imported, since store.ts (core) must not
+  // depend on the indexer package (wrong dependency direction).
+  replayPendingFrontendEdges(): number {
+    const rows = this.db
+      .prepare("SELECT * FROM pending_frontend_edges")
+      .all() as Array<{
+      id: string;
+      repo_id: string;
+      file_path: string;
+      src_node_id: string;
+      service: string;
+      function_name: string;
+      source_type: string;
+    }>;
+    const ins = this.db.prepare(
+      `INSERT INTO edges (id, src, dst, raw_target, edge_type, branch_id,
+         origin, method, confidence, provenance, source_type)
+       VALUES (?, ?, ?, NULL, 'invokes', NULL, 'parser', 'EXTRACTED', ?, ?, ?)`,
+    );
+    const del = this.db.prepare("DELETE FROM pending_frontend_edges WHERE id = ?");
+    let replayed = 0;
+    for (const row of rows) {
+      const key = `grpc::${row.service}.${String(row.function_name).toLowerCase()}`;
+      const endpointId = this.findNodeIdByIdentity(key);
+      if (!endpointId) continue;
+      ins.run(
+        `edge_${randomUUID()}`,
+        row.src_node_id,
+        endpointId,
+        1.0,
+        JSON.stringify({ file: row.file_path, repo: row.repo_id }),
+        row.source_type,
+      );
+      del.run(row.id);
+      replayed += 1;
+    }
+    return replayed;
   }
 
   indexNoteText(p: {

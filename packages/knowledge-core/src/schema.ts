@@ -82,7 +82,8 @@ CREATE TABLE IF NOT EXISTS edges (
   method TEXT NOT NULL,
   confidence REAL NOT NULL DEFAULT 1.0,
   provenance TEXT NOT NULL DEFAULT '{}',
-  status TEXT NOT NULL DEFAULT 'active'   -- active | suggested (pending AI edge) | rejected
+  status TEXT NOT NULL DEFAULT 'active',  -- active | suggested (pending AI edge) | rejected
+  source_type TEXT                        -- e.g. frontend_web/frontend_mobile provenance tag
 );
 CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src);
 CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst);
@@ -195,6 +196,20 @@ CREATE TABLE IF NOT EXISTS credential_entries (
   created_at TEXT NOT NULL
 );
 
+-- Frontend->gRPC edges whose target endpoint node doesn't exist yet at parse
+-- time (frontend and backend repos index independently/out of order). Held
+-- here until the endpoint node appears, then replayed into edges and
+-- deleted (see KnowledgeStore.replayPendingFrontendEdges).
+CREATE TABLE IF NOT EXISTS pending_frontend_edges (
+  id TEXT PRIMARY KEY,
+  repo_id TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  src_node_id TEXT NOT NULL,
+  service TEXT NOT NULL,
+  function_name TEXT NOT NULL,
+  source_type TEXT NOT NULL
+);
+
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_notes USING fts5(
   node_id UNINDEXED, title, body
 );
@@ -218,6 +233,9 @@ function migrate(db: Database.Database, _from: number): void {
   );
   if (!edgeCols.includes("status")) {
     db.exec("ALTER TABLE edges ADD COLUMN status TEXT NOT NULL DEFAULT 'active'");
+  }
+  if (!edgeCols.includes("source_type")) {
+    db.exec("ALTER TABLE edges ADD COLUMN source_type TEXT");
   }
 }
 
