@@ -25,9 +25,11 @@ the full-stack trace from a user-facing action to the handler does not exist.
 Multi-hop indirection, NOT a direct `client.method()` call:
 
 ```
-// call site (view-model)
+// call site (view-model) — VERIFIED against real casino-plus code:
+//   the key is `functionName` (NOT `method`), the payload key is `requestParam`
+//   (NOT `body`). requestApi signature = { service, functionName, requestParam }.
 WebServices.requestApi({ service: NT_SERVICE_INTERFACE.SKINFRAGMENT,
-                         method: 'claimDailyFragment', body: {...} })
+                         functionName: 'claimDailyFragment', requestParam: {...} })
 // -> dispatcher routes by the `service` enum to a thin wrapper class:
 class NtSkinFragmentService {
   static claimDailyFragment = (r) => this._net.claimDailyFragment(r)   // forwards 1:1
@@ -52,17 +54,25 @@ The proto (repo `flyover`) is the contract source of truth; codegen publishes
 
 ### 1. Composite detection (consumption + identity, both required)
 
-A frontend→endpoint edge is emitted ONLY when it has BOTH:
-- **Consumption proof**: a `requestApi({ service: <ENUM>, method: '<literal>' })`
-  call site with a STATICALLY RESOLVABLE service enum and a STRING-LITERAL method.
-  A computed/dynamic method or an unresolved enum → NO edge.
-- **Identity proof**: the resolved `<Service>.<Method>` matches a proto RPC in the
-  flyover contract registry → binds to the existing global endpoint node.
+Detection is AST-based (web-tree-sitter, already used for ts/tsx) — NOT regex.
+Real call sites are prettier-formatted, multi-line, and carry a `requestParam`
+object; regex silently misses/misfires on them.
 
-Wrapper verification is a VALIDATION gate, not a source: the wrapper method must
-forward to `this._net.<sameName>` (1:1). If the wrapper renames, batches, or
-transforms, the 1:1 assumption is broken → refuse the edge (avoids linking a
-frontend method to the wrong endpoint).
+A frontend→endpoint edge is emitted ONLY when it has ALL THREE:
+- **Consumption proof**: a `requestApi({ service: <ENUM>, functionName: '<literal>' })`
+  call site with a STATICALLY RESOLVABLE service enum and a STRING-LITERAL
+  `functionName`. A computed/dynamic functionName or an unresolved enum → NO edge.
+- **Identity proof**: the resolved `<Service>.<functionName>` matches an existing
+  global endpoint node (`grpcEndpointKey`) — see index-order handling below.
+- **Wrapper-verified gate**: `<functionName>` is in `verifiedMethodsByService[service]`,
+  a per-repo pre-pass set of wrapper methods that forward 1:1 to
+  `this._net.<sameName>`. This gate is WIRED INTO the stitch (not built-and-ignored).
+
+Wrapper 1:1 verification: the wrapper method's body must be a SOLE forward to
+`this._net.<sameName>(…)` — a lone arrow-return or a single-return block. If it
+renames, batches (calls `_net` more than once), or transforms, the 1:1 assumption
+is broken → the method is NOT verified → refuse the edge. Mere presence of
+`this._net.<name>(` is insufficient (it would pass batching).
 
 Ranked fallbacks if a signal is missing:
 1. call-site + proto (strongest — real use + identity).
@@ -92,13 +102,29 @@ proto registry + wrapper verification. Generic wrapper auto-detection (a class o
 static methods forwarding to a `_net`-like field) is used only to VALIDATE, never
 as the sole trigger.
 
-### 4. Confirmed-edges-only (value vs noise)
+### 4. Confirmed-edges-only + index-order handling (deferred re-stitch)
 
-Store ONLY confirmed consumer edges (call site + resolved enum + method literal +
-proto join). Do NOT create endpoint fan-in from wrapper-only or proto-only
-evidence — that floods endpoint nodes with "possible calls".
+Store ONLY confirmed consumer edges (call site + resolved enum + functionName +
+wrapper-verified + endpoint exists). Do NOT create endpoint fan-in from
+wrapper-only or proto-only evidence — that floods endpoint nodes with "possible
+calls".
 
-- Tag every frontend edge with `source_type: frontend_web | frontend_mobile`.
+**Index-order problem** (confirmed real): the backend consumer path `upsertNode`s
+the endpoint (creates it), but the frontend path must NOT (confirmed-only). Proto
+endpoints are also processed AFTER the per-file source loop. So a lookup-only
+frontend stitch is order-sensitive: if the frontend repo is indexed before
+flyover/backend, the endpoint node doesn't exist yet and the edge is silently
+lost. **Fix = deferred re-stitch, NOT a placeholder node** (a placeholder would
+weaken confirmed-only) and NOT a brittle index-order requirement: persist the
+resolved-but-unmatched frontend candidate (`repo, file, src symbol, service,
+functionName, sourceType`) in a `pending_frontend_edges` table; when an endpoint
+node with that identity later appears (backend/proto index), replay the pending
+candidate into a real edge. Idempotent; survives partial re-indexes.
+
+- Tag every frontend edge with `source_type: frontend_web | frontend_mobile`,
+  stored in a dedicated `source_type` COLUMN on edges (not buried in provenance
+  JSON) so the Wiki can filter frontend fan-in efficiently. Existing backend edges
+  default to NULL/`backend`. The graph query must select `source_type`.
 - Default full-stack views cap representative callers per endpoint (a few per
   repo/platform), not the full fan-in.
 - `casino-plus-app` edges are HYPOTHESIS until its wrapper pattern is inspected;
@@ -114,10 +140,11 @@ also the evidence the WHY layer (Spec B) cites.
 ## Data model
 
 - Reuse the existing global endpoint node (`grpc::Service.Method`, branch-less).
-- New edge: `frontend_invokes` (or reuse `invokes` with a `source_type` tag) from
-  the frontend call-site symbol → global endpoint node. Branch-less so it crosses
-  the repo/branch boundary like backend stitch edges.
-- Edge carries provenance (§5) + `source_type`.
+- New edge: reuse `invokes` with a `source_type` COLUMN (add the column via
+  migration), from the frontend call-site symbol → global endpoint node.
+  Branch-less so it crosses the repo/branch boundary like backend stitch edges.
+- New table `pending_frontend_edges` for deferred re-stitch (§4).
+- Edge carries provenance (§5) + `source_type` column.
 
 ## MVP — golden trace first
 
