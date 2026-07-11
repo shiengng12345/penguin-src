@@ -7,7 +7,12 @@ const CFG = { dispatcher: "requestApi",
   wrappers: { "SkinFragment": "NtSkinFragmentService" } };
 
 test("call attributed to enclosing fn", async () => {
-  const src = `export function useSF(){ async function claim(){ return WebServices.requestApi({ service: NT_SERVICE_INTERFACE.SKINFRAGMENT, functionName: 'claimDailyFragment' }) } return {claim} }`;
+  const src = `export function useSF() {
+  async function claim() {
+    return WebServices.requestApi({ service: NT_SERVICE_INTERFACE.SKINFRAGMENT, functionName: 'claimDailyFragment' })
+  }
+  return { claim }
+}`;
   const out = await extractSymbols({ lang: "tsx", source: src, relPath: "vm.tsx", frontendGrpcConfig: CFG });
   assert.equal(out.frontendGrpcCalls.length, 1);
   assert.equal(out.frontendGrpcCalls[0].functionName, "claimDailyFragment");
