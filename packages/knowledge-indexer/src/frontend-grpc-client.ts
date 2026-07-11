@@ -128,7 +128,18 @@ export function verifiedForwardingMethods(root: Node, className: string): Set<st
     for (let i = 0; i < body.namedChildCount; i++) {
       const member = body.namedChild(i)!;
       if (member.type !== "public_field_definition") continue;
-      if (member.child(0)?.type !== "static") continue; // instance fields don't count
+      // Scan ALL children (not just child(0)) for the `static` keyword: with
+      // an accessibility modifier present (e.g. `public static x = ...`), the
+      // modifier is child(0) and `static` shifts to a later positional child,
+      // so a child(0)-only check wrongly excludes real-world wrappers.
+      let isStatic = false;
+      for (let j = 0; j < member.childCount; j++) {
+        if (member.child(j)?.type === "static") {
+          isStatic = true;
+          break;
+        }
+      }
+      if (!isStatic) continue; // instance fields don't count
       const nameNode = member.childForFieldName("name") ?? member.childForFieldName("property");
       const value = member.childForFieldName("value");
       const name = nameNode?.text;
