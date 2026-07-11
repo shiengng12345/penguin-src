@@ -1,9 +1,11 @@
 // tests/pipeline-native-uniqueness.test.mjs
-// Native method-name uniqueness mode: facade wrappers (e.g. casino-plus-app
-// PromotionService) whose methods span MULTIPLE backend proto services. No
-// single enum→service mapping exists, so the stitch resolves by METHOD NAME
-// against backend endpoints, linking ONLY when a method name resolves to
-// EXACTLY ONE backend service (skip ambiguous/missing — only-correct edges).
+// Zero-config method-name uniqueness: NO `.penguin-frontend-grpc.json`
+// anywhere. Facade wrappers (e.g. casino-plus-app PromotionService) whose
+// methods span MULTIPLE backend proto services have no single enum→service
+// mapping possible in a config-free world — every call site is resolved by
+// METHOD NAME against backend endpoints, linking ONLY when a method name
+// resolves to EXACTLY ONE backend service (skip ambiguous/missing —
+// only-correct edges). This is now the ONLY linking mode.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
@@ -23,18 +25,10 @@ function openStore() {
 
 // A native-style repo: `PromotionService` is a FACADE whose static methods
 // forward 1:1 to `this._net.<name>(...)` but span multiple backend proto
-// services (so there is no single enum→service mapping possible).
+// services (so there is no single enum→service mapping possible, config or
+// not). No config file is written anywhere in this repo.
 function nativeRepo() {
   const repo = mkdtempSync(join(tmpdir(), "native-"));
-  writeFileSync(join(repo, ".penguin-frontend-grpc.json"), JSON.stringify({
-    dispatcher: "requestApi",
-    serviceEnumMap: {},
-    wrappers: {},
-    methodNameResolution: {
-      enums: ["NT_SERVICE_INTERFACE.PROMOTION"],
-      wrappers: ["PromotionService"],
-    },
-  }));
   mkdirSync(join(repo, "svc"), { recursive: true });
   writeFileSync(join(repo, "svc", "wrapper.ts"), `
     export class PromotionService {
@@ -51,16 +45,16 @@ function nativeRepo() {
   writeFileSync(join(repo, "svc", "vm.tsx"), `
     export function usePromotion() {
       async function getCurrentMissionConfig() {
-        return WebServices.requestApi({ service: NT_SERVICE_INTERFACE.PROMOTION, functionName: 'getCurrentMissionConfig' });
+        return WebServices.requestApi({ functionName: 'getCurrentMissionConfig' });
       }
       async function getPlayerTaskProgress() {
-        return WebServices.requestApi({ service: NT_SERVICE_INTERFACE.PROMOTION, functionName: 'getPlayerTaskProgress' });
+        return WebServices.requestApi({ functionName: 'getPlayerTaskProgress' });
       }
       async function getOrphanFeature() {
-        return WebServices.requestApi({ service: NT_SERVICE_INTERFACE.PROMOTION, functionName: 'getOrphanFeature' });
+        return WebServices.requestApi({ functionName: 'getOrphanFeature' });
       }
       async function claimReward() {
-        return WebServices.requestApi({ service: NT_SERVICE_INTERFACE.PROMOTION, functionName: 'claimReward' });
+        return WebServices.requestApi({ functionName: 'claimReward' });
       }
       return { getCurrentMissionConfig, getPlayerTaskProgress, getOrphanFeature, claimReward };
     }
@@ -140,10 +134,9 @@ test("idempotent: index twice → exactly one edge", async () => {
 });
 
 // ── Order-independence: a native frontend repo may be indexed BEFORE its
-// backend (fresh-clone / new-user scenario). The uniqueness-mode stitch must
+// backend (fresh-clone / new-user scenario). The uniqueness stitch must
 // persist a deferred row (service="") rather than silently dropping the call
-// site, so a LATER backend index recovers the edge — same guarantee EXACT
-// mode already has via pending_frontend_edges + replayPendingFrontendEdges().
+// site, so a LATER backend index recovers the edge.
 test("ORDER-INDEPENDENCE: frontend indexed before backend → deferred row, then replay materializes edge", async () => {
   const store = openStore();
   // No backend endpoint exists yet at index time.
@@ -215,7 +208,7 @@ test("ORDER-INDEPENDENCE: deferred miss still missing on replay → row remains 
   assert.equal(pendingBefore.length, 1);
 
   // No backend endpoint appears — replay again, still 0 services.
-  const replayed = store.replayPendingFrontendEdges();
+  store.replayPendingFrontendEdges();
   const pendingAfter = store.db
     .prepare("SELECT * FROM pending_frontend_edges WHERE function_name = ?")
     .all("getCurrentMissionConfig");

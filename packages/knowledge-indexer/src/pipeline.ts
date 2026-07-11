@@ -4,8 +4,7 @@ import { basename, dirname, relative, resolve as pathResolve } from "node:path";
 import type { KnowledgeStore, ParsedEdge } from "@penguin/knowledge-core";
 import { extractSymbols, type ExtractedSymbol } from "./extract.js";
 import { grpcEndpointKey } from "./grpc-client.js";
-import { loadFrontendGrpcConfig, type FrontendGrpcConfig } from "./frontend-grpc-config.js";
-import { verifiedForwardingMethods } from "./frontend-grpc-client.js";
+import { allForwardingMethods, extractFunctionNameCalls } from "./frontend-grpc-client.js";
 import { loadParser } from "./parser.js";
 import { readGitContext } from "./git.js";
 import { indexGitObjects } from "./gitgraph.js";
@@ -119,6 +118,34 @@ function storeSymbolIndex(store: KnowledgeStore, repoId: string): SymbolIndex {
   };
 }
 
+// The innermost symbol node id (smallest line span) enclosing `line` in
+// (branch, filePath), read straight from the DB rather than an in-memory
+// map — so it resolves correctly even for a checkpoint-skipped file whose
+// fresh symbol_versions rows persist unchanged from a prior run (needed by
+// the zero-config frontend-call always-fresh scan in indexRepo, which walks
+// EVERY ts/tsx file regardless of this run's incremental skip).
+function enclosingSymbolNodeId(
+  store: KnowledgeStore,
+  branchId: string,
+  filePath: string,
+  line: number,
+): string | null {
+  const rows = store.db
+    .prepare(
+      `SELECT n.id AS id, sv.start_line AS startLine, sv.end_line AS endLine
+       FROM symbol_versions sv JOIN nodes n ON n.id = sv.node_id
+       WHERE sv.branch_id=? AND sv.file_path=? AND sv.status='fresh'`,
+    )
+    .all(branchId, filePath) as Array<{ id: string; startLine: number; endLine: number }>;
+  let best: { id: string; startLine: number; endLine: number } | null = null;
+  for (const r of rows) {
+    if (r.startLine <= line && line <= r.endLine) {
+      if (!best || r.endLine - r.startLine < best.endLine - best.startLine) best = r;
+    }
+  }
+  return best ? best.id : null;
+}
+
 // Prior symbols (qualifiedName + contentHash) for a file+branch, for rename detection.
 function priorSymbols(
   store: KnowledgeStore,
@@ -145,22 +172,6 @@ function priorSymbols(
   }));
 }
 
-// One frontend gRPC-web call site with its src symbol resolved to a node id
-// (collected during the per-file loop; gated + stitched into `invokes` edges
-// AFTER the whole repo is walked, since wrapper verification can live in a
-// different file than the call site — see indexRepo).
-interface CollectedFrontendCall {
-  src: string;
-  service: string;
-  functionName: string;
-  filePath: string;
-  // Native method-name uniqueness mode (see frontend-grpc-config.ts):
-  // `service` is empty and the stitch below must resolve the ONE candidate
-  // backend service by method name instead of the usual exact enum→service
-  // gate.
-  resolveByMethod?: boolean;
-}
-
 // Index one already-read source file: extract → rename→ledger (before txn) →
 // one SQLite txn replacing this file's parser-derived data (§6.3.2).
 async function indexFileWithSource(
@@ -176,12 +187,10 @@ async function indexFileWithSource(
     contentHash: string;
     mtimeMs: number;
     sizeBytes: number;
-    frontendGrpcConfig?: FrontendGrpcConfig;
   },
 ): Promise<{
   error: string | null;
   renamed: number;
-  frontendCalls: CollectedFrontendCall[];
 }> {
   const lang = langForExtension(p.relPath);
   // Skip non-source files AND minified/generated bundles that slipped past the
@@ -191,19 +200,17 @@ async function indexFileWithSource(
       repoId: p.repoId, branchId: p.branchId, filePath: p.relPath,
       mtimeMs: p.mtimeMs, sizeBytes: p.sizeBytes, contentHash: p.contentHash, status: "skipped",
     });
-    return { error: null, renamed: 0, frontendCalls: [] };
+    return { error: null, renamed: 0 };
   }
 
-  const extracted = await extractSymbols({
-    lang, source: p.source, relPath: p.relPath, frontendGrpcConfig: p.frontendGrpcConfig,
-  });
+  const extracted = await extractSymbols({ lang, source: p.source, relPath: p.relPath });
   if (extracted.parseError) {
     store.upsertFileCheckpoint({
       repoId: p.repoId, branchId: p.branchId, filePath: p.relPath, lang,
       mtimeMs: p.mtimeMs, sizeBytes: p.sizeBytes, contentHash: p.contentHash,
       status: "error", error: extracted.parseError,
     });
-    return { error: extracted.parseError, renamed: 0, frontendCalls: [] };
+    return { error: extracted.parseError, renamed: 0 };
   }
 
   // Rename detection BEFORE the rebuildable txn — aliases go to the Ledger (§2.2.4).
@@ -393,27 +400,10 @@ async function indexFileWithSource(
       mtimeMs: p.mtimeMs, sizeBytes: p.sizeBytes, contentHash: p.contentHash, status: "indexed",
     });
 
-    // 6. frontend gRPC-web call sites (collected, NOT stitched here — the
-    // wrapper-verification gate needs whole-repo data: a wrapper class and a
-    // call site may live in different files, so indexRepo stitches after the
-    // full per-file loop, using a dedicated always-fresh wrapper scan — see
-    // indexRepo). Only the src symbol is resolvable at this scope.
-    const frontendCalls: CollectedFrontendCall[] = [];
-    for (const fc of extracted.frontendGrpcCalls) {
-      if (!fc.enclosingQualifiedName) continue;
-      const src = fileSymbolIds.get(fc.enclosingQualifiedName);
-      if (src) {
-        frontendCalls.push({
-          src, service: fc.service, functionName: fc.functionName, filePath: p.relPath,
-          resolveByMethod: fc.resolveByMethod,
-        });
-      }
-    }
-
-    return { fileSymbolIds, frontendCalls };
+    return { fileSymbolIds };
   });
 
-  const { fileSymbolIds, frontendCalls } = tx();
+  const { fileSymbolIds } = tx();
 
   // Apply rename aliases now that node ids exist (Ledger-first, outside the txn).
   let renamed = 0;
@@ -435,7 +425,7 @@ async function indexFileWithSource(
     }
   }
 
-  return { error: null, renamed, frontendCalls };
+  return { error: null, renamed };
 }
 
 // Index a whole repo (headless). incremental uses the files_index quick filter;
@@ -485,20 +475,18 @@ export async function indexRepo(input: {
     const files = [...walkRepoFiles(scanRoot)];
     input.onProgress?.({ phase: "scan", done: 0, total: files.length, file: "" });
 
-    // Frontend gRPC-web wiring (§Task 6): per-repo config, plus whole-repo
-    // accumulators. A wrapper class and its call sites can live in different
-    // files, so these collect across the ENTIRE per-file loop below and are
-    // only gated/stitched into edges once the loop (and the proto pass, which
-    // may create this repo's own endpoints) has finished.
-    const frontendGrpcConfig = loadFrontendGrpcConfig(scanRoot) ?? undefined;
-    const frontendCalls: CollectedFrontendCall[] = [];
-    const verifiedMethodsByService: Record<string, Set<string>> = {};
     // Files actually reprocessed this run (indexFileWithSource invoked, i.e.
-    // NOT checkpoint-skipped) — a superset of frontendCalls' file paths. Used
-    // to clear stale pending rows even when a file's call sites were REMOVED
-    // (so frontendCalls no longer mentions it) rather than merely re-gated.
+    // NOT checkpoint-skipped). Used below to scope the frontend-call scan/
+    // enqueue: a reprocessed file's OWN replaceFileEdges() call (inside
+    // indexFileWithSource) wipes ALL previously-committed parser edges
+    // provenanced to that file — INCLUDING a frontend `invokes` edge a prior
+    // run's replayPendingFrontendEdges() attributed to it (provenance =
+    // {file, repo}) — so re-enqueuing+replaying for a reprocessed file is a
+    // wipe-then-recreate (safe, no duplicate). An UNCHANGED file's edges are
+    // never wiped this run, so it must NOT be re-enqueued or
+    // replayPendingFrontendEdges() would insert a second, duplicate edge
+    // (it has no (src,dst) existence check — see idempotency).
     const reprocessedFiles = new Set<string>();
-
     const seen = new Set<string>();
     let done = 0;
     for (const file of files) {
@@ -539,12 +527,10 @@ export async function indexRepo(input: {
         repoId, branchId, commit: git.commit, relPath: file.relPath,
         absPath: file.absPath, rootPath: scanRoot,
         source, contentHash, mtimeMs: file.mtimeMs, sizeBytes: file.sizeBytes,
-        frontendGrpcConfig,
       });
       if (r.error) report.errors += 1;
       else report.parsed += 1;
       report.renamed += r.renamed;
-      frontendCalls.push(...r.frontendCalls);
     }
 
     // delete detection: checkpoints present but file gone from disk (§6.3.1)
@@ -609,134 +595,95 @@ export async function indexRepo(input: {
       tx();
     }
 
-    // ── Wrapper verification: ALWAYS scanned fresh across the whole repo,
-    // independent of the incremental per-file skip above (same reasoning as
-    // the proto pass re-walking every .proto file every run, right above).
-    // Rationale: verifiedMethodsByService gates the frontend stitch below; if
-    // it were only populated from files actually reprocessed THIS run, then
-    // any incremental run where a call-site file changes but its (unchanged,
-    // skipped) wrapper file does not would see an empty/stale gate for that
-    // service — wrongly failing verification and, worse, wiping an already-
-    // confirmed edge that the reprocessed call-site file's own
-    // replaceFileEdges() call just deleted (branch-less cleanup keyed on that
-    // file's provenance) without the stitch being able to re-add it. A cheap
-    // substring pre-filter keeps this bounded to files that actually mention
-    // a configured wrapper class name.
-    if (frontendGrpcConfig && Object.keys(frontendGrpcConfig.wrappers).length > 0) {
-      const wrapperClassNames = [...new Set(Object.values(frontendGrpcConfig.wrappers))];
-      for (const file of walkRepoFiles(scanRoot)) {
-        const wLang = langForExtension(file.relPath);
-        if (wLang !== "ts" && wLang !== "tsx") continue;
+    // ── Zero-config frontend→backend gRPC-web linking (no per-repo config
+    // file anywhere — see frontend-grpc-client.ts). Runs UNCONDITIONALLY on
+    // every repo. Two always-fresh whole-repo scans, same rationale as the
+    // proto pass above (independent of the incremental per-file skip: a
+    // wrapper class and its call site can live in files that are
+    // individually checkpoint-skipped on a given run):
+    //
+    //   1. verifiedMethods = union of allForwardingMethods() (ANY static
+    //      class method that is a SOLE forward to `this._net.<sameName>`)
+    //      across every ts/tsx file. Backend repos have no such classes →
+    //      empty set → the call-scan below is skipped entirely → 0 edges,
+    //      safe to run on every repo.
+    //   2. every `functionName: '<literal>'` call site (dispatcher-agnostic
+    //      — any call shape) whose literal IS in verifiedMethods, attributed
+    //      to its enclosing symbol's node id via a DB lookup against
+    //      symbol_versions (works even for checkpoint-skipped files: their
+    //      fresh rows persist unchanged from a prior run).
+    //
+    // Cheap substring pre-filters (`this._net` / `functionName`) keep tree-
+    // sitter parsing bounded to files that could possibly match.
+    const tsxFiles = [...walkRepoFiles(scanRoot)].filter((f) => {
+      const l = langForExtension(f.relPath);
+      return l === "ts" || l === "tsx";
+    });
+
+    const verifiedMethods = new Set<string>();
+    for (const file of tsxFiles) {
+      let wSource: string;
+      try {
+        wSource = readFileSync(file.absPath, "utf8");
+      } catch { continue; }
+      if (!wSource.includes("this._net")) continue;
+      const wLang = langForExtension(file.relPath) as "ts" | "tsx";
+      let tree;
+      try {
+        const parser = await loadParser(wLang);
+        tree = parser.parse(wSource);
+      } catch { continue; }
+      if (!tree) continue;
+      for (const m of allForwardingMethods(tree.rootNode)) verifiedMethods.add(m);
+    }
+
+    // Call-site scan+enqueue is scoped to files REPROCESSED this run (unlike
+    // verifiedMethods above, which must stay whole-repo for correctness — see
+    // the reprocessedFiles comment above). This is required for idempotency,
+    // not just an optimization: a reprocessed file's OWN replaceFileEdges()
+    // call (inside indexFileWithSource, earlier in this same run) already
+    // wiped any frontend `invokes` edge previously attributed to it (parser
+    // edges are provenanced by file and fully replaced on reprocess), so
+    // enqueue+replay here is a wipe-then-recreate. An UNCHANGED file's edges
+    // were never wiped this run, so re-enqueuing it would make
+    // replayPendingFrontendEdges() insert a SECOND, duplicate edge (it has no
+    // (src,dst) existence check). clear-then-insert (rather than insert-only)
+    // also prevents duplicate pending rows from accumulating across repeated
+    // re-parses of the same frontend file before its backend endpoint shows
+    // up, and correctly purges a call site that was removed/renamed away.
+    const callScanFiles = tsxFiles.filter((f) => reprocessedFiles.has(f.relPath));
+    for (const file of callScanFiles) {
+      store.clearPendingFrontendEdgesForFile(repoId, file.relPath);
+    }
+    if (verifiedMethods.size > 0) {
+      for (const file of callScanFiles) {
         let wSource: string;
         try {
           wSource = readFileSync(file.absPath, "utf8");
         } catch { continue; }
-        const mentioned = wrapperClassNames.filter((c) => wSource.includes(c));
-        if (mentioned.length === 0) continue;
+        if (!wSource.includes("functionName")) continue;
+        const wLang = langForExtension(file.relPath) as "ts" | "tsx";
         let tree;
         try {
           const parser = await loadParser(wLang);
           tree = parser.parse(wSource);
         } catch { continue; }
         if (!tree) continue;
-        for (const [service, cls] of Object.entries(frontendGrpcConfig.wrappers)) {
-          if (!mentioned.includes(cls)) continue;
-          const verified = verifiedForwardingMethods(tree.rootNode, cls);
-          if (verified.size === 0) continue;
-          const set = (verifiedMethodsByService[service] ??= new Set<string>());
-          for (const m of verified) set.add(m);
+        for (const call of extractFunctionNameCalls(tree.rootNode, verifiedMethods)) {
+          const srcNodeId = enclosingSymbolNodeId(store, branchId, file.relPath, call.startLine);
+          if (!srcNodeId) continue; // no symbol wraps this call site
+          // Only-correct guarantee: link ONLY when EXACTLY ONE gRPC service
+          // defines this method; 0 → deferred (service="", re-resolved on a
+          // later replayPendingFrontendEdges()); >1 → skip, never link.
+          const services = store.findEndpointServicesByMethod(call.functionName.toLowerCase());
+          if (services.length > 1) continue;
+          store.enqueuePendingFrontendEdge({
+            repoId, filePath: file.relPath, srcNodeId,
+            service: services.length === 1 ? services[0] : "",
+            functionName: call.functionName, sourceType: "frontend_web",
+          });
         }
       }
-    }
-
-    // ── Native method-name uniqueness mode: ALSO scanned fresh across the
-    // whole repo (same rationale as the wrapper-verification pass above).
-    // Facade wrappers (e.g. casino-plus-app PromotionService) have methods
-    // spanning MULTIPLE backend proto services, so there is no per-service
-    // wrapper class to key off — instead every configured uniqueness wrapper
-    // class's sole-forward static methods are unioned into ONE flat set,
-    // gating the method-name-resolution stitch branch below.
-    const verifiedUniquenessMethods = new Set<string>();
-    const uniquenessWrapperNames = [...new Set(frontendGrpcConfig?.methodNameResolution?.wrappers ?? [])];
-    if (uniquenessWrapperNames.length > 0) {
-      for (const file of walkRepoFiles(scanRoot)) {
-        const wLang = langForExtension(file.relPath);
-        if (wLang !== "ts" && wLang !== "tsx") continue;
-        let wSource: string;
-        try {
-          wSource = readFileSync(file.absPath, "utf8");
-        } catch { continue; }
-        const mentioned = uniquenessWrapperNames.filter((c) => wSource.includes(c));
-        if (mentioned.length === 0) continue;
-        let tree;
-        try {
-          const parser = await loadParser(wLang);
-          tree = parser.parse(wSource);
-        } catch { continue; }
-        if (!tree) continue;
-        for (const cls of mentioned) {
-          const verified = verifiedForwardingMethods(tree.rootNode, cls);
-          for (const m of verified) verifiedUniquenessMethods.add(m);
-        }
-      }
-    }
-
-    // ── Frontend gRPC-web stitch: confirmed-only invokes edges + deferred
-    // re-stitch (§Task 6). Runs after the proto pass above so THIS repo's own
-    // endpoints already exist.
-    //
-    // Deliberately does NOT call store.replaceFileEdges() again for a frontend
-    // file: each file's OTHER edges (defines/imports/calls/...) were already
-    // committed by exactly one replaceFileEdges() call inside the per-file
-    // loop above, and replaceFileEdges() REPLACES ALL parser edges for that
-    // (repo, file) — a second call here would wipe them. Instead every gated
-    // call funnels through the pending-edge queue: enqueue (never replaces
-    // existing edges), then replayPendingFrontendEdges() converts any row
-    // whose endpoint already exists into a real `invokes` edge immediately —
-    // giving the same "endpoint exists → edge emitted now" outcome without
-    // ever touching the edges this file's own replaceFileEdges() call owns.
-    //
-    // clear-then-insert per file (rather than insert-only) prevents duplicate
-    // pending rows from accumulating across repeated re-parses of the same
-    // frontend file before its backend endpoint shows up (Task 5 review
-    // carry-in). The pending row is keyed on the FRONTEND file's own
-    // (repoId, filePath) — not the backend's — so that file's own
-    // replaceFileEdges() call correctly purges the replayed branch-less edge
-    // on the next re-index (provenance.repo/provenance.file match).
-    //
-    // Cleared for every REPROCESSED file (not just files with frontendCalls
-    // this run): a file whose call site was removed/refactored away still
-    // needs its stale pending row purged, or a since-deleted call would
-    // wrongly materialize into an edge once the endpoint later appears.
-    for (const filePath of reprocessedFiles) {
-      store.clearPendingFrontendEdgesForFile(repoId, filePath);
-    }
-    for (const fc of frontendCalls) {
-      if (fc.resolveByMethod) {
-        // Uniqueness branch: no single service for this call site — verify
-        // the facade wrapper forwards this method 1:1, then link ONLY if
-        // exactly one backend service defines it (skip ambiguous/missing —
-        // only-correct edges).
-        if (!verifiedUniquenessMethods.has(fc.functionName)) continue; // not a verified forwarding method
-        const services = store.findEndpointServicesByMethod(fc.functionName.toLowerCase());
-        if (services.length > 1) continue; // ambiguous → never link
-        // 0 services: the backend endpoint isn't indexed YET (this repo may
-        // have been indexed BEFORE its backend — order-independence). Persist
-        // with service="" as a "resolve-by-method-later" marker so a later
-        // replayPendingFrontendEdges() (run on every indexRepo call) can
-        // re-resolve it once the endpoint appears, instead of silently
-        // dropping the call site the way a bare `continue` would.
-        store.enqueuePendingFrontendEdge({
-          repoId, filePath: fc.filePath, srcNodeId: fc.src,
-          service: services.length === 1 ? services[0] : "", functionName: fc.functionName, sourceType: "frontend_web",
-        });
-        continue;
-      }
-      if (!verifiedMethodsByService[fc.service]?.has(fc.functionName)) continue; // wrapper gate
-      store.enqueuePendingFrontendEdge({
-        repoId, filePath: fc.filePath, srcNodeId: fc.src,
-        service: fc.service, functionName: fc.functionName, sourceType: "frontend_web",
-      });
     }
     // Unconditional: also replays pending rows left by OTHER repos (e.g. this
     // repo's own proto pass just created the endpoint a prior frontend repo's

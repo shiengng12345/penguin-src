@@ -1,35 +1,20 @@
 import { Parser, type Node } from "web-tree-sitter";
 import { loadLanguage } from "./parser.js";
 import type { Lang } from "./registry.js";
-import type { FrontendGrpcConfig } from "./frontend-grpc-config.js";
 
+// Zero-config frontend→backend gRPC-web linking (no `.penguin-frontend-grpc.json`
+// anywhere): a call site is linked to a backend endpoint purely by method-name
+// uniqueness — see pipeline.ts and knowledge-core's
+// findEndpointServicesByMethod/enqueuePendingFrontendEdge/replayPendingFrontendEdges.
 export interface FrontendGrpcCall {
-  service: string;
   functionName: string;
   startLine: number;
   enclosingQualifiedName: string | null;
-  // Native method-name uniqueness mode (see frontend-grpc-config.ts): the
-  // call-site enum is NOT in serviceEnumMap but IS in
-  // config.methodNameResolution.enums, so `service` is left empty here and
-  // must be resolved downstream by method name against backend endpoints,
-  // linking only when exactly one candidate service exists.
-  resolveByMethod?: boolean;
 }
 
 function walk(node: Node, visit: (n: Node) => void): void {
   visit(node);
   for (let i = 0; i < node.namedChildCount; i++) walk(node.namedChild(i)!, visit);
-}
-
-// "A.B" for a member_expression object.property; null otherwise.
-function dottedName(n: Node | null): string | null {
-  if (!n) return null;
-  if (n.type === "member_expression") {
-    const o = n.childForFieldName("object");
-    const p = n.childForFieldName("property");
-    if (o?.type === "identifier" && p) return `${o.text}.${p.text}`;
-  }
-  return null;
 }
 
 // Value of an object property by key, given the `object` node.
@@ -50,58 +35,40 @@ function stringLiteral(n: Node | null): string | null {
   return n.namedChild(0)?.text ?? n.text.replace(/^['"]|['"]$/g, "");
 }
 
-// Frontend requestApi call-site extraction: `WebServices.<dispatcher>({ service:
-// <ENUM>, functionName: '<literal>', ... })`. Resolves the enum member (e.g.
-// `NT_SERVICE_INTERFACE.SKINFRAGMENT`) to a proto service name via
-// `config.serviceEnumMap`. Only literal functionName + mapped enum produce a
-// call; computed values or unmapped enums are skipped (no false edges).
-export function extractFrontendGrpcCalls(root: Node, config: FrontendGrpcConfig): FrontendGrpcCall[] {
+// Dispatcher-agnostic call-site extraction: ANY call_expression whose FIRST
+// object-literal argument has a property `functionName: '<string literal>'`
+// where the literal is IN `verifiedMethods` (the auto-detected wrapper
+// methods — see allForwardingMethods below). We deliberately do NOT check
+// what the call target/dispatcher is named — zero-config means there is no
+// config to say "requestApi" or similar, so any call shape qualifies as long
+// as the literal functionName is a verified sole-forward wrapper method.
+// Computed (non-literal) functionName values are skipped (no false edges).
+export function extractFunctionNameCalls(root: Node, verifiedMethods: Set<string>): FrontendGrpcCall[] {
   const calls: FrontendGrpcCall[] = [];
-  const uniquenessEnums = new Set(config.methodNameResolution?.enums ?? []);
+  if (verifiedMethods.size === 0) return calls;
   walk(root, (n) => {
     if (n.type !== "call_expression") return;
-    const fn = n.childForFieldName("function");
-    if (!fn || fn.type !== "member_expression") return;
-    if (fn.childForFieldName("property")?.text !== config.dispatcher) return;
     const args = n.childForFieldName("arguments");
     const obj = args?.namedChildren.find((c) => c?.type === "object");
     if (!obj) return;
-    const svcEnum = dottedName(propValue(obj, "service"));
     const functionName = stringLiteral(propValue(obj, "functionName"));
-    if (!svcEnum || !functionName) return; // computed / missing → skip
-    const service = config.serviceEnumMap[svcEnum];
-    if (service) {
-      calls.push({ service, functionName, startLine: n.startPosition.row + 1, enclosingQualifiedName: null });
-      return;
-    }
-    if (uniquenessEnums.has(svcEnum)) {
-      // Facade wrapper: no single service for this enum — resolved downstream
-      // by method name against backend endpoints (uniqueness mode).
-      calls.push({
-        service: "",
-        functionName,
-        startLine: n.startPosition.row + 1,
-        enclosingQualifiedName: null,
-        resolveByMethod: true,
-      });
-      return;
-    }
-    // enum in neither serviceEnumMap nor methodNameResolution.enums → skip
+    if (!functionName || !verifiedMethods.has(functionName)) return; // computed / unverified → skip
+    calls.push({ functionName, startLine: n.startPosition.row + 1, enclosingQualifiedName: null });
   });
   return calls;
 }
 
-// Test-only helper: parse source then extract.
-export async function extractFrontendCallsFromSource(
+// Test-only helper: parse then extract.
+export async function extractFunctionNameCallsFromSource(
   lang: Lang,
   source: string,
-  config: FrontendGrpcConfig,
+  verifiedMethods: Set<string>,
 ): Promise<FrontendGrpcCall[]> {
   const language = await loadLanguage(lang);
   const parser = new Parser();
   parser.setLanguage(language);
   const tree = parser.parse(source);
-  return tree ? extractFrontendGrpcCalls(tree.rootNode, config) : [];
+  return tree ? extractFunctionNameCalls(tree.rootNode, verifiedMethods) : [];
 }
 
 // Count occurrences of `this._net.<X>(` in a body node; true iff there is
@@ -140,7 +107,7 @@ function soleNetForward(body: Node, name: string): boolean {
   return netCalls === 1 && matchesName; // exactly one _net call, and it is <name>
 }
 
-// Static methods of `class <className>` whose body is a SOLE forward to
+// Static methods of ONE `class <body>` whose body is a SOLE forward to
 // `this._net.<sameName>(...)`. Confirms a frontend wrapper method name really
 // maps 1:1 to the RPC it dispatches to — rejects rename/batch/transform.
 //
@@ -150,6 +117,35 @@ function soleNetForward(body: Node, name: string): boolean {
 // with a leading unnamed `static` token as the field's first child (no
 // dedicated field name for it) — confirmed by parsing the task fixture and
 // inspecting `tree.rootNode.toString()` plus each member's raw children.
+function classForwardingMethods(body: Node): Set<string> {
+  const out = new Set<string>();
+  for (let i = 0; i < body.namedChildCount; i++) {
+    const member = body.namedChild(i)!;
+    if (member.type !== "public_field_definition") continue;
+    // Scan ALL children (not just child(0)) for the `static` keyword: with
+    // an accessibility modifier present (e.g. `public static x = ...`), the
+    // modifier is child(0) and `static` shifts to a later positional child,
+    // so a child(0)-only check wrongly excludes real-world wrappers.
+    let isStatic = false;
+    for (let j = 0; j < member.childCount; j++) {
+      if (member.child(j)?.type === "static") {
+        isStatic = true;
+        break;
+      }
+    }
+    if (!isStatic) continue; // instance fields don't count
+    const nameNode = member.childForFieldName("name") ?? member.childForFieldName("property");
+    const value = member.childForFieldName("value");
+    const name = nameNode?.text;
+    if (!name || !value || value.type !== "arrow_function") continue;
+    const abody = value.childForFieldName("body");
+    if (abody && soleNetForward(abody, name)) out.add(name);
+  }
+  return out;
+}
+
+// Static methods of `class <className>` whose body is a SOLE forward to
+// `this._net.<sameName>(...)`.
 export function verifiedForwardingMethods(root: Node, className: string): Set<string> {
   const out = new Set<string>();
   walk(root, (cls) => {
@@ -157,28 +153,24 @@ export function verifiedForwardingMethods(root: Node, className: string): Set<st
     if (cls.childForFieldName("name")?.text !== className) return;
     const body = cls.childForFieldName("body");
     if (!body) return;
-    for (let i = 0; i < body.namedChildCount; i++) {
-      const member = body.namedChild(i)!;
-      if (member.type !== "public_field_definition") continue;
-      // Scan ALL children (not just child(0)) for the `static` keyword: with
-      // an accessibility modifier present (e.g. `public static x = ...`), the
-      // modifier is child(0) and `static` shifts to a later positional child,
-      // so a child(0)-only check wrongly excludes real-world wrappers.
-      let isStatic = false;
-      for (let j = 0; j < member.childCount; j++) {
-        if (member.child(j)?.type === "static") {
-          isStatic = true;
-          break;
-        }
-      }
-      if (!isStatic) continue; // instance fields don't count
-      const nameNode = member.childForFieldName("name") ?? member.childForFieldName("property");
-      const value = member.childForFieldName("value");
-      const name = nameNode?.text;
-      if (!name || !value || value.type !== "arrow_function") continue;
-      const abody = value.childForFieldName("body");
-      if (abody && soleNetForward(abody, name)) out.add(name);
-    }
+    for (const m of classForwardingMethods(body)) out.add(m);
+  });
+  return out;
+}
+
+// Zero-config auto-detection: union of sole-forward static methods across
+// EVERY class declared in the file, regardless of class name. A "wrapper
+// method" is simply any static class method whose body is a SOLE forward to
+// `this._net.<sameName>(...)` — no `wrappers` config naming which classes
+// matter. Backend repos have no such classes → empty set → 0 edges (safe to
+// run on every repo unconditionally).
+export function allForwardingMethods(root: Node): Set<string> {
+  const out = new Set<string>();
+  walk(root, (cls) => {
+    if (cls.type !== "class_declaration" && cls.type !== "class") return;
+    const body = cls.childForFieldName("body");
+    if (!body) return;
+    for (const m of classForwardingMethods(body)) out.add(m);
   });
   return out;
 }
@@ -193,4 +185,12 @@ export async function verifiedMethodsFromSource(
   parser.setLanguage(language);
   const tree = parser.parse(source);
   return tree ? verifiedForwardingMethods(tree.rootNode, className) : new Set();
+}
+
+export async function allForwardingMethodsFromSource(lang: Lang, source: string): Promise<Set<string>> {
+  const language = await loadLanguage(lang);
+  const parser = new Parser();
+  parser.setLanguage(language);
+  const tree = parser.parse(source);
+  return tree ? allForwardingMethods(tree.rootNode) : new Set();
 }
