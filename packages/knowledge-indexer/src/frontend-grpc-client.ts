@@ -8,6 +8,12 @@ export interface FrontendGrpcCall {
   functionName: string;
   startLine: number;
   enclosingQualifiedName: string | null;
+  // Native method-name uniqueness mode (see frontend-grpc-config.ts): the
+  // call-site enum is NOT in serviceEnumMap but IS in
+  // config.methodNameResolution.enums, so `service` is left empty here and
+  // must be resolved downstream by method name against backend endpoints,
+  // linking only when exactly one candidate service exists.
+  resolveByMethod?: boolean;
 }
 
 function walk(node: Node, visit: (n: Node) => void): void {
@@ -51,6 +57,7 @@ function stringLiteral(n: Node | null): string | null {
 // call; computed values or unmapped enums are skipped (no false edges).
 export function extractFrontendGrpcCalls(root: Node, config: FrontendGrpcConfig): FrontendGrpcCall[] {
   const calls: FrontendGrpcCall[] = [];
+  const uniquenessEnums = new Set(config.methodNameResolution?.enums ?? []);
   walk(root, (n) => {
     if (n.type !== "call_expression") return;
     const fn = n.childForFieldName("function");
@@ -63,8 +70,23 @@ export function extractFrontendGrpcCalls(root: Node, config: FrontendGrpcConfig)
     const functionName = stringLiteral(propValue(obj, "functionName"));
     if (!svcEnum || !functionName) return; // computed / missing → skip
     const service = config.serviceEnumMap[svcEnum];
-    if (!service) return; // unmapped enum → skip
-    calls.push({ service, functionName, startLine: n.startPosition.row + 1, enclosingQualifiedName: null });
+    if (service) {
+      calls.push({ service, functionName, startLine: n.startPosition.row + 1, enclosingQualifiedName: null });
+      return;
+    }
+    if (uniquenessEnums.has(svcEnum)) {
+      // Facade wrapper: no single service for this enum — resolved downstream
+      // by method name against backend endpoints (uniqueness mode).
+      calls.push({
+        service: "",
+        functionName,
+        startLine: n.startPosition.row + 1,
+        enclosingQualifiedName: null,
+        resolveByMethod: true,
+      });
+      return;
+    }
+    // enum in neither serviceEnumMap nor methodNameResolution.enums → skip
   });
   return calls;
 }

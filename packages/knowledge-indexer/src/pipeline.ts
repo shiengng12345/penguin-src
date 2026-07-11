@@ -154,6 +154,11 @@ interface CollectedFrontendCall {
   service: string;
   functionName: string;
   filePath: string;
+  // Native method-name uniqueness mode (see frontend-grpc-config.ts):
+  // `service` is empty and the stitch below must resolve the ONE candidate
+  // backend service by method name instead of the usual exact enum→service
+  // gate.
+  resolveByMethod?: boolean;
 }
 
 // Index one already-read source file: extract → rename→ledger (before txn) →
@@ -397,7 +402,12 @@ async function indexFileWithSource(
     for (const fc of extracted.frontendGrpcCalls) {
       if (!fc.enclosingQualifiedName) continue;
       const src = fileSymbolIds.get(fc.enclosingQualifiedName);
-      if (src) frontendCalls.push({ src, service: fc.service, functionName: fc.functionName, filePath: p.relPath });
+      if (src) {
+        frontendCalls.push({
+          src, service: fc.service, functionName: fc.functionName, filePath: p.relPath,
+          resolveByMethod: fc.resolveByMethod,
+        });
+      }
     }
 
     return { fileSymbolIds, frontendCalls };
@@ -639,6 +649,38 @@ export async function indexRepo(input: {
       }
     }
 
+    // ── Native method-name uniqueness mode: ALSO scanned fresh across the
+    // whole repo (same rationale as the wrapper-verification pass above).
+    // Facade wrappers (e.g. casino-plus-app PromotionService) have methods
+    // spanning MULTIPLE backend proto services, so there is no per-service
+    // wrapper class to key off — instead every configured uniqueness wrapper
+    // class's sole-forward static methods are unioned into ONE flat set,
+    // gating the method-name-resolution stitch branch below.
+    const verifiedUniquenessMethods = new Set<string>();
+    const uniquenessWrapperNames = [...new Set(frontendGrpcConfig?.methodNameResolution?.wrappers ?? [])];
+    if (uniquenessWrapperNames.length > 0) {
+      for (const file of walkRepoFiles(scanRoot)) {
+        const wLang = langForExtension(file.relPath);
+        if (wLang !== "ts" && wLang !== "tsx") continue;
+        let wSource: string;
+        try {
+          wSource = readFileSync(file.absPath, "utf8");
+        } catch { continue; }
+        const mentioned = uniquenessWrapperNames.filter((c) => wSource.includes(c));
+        if (mentioned.length === 0) continue;
+        let tree;
+        try {
+          const parser = await loadParser(wLang);
+          tree = parser.parse(wSource);
+        } catch { continue; }
+        if (!tree) continue;
+        for (const cls of mentioned) {
+          const verified = verifiedForwardingMethods(tree.rootNode, cls);
+          for (const m of verified) verifiedUniquenessMethods.add(m);
+        }
+      }
+    }
+
     // ── Frontend gRPC-web stitch: confirmed-only invokes edges + deferred
     // re-stitch (§Task 6). Runs after the proto pass above so THIS repo's own
     // endpoints already exist.
@@ -670,6 +712,20 @@ export async function indexRepo(input: {
       store.clearPendingFrontendEdgesForFile(repoId, filePath);
     }
     for (const fc of frontendCalls) {
+      if (fc.resolveByMethod) {
+        // Uniqueness branch: no single service for this call site — verify
+        // the facade wrapper forwards this method 1:1, then link ONLY if
+        // exactly one backend service defines it (skip ambiguous/missing —
+        // only-correct edges).
+        if (!verifiedUniquenessMethods.has(fc.functionName)) continue; // not a verified forwarding method
+        const services = store.findEndpointServicesByMethod(fc.functionName.toLowerCase());
+        if (services.length !== 1) continue; // 0 (missing) or >1 (ambiguous) → no edge
+        store.enqueuePendingFrontendEdge({
+          repoId, filePath: fc.filePath, srcNodeId: fc.src,
+          service: services[0], functionName: fc.functionName, sourceType: "frontend_web",
+        });
+        continue;
+      }
       if (!verifiedMethodsByService[fc.service]?.has(fc.functionName)) continue; // wrapper gate
       store.enqueuePendingFrontendEdge({
         repoId, filePath: fc.filePath, srcNodeId: fc.src,

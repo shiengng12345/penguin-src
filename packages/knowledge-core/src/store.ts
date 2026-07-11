@@ -677,6 +677,33 @@ export class KnowledgeStore {
     return r?.id ?? null;
   }
 
+  // Native method-name uniqueness mode: given a lowercased method name,
+  // return the DISTINCT proto-service names of all GLOBAL gRPC endpoint
+  // nodes (`grpc::<Service>.<method>`, repo_id IS NULL) whose method matches.
+  // The LIKE is a coarse pre-filter (methodLower may contain '_', a LIKE
+  // single-char wildcard, causing over-matching); the exact suffix check in
+  // JS below is what actually guarantees correctness — only rows whose
+  // identity_key ends with EXACTLY '.'+methodLower count, so a method like
+  // "x" can never match "grpc::A.bx". Method names never contain '.', so the
+  // service is the substring between "grpc::" and the LAST '.'.
+  findEndpointServicesByMethod(methodLower: string): string[] {
+    const suffix = `.${methodLower}`;
+    const pattern = `grpc::%${suffix}`;
+    const rows = this.db
+      .prepare(
+        "SELECT identity_key FROM nodes WHERE node_type = 'endpoint' AND repo_id IS NULL AND identity_key LIKE ?",
+      )
+      .all(pattern) as Array<{ identity_key: string }>;
+    const services = new Set<string>();
+    for (const r of rows) {
+      const key = r.identity_key;
+      if (!key.startsWith("grpc::") || !key.endsWith(suffix)) continue;
+      const body = key.slice("grpc::".length, key.length - suffix.length);
+      if (body) services.add(body);
+    }
+    return [...services];
+  }
+
   // Frontend and backend repos index independently, so a frontend call site
   // may be parsed before its backend gRPC endpoint node exists. Queue it here;
   // replayPendingFrontendEdges() links it once the endpoint shows up.
