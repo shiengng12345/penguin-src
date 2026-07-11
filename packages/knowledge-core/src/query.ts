@@ -381,7 +381,7 @@ export function listFileSymbols(
 export interface GraphView {
   focus: string | null; // the centered node (null for repo-scoped view)
   nodes: Array<{ nodeId: string; title: string; nodeType: string }>;
-  edges: Array<{ src: string; dst: string; edgeType: string }>;
+  edges: Array<{ src: string; dst: string; edgeType: string; sourceType?: string | null }>;
 }
 
 // Local graph: a focus node + its neighbourhood within `depth` hops (both
@@ -471,7 +471,7 @@ function collectGraph(
   const params = branchId ? [branchId, ...ids, ...ids, edgeLimit] : [...ids, ...ids, edgeLimit];
   const edges = store.db
     .prepare(
-      `SELECT src, dst, edge_type AS edgeType FROM edges
+      `SELECT src, dst, edge_type AS edgeType, source_type AS sourceType FROM edges
        WHERE status='active' AND dst IS NOT NULL ${branchClause}
          AND src IN (${ph}) AND dst IN (${ph})
        ORDER BY CASE edge_type
