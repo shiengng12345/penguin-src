@@ -705,6 +705,17 @@ export class KnowledgeStore {
       );
   }
 
+  // Delete this (repo, file)'s previously-queued pending frontend edges before
+  // re-enqueueing its current call sites. A frontend file re-parsed several
+  // times before its backend endpoint exists would otherwise accumulate one
+  // pending row per parse → duplicate `invokes` edges once replayed. Callers
+  // should clear-then-insert per file rather than insert-only.
+  clearPendingFrontendEdgesForFile(repoId: string, filePath: string): void {
+    this.db
+      .prepare("DELETE FROM pending_frontend_edges WHERE repo_id = ? AND file_path = ?")
+      .run(repoId, filePath);
+  }
+
   // For every pending row whose gRPC endpoint node now exists, insert the
   // branch-less `invokes` edge and delete the row. Returns count replayed.
   // NOTE: the key formula below must stay byte-identical to

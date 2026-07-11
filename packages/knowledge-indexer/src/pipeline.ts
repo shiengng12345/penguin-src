@@ -4,6 +4,9 @@ import { basename, dirname, relative, resolve as pathResolve } from "node:path";
 import type { KnowledgeStore, ParsedEdge } from "@penguin/knowledge-core";
 import { extractSymbols, type ExtractedSymbol } from "./extract.js";
 import { grpcEndpointKey } from "./grpc-client.js";
+import { loadFrontendGrpcConfig, type FrontendGrpcConfig } from "./frontend-grpc-config.js";
+import { verifiedForwardingMethods } from "./frontend-grpc-client.js";
+import { loadParser } from "./parser.js";
 import { readGitContext } from "./git.js";
 import { indexGitObjects } from "./gitgraph.js";
 import { langForExtension } from "./registry.js";
@@ -142,6 +145,17 @@ function priorSymbols(
   }));
 }
 
+// One frontend gRPC-web call site with its src symbol resolved to a node id
+// (collected during the per-file loop; gated + stitched into `invokes` edges
+// AFTER the whole repo is walked, since wrapper verification can live in a
+// different file than the call site — see indexRepo).
+interface CollectedFrontendCall {
+  src: string;
+  service: string;
+  functionName: string;
+  filePath: string;
+}
+
 // Index one already-read source file: extract → rename→ledger (before txn) →
 // one SQLite txn replacing this file's parser-derived data (§6.3.2).
 async function indexFileWithSource(
@@ -157,8 +171,13 @@ async function indexFileWithSource(
     contentHash: string;
     mtimeMs: number;
     sizeBytes: number;
+    frontendGrpcConfig?: FrontendGrpcConfig;
   },
-): Promise<{ error: string | null; renamed: number }> {
+): Promise<{
+  error: string | null;
+  renamed: number;
+  frontendCalls: CollectedFrontendCall[];
+}> {
   const lang = langForExtension(p.relPath);
   // Skip non-source files AND minified/generated bundles that slipped past the
   // name filter — parsing them yields single-letter symbols that dominate hubs.
@@ -167,17 +186,19 @@ async function indexFileWithSource(
       repoId: p.repoId, branchId: p.branchId, filePath: p.relPath,
       mtimeMs: p.mtimeMs, sizeBytes: p.sizeBytes, contentHash: p.contentHash, status: "skipped",
     });
-    return { error: null, renamed: 0 };
+    return { error: null, renamed: 0, frontendCalls: [] };
   }
 
-  const extracted = await extractSymbols({ lang, source: p.source, relPath: p.relPath });
+  const extracted = await extractSymbols({
+    lang, source: p.source, relPath: p.relPath, frontendGrpcConfig: p.frontendGrpcConfig,
+  });
   if (extracted.parseError) {
     store.upsertFileCheckpoint({
       repoId: p.repoId, branchId: p.branchId, filePath: p.relPath, lang,
       mtimeMs: p.mtimeMs, sizeBytes: p.sizeBytes, contentHash: p.contentHash,
       status: "error", error: extracted.parseError,
     });
-    return { error: extracted.parseError, renamed: 0 };
+    return { error: extracted.parseError, renamed: 0, frontendCalls: [] };
   }
 
   // Rename detection BEFORE the rebuildable txn — aliases go to the Ledger (§2.2.4).
@@ -367,10 +388,22 @@ async function indexFileWithSource(
       mtimeMs: p.mtimeMs, sizeBytes: p.sizeBytes, contentHash: p.contentHash, status: "indexed",
     });
 
-    return fileSymbolIds;
+    // 6. frontend gRPC-web call sites (collected, NOT stitched here — the
+    // wrapper-verification gate needs whole-repo data: a wrapper class and a
+    // call site may live in different files, so indexRepo stitches after the
+    // full per-file loop, using a dedicated always-fresh wrapper scan — see
+    // indexRepo). Only the src symbol is resolvable at this scope.
+    const frontendCalls: CollectedFrontendCall[] = [];
+    for (const fc of extracted.frontendGrpcCalls) {
+      if (!fc.enclosingQualifiedName) continue;
+      const src = fileSymbolIds.get(fc.enclosingQualifiedName);
+      if (src) frontendCalls.push({ src, service: fc.service, functionName: fc.functionName, filePath: p.relPath });
+    }
+
+    return { fileSymbolIds, frontendCalls };
   });
 
-  const fileSymbolIds = tx();
+  const { fileSymbolIds, frontendCalls } = tx();
 
   // Apply rename aliases now that node ids exist (Ledger-first, outside the txn).
   let renamed = 0;
@@ -392,7 +425,7 @@ async function indexFileWithSource(
     }
   }
 
-  return { error: null, renamed };
+  return { error: null, renamed, frontendCalls };
 }
 
 // Index a whole repo (headless). incremental uses the files_index quick filter;
@@ -442,6 +475,20 @@ export async function indexRepo(input: {
     const files = [...walkRepoFiles(scanRoot)];
     input.onProgress?.({ phase: "scan", done: 0, total: files.length, file: "" });
 
+    // Frontend gRPC-web wiring (§Task 6): per-repo config, plus whole-repo
+    // accumulators. A wrapper class and its call sites can live in different
+    // files, so these collect across the ENTIRE per-file loop below and are
+    // only gated/stitched into edges once the loop (and the proto pass, which
+    // may create this repo's own endpoints) has finished.
+    const frontendGrpcConfig = loadFrontendGrpcConfig(scanRoot) ?? undefined;
+    const frontendCalls: CollectedFrontendCall[] = [];
+    const verifiedMethodsByService: Record<string, Set<string>> = {};
+    // Files actually reprocessed this run (indexFileWithSource invoked, i.e.
+    // NOT checkpoint-skipped) — a superset of frontendCalls' file paths. Used
+    // to clear stale pending rows even when a file's call sites were REMOVED
+    // (so frontendCalls no longer mentions it) rather than merely re-gated.
+    const reprocessedFiles = new Set<string>();
+
     const seen = new Set<string>();
     let done = 0;
     for (const file of files) {
@@ -477,14 +524,17 @@ export async function indexRepo(input: {
         continue;
       }
 
+      reprocessedFiles.add(file.relPath);
       const r = await indexFileWithSource(store, {
         repoId, branchId, commit: git.commit, relPath: file.relPath,
         absPath: file.absPath, rootPath: scanRoot,
         source, contentHash, mtimeMs: file.mtimeMs, sizeBytes: file.sizeBytes,
+        frontendGrpcConfig,
       });
       if (r.error) report.errors += 1;
       else report.parsed += 1;
       report.renamed += r.renamed;
+      frontendCalls.push(...r.frontendCalls);
     }
 
     // delete detection: checkpoints present but file gone from disk (§6.3.1)
@@ -548,6 +598,88 @@ export async function indexRepo(input: {
       });
       tx();
     }
+
+    // ── Wrapper verification: ALWAYS scanned fresh across the whole repo,
+    // independent of the incremental per-file skip above (same reasoning as
+    // the proto pass re-walking every .proto file every run, right above).
+    // Rationale: verifiedMethodsByService gates the frontend stitch below; if
+    // it were only populated from files actually reprocessed THIS run, then
+    // any incremental run where a call-site file changes but its (unchanged,
+    // skipped) wrapper file does not would see an empty/stale gate for that
+    // service — wrongly failing verification and, worse, wiping an already-
+    // confirmed edge that the reprocessed call-site file's own
+    // replaceFileEdges() call just deleted (branch-less cleanup keyed on that
+    // file's provenance) without the stitch being able to re-add it. A cheap
+    // substring pre-filter keeps this bounded to files that actually mention
+    // a configured wrapper class name.
+    if (frontendGrpcConfig && Object.keys(frontendGrpcConfig.wrappers).length > 0) {
+      const wrapperClassNames = [...new Set(Object.values(frontendGrpcConfig.wrappers))];
+      for (const file of walkRepoFiles(scanRoot)) {
+        const wLang = langForExtension(file.relPath);
+        if (wLang !== "ts" && wLang !== "tsx") continue;
+        let wSource: string;
+        try {
+          wSource = readFileSync(file.absPath, "utf8");
+        } catch { continue; }
+        const mentioned = wrapperClassNames.filter((c) => wSource.includes(c));
+        if (mentioned.length === 0) continue;
+        let tree;
+        try {
+          const parser = await loadParser(wLang);
+          tree = parser.parse(wSource);
+        } catch { continue; }
+        if (!tree) continue;
+        for (const [service, cls] of Object.entries(frontendGrpcConfig.wrappers)) {
+          if (!mentioned.includes(cls)) continue;
+          const verified = verifiedForwardingMethods(tree.rootNode, cls);
+          if (verified.size === 0) continue;
+          const set = (verifiedMethodsByService[service] ??= new Set<string>());
+          for (const m of verified) set.add(m);
+        }
+      }
+    }
+
+    // ── Frontend gRPC-web stitch: confirmed-only invokes edges + deferred
+    // re-stitch (§Task 6). Runs after the proto pass above so THIS repo's own
+    // endpoints already exist.
+    //
+    // Deliberately does NOT call store.replaceFileEdges() again for a frontend
+    // file: each file's OTHER edges (defines/imports/calls/...) were already
+    // committed by exactly one replaceFileEdges() call inside the per-file
+    // loop above, and replaceFileEdges() REPLACES ALL parser edges for that
+    // (repo, file) — a second call here would wipe them. Instead every gated
+    // call funnels through the pending-edge queue: enqueue (never replaces
+    // existing edges), then replayPendingFrontendEdges() converts any row
+    // whose endpoint already exists into a real `invokes` edge immediately —
+    // giving the same "endpoint exists → edge emitted now" outcome without
+    // ever touching the edges this file's own replaceFileEdges() call owns.
+    //
+    // clear-then-insert per file (rather than insert-only) prevents duplicate
+    // pending rows from accumulating across repeated re-parses of the same
+    // frontend file before its backend endpoint shows up (Task 5 review
+    // carry-in). The pending row is keyed on the FRONTEND file's own
+    // (repoId, filePath) — not the backend's — so that file's own
+    // replaceFileEdges() call correctly purges the replayed branch-less edge
+    // on the next re-index (provenance.repo/provenance.file match).
+    //
+    // Cleared for every REPROCESSED file (not just files with frontendCalls
+    // this run): a file whose call site was removed/refactored away still
+    // needs its stale pending row purged, or a since-deleted call would
+    // wrongly materialize into an edge once the endpoint later appears.
+    for (const filePath of reprocessedFiles) {
+      store.clearPendingFrontendEdgesForFile(repoId, filePath);
+    }
+    for (const fc of frontendCalls) {
+      if (!verifiedMethodsByService[fc.service]?.has(fc.functionName)) continue; // wrapper gate
+      store.enqueuePendingFrontendEdge({
+        repoId, filePath: fc.filePath, srcNodeId: fc.src,
+        service: fc.service, functionName: fc.functionName, sourceType: "frontend_web",
+      });
+    }
+    // Unconditional: also replays pending rows left by OTHER repos (e.g. this
+    // repo's own proto pass just created the endpoint a prior frontend repo's
+    // pending row was waiting on) even when THIS repo has no frontend calls.
+    store.replayPendingFrontendEdges();
 
     // ── Package dependency detection: npm package ↔ repo mapping for the
     // cross-repo service graph. Creates service nodes for published packages
