@@ -170,7 +170,7 @@ async function indexFileWithSource(
     return { error: null, renamed: 0 };
   }
 
-  const extracted = await extractSymbols({ lang, source: p.source });
+  const extracted = await extractSymbols({ lang, source: p.source, relPath: p.relPath });
   if (extracted.parseError) {
     store.upsertFileCheckpoint({
       repoId: p.repoId, branchId: p.branchId, filePath: p.relPath, lang,

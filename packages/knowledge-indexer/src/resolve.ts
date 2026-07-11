@@ -16,8 +16,12 @@ export interface ResolvedEdges {
 }
 
 function bareOf(qualifiedName: string): string {
-  const i = qualifiedName.lastIndexOf(".");
-  return i >= 0 ? qualifiedName.slice(i + 1) : qualifiedName;
+  // Names are joined by "." (scope chain) or prefixed by "<file>::" (file-scoped
+  // scope-less symbols). Take whatever follows the LAST of either separator.
+  const c = qualifiedName.lastIndexOf("::");
+  const d = qualifiedName.lastIndexOf(".");
+  const cut = c >= 0 && c + 2 > d ? c + 2 : d + 1;
+  return cut > 0 ? qualifiedName.slice(cut) : qualifiedName;
 }
 
 // A bare name matching more candidates than this is too ambiguous to guess —
