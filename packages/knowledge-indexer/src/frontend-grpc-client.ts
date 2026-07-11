@@ -81,3 +81,73 @@ export async function extractFrontendCallsFromSource(
   const tree = parser.parse(source);
   return tree ? extractFrontendGrpcCalls(tree.rootNode, config) : [];
 }
+
+// Count occurrences of `this._net.<X>(` in a body node; true iff there is
+// exactly one such call AND it calls <name> — i.e. the body is a SOLE forward
+// to the same-named RPC. Rejects rename (calls something else), batching
+// (more than one _net call), and any transform beyond forwarding args/return.
+function soleNetForward(body: Node, name: string): boolean {
+  let netCalls = 0;
+  let matchesName = false;
+  walk(body, (n) => {
+    if (n.type !== "call_expression") return;
+    const fn = n.childForFieldName("function");
+    if (!fn || fn.type !== "member_expression") return;
+    const obj = fn.childForFieldName("object");
+    const prop = fn.childForFieldName("property")?.text;
+    // obj is `this._net`
+    if (
+      obj?.type === "member_expression" &&
+      obj.childForFieldName("object")?.type === "this" &&
+      obj.childForFieldName("property")?.text === "_net"
+    ) {
+      netCalls += 1;
+      if (prop === name) matchesName = true;
+    }
+  });
+  return netCalls === 1 && matchesName; // exactly one _net call, and it is <name>
+}
+
+// Static methods of `class <className>` whose body is a SOLE forward to
+// `this._net.<sameName>(...)`. Confirms a frontend wrapper method name really
+// maps 1:1 to the RPC it dispatches to — rejects rename/batch/transform.
+//
+// Grammar note (tree-sitter-tsx): `class <name> { static x = (r) => ... }`
+// parses as `class_declaration` → body: `class_body` → members:
+// `public_field_definition` (name: property_identifier, value: arrow_function),
+// with a leading unnamed `static` token as the field's first child (no
+// dedicated field name for it) — confirmed by parsing the task fixture and
+// inspecting `tree.rootNode.toString()` plus each member's raw children.
+export function verifiedForwardingMethods(root: Node, className: string): Set<string> {
+  const out = new Set<string>();
+  walk(root, (cls) => {
+    if (cls.type !== "class_declaration" && cls.type !== "class") return;
+    if (cls.childForFieldName("name")?.text !== className) return;
+    const body = cls.childForFieldName("body");
+    if (!body) return;
+    for (let i = 0; i < body.namedChildCount; i++) {
+      const member = body.namedChild(i)!;
+      if (member.type !== "public_field_definition") continue;
+      if (member.child(0)?.type !== "static") continue; // instance fields don't count
+      const nameNode = member.childForFieldName("name") ?? member.childForFieldName("property");
+      const value = member.childForFieldName("value");
+      const name = nameNode?.text;
+      if (!name || !value || value.type !== "arrow_function") continue;
+      const abody = value.childForFieldName("body");
+      if (abody && soleNetForward(abody, name)) out.add(name);
+    }
+  });
+  return out;
+}
+
+export async function verifiedMethodsFromSource(
+  lang: Lang,
+  source: string,
+  className: string,
+): Promise<Set<string>> {
+  const language = await loadLanguage(lang);
+  const parser = new Parser();
+  parser.setLanguage(language);
+  const tree = parser.parse(source);
+  return tree ? verifiedForwardingMethods(tree.rootNode, className) : new Set();
+}
