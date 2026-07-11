@@ -1128,10 +1128,11 @@ export function deadCode(store: KnowledgeStore, options?: { limit?: number }): D
 }
 
 // —— serviceGraph: the system-level microservice map ("main graph") ——
-// Nodes = repos (services) + external gRPC endpoints they consume but whose
-// provider isn't indexed. Edges = consumer→provider (a real cross-service call,
-// via a shared global endpoint) or consumer→external-endpoint. This answers
-// "how do the services relate" without needing a symbol focus.
+// Nodes = repos (services). Edges = consumer→provider (a real cross-service call
+// via a shared global endpoint, where BOTH ends are indexed). Endpoints that are
+// invoked but whose provider/handler isn't indexed (no source) are NOT shown —
+// they were dangling noise. This answers "how do the services relate" without a
+// symbol focus.
 export function serviceGraph(store: KnowledgeStore): GraphView {
   const repos = store.db.prepare("SELECT id, name FROM repos").all() as { id: string; name: string }[];
   const repoName = new Map(repos.map((r) => [r.id, r.name]));
@@ -1155,12 +1156,10 @@ export function serviceGraph(store: KnowledgeStore): GraphView {
     const provs = provBy.get(c.endpoint);
     if (provs && provs.size) {
       for (const p of provs) if (p !== c.repo) { useRepo(p); addEdge(c.repo, p, "invokes"); }
-    } else {
-      // provider not indexed → show the external endpoint node
-      const b = nodeBrief(store, c.endpoint);
-      if (!nodes.has(c.endpoint)) nodes.set(c.endpoint, { nodeId: c.endpoint, title: b.title, nodeType: "endpoint" });
-      addEdge(c.repo, c.endpoint, "invokes");
     }
+    // else: the endpoint has no indexed handler (no source) → skip it. We don't
+    // surface "invoked but unimplemented-in-index" endpoints as standalone nodes;
+    // they were graph noise (dangling red nodes with nothing behind them).
   }
   // always include every repo as a node (even isolated ones)
   for (const r of repos) useRepo(r.id);
