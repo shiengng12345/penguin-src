@@ -147,6 +147,10 @@ pub fn run() {
             // Warm the knowledge CLI (node resolution + cold-start + DB) in the
             // background so first entry into the Wiki isn't slow (perf).
             knowledge::prewarm(app.handle().clone());
+            // Auto-install the `penguin` CLI onto ~/.local/bin so a fresh user can
+            // use it in a terminal without any manual step (no chicken-and-egg
+            // `penguin install`). Idempotent, off-main-thread, self-healing.
+            knowledge::install_cli_command(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
