@@ -108,24 +108,46 @@ evidence IDs:
 ### PRD matching (no hallucinated mapping)
 
 Rank of signals (most → least reliable), each emits CANDIDATES only:
-1. explicit human-confirmed binding `{edge/entity → AC_id | domain-row}` (a small
-   static map, 10–50 entries for the real edges). Authoritative.
-2. proto message / DTO / entity name overlap (`inviteRecord` ↔ `InviteRecord`,
-   `SkinFragment` service ↔ PRD domain rows). Strong candidate generator.
-3. lexical (AC id / entity / service-name) match over pre-parsed PRD chunks.
-4. embeddings — MAY WIDEN candidates, NEVER creates a cited fact.
+1. **proto-comment AC annotations** — VERIFIED in this repo: the flyover
+   promotion protos already cite ACs directly, e.g.
+   `skin-fragment-frontend.proto: // AC-028: risk-hit ...`,
+   `skin-fragment-admin.proto: // ListRedemptions (AC-021 玩家兑换表)`. Since the
+   proto defines the `Service.Method` and carries the AC in a nearby comment, this
+   is a HIGH-reliability, machine-extractable `endpoint → AC` binding — often
+   removing the need for a hand-authored map. Parse proto comments per rpc.
+2. explicit human-confirmed binding `{edge/entity → AC_id | domain-row}` (a small
+   static map) for contracts whose proto is NOT AC-annotated.
+3. proto message / DTO / entity name overlap (`inviteRecord` ↔ `InviteRecord`,
+   `SkinFragment` service ↔ PRD domain rows). Candidate generator.
+4. lexical (AC id / entity / service-name) match over pre-parsed PRD chunks.
+5. embeddings — MAY WIDEN candidates, NEVER creates a cited fact.
 
-A PRD citation appears on a card ONLY through a stored binding (candidate →
-human-confirmed). No auto-asserted PRD match becomes evidence.
+A PRD citation appears on a card ONLY through a stored binding (a proto-comment
+annotation counts as a machine-confirmed binding; anything weaker needs a human
+confirm). No auto-asserted fuzzy match becomes evidence.
 
 ### PRD implementation coverage check (defeats authority laundering)
 
 For each cited AC, auto-check whether a code/integration test references that AC
-label (test name / annotation). If NO test covers it, the PRD claim is demoted
-to `unchecked`/UNVERIFIED — trust no higher than AI inference — and flagged
-"PRD-declared, not verified in code". (First: confirm whether this repo's tests
-actually carry AC labels; if not, coverage = "no AC-labelled tests found" and all
-PRD claims stay `unchecked` until a human confirms.)
+label. If NO test covers it, the PRD claim is demoted to `unchecked`/UNVERIFIED —
+trust no higher than AI inference — and flagged "PRD-declared, not verified in
+code".
+
+VERIFIED in this repo — the convention exists and is machine-extractable:
+- AC labels appear in **test NAMES**, e.g.
+  `it('AC-003 sameTaskFrequencyDays blocks within cool-down', …)` — structured,
+  greppable; and in comments (`// AC-003: …`). Extract from both.
+- The skin-fragment backend has AC-labelled tests under
+  `fpmsnt/apps/promotion/test/**/skin-fragment/` (draw/redemption/invite/activity).
+
+CRITICAL caveat — **AC numbers COLLIDE across PRDs/features**. `AC-003` exists in
+unbind-phone, a growth-task frequency feature, a task-validation feature, AND
+skin-fragment — each a DIFFERENT AC-003. Therefore the coverage check MUST be
+**feature/PRD-scoped**, never a global AC-number grep:
+- scope = the contract's owning module/test directory (e.g. the skin-fragment
+  card only counts tests under `apps/promotion/**/skin-fragment/**` referencing
+  that AC), tied to the PRD the card's contract belongs to.
+- a global `AC-039` match outside that scope does NOT count as coverage.
 
 ## `penguin why` — the batch enricher (NOT a Q&A tool)
 
@@ -236,4 +258,6 @@ Rules:
   collapse/diff/discrepancy UI in `WikiWhyPanel`).
 - PRD parser: chunking by AC anchor + domain-row; where the PRD file(s) live and
   how the binding map is stored/edited.
-- Whether this repo's tests carry AC labels (drives the coverage check design).
+- ~~Whether this repo's tests carry AC labels~~ — RESOLVED: yes, in test names
+  (`it('AC-0xx …')`) + comments + proto comments; coverage check must be
+  feature/PRD-scoped because AC numbers collide across PRDs (see above).
