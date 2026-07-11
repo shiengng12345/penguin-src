@@ -20,6 +20,13 @@ edges carry a `source_type` COLUMN.
 
 ## Global Constraints
 
+> ⚠️ VERIFIED-DB CORRECTIONS (2026-07-11) — see `../HANDOFF-fullstack-why-layer.md` §5.5:
+> real proto service = `FrontendSkinFragmentService` (NOT `SkinFragment`); endpoint id
+> `grpc::FrontendSkinFragmentService.claimdailyfragment`. `buildContextPack`/`explain` resolve by
+> NODE ID only (not title) — resolve to the handler SYMBOL node. Substitute these into the
+> example fixtures below.
+
+
 - Endpoint node identity is `grpcEndpointKey(service, method)` = `grpc::${service}.${method.toLowerCase()}` in `packages/knowledge-indexer/src/grpc-client.ts`. Reuse verbatim. The frontend `functionName` (camelCase) and the proto RPC (PascalCase) collapse to the same key because the method half is lowercased; the SERVICE half must match proto casing (via `serviceEnumMap`).
 - REAL call shape (verified in casino-plus): key is `functionName` (NOT `method`); payload key is `requestParam` (NOT `body`). Detection is AST, NOT regex.
 - Cross-service edges to the global (repo-less) endpoint MUST be `branchless: true`.

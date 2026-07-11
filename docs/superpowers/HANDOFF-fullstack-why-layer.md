@@ -158,6 +158,36 @@ flags a stale claim after the code changes. All 7 tasks' tests green (via stub L
 
 ---
 
+## 5.5 VERIFIED against the real DB (2026-07-11) — read before coding
+
+We ran the real CLI against the live 279MB knowledge DB
+(`~/.penguin/knowledge/knowledge.db`). Facts the plans' example fixtures got
+wrong — **use these real values**:
+
+- **The BYOK chain works.** `penguin explain <nodeId>` returns a grounded, useful
+  answer from DeepSeek in ~6s. Spec B's generation path is proven.
+- **`buildContextPack` / `explain` / `context` / `node` resolve by NODE ID ONLY**
+  — a bare name or title ("claimDailyFragment", "SkinFragment.ClaimDailyFragment")
+  returns "no context". `penguin search "<name>" --json` gives you the `nodeId`.
+  → **Spec B plan Task 5 must call `buildContextPack(store, <nodeId>)`, not
+  `t.title`.** The endpoint node has no source; resolve to the HANDLER SYMBOL node
+  (via the `handles` edge) for rich context — that symbol is what produced the
+  good explanation.
+- **The real proto service names are `FrontendSkinFragmentService` and
+  `AdminSkinFragmentService`, NOT `SkinFragment`.** So:
+  - the endpoint identity is `grpc::FrontendSkinFragmentService.claimdailyfragment`;
+  - Spec A's `serviceEnumMap` value + `casino-plus/.penguin-frontend-grpc.json` +
+    every golden-trace fixture must use `FrontendSkinFragmentService` (the wrapper
+    class stays `NtSkinFragmentService`; the frontend gRPC-web client class is
+    still `SkinFragment` — do not confuse the client class with the proto service).
+  - Wherever a plan fixture says `grpc::SkinFragment.…` or `serviceEnumMap: { … :
+    "SkinFragment" }`, substitute `FrontendSkinFragmentService`.
+- **Today the skin-fragment endpoints have `handles` but ZERO `invokes`** — no
+  consumer is linked yet. They become `whyTargets` only AFTER Spec A links the
+  frontend. Confirms A→B order for skin-fragment.
+- **But 127 backend cross-service endpoints already have handles+invokes** — so
+  Spec B's `penguin why` can be validated on those TODAY, independent of Spec A.
+
 ## 6. Critical decisions & gotchas (do NOT re-litigate — these came from review)
 
 1. **Frontend call key is `functionName`, not `method`; payload is `requestParam`,

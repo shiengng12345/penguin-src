@@ -10,6 +10,13 @@
 
 ## Global Constraints
 
+> ⚠️ VERIFIED-DB CORRECTIONS (2026-07-11) — see `../HANDOFF-fullstack-why-layer.md` §5.5:
+> real proto service = `FrontendSkinFragmentService` (NOT `SkinFragment`); endpoint id
+> `grpc::FrontendSkinFragmentService.claimdailyfragment`. `buildContextPack`/`explain` resolve by
+> NODE ID only (not title) — resolve to the handler SYMBOL node. Substitute these into the
+> example fixtures below.
+
+
 - MVP is phase 1: graph + git + tests only. NO PRD binding / AC coverage (phase 2).
 - Reuse `aiComplete(cfg, messages)` + `resolveProvider(opts)` from `packages/knowledge-cli/src/ai.ts`; `buildContextPack(store, target)` + `renderContextPackMarkdown(pack)` from knowledge-core. Do NOT add AI to the deterministic indexer. Do NOT use MCP `write_note`.
 - Card subject = the global endpoint node (`grpc::Service.method`, repo-less). Human note binds to it; per-claim state lives in the NEW `why_claims` table (frontmatter can't hold nested claims).
