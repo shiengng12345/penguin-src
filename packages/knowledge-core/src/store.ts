@@ -7,6 +7,19 @@ import type { LedgerEvent, LedgerEventInput } from "./ledger.js";
 import { materialize, LedgerGapError } from "./materializer.js";
 import { openDatabase } from "./schema.js";
 
+// signal 0 is a standard no-op liveness probe: it validates the pid without
+// actually sending a signal. ESRCH = no such process (dead); EPERM = exists
+// but owned by another user (still alive, just not signalable by us) — any
+// other error is treated conservatively as "can't tell, assume alive".
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
 export interface ParsedEdge {
   src: string;
   dst: string | null;
@@ -41,6 +54,10 @@ export interface SearchHit {
   nodeType: string;
   title: string;
   snippet: string | null;
+  identityKey: string;
+  filePath: string | null;
+  branch: string | null;
+  rank: number | null;
 }
 
 export type BranchStatus = "live" | "snapshot" | "gone";
@@ -206,6 +223,19 @@ export class KnowledgeStore {
     );
   }
 
+  // Accepts EITHER a repo's internal id OR its display name (case-insensitive)
+  // — callers (MCP/CLI) only ever see the display name in status/index output
+  // and have no way to know the internal UUID without a prior lookup, so a
+  // filter that only matched by id silently scoped every search to nothing.
+  resolveRepoIds(idOrName: string): string[] {
+    const byId = this.db.prepare("SELECT id FROM repos WHERE id = ?").get(idOrName) as { id: string } | undefined;
+    if (byId) return [byId.id];
+    const byName = this.db
+      .prepare("SELECT id FROM repos WHERE name = ? COLLATE NOCASE")
+      .all(idOrName) as { id: string }[];
+    return byName.map((r) => r.id);
+  }
+
   registerBranch(p: {
     repoId: string;
     name: string;
@@ -242,12 +272,26 @@ export class KnowledgeStore {
     );
   }
 
+  // A checkout has ONE branch checked out at a time: after indexing `keep` at
+  // `checkoutPath`, any OTHER live branch of the same repo AND same checkout
+  // is history — flip it to snapshot. Separate worktrees (different checkout
+  // paths) legitimately stay live side by side, so they are left alone.
+  demoteSiblingBranches(p: { repoId: string; keepBranchId: string; checkoutPath: string | null }): number {
+    if (!p.checkoutPath) return 0;
+    return this.db
+      .prepare(
+        `UPDATE branches SET status = 'snapshot'
+         WHERE repo_id = ? AND id <> ? AND checkout_path = ? AND status = 'live'`,
+      )
+      .run(p.repoId, p.keepBranchId, p.checkoutPath).changes;
+  }
+
   setBranchStatus(branchId: string, status: BranchStatus): void {
     this.db.prepare("UPDATE branches SET status = ? WHERE id = ?").run(status, branchId);
   }
 
   recordBranchIndexed(p: { branchId: string; commit?: string | null }): void {
-    this.db
+    const r = this.db
       .prepare(
         `UPDATE branches
          SET last_indexed_at = @at,
@@ -255,6 +299,11 @@ export class KnowledgeStore {
          WHERE id = @branchId`,
       )
       .run({ branchId: p.branchId, commit: p.commit ?? null, at: new Date().toISOString() });
+    // Fail loud, not silent: the branch row disappearing mid-index means a
+    // concurrent removeBranch won — this run's rows are orphans, surface it.
+    if (r.changes === 0) {
+      throw new Error(`branch ${p.branchId} was removed while indexing — re-run the index`);
+    }
   }
 
   // —— symbol_versions（分支作用域的实现快照，可再生直写）——
@@ -793,6 +842,13 @@ export class KnowledgeStore {
         endpointId = this.findNodeIdByIdentity(key);
         if (!endpointId) continue; // defensive: leave the row
       }
+      // Defensive: the source symbol may have been GC'd (branch removal)
+      // after this row was queued — an edge from a dead id would be an orphan.
+      const srcAlive = this.db.prepare("SELECT 1 FROM nodes WHERE id = ?").get(row.src_node_id);
+      if (!srcAlive) {
+        del.run(row.id);
+        continue;
+      }
       ins.run(
         `edge_${randomUUID()}`,
         row.src_node_id,
@@ -869,28 +925,46 @@ export class KnowledgeStore {
     const noteRows = this.db
       .prepare(
         `SELECT n.id AS nodeId, n.node_type AS nodeType, n.title AS title,
+                n.identity_key AS identityKey, ni.path AS filePath, NULL AS branch,
+                bm25(fts_notes) AS rank,
                 snippet(fts_notes, 2, '[', ']', '…', 12) AS snippet
          FROM fts_notes f
          JOIN nodes n ON n.id = f.node_id
          JOIN notes_index ni ON ni.node_id = f.node_id
          WHERE fts_notes MATCH ?
            AND (? = 1 OR (ni.sensitive = 0 AND ni.mcp_access = 'allowed'))
+         ORDER BY rank
          LIMIT ?`,
       )
       .all(match, opts?.includeSensitive ? 1 : 0, limit) as SearchHit[];
 
+    // LEFT JOIN symbol_versions: symbols indexed via indexSymbolText() alone
+    // (no full pipeline run, e.g. some test fixtures) have no version row —
+    // filePath/branch must degrade to null rather than dropping the hit.
+    // Preferring status='fresh' picks the live branch's copy when a symbol
+    // has versions across multiple branches; falls back to any version.
     const symbolRows = this.db
       .prepare(
         `SELECT n.id AS nodeId, n.node_type AS nodeType, n.title AS title,
+                n.identity_key AS identityKey, sv.file_path AS filePath, br.name AS branch,
+                bm25(fts_symbols) AS rank,
                 NULL AS snippet
          FROM fts_symbols f
          JOIN nodes n ON n.id = f.node_id
+         LEFT JOIN symbol_versions sv ON sv.id = (
+           SELECT id FROM symbol_versions WHERE node_id = n.id
+           ORDER BY (status = 'fresh') DESC LIMIT 1
+         )
+         LEFT JOIN branches br ON br.id = sv.branch_id
          WHERE fts_symbols MATCH ?
+         ORDER BY rank
          LIMIT ?`,
       )
       .all(match, limit) as SearchHit[];
 
-    let hits = [...noteRows, ...symbolRows];
+    // bm25 is lower-is-more-relevant; sort the merged note+symbol set by it
+    // (nulls-safe fallback to 0) so relevance ordering holds across both kinds.
+    let hits = [...noteRows, ...symbolRows].sort((a, b) => (a.rank ?? 0) - (b.rank ?? 0));
     if (opts?.types?.length) {
       hits = hits.filter((h) => opts.types!.includes(h.nodeType));
     }
@@ -905,15 +979,196 @@ export class KnowledgeStore {
       .get(key) as { id: string } | undefined;
     if (direct) return { nodeId: direct.id, via: "identity" };
 
+    // JOIN nodes: ledger-replayed aliases can point at node ids that no longer
+    // exist (post-wipe re-index assigns fresh ids). Returning a dead id here
+    // crashes callers that dereference it (getNodeDetail's `getNode(id)!`).
     const alias = this.db
       .prepare(
-        `SELECT node_id FROM node_aliases
-         WHERE alias_key = ? AND valid_to IS NULL
-         ORDER BY created_at DESC LIMIT 1`,
+        `SELECT a.node_id FROM node_aliases a
+         JOIN nodes n ON n.id = a.node_id
+         WHERE a.alias_key = ? AND a.valid_to IS NULL
+         ORDER BY a.created_at DESC LIMIT 1`,
       )
       .get(key) as { node_id: string } | undefined;
     if (alias) return { nodeId: alias.node_id, via: "alias" };
     return null;
+  }
+
+  // Cross-process "index in progress" marker for a branch (meta table). The
+  // in-process IndexTaskLock cannot guard app↔CLI races: every app call is its
+  // own CLI process. A marker only blocks while its recorded pid is STILL
+  // ALIVE — a crashed/killed indexer (never reaches its releaseIndexMarker
+  // cleanup) must not lock retries out for the full 30 minutes just because
+  // its timestamp is recent. The age check remains as a bounded fallback
+  // (e.g. pid-reuse races), so a live-but-hung process still self-clears
+  // after 30 minutes either way.
+  acquireIndexMarker(branchId: string): void {
+    const key = `index_lock::${branchId}`;
+    const row = this.db.prepare("SELECT value FROM meta WHERE key = ?").get(key) as
+      | { value: string }
+      | undefined;
+    if (row) {
+      try {
+        const v = JSON.parse(row.value) as { pid?: number; startedAt?: string };
+        const age = Date.now() - Date.parse(v.startedAt ?? "");
+        const stillRunning = typeof v.pid === "number" && isPidAlive(v.pid);
+        if (stillRunning && Number.isFinite(age) && age < 30 * 60_000) {
+          throw new Error(`index already running for this branch (started ${v.startedAt})`);
+        }
+      } catch (e) {
+        if (e instanceof Error && /already running/.test(e.message)) throw e;
+        // unparseable marker → treat as stale
+      }
+    }
+    this.db
+      .prepare(
+        "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      )
+      .run(key, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+  }
+
+  releaseIndexMarker(branchId: string): void {
+    this.db.prepare("DELETE FROM meta WHERE key = ?").run(`index_lock::${branchId}`);
+  }
+
+  private assertNoFreshIndexMarker(branchId: string): void {
+    const row = this.db
+      .prepare("SELECT value FROM meta WHERE key = ?")
+      .get(`index_lock::${branchId}`) as { value: string } | undefined;
+    if (!row) return;
+    try {
+      const v = JSON.parse(row.value) as { pid?: number; startedAt?: string };
+      const age = Date.now() - Date.parse(v.startedAt ?? "");
+      const stillRunning = typeof v.pid === "number" && isPidAlive(v.pid);
+      if (stillRunning && Number.isFinite(age) && age < 30 * 60_000) {
+        throw new Error("an index is currently running for this branch — retry after it finishes");
+      }
+    } catch (e) {
+      if (e instanceof Error && /currently running/.test(e.message)) throw e;
+    }
+  }
+
+  // Toggle a branch's pinned flag. Pinned branches are exempt from every
+  // automatic retention mechanism and refuse CLI deletion (unpin first).
+  toggleBranchPinned(branchId: string): boolean {
+    this.db.prepare("UPDATE branches SET pinned = 1 - pinned WHERE id = ?").run(branchId);
+    const row = this.db.prepare("SELECT pinned FROM branches WHERE id = ?").get(branchId) as
+      | { pinned: number }
+      | undefined;
+    return !!row?.pinned;
+  }
+
+  // Remove ONE branch: purge its branch-scoped rows, then GC only nodes with
+  // no remaining liveness anywhere (versions, edges, notes, credentials,
+  // response samples; file nodes also checked against files_index). Branchless
+  // parser edges (global gRPC invokes/handles) are NOT branch-owned and are
+  // never touched here — design review Q1.
+  removeBranch(branchId: string): void {
+    const branch = this.db
+      .prepare("SELECT repo_id FROM branches WHERE id = ?")
+      .get(branchId) as { repo_id: string } | undefined;
+    if (!branch) return;
+    this.assertNoFreshIndexMarker(branchId);
+    const repoId = branch.repo_id;
+    const tx = this.db.transaction(() => {
+      this.db.prepare("DELETE FROM edges WHERE branch_id = ?").run(branchId);
+      this.db.prepare("DELETE FROM symbol_versions WHERE branch_id = ?").run(branchId);
+      this.db.prepare("DELETE FROM files_index WHERE branch_id = ?").run(branchId);
+      this.db.prepare("DELETE FROM branches WHERE id = ?").run(branchId);
+      this.db.exec(`
+        CREATE TEMP TABLE IF NOT EXISTS gc_nodes (id TEXT PRIMARY KEY);
+        DELETE FROM gc_nodes;
+      `);
+      this.db
+        .prepare(
+          `INSERT INTO gc_nodes
+           SELECT n.id FROM nodes n
+           WHERE n.repo_id = ?
+             AND n.node_type IN ('symbol','file','endpoint','entity','service','route')
+             AND NOT EXISTS (SELECT 1 FROM symbol_versions sv WHERE sv.node_id = n.id)
+             AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.src = n.id OR e.dst = n.id)
+             AND NOT EXISTS (SELECT 1 FROM notes_index ni WHERE ni.node_id = n.id)
+             AND NOT EXISTS (SELECT 1 FROM credential_entries ce WHERE ce.node_id = n.id)
+             AND NOT EXISTS (
+               SELECT 1 FROM response_samples rs
+               WHERE rs.endpoint_id = n.id OR rs.endpoint_key = n.identity_key
+             )
+             AND (n.node_type <> 'file' OR NOT EXISTS (
+               SELECT 1 FROM files_index fi
+               WHERE fi.repo_id = n.repo_id
+                 AND n.identity_key = n.repo_id || '::file::' || fi.file_path
+             ))`,
+        )
+        .run(repoId);
+      this.db.exec(`
+        -- pending frontend rows whose source symbol is being GC'd would make a
+        -- later replay insert an orphan-src edge — drop them with the node.
+        DELETE FROM pending_frontend_edges WHERE src_node_id IN (SELECT id FROM gc_nodes);
+        DELETE FROM fts_symbols WHERE node_id IN (SELECT id FROM gc_nodes);
+        DELETE FROM node_aliases WHERE node_id IN (SELECT id FROM gc_nodes);
+        DELETE FROM nodes WHERE id IN (SELECT id FROM gc_nodes);
+        DROP TABLE gc_nodes;
+      `);
+    });
+    tx();
+  }
+
+  // Remove one repo and ALL its derived data (nodes, edges, versions, file
+  // checkpoints, FTS rows, pending frontend rows, branches). Parser data only —
+  // rebuildable by re-indexing; the append-only ledger stays untouched. Global
+  // (repo-less) gRPC endpoint nodes survive: other repos may reference them,
+  // and dangling ones are hidden by the UI / cleaned by their own pass.
+  removeRepo(repoId: string): void {
+    const tx = this.db.transaction(() => {
+      // Edges: branch-scoped (this repo's branches), branchless parser edges
+      // provenanced to this repo, and anything touching this repo's nodes.
+      this.db.prepare(
+        "DELETE FROM edges WHERE branch_id IN (SELECT id FROM branches WHERE repo_id = ?)",
+      ).run(repoId);
+      this.db.prepare(
+        "DELETE FROM edges WHERE json_extract(provenance, '$.repo') = ?",
+      ).run(repoId);
+      this.db.prepare(
+        `DELETE FROM edges WHERE src IN (SELECT id FROM nodes WHERE repo_id = ?)
+           OR dst IN (SELECT id FROM nodes WHERE repo_id = ?)`,
+      ).run(repoId, repoId);
+      this.db.prepare(
+        "DELETE FROM fts_symbols WHERE node_id IN (SELECT id FROM nodes WHERE repo_id = ?)",
+      ).run(repoId);
+      this.db.prepare(
+        "DELETE FROM symbol_versions WHERE branch_id IN (SELECT id FROM branches WHERE repo_id = ?)",
+      ).run(repoId);
+      this.db.prepare(
+        "DELETE FROM symbol_versions WHERE node_id IN (SELECT id FROM nodes WHERE repo_id = ?)",
+      ).run(repoId);
+      this.db.prepare("DELETE FROM pending_frontend_edges WHERE repo_id = ?").run(repoId);
+      this.db.prepare("DELETE FROM files_index WHERE repo_id = ?").run(repoId);
+      this.db.prepare("DELETE FROM workspace_repos WHERE repo_id = ?").run(repoId);
+      this.db.prepare("DELETE FROM nodes WHERE repo_id = ?").run(repoId);
+      this.db.prepare("DELETE FROM branches WHERE repo_id = ?").run(repoId);
+      this.db.prepare("DELETE FROM repos WHERE id = ?").run(repoId);
+    });
+    tx();
+  }
+
+  // Purge notes whose markdown file no longer exists on disk. The file IS the
+  // source of truth (see notes-fs.ts) — a DB-only note is stale residue that
+  // reads as alive in the UI until the next DB wipe silently loses it forever
+  // (audit F-3). Derived rows only; the append-only ledger is untouched.
+  pruneMissingNotes(existingPaths: Set<string>): number {
+    const rows = this.db
+      .prepare("SELECT node_id, path FROM notes_index")
+      .all() as Array<{ node_id: string; path: string }>;
+    let pruned = 0;
+    for (const r of rows) {
+      if (existingPaths.has(r.path)) continue;
+      this.db.prepare("DELETE FROM notes_index WHERE node_id = ?").run(r.node_id);
+      this.db.prepare("DELETE FROM fts_notes WHERE node_id = ?").run(r.node_id);
+      this.db.prepare("DELETE FROM edges WHERE src = ? OR dst = ?").run(r.node_id, r.node_id);
+      this.db.prepare("DELETE FROM nodes WHERE id = ?").run(r.node_id);
+      pruned += 1;
+    }
+    return pruned;
   }
 
   getAliases(nodeId: string): Array<{

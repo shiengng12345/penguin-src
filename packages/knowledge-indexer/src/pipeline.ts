@@ -191,6 +191,12 @@ async function indexFileWithSource(
 ): Promise<{
   error: string | null;
   renamed: number;
+  // Endpoints this file defines (NestJS decorators) — surfaced so indexRepo
+  // can emit discovery events without re-parsing.
+  endpoints: Array<{ key: string; protocol: string }>;
+  // Bare names that resolved to ZERO candidates (forward references) — the
+  // caller retries this file in a second pass once the symbol table is full.
+  retryNames: string[];
 }> {
   const lang = langForExtension(p.relPath);
   // Skip non-source files AND minified/generated bundles that slipped past the
@@ -200,7 +206,7 @@ async function indexFileWithSource(
       repoId: p.repoId, branchId: p.branchId, filePath: p.relPath,
       mtimeMs: p.mtimeMs, sizeBytes: p.sizeBytes, contentHash: p.contentHash, status: "skipped",
     });
-    return { error: null, renamed: 0 };
+    return { error: null, renamed: 0, endpoints: [], retryNames: [] };
   }
 
   const extracted = await extractSymbols({ lang, source: p.source, relPath: p.relPath });
@@ -210,8 +216,10 @@ async function indexFileWithSource(
       mtimeMs: p.mtimeMs, sizeBytes: p.sizeBytes, contentHash: p.contentHash,
       status: "error", error: extracted.parseError,
     });
-    return { error: extracted.parseError, renamed: 0 };
+    return { error: extracted.parseError, renamed: 0, endpoints: [], retryNames: [] };
   }
+  // Hoisted out of the write-transaction closure below so the return can see it.
+  let retryNames: string[] = [];
 
   // Rename detection BEFORE the rebuildable txn — aliases go to the Ledger (§2.2.4).
   const prior = priorSymbols(store, p.repoId, p.branchId, p.relPath);
@@ -282,6 +290,9 @@ async function indexFileWithSource(
       fileSymbolIds, lookup: storeSymbolIndex(store, p.repoId),
       currentFile: p.relPath, importedFiles,
     });
+    // Cap: a file with hundreds of external (node_modules/stdlib) misses would
+    // otherwise carry a huge retry list for names that never resolve.
+    retryNames = [...new Set(resolved.unresolvedNames)].slice(0, 100);
     const structural: ParsedEdge[] = [];
     for (const nodeId of fileSymbolIds.values()) {
       structural.push({ src: fileNodeId, dst: nodeId, edgeType: "defines", origin: "parser", method: "EXTRACTED" });
@@ -345,11 +356,16 @@ async function indexFileWithSource(
     if (lang === "js") {
       const jsCalls = extractFpmsGrpcCalls(p.source);
       for (const jc of jsCalls) {
-        // Match the function name to an extracted symbol (e.g. "AdminUnlockPlayer"
-        // → qualifiedName "fpmsNTApi.AdminUnlockPlayer").
-        const matching = extracted.symbols.find((s) =>
-          s.qualifiedName === jc.functionName || s.qualifiedName.endsWith(`.${jc.functionName}`)
-        );
+        // Match the function name to an extracted symbol. qualifiedName is
+        // file-prefixed ("<relPath>::<name>", possibly dot-nested), so compare
+        // against the local name after the "::" — matching on a bare name or a
+        // ".name" suffix alone never fires (that regression left every real
+        // FPMS call site with zero invokes edges).
+        const matching = extracted.symbols.find((s) => {
+          const sep = s.qualifiedName.lastIndexOf("::");
+          const local = sep === -1 ? s.qualifiedName : s.qualifiedName.slice(sep + 2);
+          return local === jc.functionName || local.endsWith(`.${jc.functionName}`);
+        });
         const src = matching ? fileSymbolIds.get(matching.qualifiedName) : undefined;
         if (!src) continue;
         const endpointId = store.upsertNode({
@@ -425,8 +441,27 @@ async function indexFileWithSource(
     }
   }
 
-  return { error: null, renamed };
+  return {
+    error: null,
+    renamed,
+    endpoints: extracted.endpoints.map((e) => ({ key: e.key, protocol: e.protocol })),
+    retryNames,
+  };
 }
+
+// Pipeline stages indexRepo runs through, in order. UIs render this list.
+export type IndexStageId = "scan" | "parse" | "deletes" | "proto" | "link" | "packages" | "git";
+
+// Progress events: the legacy per-file "scan"/"index" shapes are kept verbatim
+// (existing CLI bar + Tauri Wiki bar parse them), PLUS typed pipeline events —
+// stage lifecycle, throttled metric snapshots, discoveries — so UIs can
+// narrate indexing ("what am I building for you") instead of a bare % bar.
+export type IndexProgressEvent =
+  | { phase: "scan"; done: number; total: number; file: string; langs?: Record<string, number> }
+  | { phase: "index"; done: number; total: number; file: string; lang?: string }
+  | { phase: "stage"; stage: IndexStageId; state: "start" | "done"; detail?: string; elapsedMs?: number }
+  | { phase: "metric"; symbols: number; edges: number; endpoints: number }
+  | { phase: "discovery"; kind: "endpoint" | "service" | "link"; title: string; file?: string };
 
 // Index a whole repo (headless). incremental uses the files_index quick filter;
 // rebuild clears the branch's checkpoints so every file re-parses (§8.3).
@@ -434,9 +469,7 @@ export async function indexRepo(input: {
   store: KnowledgeStore;
   rootPath: string;
   mode: "incremental" | "rebuild";
-  // Progress callback: phase "scan" fires once after the walk with the total
-  // file count; phase "index" fires per file with done/total for a % bar.
-  onProgress?: (p: { phase: "scan" | "index"; done: number; total: number; file: string }) => void;
+  onProgress?: (p: IndexProgressEvent) => void;
 }): Promise<IndexReport> {
   const { store, rootPath, mode } = input;
   const git = readGitContext(rootPath);
@@ -450,8 +483,13 @@ export async function indexRepo(input: {
     name: git.repoName ?? basename(scanRoot),
     rootPath: scanRoot,
   });
+  // Register WITHOUT claiming "live": a branch earns live status only when its
+  // index SUCCEEDS (validation V1 — a failed run must not look trustworthy).
+  // Existing branches keep their current status during the run.
+  const prior = store.getBranch(repoId, git.branch);
   const branchId = store.registerBranch({
-    repoId, name: git.branch, headCommit: git.commit, checkoutPath: git.checkoutPath, status: "live",
+    repoId, name: git.branch, headCommit: git.commit, checkoutPath: git.checkoutPath,
+    status: (prior?.status as "live" | "snapshot" | "gone" | undefined) ?? "snapshot",
   });
 
   const lockKey = `${repoId}:${branchId}:${git.checkoutPath}`;
@@ -459,11 +497,39 @@ export async function indexRepo(input: {
   if (!lock) {
     throw new Error(`index task already running for ${git.branch}`);
   }
+  // Cross-process guard (app calls spawn a fresh CLI process each time, so the
+  // in-process lock above cannot see them): a DB marker removeBranch checks.
+  store.acquireIndexMarker(branchId);
 
   const report: IndexReport = {
     repoId, branchId, branchName: git.branch, commit: git.commit,
     scanned: 0, parsed: 0, skipped: 0, deleted: 0, errors: 0, renamed: 0,
     commits: 0, tags: 0,
+  };
+
+  const emit = input.onProgress;
+  const stageT0 = new Map<IndexStageId, number>();
+  const stageStart = (s: IndexStageId) => {
+    stageT0.set(s, Date.now());
+    emit?.({ phase: "stage", stage: s, state: "start" });
+  };
+  const stageDone = (s: IndexStageId, detail?: string) => {
+    emit?.({
+      phase: "stage", stage: s, state: "done", detail,
+      elapsedMs: Date.now() - (stageT0.get(s) ?? Date.now()),
+    });
+  };
+  // Endpoints surfaced this run (per-file NestJS + proto pass) for the metric line.
+  let endpointsFound = 0;
+  const emitMetric = () => {
+    if (!emit) return;
+    const symbols = (store.db
+      .prepare("SELECT COUNT(*) AS c FROM nodes WHERE repo_id=? AND node_type='symbol'")
+      .get(repoId) as { c: number }).c;
+    const edges = (store.db
+      .prepare("SELECT COUNT(*) AS c FROM edges WHERE branch_id=? AND status='active'")
+      .get(branchId) as { c: number }).c;
+    emit({ phase: "metric", symbols, edges, endpoints: endpointsFound });
   };
 
   try {
@@ -472,8 +538,18 @@ export async function indexRepo(input: {
     }
 
     // Collect the file list first so progress has a total for a % bar.
+    stageStart("scan");
     const files = [...walkRepoFiles(scanRoot)];
-    input.onProgress?.({ phase: "scan", done: 0, total: files.length, file: "" });
+    // Per-language totals so UIs can render one bar per language ("other" =
+    // walked but non-source: json/md/config — still checkpointed, so counted).
+    const langOf = (relPath: string) => langForExtension(relPath) ?? "other";
+    const langTotals: Record<string, number> = {};
+    for (const f of files) langTotals[langOf(f.relPath)] = (langTotals[langOf(f.relPath)] ?? 0) + 1;
+    input.onProgress?.({ phase: "scan", done: 0, total: files.length, file: "", langs: langTotals });
+    stageDone("scan", `${files.length} files`);
+    stageStart("parse");
+    // Metric cadence: ~50 snapshots per run — cheap COUNTs, smooth counters.
+    const metricEvery = Math.max(1, Math.floor(files.length / 50));
 
     // Files actually reprocessed this run (indexFileWithSource invoked, i.e.
     // NOT checkpoint-skipped). Used below to scope the frontend-call scan/
@@ -487,13 +563,16 @@ export async function indexRepo(input: {
     // replayPendingFrontendEdges() would insert a second, duplicate edge
     // (it has no (src,dst) existence check — see idempotency).
     const reprocessedFiles = new Set<string>();
+    // Files whose refs had zero-candidate (forward-reference) misses in the
+    // first pass — retried below once the full symbol table exists.
+    const retryByFile = new Map<string, { file: (typeof files)[number]; names: string[] }>();
     const seen = new Set<string>();
     let done = 0;
     for (const file of files) {
       report.scanned += 1;
       seen.add(file.relPath);
       done += 1;
-      input.onProgress?.({ phase: "index", done, total: files.length, file: file.relPath });
+      input.onProgress?.({ phase: "index", done, total: files.length, file: file.relPath, lang: langOf(file.relPath) });
       const prev = store.getFileCheckpoint(repoId, branchId, file.relPath);
 
       // quick filter: mtime+size unchanged (and not previously errored) → skip
@@ -531,9 +610,48 @@ export async function indexRepo(input: {
       if (r.error) report.errors += 1;
       else report.parsed += 1;
       report.renamed += r.renamed;
+      if (r.retryNames.length > 0) retryByFile.set(file.relPath, { file, names: r.retryNames });
+      for (const ep of r.endpoints) {
+        endpointsFound += 1;
+        emit?.({ phase: "discovery", kind: "endpoint", title: ep.key, file: file.relPath });
+      }
+      if (done % metricEvery === 0) emitMetric();
     }
 
+    // ── Second resolution pass. Single-pass resolution sees only symbols
+    // indexed BEFORE the current file, so forward references (a file calling a
+    // symbol whose defining file walks later) drop silently — a fresh rebuild
+    // under-links massively vs a converged incremental DB (audit measured
+    // −25% calls / −42% references fleet-wide). Re-index exactly the files
+    // whose zero-candidate names NOW exist in the completed symbol table.
+    // replaceFileEdges is wipe-then-recreate per file, so the redo is
+    // idempotent; the frontend call scan below runs after this and already
+    // treats these files as reprocessed.
+    let reResolved = 0;
+    if (retryByFile.size > 0) {
+      const idx = storeSymbolIndex(store, repoId);
+      for (const { file, names } of retryByFile.values()) {
+        if (!names.some((n) => idx.bareNameCandidates(n).length > 0)) continue;
+        let source: string;
+        try {
+          source = readFileSync(file.absPath, "utf8");
+        } catch { continue; }
+        const r2 = await indexFileWithSource(store, {
+          repoId, branchId, commit: git.commit, relPath: file.relPath,
+          absPath: file.absPath, rootPath: scanRoot,
+          source, contentHash: sha256(source), mtimeMs: file.mtimeMs, sizeBytes: file.sizeBytes,
+        });
+        if (!r2.error) reResolved += 1;
+      }
+    }
+    stageDone(
+      "parse",
+      `${report.parsed} parsed · ${report.skipped} unchanged` +
+        (reResolved > 0 ? ` · ${reResolved} re-linked` : ""),
+    );
+
     // delete detection: checkpoints present but file gone from disk (§6.3.1)
+    stageStart("deletes");
     for (const cp of store.listFileCheckpoints(repoId, branchId)) {
       if (seen.has(cp.file_path) || cp.status === "deleted") continue;
       store.markFileDeleted({ repoId, branchId, filePath: cp.file_path });
@@ -548,6 +666,8 @@ export async function indexRepo(input: {
         .run(branchId, cp.file_path);
       report.deleted += 1;
     }
+    stageDone("deletes", report.deleted > 0 ? `${report.deleted} removed` : undefined);
+    stageStart("proto");
 
     // ── Proto file processing: extract gRPC service/method definitions from .proto
     // files and create endpoint + service nodes with handles edges. This powers the
@@ -593,7 +713,15 @@ export async function indexRepo(input: {
         });
       });
       tx();
+      endpointsFound += eps.length;
+      emit?.({
+        phase: "discovery", kind: "service",
+        title: `gRPC ${eps[0].module} (${eps.length} rpc${eps.length === 1 ? "" : "s"})`,
+        file: file.relPath,
+      });
     }
+    stageDone("proto");
+    stageStart("link");
 
     // ── Zero-config frontend→backend gRPC-web linking (no per-repo config
     // file anywhere — see frontend-grpc-client.ts). Runs UNCONDITIONALLY on
@@ -688,7 +816,15 @@ export async function indexRepo(input: {
     // Unconditional: also replays pending rows left by OTHER repos (e.g. this
     // repo's own proto pass just created the endpoint a prior frontend repo's
     // pending row was waiting on) even when THIS repo has no frontend calls.
-    store.replayPendingFrontendEdges();
+    const replayed = store.replayPendingFrontendEdges();
+    if (replayed > 0) {
+      emit?.({
+        phase: "discovery", kind: "link",
+        title: `${replayed} frontend call${replayed === 1 ? "" : "s"} linked to backend endpoints`,
+      });
+    }
+    stageDone("link");
+    stageStart("packages");
 
     // ── Package dependency detection: npm package ↔ repo mapping for the
     // cross-repo service graph. Creates service nodes for published packages
@@ -757,14 +893,25 @@ export async function indexRepo(input: {
       }
     }
 
+    stageDone("packages");
+
     // git topology (commits/tags) into the graph — on-demand, bounded (§11).
+    stageStart("git");
     const gitGraph = indexGitObjects({ store, rootPath });
     report.commits = gitGraph.commits;
     report.tags = gitGraph.tags;
+    stageDone("git", gitGraph.commits > 0 ? `${gitGraph.commits} commits` : undefined);
+    emitMetric();
 
     store.recordBranchIndexed({ branchId, commit: git.commit });
+    // Success: NOW the branch is trustworthy — promote it to live and flip the
+    // previously-indexed branch of THIS checkout to snapshot (design review
+    // Q5 + validation V1: neither may happen on a failed run).
+    store.setBranchStatus(branchId, "live");
+    store.demoteSiblingBranches({ repoId, keepBranchId: branchId, checkoutPath: git.checkoutPath });
     return report;
   } finally {
+    store.releaseIndexMarker(branchId);
     lock.release();
   }
 }

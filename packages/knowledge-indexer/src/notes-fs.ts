@@ -148,8 +148,11 @@ export function listNotes(notesDir: string): string[] {
 // Re-scan the whole notes dir into the index (rebuildability: notes survive a
 // DB wipe because their Markdown persists on disk and re-indexes to the same
 // identities). Returns how many notes were indexed.
-export function reindexNotesDir(input: { store: KnowledgeStore; notesDir: string }): { indexed: number } {
+export function reindexNotesDir(input: { store: KnowledgeStore; notesDir: string }): { indexed: number; pruned: number } {
   const files = listNotes(input.notesDir);
   for (const f of files) indexFile(input.store, input.notesDir, f);
-  return { indexed: files.length };
+  // File is source of truth: a note whose .md vanished must leave the index
+  // too, or it lives on DB-only until a wipe loses it permanently (audit F-3).
+  const pruned = input.store.pruneMissingNotes(new Set(files));
+  return { indexed: files.length, pruned };
 }

@@ -40,8 +40,11 @@ test("watcher debounces a burst into a single index run and indexes the change",
     await delay(50);
 
     assert.equal(runs.length, 1, "burst coalesced into one run");
-    // the change got indexed — the last write's symbol is present
-    assert.ok(store.resolveIdentity(`${runs[0].repoId}::fn4`), "fn4 indexed");
+    // the change got indexed — the last write's symbol is present. Identity
+    // keys for file-scoped symbols are `repoId::relPath::name`, not bare
+    // `repoId::name` — this assertion's stale key format was the actual
+    // reason this test failed (not the debounce/watch logic, which was fine).
+    assert.ok(store.resolveIdentity(`${runs[0].repoId}::src/svc.ts::fn4`), "fn4 indexed");
     store.close();
   } finally {
     await w.stop();

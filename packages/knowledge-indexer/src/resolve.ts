@@ -13,6 +13,10 @@ export interface SymbolIndex {
 export interface ResolvedEdges {
   edges: ParsedEdge[];
   unresolved: number;
+  // Bare names dropped with ZERO same-repo candidates — the forward-reference
+  // signature (defining file not indexed yet). The pipeline retries these
+  // files in a second pass once the full symbol table exists.
+  unresolvedNames: string[];
 }
 
 function bareOf(qualifiedName: string): string {
@@ -72,6 +76,7 @@ export function resolveRefs(input: {
 }): ResolvedEdges {
   const edges: ParsedEdge[] = [];
   let unresolved = 0;
+  const unresolvedNames: string[] = [];
 
   const fileByBare = new Map<string, ExtractedSymbol[]>();
   for (const s of input.fileSymbols) {
@@ -97,11 +102,15 @@ export function resolveRefs(input: {
     }
     const bare = bareOf(ref.rawName);
 
-    // tier 1: same file
+    // tier 1: same file. If the only same-file bare match IS the enclosing
+    // symbol itself (e.g. a handler method calling a same-named method on an
+    // injected collaborator — `getProfile() { this.processor.getProfile() }`),
+    // that's a self-loop, not the real target: fall through to tier 2/3
+    // instead of stopping here, or the real cross-file call silently vanishes.
     const local = fileByBare.get(bare);
     if (local && local.length === 1) {
       const dst = input.fileSymbolIds.get(local[0].qualifiedName);
-      if (dst) {
+      if (dst && dst !== src) {
         push(src, dst, edgeType, "EXTRACTED");
         continue;
       }
@@ -114,9 +123,15 @@ export function resolveRefs(input: {
       continue;
     }
 
-    // tier 3: same-repo bare name.
-    const candidates = input.lookup.bareNameCandidates(bare);
+    // tier 3: same-repo bare name. Exclude the enclosing symbol itself — a
+    // same-named collaborator method (handler calling `this.x.<sameName>()`)
+    // would otherwise count as a phantom "candidate", inflating an actually-
+    // unique cross-file target into a fake tie (tier 3a/3b would then refuse
+    // to resolve, or tier 3c would risk picking the wrong one of the "tie").
+    const candidates = input.lookup.bareNameCandidates(bare).filter((c) => c.id !== src);
     const generic = GENERIC_NAMES.has(bare);
+    // Zero candidates = likely forward reference; every path below drops it.
+    if (candidates.length === 0) unresolvedNames.push(bare);
 
     // tier 3a: narrow to the current file + its imports. An imported symbol is
     // the strongly-likely target; a unique scoped hit wins. Import evidence is
@@ -160,5 +175,5 @@ export function resolveRefs(input: {
     }
   }
 
-  return { edges, unresolved };
+  return { edges, unresolved, unresolvedNames };
 }

@@ -56,5 +56,8 @@ src-tauri/icons/android/
 # Generated self-contained knowledge CLI runtime (node binary + native + wasm)
 packages/knowledge-cli/bundle/
 
+# Generated self-contained MCP server runtime (node binary + native closure)
+packages/mcp/bundle/
+
 # Vendor download cache (node binaries + native prebuilds)
 .cache/

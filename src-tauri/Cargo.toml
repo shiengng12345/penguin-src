@@ -19,6 +19,8 @@ tauri-build = { version = "2", features = [] }
 # Used by `inline_webview` to embed Vault / ArgoCD UIs natively.
 tauri = { version = "2", features = ["unstable"] }
 tauri-plugin-shell = "2"
+# Native folder picker for onboarding's one-click "pick a repo and index it".
+tauri-plugin-dialog = "2"
 tauri-plugin-store = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"

@@ -18,6 +18,52 @@ export function formatKnowledgeError(error: unknown): string {
   return raw.length > 260 ? `${raw.slice(0, 257)}...` : raw;
 }
 
+// The CLI exits 3 with this message when knowledge.db simply doesn't exist yet
+// (fresh install / index deleted on purpose). That's an onboarding state, not a
+// failure — UIs must render "start indexing" guidance instead of an error card.
+export function isNoDatabaseError(message: string): boolean {
+  return message.includes("no knowledge database");
+}
+
+// Terminal availability of the `penguin` CLI (launcher present + on PATH).
+// Backs onboarding's one-click "configure penguin command".
+export interface CliSetupStatus {
+  installed: boolean;
+  on_path: boolean;
+  rc_updated: boolean;
+  bin_dir: string;
+  // Login shell basename ("zsh" | "bash" | "fish" | ...); empty if unknown.
+  shell: string;
+  // Present when PATH couldn't be wired automatically (unrecognized shell).
+  manual_hint: string | null;
+}
+
+export async function knowledgeCliStatus(): Promise<CliSetupStatus> {
+  return invoke<CliSetupStatus>("knowledge_cli_status");
+}
+
+export async function knowledgeCliSetup(): Promise<CliSetupStatus> {
+  return invoke<CliSetupStatus>("knowledge_cli_setup");
+}
+
+// Configure the penguin MCP server into Claude Desktop / Claude Code / Codex
+// (idempotent config merges; returns a human summary).
+export async function mcpInstallToLocalClients(): Promise<string> {
+  return invoke<string>("mcp_install_to_local_clients");
+}
+
+// Write/refresh the global Penguin guidance block in the instruction files of
+// AI clients present on this machine (~/.claude/CLAUDE.md, ~/.codex/AGENTS.md).
+// `skipped` lists clients not installed here — nothing is scaffolded for them.
+export interface GuidanceSetupResult {
+  written: string[];
+  skipped: string[];
+}
+
+export async function knowledgeAgentGuidanceSetup(): Promise<GuidanceSetupResult> {
+  return invoke<GuidanceSetupResult>("knowledge_agent_guidance_setup");
+}
+
 export interface KnowledgeDbStatus {
   db_path: string;
   exists: boolean;
@@ -31,6 +77,10 @@ export interface KnowledgeSearchHit {
   nodeType: string;
   title: string;
   snippet: string | null;
+  identityKey: string;
+  filePath: string | null;
+  branch: string | null;
+  rank: number | null;
 }
 
 export interface KnowledgeNodeDetail {
@@ -98,7 +148,7 @@ export interface KnowledgeIndexStatus {
     repoId: string;
     name: string;
     rootPath: string;
-    branches: Array<{ branchId: string; name: string; status: string; lastIndexedAt: string | null; staleSymbols: number }>;
+    branches: Array<{ branchId: string; name: string; status: string; lastIndexedAt: string | null; staleSymbols: number; pinned: boolean }>;
   }>;
 }
 
@@ -124,9 +174,44 @@ export interface KnowledgeGraphView {
   edges: Array<{ src: string; dst: string; edgeType: string }>;
 }
 
+// Hide the checked-off node types — and optionally individual nodes (service
+// map: pick which repos display) — from a graph view. Pure: the raw view stays
+// intact so re-checking restores. Edges touching a hidden node drop with it
+// (a dangling edge would crash the force layout).
+export function filterGraphView(
+  view: KnowledgeGraphView,
+  hiddenTypes: Set<string>,
+  hiddenIds?: Set<string>,
+): KnowledgeGraphView {
+  if (hiddenTypes.size === 0 && !hiddenIds?.size) return view;
+  const nodes = view.nodes.filter((n) => !hiddenTypes.has(n.nodeType) && !hiddenIds?.has(n.nodeId));
+  const keep = new Set(nodes.map((n) => n.nodeId));
+  return {
+    focus: view.focus && keep.has(view.focus) ? view.focus : null,
+    nodes,
+    edges: view.edges.filter((e) => keep.has(e.src) && keep.has(e.dst)),
+  };
+}
+
 // repos + branches for the navigation tree's top two levels.
 export function knowledgeIndexStatus(): Promise<KnowledgeIndexStatus> {
   return query<KnowledgeIndexStatus>(["status"]);
+}
+
+// Remove a repo (by name or root path) from the index — parser data only,
+// rebuildable by re-indexing. Backs the Explorer/table delete buttons.
+export function knowledgeRemoveRepo(nameOrPath: string): Promise<{ ok: boolean; name: string }> {
+  return query<{ ok: boolean; name: string }>(["remove", nameOrPath]);
+}
+
+// Remove a single branch of a repo (refused while pinned).
+export function knowledgeRemoveBranch(repo: string, branch: string): Promise<{ ok: boolean }> {
+  return query<{ ok: boolean }>(["remove", repo, branch]);
+}
+
+// Toggle a branch's pin: pinned branches are exempt from auto-retention.
+export function knowledgePinBranch(repo: string, branch: string): Promise<{ ok: boolean; pinned: boolean }> {
+  return query<{ ok: boolean; pinned: boolean }>(["pin", repo, branch]);
 }
 
 // The files captured for a repo/branch (tree leaf level, lazy-loaded).
@@ -266,6 +351,33 @@ export interface IndexProgress {
 export async function onIndexProgress(cb: (p: IndexProgress) => void): Promise<() => void> {
   const { listen } = await import("@tauri-apps/api/event");
   return listen<IndexProgress>("knowledge-index-progress", (e) => cb(e.payload));
+}
+
+export interface WatchStatus {
+  repoId: string;
+  watching: boolean;
+}
+
+// Toggle live auto-indexing for one repo: spawns/kills a `penguin watch
+// <rootPath>` child process (Rust-managed WatchRegistry). Returns the
+// resulting on/off state (mirrors the request on success).
+export function knowledgeWatchToggle(repoId: string, rootPath: string, enable: boolean): Promise<boolean> {
+  return invoke<boolean>("knowledge_watch_toggle", { repoId, rootPath, enable });
+}
+
+export function knowledgeWatchStatus(repoIds: string[]): Promise<WatchStatus[]> {
+  return invoke<WatchStatus[]>("knowledge_watch_status", { repoIds });
+}
+
+// Subscribe to a watched repo's incremental re-index runs (fired once per
+// debounced file-change settle, not just once like onIndexProgress).
+export async function onWatchEvent(
+  cb: (repoId: string, payload: unknown) => void,
+): Promise<() => void> {
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<{ repoId: string; payload: unknown }>("knowledge-watch-event", (e) =>
+    cb(e.payload.repoId, e.payload.payload),
+  );
 }
 
 // Parse the search box's `type:`/`repo:`/`tag:`/`entity:` filter syntax out of

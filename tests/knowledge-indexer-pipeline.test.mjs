@@ -108,7 +108,7 @@ test("indexRepo: full index then incremental skip; rename detection", async () =
   const r3 = await indexRepo({ store, rootPath: root, mode: "incremental" });
   assert.ok(r3.renamed >= 1, "rename detected → alias");
   // old qualified name still resolves via alias
-  assert.ok(store.resolveIdentity(`${r1.repoId}::helper`), "old name resolves via alias");
+  assert.ok(store.resolveIdentity(`${r1.repoId}::src/svc.ts::helper`), "old name resolves via alias");
   store.close();
 });
 
@@ -119,7 +119,7 @@ test("indexRepo: delete detection marks gone file's symbols stale", async () => 
   writeFileSync(join(root, "src", "gone.ts"), "export function willVanish() {}");
   const store = openStore();
   const r1 = await indexRepo({ store, rootPath: root, mode: "incremental" });
-  const nodeId = store.resolveIdentity(`${r1.repoId}::willVanish`).nodeId;
+  const nodeId = store.resolveIdentity(`${r1.repoId}::src/gone.ts::willVanish`).nodeId;
   const branch = store.getBranch(r1.repoId, "main");
   assert.equal(store.getSymbolVersion(nodeId, branch.id).status, "fresh");
 
@@ -139,16 +139,16 @@ test("indexRepo: branch switch flips old→snapshot, keeps node identity", async
   writeFileSync(join(root, "src", "a.ts"), "export function shared() {}");
   const store = openStore();
   const r1 = await indexRepo({ store, rootPath: root, mode: "incremental" });
-  const nodeBefore = store.resolveIdentity(`${r1.repoId}::shared`).nodeId;
+  const nodeBefore = store.resolveIdentity(`${r1.repoId}::src/a.ts::shared`).nodeId;
 
   // switch branch
   writeGit(root, "ref: refs/heads/feature\n", { feature: "c1" });
   const r2 = await indexRepo({ store, rootPath: root, mode: "incremental" });
   assert.equal(r2.branchName, "feature");
-  store.setBranchStatus(store.getBranch(r1.repoId, "main").id, "snapshot");
-  assert.equal(store.getBranch(r1.repoId, "main").status, "snapshot");
+  assert.equal(store.getBranch(r1.repoId, "main").status, "snapshot", "old branch auto-flipped on switch");
+  assert.equal(store.getBranch(r1.repoId, "feature").status, "live");
   // node identity stable across branches
-  const nodeAfter = store.resolveIdentity(`${r1.repoId}::shared`).nodeId;
+  const nodeAfter = store.resolveIdentity(`${r1.repoId}::src/a.ts::shared`).nodeId;
   assert.equal(nodeAfter, nodeBefore);
   store.close();
 });
@@ -211,7 +211,7 @@ test("indexRepo: spec file gets tests edges to exercised symbols (Plan B P1)", a
   const specFile = store.db
     .prepare("SELECT id FROM nodes WHERE identity_key=?")
     .get(`${r.repoId}::file::src/calc.spec.ts`);
-  const addSym = store.resolveIdentity(`${r.repoId}::add`);
+  const addSym = store.resolveIdentity(`${r.repoId}::src/calc.ts::add`);
   const testsEdge = store.db
     .prepare("SELECT COUNT(*) AS n FROM edges WHERE edge_type='tests' AND src=? AND dst=?")
     .get(specFile.id, addSym.nodeId);

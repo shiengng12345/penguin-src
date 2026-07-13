@@ -1,383 +1,525 @@
-import { type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
-  Box,
-  Clock,
+  Boxes,
+  ChevronRight,
+  ChevronDown,
   Database,
-  FileCode,
-  FileText,
+  FolderOpen,
   GitBranch,
   Loader2,
   Network,
-  Search,
+  Pin,
+  Radio,
+  RefreshCw,
   Sparkles,
-  Workflow,
+  Trash2,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { Dot, TabBtn } from "@/components/wiki/WikiUIKit";
-import { WikiBrowseTree } from "@/components/wiki/WikiBrowseTree";
+import { useDeveloperMode } from "@/hooks/useDeveloperMode";
+import { TabBtn } from "@/components/wiki/WikiUIKit";
 import { WikiGraph, type GraphLayout } from "@/components/wiki/WikiGraph";
 import { WikiGraph3D } from "@/components/wiki/WikiGraph3D";
 import { WikiContextPane } from "@/components/wiki/WikiContextPane";
-import { WikiFlowPane } from "@/components/wiki/WikiFlowPane";
-import { WikiTimelinePane } from "@/components/wiki/WikiTimelinePane";
-import { WikiWhyPanel } from "@/components/wiki/WikiWhyPanel";
 import {
+  filterGraphView,
   formatKnowledgeError,
+  isNoDatabaseError,
+  knowledgeAgentGuidanceSetup,
+  knowledgeCliSetup,
+  knowledgeCliStatus,
+  knowledgeReindex,
+  knowledgePinBranch,
+  knowledgeRemoveBranch,
+  knowledgeRemoveRepo,
+  knowledgeWatchToggle,
+  knowledgeWatchStatus,
+  mcpInstallToLocalClients,
+  onIndexProgress,
   knowledgeDbStatus,
-  knowledgeExplore,
-  knowledgeFileSymbols,
   knowledgeGraph,
   knowledgeIndexStatus,
+  type KnowledgeIndexStatus,
   knowledgeRepoGraph,
   knowledgeServiceGraph,
   knowledgeContext,
-  knowledgeFlow,
-  knowledgeSearch,
-  knowledgeTimeline,
-  type KnowledgeTimelineEntry,
-  knowledgeNoteWrite,
-  knowledgeNoteRead,
-  knowledgeNoteNewTyped,
-  type KnowledgeNoteType,
   type KnowledgeDbStatus,
-  type KnowledgeFileSymbol,
   type KnowledgeGraphView,
-  type KnowledgeSearchHit,
   type ContextPack,
-  type FlowResult,
 } from "@/lib/knowledge-client";
 
 interface WikiPageProps { onClose: () => void }
 
-type CenterTab = "context" | "graph" | "flow" | "timeline";
-type NavEntry = { kind: "symbol"; id: string } | { kind: "file"; branchId: string; filePath: string };
+type CenterTab = "context" | "graph";
+// "home" = the repo/branch datatable (focusId null) — the implicit place
+// every FIRST symbol view was reached from (a graph node click, or nothing
+// yet). Without recording it, the very first symbol opened in a session had
+// nothing behind it in the trail, so "返回" stayed permanently disabled no
+// matter how the user got there.
+type NavEntry = { kind: "symbol"; id: string } | { kind: "home" };
 type GraphScope = { title: string; detail: string };
 
-const SEARCH_HINTS = ["GetLoginURL", "providerId", "type:incident", "repo:FPMS-NT"];
 
-function MetricPill({ label, value }: { label: string; value: string | number }) {
-  return (
-    <span className="inline-flex items-center gap-1.5 rounded-md border border-slate-800 bg-slate-950/50 px-2.5 py-1 text-[11px] text-slate-400">
-      <b className="font-mono text-slate-100">{value}</b>{label}
-    </span>
-  );
-}
+// Full-screen teaching page shown while the knowledge base is empty (no DB or
+// zero repos). Replaces ALL wiki chrome. Primary path is one-click: native
+// folder picker → in-app index (knowledge_reindex) with live progress; the
+// terminal command stays as the secondary path. Polling flips into the wiki
+// automatically once repos > 0.
+function WikiOnboarding({ onRefresh, onClose }: { onRefresh: () => void; onClose: () => void }) {
+  const [indexing, setIndexing] = useState<{ dir: string; done: number; total: number; file: string } | null>(null);
+  const [obError, setObError] = useState<string | null>(null);
+  // One-click AI integration: penguin command on PATH + MCP into Claude/Codex +
+  // global CLAUDE.md/AGENTS.md guidance. `done` carries the per-item summary.
+  const [cliReady, setCliReady] = useState<boolean | null>(null);
+  const [aiBusy, setAiBusy] = useState(false);
+  // Per-item outcome — machines differ (shell, which AI clients are installed,
+  // node present or not), so each step runs independently and reports honestly:
+  // ok / skipped / failed, never one blanket success or one blanket error.
+  const [aiResults, setAiResults] = useState<Array<{ state: "ok" | "warn" | "fail"; text: string }> | null>(null);
 
-function SearchResultRow({
-  hit,
-  onSelect,
-}: {
-  hit: KnowledgeSearchHit;
-  onSelect: (id: string) => void;
-}) {
+  useEffect(() => {
+    knowledgeCliStatus()
+      .then((s) => setCliReady(s.installed && s.on_path))
+      .catch(() => setCliReady(null));
+  }, []);
+
+  const setupAi = useCallback(async () => {
+    setAiBusy(true);
+    const results: Array<{ state: "ok" | "warn" | "fail"; text: string }> = [];
+    try {
+      const cli = await knowledgeCliSetup();
+      if (cli.manual_hint) {
+        results.push({ state: "warn", text: `penguin 命令已安装 — ${cli.manual_hint}` });
+      } else {
+        const rc = cli.shell === "fish" ? "config.fish" : cli.shell === "bash" ? "~/.bashrc" : "~/.zshrc";
+        results.push({
+          state: "ok",
+          text: `penguin 命令 — ${cli.rc_updated ? `已写入 ${rc},新开一个终端生效` : "已可用"}`,
+        });
+        setCliReady(true);
+      }
+    } catch (e) {
+      results.push({ state: "fail", text: `penguin 命令:${formatKnowledgeError(e)}` });
+    }
+    try {
+      const msg = await mcpInstallToLocalClients();
+      const skipped = msg.match(/Skipped \(not installed\): ([^.]+)\./)?.[1];
+      results.push({
+        state: "ok",
+        text: `MCP 已接入(重启客户端生效)${skipped ? ` — 未安装已跳过:${skipped}` : ""}`,
+      });
+    } catch (e) {
+      results.push({ state: "fail", text: `MCP:${formatKnowledgeError(e)}` });
+    }
+    try {
+      const g = await knowledgeAgentGuidanceSetup();
+      if (g.written.length > 0) {
+        results.push({
+          state: "ok",
+          text: `AI 指引已写入 ${g.written.map((p) => p.replace(/^.*\/(\.\w+)/, "$1")).join("、")}${g.skipped.length ? ` — 未安装已跳过:${g.skipped.join("、")}` : ""}`,
+        });
+      } else if (g.skipped.length > 0) {
+        results.push({ state: "warn", text: `AI 指引:未检测到 Claude Code / Codex,已全部跳过` });
+      } else {
+        results.push({ state: "ok", text: "AI 指引已是最新" });
+      }
+    } catch (e) {
+      results.push({ state: "fail", text: `AI 指引:${formatKnowledgeError(e)}` });
+    }
+    setAiResults(results);
+    setAiBusy(false);
+  }, []);
+
+  const pickAndIndex = useCallback(async () => {
+    setObError(null);
+    const { open } = await import("@tauri-apps/plugin-dialog");
+    const dir = await open({ directory: true, multiple: false, title: "选择要索引的代码仓库" });
+    if (typeof dir !== "string") return; // cancelled
+    setIndexing({ dir, done: 0, total: 0, file: "" });
+    const unlisten = await onIndexProgress((p) => {
+      setIndexing((cur) => (cur ? { ...cur, done: p.done, total: p.total, file: p.file ?? "" } : cur));
+    });
+    try {
+      await knowledgeReindex(dir);
+      onRefresh(); // repos > 0 now — parent flips into the wiki
+    } catch (e) {
+      setObError(formatKnowledgeError(e));
+    } finally {
+      unlisten();
+      setIndexing(null);
+    }
+  }, [onRefresh]);
+
+  const step = "flex gap-3 rounded-xl border border-slate-800 bg-slate-950/50 p-4";
+  const num = "flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-cyan-500/15 text-xs font-bold text-cyan-300";
+  const pct = indexing && indexing.total > 0 ? Math.round((indexing.done / indexing.total) * 100) : 0;
   return (
-    <button
-      type="button"
-      onClick={() => onSelect(hit.nodeId)}
-      className="group flex w-full items-start gap-3 rounded-lg border border-slate-800 bg-[#0f1722]/80 px-3 py-2.5 text-left hover:border-cyan-500/40 hover:bg-cyan-500/[0.06]"
-    >
-      <div className="mt-1"><Dot t={hit.nodeType} /></div>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <span className="truncate font-mono text-sm font-semibold text-slate-100">{hit.title}</span>
-          <span className="shrink-0 rounded bg-slate-800 px-1.5 py-0.5 text-[9px] uppercase text-slate-500">{hit.nodeType}</span>
+    <div className="relative flex h-full flex-col items-center justify-center bg-[#070b11] px-8 text-slate-100">
+      <button type="button" onClick={onClose} aria-label="关闭"
+        className="absolute right-4 top-4 rounded p-1.5 text-slate-400 hover:bg-white/5 hover:text-slate-100">
+        <X className="h-4 w-4" />
+      </button>
+      <div className="w-full max-w-xl">
+        <div className="flex items-center gap-3">
+          <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-cyan-500/10">
+            <Database className="h-5 w-5 text-cyan-300" />
+          </div>
+          <div>
+            <h1 className="text-xl font-semibold">建立你的知识库</h1>
+            <p className="mt-0.5 text-sm text-slate-400">Penguin 会把代码仓库解析成可搜索的知识图谱。</p>
+          </div>
         </div>
-        {hit.snippet && <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-slate-500">{hit.snippet}</p>}
-      </div>
-      <ArrowRight className="mt-1 h-3.5 w-3.5 shrink-0 text-slate-600 group-hover:text-cyan-300" />
-    </button>
-  );
-}
 
-function QuickAction({
-  icon,
-  title,
-  text,
-  onClick,
-}: {
-  icon: ReactNode;
-  title: string;
-  text: string;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="rounded-xl border border-slate-800 bg-[#0f1722]/75 p-4 text-left transition hover:border-cyan-500/40 hover:bg-cyan-500/[0.06]"
-    >
-      <div className="mb-3 flex h-9 w-9 items-center justify-center rounded-lg border border-cyan-500/20 bg-cyan-500/10 text-cyan-200">
-        {icon}
-      </div>
-      <div className="text-sm font-semibold text-slate-100">{title}</div>
-      <p className="mt-1 text-xs leading-relaxed text-slate-500">{text}</p>
-    </button>
-  );
-}
-
-function KnowledgeHomePanel({
-  status,
-  searchQuery,
-  searchResults,
-  searchBusy,
-  selectedFile,
-  fileSymbols,
-  onRunSearch,
-  onSelectSymbol,
-  onOpenServiceGraph,
-  onOpenTimeline,
-  onCreateIncident,
-}: {
-  status: KnowledgeDbStatus | null;
-  searchQuery: string;
-  searchResults: KnowledgeSearchHit[] | null;
-  searchBusy: boolean;
-  selectedFile: { branchId: string; filePath: string } | null;
-  fileSymbols: KnowledgeFileSymbol[];
-  onRunSearch: (query: string) => void;
-  onSelectSymbol: (id: string) => void;
-  onOpenServiceGraph: () => void;
-  onOpenTimeline: () => void;
-  onCreateIncident: () => void;
-}) {
-  const hasResults = searchResults && searchResults.length > 0;
-
-  return (
-    <div className="min-h-0 flex-1 overflow-auto bg-[radial-gradient(circle_at_20%_0%,rgba(34,211,238,0.08),transparent_34%),linear-gradient(180deg,#070c13_0%,#0a0f17_100%)] p-6">
-      <div className="mx-auto flex max-w-5xl flex-col gap-5">
-        <section className="rounded-2xl border border-slate-800 bg-[#0d1420]/85 p-5 shadow-[0_24px_80px_rgba(0,0,0,0.24)]">
-          <div className="flex flex-wrap items-start gap-4">
+        <div className="mt-8 space-y-3">
+          <div className={cn(step, "border-cyan-500/25")}>
+            <span className={num}>1</span>
             <div className="min-w-0 flex-1">
-              <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-cyan-300">
-                <Sparkles className="h-3.5 w-3.5" />Knowledge command center
-              </div>
-              <h2 className="text-xl font-semibold tracking-normal text-slate-50">先搜，再看上下文、图谱和 why 记录。</h2>
-              <p className="mt-2 max-w-2xl text-sm leading-relaxed text-slate-500">
-                用 symbol、API、config、case 或实体开始。结果打开后会进入 Context Pack，右侧显示关联笔记和新鲜度。
+              <div className="text-sm font-semibold">选择第一个仓库</div>
+              {indexing ? (
+                <div className="mt-3">
+                  <div className="flex items-center justify-between text-xs text-slate-400">
+                    <span className="min-w-0 truncate font-mono">{indexing.dir.split("/").pop()}</span>
+                    <span className="ml-2 shrink-0 font-bold text-cyan-300">
+                      {indexing.total > 0 ? `${pct}% · ${indexing.done}/${indexing.total}` : "扫描中…"}
+                    </span>
+                  </div>
+                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-800">
+                    <div className="h-full rounded-full bg-cyan-400 transition-[width] duration-200" style={{ width: `${pct}%` }} />
+                  </div>
+                  {indexing.file && <p className="mt-2 truncate font-mono text-[11px] text-slate-600">{indexing.file}</p>}
+                </div>
+              ) : (
+                <>
+                  <button type="button" onClick={() => void pickAndIndex()}
+                    className="mt-3 flex items-center gap-2 rounded-lg bg-cyan-400 px-4 py-2 text-sm font-bold text-[#04121a] hover:bg-cyan-300">
+                    <FolderOpen className="h-4 w-4" /> 选择仓库并索引
+                  </button>
+                  <p className="mt-2 text-xs leading-relaxed text-slate-500">
+                    也可以在终端运行 <code className="rounded bg-slate-950 px-1.5 py-0.5 font-mono text-[11px] text-cyan-200/80">penguin init /path/to/repo</code>,每个仓库一次。
+                  </p>
+                </>
+              )}
+              {obError && <p className="mt-2 text-xs leading-relaxed text-amber-300">{obError}</p>}
+            </div>
+          </div>
+          <div className={step}>
+            <span className={num}>2</span>
+            <div>
+              <div className="text-sm font-semibold">等待索引完成</div>
+              <p className="mt-1 text-xs leading-relaxed text-slate-500">解析符号、调用关系、API 端点和跨服务连接;大仓库需要几分钟。</p>
+            </div>
+          </div>
+          <div className={step}>
+            <span className={num}>3</span>
+            <div>
+              <div className="text-sm font-semibold">自动进入 Wiki</div>
+              <p className="mt-1 text-xs leading-relaxed text-slate-500">索引就绪后本页自动切换:符号搜索、跨服务地图、调用链、事故笔记。</p>
+            </div>
+          </div>
+        </div>
+
+        {/* AI integration: one click sets up the terminal command, the MCP
+            server for Claude Desktop/Claude Code/Codex, and the global
+            CLAUDE.md / AGENTS.md guidance blocks. */}
+        <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/50 p-4">
+          <div className="flex items-center gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="text-sm font-semibold">AI 集成</div>
+              <p className="mt-1 text-xs leading-relaxed text-slate-500">
+                penguin 终端命令 · Claude / Codex 的 MCP 接入 · 全局 CLAUDE.md / AGENTS.md 指引
               </p>
             </div>
-            <div className="flex shrink-0 flex-wrap gap-2">
-              <MetricPill label="repos" value={status?.repos ?? "-"} />
-              <MetricPill label="symbols" value={status?.symbols ?? "-"} />
-              <MetricPill label="notes" value={status?.notes ?? "-"} />
-            </div>
+            <button type="button" disabled={aiBusy} onClick={() => void setupAi()}
+              className="flex shrink-0 items-center gap-2 rounded-lg border border-cyan-500/40 px-3 py-1.5 text-xs font-bold text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-50">
+              {aiBusy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              {aiResults ? "重新配置" : "一键配置 AI 集成"}
+            </button>
           </div>
-          <div className="mt-4 flex flex-wrap gap-2">
-            {SEARCH_HINTS.map((hint) => (
-              <button
-                key={hint}
-                type="button"
-                onClick={() => onRunSearch(hint)}
-                className="rounded-md border border-slate-800 bg-slate-950/45 px-2.5 py-1 font-mono text-[11px] text-slate-400 hover:border-cyan-500/30 hover:text-cyan-200"
-              >
-                {hint}
-              </button>
-            ))}
-          </div>
-        </section>
-
-        {searchBusy && (
-          <div className="flex items-center gap-2 rounded-xl border border-slate-800 bg-[#0f1722]/70 px-4 py-3 text-sm text-slate-400">
-            <Loader2 className="h-4 w-4 animate-spin text-cyan-300" /> 正在搜索知识图谱…
-          </div>
-        )}
-
-        {searchResults && !searchBusy && (
-          <section className="rounded-2xl border border-slate-800 bg-[#0d1420]/85 p-4">
-            <div className="mb-3 flex items-center justify-between">
-              <div>
-                <div className="text-sm font-semibold text-slate-100">Search results</div>
-                <div className="text-xs text-slate-500">{searchQuery || "current query"} · {searchResults.length} matches</div>
-              </div>
-            </div>
-            {hasResults ? (
-              <div className="space-y-2">
-                {searchResults.slice(0, 12).map((hit) => (
-                  <SearchResultRow key={hit.nodeId} hit={hit} onSelect={onSelectSymbol} />
-                ))}
-              </div>
-            ) : (
-              <div className="rounded-xl border border-dashed border-slate-800 px-4 py-8 text-center text-sm text-slate-500">
-                没找到结果。试试只搜 method 名、config key，或加上 <span className="font-mono text-slate-300">repo:</span> 缩小范围。
-              </div>
-            )}
-          </section>
-        )}
-
-        {selectedFile && fileSymbols.length > 0 && !searchResults && (
-          <section className="rounded-2xl border border-slate-800 bg-[#0d1420]/85 p-4">
-            <div className="mb-3 flex items-center gap-2">
-              <FileCode className="h-4 w-4 text-cyan-300" />
-              <div className="min-w-0 flex-1">
-                <div className="truncate font-mono text-sm font-semibold text-slate-100">{selectedFile.filePath}</div>
-                <div className="text-xs text-slate-500">{fileSymbols.length} indexed symbols</div>
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-2">
-              {fileSymbols.slice(0, 18).map((symbol) => (
-                <button
-                  key={symbol.nodeId}
-                  type="button"
-                  onClick={() => onSelectSymbol(symbol.nodeId)}
-                  className="flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/35 px-3 py-2 text-left font-mono text-xs text-slate-300 hover:border-cyan-500/30 hover:text-cyan-100"
-                >
-                  <Box className="h-3.5 w-3.5 shrink-0 text-cyan-300/70" />
-                  <span className="min-w-0 flex-1 truncate">{symbol.title}</span>
-                  <span className="text-[9px] uppercase text-slate-600">{symbol.kind}</span>
-                </button>
+          {cliReady === false && !aiResults && !aiBusy && (
+            <p className="mt-2 text-xs text-amber-300/90">检测到终端里还没有 penguin 命令 — 点右侧一键配置。</p>
+          )}
+          {aiResults && (
+            <ul className="mt-3 space-y-1 text-xs">
+              {aiResults.map((r, i) => (
+                <li key={i} className={r.state === "ok" ? "text-emerald-300/90" : r.state === "warn" ? "text-amber-300/90" : "text-red-300/90"}>
+                  {r.state === "ok" ? "✓" : r.state === "warn" ? "⚠" : "✗"} {r.text}
+                </li>
               ))}
-            </div>
-          </section>
-        )}
-
-        <div className="grid grid-cols-3 gap-3">
-          <QuickAction
-            icon={<Search className="h-4 w-4" />}
-            title="Find a symbol"
-            text="从 method、service、DTO、config key 进入上下文。"
-            onClick={() => onRunSearch(searchQuery || "GetLoginURL")}
-          />
-          <QuickAction
-            icon={<Network className="h-4 w-4" />}
-            title="Open service map"
-            text="查看跨 repo / microservice 的主要连接。"
-            onClick={onOpenServiceGraph}
-          />
-          <QuickAction
-            icon={<FileText className="h-4 w-4" />}
-            title="Create incident note"
-            text="把当前调查沉淀成下一次 AI 可召回的 case。"
-            onClick={onCreateIncident}
-          />
+            </ul>
+          )}
         </div>
 
-        <button
-          type="button"
-          onClick={onOpenTimeline}
-          className="flex items-center gap-3 rounded-xl border border-slate-800 bg-[#0f1722]/75 px-4 py-3 text-left hover:border-cyan-500/40 hover:bg-cyan-500/[0.06]"
-        >
-          <Clock className="h-4 w-4 text-cyan-300" />
-          <div className="min-w-0 flex-1">
-            <div className="text-sm font-semibold text-slate-100">Recent changes timeline</div>
-            <div className="text-xs text-slate-500">跨仓库提交和近期变更，用来排查「昨天好、今天坏」。</div>
-          </div>
-          <ArrowRight className="h-4 w-4 text-slate-600" />
-        </button>
+        <div className="mt-6 flex items-center gap-3">
+          <button type="button" onClick={onRefresh}
+            className="rounded-lg border border-slate-700 px-4 py-1.5 text-xs font-semibold text-slate-300 hover:bg-white/5">
+            立即检测
+          </button>
+          <span className="text-xs text-slate-600">每 5 秒自动检测一次</span>
+        </div>
       </div>
     </div>
   );
 }
 
-function FileOverviewPanel({
-  selectedFile,
-  fileSymbols,
-  busy,
-  onSelectSymbol,
+function KnowledgeHomePanel({
+  onOpenRepoGraph,
 }: {
-  selectedFile: { branchId: string; filePath: string };
-  fileSymbols: KnowledgeFileSymbol[];
-  busy: boolean;
-  onSelectSymbol: (id: string) => void;
+  onOpenRepoGraph: (repoId: string, branchId: string) => void;
 }) {
-  const fileName = selectedFile.filePath.split("/").pop() || selectedFile.filePath;
-  const kindStats = Object.entries(
-    fileSymbols.reduce<Record<string, number>>((acc, symbol) => {
-      const key = symbol.kind || "symbol";
-      acc[key] = (acc[key] ?? 0) + 1;
-      return acc;
-    }, {}),
-  ).sort((a, b) => b[1] - a[1]);
-  const indexedCount = fileSymbols.filter((symbol) => symbol.status === "indexed").length;
-
+  // Nothing selected → a repo datatable IS the home content. Repo row expands
+  // to its branches; a branch row opens that branch's graph.
+  const [indexRows, setIndexRows] = useState<KnowledgeIndexStatus | null>(null);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [collapsed, setCollapsed] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  // Keep-refreshing (auto poll) is a superadmin-only capability — everyone
+  // else can only trigger a single refresh per click. hasValidToken alone
+  // (the "admin" tier) does NOT unlock it.
+  const { isSuperAdmin } = useDeveloperMode();
+  const [autoRefresh, setAutoRefresh] = useState(false);
+  const toggleRepo = (id: string) =>
+    setExpanded((cur) => {
+      const next = new Set(cur);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  // Which repos have a live `penguin watch` child process — the Rust-side
+  // WatchRegistry is the source of truth (survives this component
+  // unmounting), so re-sync from it on every reload rather than trusting
+  // local state alone.
+  const [watching, setWatching] = useState<Set<string>>(new Set());
+  const syncWatchStatus = useCallback((repos: KnowledgeIndexStatus["repos"]) => {
+    if (repos.length === 0) { setWatching(new Set()); return; }
+    knowledgeWatchStatus(repos.map((r) => r.repoId))
+      .then((rows) => setWatching(new Set(rows.filter((r) => r.watching).map((r) => r.repoId))))
+      .catch(() => {});
+  }, []);
+  const reload = useCallback(() => {
+    knowledgeIndexStatus()
+      .then((s) => { setIndexRows(s); syncWatchStatus(s.repos); })
+      .catch(() => setIndexRows(null));
+  }, [syncWatchStatus]);
+  useEffect(reload, [reload]);
+  const toggleWatch = useCallback(async (repo: KnowledgeIndexStatus["repos"][number]) => {
+    const enable = !watching.has(repo.repoId);
+    try {
+      const result = await knowledgeWatchToggle(repo.repoId, repo.rootPath, enable);
+      setWatching((cur) => {
+        const next = new Set(cur);
+        if (result) next.add(repo.repoId); else next.delete(repo.repoId);
+        return next;
+      });
+    } catch {
+      // best-effort — leave the toggle showing its prior state on failure
+    }
+  }, [watching]);
+  // Auto-refresh only ever runs for a superadmin who has turned it on; if
+  // their tier drops (token cleared) mid-session, the effect cleanup below
+  // tears the interval down since isSuperAdmin becomes a dependency.
+  useEffect(() => {
+    if (!isSuperAdmin || !autoRefresh) return;
+    const id = setInterval(reload, 5000);
+    return () => clearInterval(id);
+  }, [isSuperAdmin, autoRefresh, reload]);
+  const manualRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await knowledgeIndexStatus().then(setIndexRows);
+    } catch {
+      setIndexRows(null);
+    } finally {
+      setRefreshing(false);
+    }
+  }, []);
+  const removeRepo = useCallback(async (name: string) => {
+    if (!window.confirm(`从索引中删除 ${name}?\n(只删索引数据,不动仓库文件;重新 index 即可恢复)`)) return;
+    try {
+      await knowledgeRemoveRepo(name);
+    } finally {
+      reload();
+    }
+  }, [reload]);
+  const removeBranch = useCallback(async (repoName: string, branch: string) => {
+    if (!window.confirm(`从索引中删除分支 ${repoName}/${branch}?\n(只删索引数据;重新 index 即可恢复)`)) return;
+    try {
+      await knowledgeRemoveBranch(repoName, branch);
+    } finally {
+      reload();
+    }
+  }, [reload]);
+  const pinBranch = useCallback(async (repoName: string, branch: string) => {
+    try {
+      await knowledgePinBranch(repoName, branch);
+    } finally {
+      reload();
+    }
+  }, [reload]);
+  const fmtWhen = (iso: string | null) =>
+    iso ? new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
   return (
-    <div className="min-h-0 flex-1 overflow-auto bg-[linear-gradient(180deg,#070c13_0%,#0a0f17_100%)] p-6">
-      <div className="mx-auto flex max-w-5xl flex-col gap-4">
-        <section className="rounded-2xl border border-slate-800 bg-[#0d1420]/85 p-5 shadow-[0_24px_80px_rgba(0,0,0,0.24)]">
-          <div className="flex flex-wrap items-start gap-4">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-cyan-500/20 bg-cyan-500/10 text-cyan-200">
-              <FileCode className="h-5 w-5" />
-            </div>
-            <div className="min-w-0 flex-1">
-              <div className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-cyan-300">File overview</div>
-              <h2 className="truncate font-mono text-lg font-semibold tracking-normal text-slate-50">{fileName}</h2>
-              <p className="mt-1 break-all font-mono text-xs leading-relaxed text-slate-500">{selectedFile.filePath}</p>
-            </div>
-            <div className="min-w-[180px] rounded-xl border border-slate-800 bg-slate-950/45 px-3 py-2">
-              <div className="mb-1 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-slate-600">
-                <GitBranch className="h-3 w-3" /> Branch
-              </div>
-              <div className="truncate font-mono text-xs text-slate-300">{selectedFile.branchId}</div>
-            </div>
-          </div>
-
-          <div className="mt-5 grid gap-3 sm:grid-cols-3">
-            <div className="rounded-xl border border-slate-800 bg-slate-950/35 p-3">
-              <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-600">Symbols</div>
-              <div className="mt-1 font-mono text-2xl font-semibold text-slate-100">{busy ? "-" : fileSymbols.length}</div>
-            </div>
-            <div className="rounded-xl border border-slate-800 bg-slate-950/35 p-3">
-              <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-600">Indexed</div>
-              <div className="mt-1 font-mono text-2xl font-semibold text-emerald-200">{busy ? "-" : indexedCount}</div>
-            </div>
-            <div className="rounded-xl border border-slate-800 bg-slate-950/35 p-3">
-              <div className="text-[10px] font-semibold uppercase tracking-wide text-slate-600">Kinds</div>
-              <div className="mt-2 flex flex-wrap gap-1.5">
-                {busy ? (
-                  <span className="font-mono text-xs text-slate-500">loading</span>
-                ) : kindStats.length ? (
-                  kindStats.slice(0, 5).map(([kind, count]) => (
-                    <span key={kind} className="rounded-md border border-slate-800 bg-[#101826] px-2 py-0.5 font-mono text-[11px] text-slate-300">
-                      {kind} {count}
-                    </span>
-                  ))
-                ) : (
-                  <span className="font-mono text-xs text-slate-500">none</span>
-                )}
-              </div>
+    <div className="flex min-h-0 flex-1 flex-col overflow-auto bg-[radial-gradient(circle_at_20%_0%,rgba(34,211,238,0.08),transparent_34%),linear-gradient(180deg,#070c13_0%,#0a0f17_100%)] p-6">
+      {indexRows && indexRows.repos.length > 0 && (
+        <section className={cn("flex flex-col overflow-hidden rounded-2xl border border-slate-800 bg-[#0d1420]/85", collapsed ? "shrink-0" : "min-h-0 flex-1")}>
+          <div className="flex shrink-0 items-center gap-2 border-b border-slate-800 px-4 py-3">
+            <Boxes className="h-4 w-4 text-cyan-300" />
+            <span className="text-sm font-semibold text-slate-100">Indexed repositories</span>
+            <span className="text-xs text-slate-500">点仓库展开分支,点分支进图谱</span>
+            <div className="ml-auto flex items-center gap-2">
+              {isSuperAdmin && (
+                <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-slate-400 hover:text-slate-200">
+                  <input
+                    type="checkbox"
+                    checked={autoRefresh}
+                    onChange={(e) => setAutoRefresh(e.target.checked)}
+                    className="h-3 w-3 accent-cyan-400"
+                  />
+                  自动刷新
+                </label>
+              )}
+              <button
+                type="button"
+                title={isSuperAdmin && autoRefresh ? "自动刷新中(点击立即刷新一次)" : "刷新"}
+                onClick={() => void manualRefresh()}
+                disabled={refreshing}
+                className="rounded p-1.5 text-slate-500 hover:bg-white/5 hover:text-slate-200 disabled:opacity-50"
+              >
+                {/* Same convention as PackageInstaller's refresh icon: spinning
+                    ambiently means "auto-refresh is active", not just "a fetch
+                    is in flight right now" — matches the app's existing pattern
+                    for this exact toggle-a-poll-loop UI shape. */}
+                <RefreshCw className={cn("h-3.5 w-3.5", (refreshing || (isSuperAdmin && autoRefresh)) && "animate-spin")} />
+              </button>
+              <button
+                type="button"
+                title={collapsed ? "展开" : "收起"}
+                onClick={() => setCollapsed((c) => !c)}
+                className="rounded p-1.5 text-slate-500 hover:bg-white/5 hover:text-slate-200"
+              >
+                {collapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
+              </button>
             </div>
           </div>
-        </section>
-
-        <section className="rounded-2xl border border-slate-800 bg-[#0d1420]/85 p-4">
-          <div className="mb-3 flex items-center justify-between gap-3">
-            <div>
-              <div className="text-sm font-semibold text-slate-100">Indexed symbols</div>
-              <div className="text-xs text-slate-500">Open one symbol to build a Context Pack.</div>
-            </div>
-            {busy && <Loader2 className="h-4 w-4 animate-spin text-cyan-300" />}
+          {!collapsed && (
+          <div className="min-h-0 flex-1 overflow-auto">
+            <table className="w-full text-left text-sm">
+              <thead>
+                <tr className="border-b border-slate-800/70 text-[10px] uppercase tracking-wide text-slate-500">
+                  <th className="px-4 py-2 font-semibold">Repo</th>
+                  <th className="px-3 py-2 font-semibold">Branches</th>
+                  <th className="px-3 py-2 font-semibold">状态</th>
+                  <th className="px-3 py-2 font-semibold">Last indexed</th>
+                  <th className="px-3 py-2" />
+                </tr>
+              </thead>
+              <tbody>
+                {indexRows.repos.map((repo) => {
+                  const open = expanded.has(repo.repoId);
+                  const live = repo.branches.filter((b) => b.status === "live").length;
+                  const latest = repo.branches.reduce<string | null>(
+                    (acc, b) => (b.lastIndexedAt && (!acc || b.lastIndexedAt > acc) ? b.lastIndexedAt : acc),
+                    null,
+                  );
+                  return [
+                    <tr
+                      key={repo.repoId}
+                      onClick={() => toggleRepo(repo.repoId)}
+                      className="cursor-pointer border-b border-slate-800/40 hover:bg-white/[0.03]"
+                    >
+                      <td className="px-4 py-3 font-mono font-semibold text-slate-200">
+                        <span className="flex items-center gap-2">
+                          {open ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-slate-500" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-slate-500" />}
+                          {repo.name}
+                        </span>
+                      </td>
+                      <td className="px-3 py-3 text-slate-400">{repo.branches.length}</td>
+                      <td className="px-3 py-3">
+                        <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-bold text-emerald-300">{live} live</span>
+                      </td>
+                      <td className="px-3 py-3 text-slate-500">{fmtWhen(latest)}</td>
+                      <td className="px-3 py-3 text-right">
+                        <div className="flex items-center justify-end gap-1.5">
+                          <button
+                            type="button"
+                            title={watching.has(repo.repoId) ? "自动同步已开启(改动即自动增量索引) — 点击关闭" : "开启自动同步(改动后自动增量索引,不用手动 penguin index)"}
+                            onClick={(e) => { e.stopPropagation(); void toggleWatch(repo); }}
+                            className={cn(
+                              "rounded p-1",
+                              watching.has(repo.repoId) ? "text-cyan-300" : "text-slate-600 hover:text-cyan-200",
+                            )}
+                          >
+                            <Radio className={cn("h-3.5 w-3.5", watching.has(repo.repoId) && "animate-pulse")} />
+                          </button>
+                          <button
+                            type="button"
+                            title={`删除 ${repo.name} 的索引`}
+                            onClick={(e) => { e.stopPropagation(); void removeRepo(repo.name); }}
+                            className="rounded p-1 text-slate-600 hover:bg-red-500/10 hover:text-red-300"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>,
+                    ...(open
+                      ? repo.branches.map((br) => (
+                          <tr
+                            key={`${repo.repoId}:${br.branchId}`}
+                            onClick={() => onOpenRepoGraph(repo.repoId, br.branchId)}
+                            className="cursor-pointer border-b border-slate-800/30 bg-slate-950/30 hover:bg-cyan-500/[0.07]"
+                          >
+                            <td className="py-2.5 pl-12 pr-4 font-mono text-xs text-slate-300">
+                              <span className="flex items-center gap-2">
+                                <GitBranch className="h-3 w-3 shrink-0 text-slate-600" />
+                                {br.name}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2.5" />
+                            <td className="px-3 py-2.5">
+                              {br.staleSymbols > 0 ? (
+                                <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-bold text-amber-300">stale {br.staleSymbols}</span>
+                              ) : br.status === "live" ? (
+                                <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-bold text-emerald-300">live</span>
+                              ) : (
+                                <span className="rounded bg-slate-700/40 px-1.5 py-0.5 text-[10px] font-bold text-slate-400">{br.status}</span>
+                              )}
+                            </td>
+                            <td className="px-3 py-2.5 text-xs text-slate-500">{fmtWhen(br.lastIndexedAt)}</td>
+                            <td className="px-3 py-2.5">
+                              <div className="flex items-center justify-end gap-1.5">
+                                <button
+                                  type="button"
+                                  title={br.pinned ? "取消固定" : "固定(不被自动清理)"}
+                                  onClick={(e) => { e.stopPropagation(); void pinBranch(repo.name, br.name); }}
+                                  className={cn("rounded p-1", br.pinned ? "text-cyan-300" : "text-slate-600 hover:text-cyan-200")}
+                                >
+                                  <Pin className={cn("h-3.5 w-3.5", br.pinned && "fill-current")} />
+                                </button>
+                                <button
+                                  type="button"
+                                  title={br.pinned ? "已固定 — 先取消固定" : `删除分支 ${br.name} 的索引`}
+                                  disabled={br.pinned}
+                                  onClick={(e) => { e.stopPropagation(); void removeBranch(repo.name, br.name); }}
+                                  className="rounded p-1 text-slate-600 hover:bg-red-500/10 hover:text-red-300 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-slate-600"
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </button>
+                                <ArrowRight className="h-3.5 w-3.5 text-slate-600" />
+                              </div>
+                            </td>
+                          </tr>
+                        ))
+                      : []),
+                  ];
+                })}
+              </tbody>
+            </table>
           </div>
-
-          {busy ? (
-            <div className="flex items-center gap-2 rounded-xl border border-slate-800 bg-slate-950/35 px-4 py-5 text-sm text-slate-500">
-              <Loader2 className="h-4 w-4 animate-spin text-cyan-300" />
-              Loading file symbols...
-            </div>
-          ) : fileSymbols.length ? (
-            <div className="grid gap-2 md:grid-cols-2">
-              {fileSymbols.map((symbol) => (
-                <button
-                  key={symbol.nodeId}
-                  type="button"
-                  onClick={() => onSelectSymbol(symbol.nodeId)}
-                  className="group flex min-h-11 items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/35 px-3 py-2 text-left font-mono text-xs text-slate-300 hover:border-cyan-500/30 hover:bg-cyan-500/[0.05] hover:text-cyan-100"
-                >
-                  <Box className="h-3.5 w-3.5 shrink-0 text-cyan-300/70" />
-                  <span className="min-w-0 flex-1 truncate">{symbol.title}</span>
-                  <span className="shrink-0 rounded bg-slate-900 px-1.5 py-0.5 text-[9px] uppercase text-slate-600">{symbol.kind}</span>
-                  <ArrowRight className="h-3.5 w-3.5 shrink-0 text-slate-700 group-hover:text-cyan-300" />
-                </button>
-              ))}
-            </div>
-          ) : (
-            <div className="rounded-xl border border-dashed border-slate-800 px-4 py-8 text-center text-sm text-slate-500">
-              这个文件目前没有可打开的 indexed symbol。
-            </div>
           )}
         </section>
-      </div>
+      )}
     </div>
   );
 }
@@ -407,39 +549,134 @@ function GraphEmptyState({
   );
 }
 
+// Per-node picking only makes sense while the list is scannable (service map:
+// one node per repo). Bigger graphs keep the type checkboxes only.
+const NODE_PICK_LIMIT = 40;
+
 function GraphStatsOverlay({
   scope,
-  data,
+  raw,
+  shown,
+  hidden,
+  hiddenIds,
+  onToggleType,
+  onToggleNode,
 }: {
   scope: GraphScope | null;
-  data: KnowledgeGraphView;
+  // Raw view drives the checklists (a hidden entry must stay listed or it
+  // could never be re-checked); shown view drives the counts.
+  raw: KnowledgeGraphView;
+  shown: KnowledgeGraphView;
+  hidden: Set<string>;
+  hiddenIds: Set<string>;
+  onToggleType: (t: string) => void;
+  onToggleNode: (id: string) => void;
 }) {
-  const edgeTypes = Object.entries(
-    data.edges.reduce<Record<string, number>>((acc, edge) => {
-      acc[edge.edgeType] = (acc[edge.edgeType] ?? 0) + 1;
+  const nodeTypes = Object.entries(
+    raw.nodes.reduce<Record<string, number>>((acc, n) => {
+      acc[n.nodeType] = (acc[n.nodeType] ?? 0) + 1;
       return acc;
     }, {}),
   ).sort((a, b) => b[1] - a[1]);
+  // Badge SET comes from the raw view (fixed while browsing this graph, so
+  // the panel never grows/shrinks rows as types are toggled); the COUNT shown
+  // is the filtered one. Same reason the node-type checklist uses raw.
+  const shownEdgeCounts = shown.edges.reduce<Record<string, number>>((acc, edge) => {
+    acc[edge.edgeType] = (acc[edge.edgeType] ?? 0) + 1;
+    return acc;
+  }, {});
+  const edgeTypes = Object.entries(
+    raw.edges.reduce<Record<string, number>>((acc, edge) => {
+      acc[edge.edgeType] = (acc[edge.edgeType] ?? 0) + 1;
+      return acc;
+    }, {}),
+  )
+    .sort((a, b) => b[1] - a[1])
+    .map(([type]) => [type, shownEdgeCounts[type] ?? 0] as const);
 
-  return (
-    <div className="pointer-events-none absolute right-3 top-3 max-w-[360px] rounded-xl border border-slate-800 bg-[#0d1420]/90 p-3 text-xs shadow-[0_18px_50px_rgba(0,0,0,0.28)] backdrop-blur">
-      <div className="mb-2 flex items-center gap-2">
+  const [collapsed, setCollapsed] = useState(false);
+  if (collapsed) {
+    // Collapsed pill — stays visible (not fully hidden) so the panel is easy
+    // to find again, but gives the graph almost all the space back.
+    return (
+      <button
+        type="button"
+        onClick={() => setCollapsed(false)}
+        title="展开图谱统计面板"
+        className="absolute right-3 top-3 flex items-center gap-2 rounded-xl border border-slate-800 bg-[#0d1420]/90 px-3 py-2 text-xs shadow-[0_18px_50px_rgba(0,0,0,0.28)] backdrop-blur hover:border-cyan-500/40"
+      >
         <Network className="h-3.5 w-3.5 text-cyan-300" />
-        <div className="min-w-0">
+        <span className="max-w-[140px] truncate font-semibold text-slate-100">{scope?.title ?? "Graph view"}</span>
+        <ChevronRight className="h-3.5 w-3.5 text-slate-500" />
+      </button>
+    );
+  }
+  return (
+    // Fixed width + tabular digits: toggling types must not resize the panel.
+    <div className="absolute right-3 top-3 w-[320px] rounded-xl border border-slate-800 bg-[#0d1420]/90 p-3 text-xs tabular-nums shadow-[0_18px_50px_rgba(0,0,0,0.28)] backdrop-blur">
+      <div className="mb-2 flex items-center gap-2">
+        <Network className="h-3.5 w-3.5 shrink-0 text-cyan-300" />
+        <div className="min-w-0 flex-1">
           <div className="truncate font-semibold text-slate-100">{scope?.title ?? "Graph view"}</div>
           <div className="truncate text-[11px] text-slate-500">{scope?.detail ?? "Current graph data"}</div>
         </div>
+        <button
+          type="button"
+          onClick={() => setCollapsed(true)}
+          title="收起面板"
+          className="shrink-0 rounded p-1 text-slate-500 hover:bg-white/5 hover:text-slate-200"
+        >
+          <ChevronRight className="h-3.5 w-3.5" />
+        </button>
       </div>
       <div className="grid grid-cols-2 gap-2">
         <div className="rounded-lg border border-slate-800 bg-slate-950/45 px-2 py-1.5">
           <div className="text-[9px] font-semibold uppercase tracking-wide text-slate-600">Nodes</div>
-          <div className="font-mono text-base font-semibold text-slate-100">{data.nodes.length}</div>
+          <div className="font-mono text-base font-semibold text-slate-100">{shown.nodes.length}</div>
         </div>
         <div className="rounded-lg border border-slate-800 bg-slate-950/45 px-2 py-1.5">
           <div className="text-[9px] font-semibold uppercase tracking-wide text-slate-600">Links</div>
-          <div className="font-mono text-base font-semibold text-cyan-100">{data.edges.length}</div>
+          <div className="font-mono text-base font-semibold text-cyan-100">{shown.edges.length}</div>
         </div>
       </div>
+      {raw.nodes.length > 0 && raw.nodes.length <= NODE_PICK_LIMIT && (
+        <div className="mt-2">
+          <div className="mb-1 text-[9px] font-semibold uppercase tracking-wide text-slate-600">
+            {scope?.title === "Service map" ? "Repos" : "Nodes"}
+          </div>
+          <div className="max-h-44 overflow-auto pr-1">
+            {[...raw.nodes].sort((a, b) => a.title.localeCompare(b.title)).map((n) => (
+              <label key={n.nodeId} className="flex cursor-pointer items-center gap-1.5 py-0.5 font-mono text-[11px] text-slate-300 hover:text-cyan-200">
+                <input
+                  type="checkbox"
+                  checked={!hiddenIds.has(n.nodeId)}
+                  onChange={() => onToggleNode(n.nodeId)}
+                  className="h-3 w-3 shrink-0 accent-cyan-400"
+                />
+                <span className="min-w-0 truncate">{n.title}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
+      {nodeTypes.length > 1 && (
+        <div className="mt-2">
+          <div className="mb-1 text-[9px] font-semibold uppercase tracking-wide text-slate-600">Node types</div>
+          <div className="flex flex-wrap gap-x-3 gap-y-1">
+            {nodeTypes.map(([type, count]) => (
+              <label key={type} className="flex cursor-pointer items-center gap-1.5 font-mono text-[11px] text-slate-300 hover:text-cyan-200">
+                <input
+                  type="checkbox"
+                  checked={!hidden.has(type)}
+                  onChange={() => onToggleType(type)}
+                  className="h-3 w-3 accent-cyan-400"
+                />
+                {type} <span className="text-slate-600">{count}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
       {edgeTypes.length > 0 && (
         <div className="mt-2 flex flex-wrap gap-1.5">
           {edgeTypes.map(([type, count]) => (
@@ -457,33 +694,22 @@ export function WikiPage({ onClose }: WikiPageProps) {
   const [status, setStatus] = useState<KnowledgeDbStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const [selectedFile, setSelectedFile] = useState<{ branchId: string; filePath: string } | null>(null);
-  const [fileSymbols, setFileSymbols] = useState<KnowledgeFileSymbol[]>([]);
-  const [fileSymbolsBusy, setFileSymbolsBusy] = useState(false);
 
   const [focusId, setFocusId] = useState<string | null>(null);
   const [tab, setTab] = useState<CenterTab>("context");
 
   const [pack, setPack] = useState<ContextPack | null>(null);
   const [packBusy, setPackBusy] = useState(false);
-  const [flow, setFlow] = useState<FlowResult | null>(null);
-  const [flowBusy, setFlowBusy] = useState(false);
   const [graphData, setGraphData] = useState<KnowledgeGraphView | null>(null);
   const [graphBusy, setGraphBusy] = useState(false);
   const [graphLayout, setGraphLayout] = useState<GraphLayout>("radial");
   const [graphScope, setGraphScope] = useState<GraphScope | null>(null);
-  const [backlinks, setBacklinks] = useState<{ nodeId: string; title: string; nodeType: string }[]>([]);
-  const [timelineData, setTimelineData] = useState<KnowledgeTimelineEntry[] | null>(null);
-  const [timelineBusy, setTimelineBusy] = useState(false);
-
-  const [searchQuery, setSearchQuery] = useState("");
-  const [searchResults, setSearchResults] = useState<KnowledgeSearchHit[] | null>(null);
-  const [searchBusy, setSearchBusy] = useState(false);
-
-  const [editing, setEditing] = useState<{ slug: string; body: string } | null>(null);
-  const [savingNote, setSavingNote] = useState(false);
-  const [creating, setCreating] = useState<{ type: KnowledgeNoteType; title: string } | null>(null);
-  const [creatingBusy, setCreatingBusy] = useState(false);
+  // Node types the user has un-checked in the graph overlay. Survives graph
+  // switches on purpose — a preference, not per-view state.
+  const [hiddenNodeTypes, setHiddenNodeTypes] = useState<Set<string>>(new Set());
+  // Per-node picks (service map: choose repos to display). Reset on every
+  // graph switch — node ids from one view mean nothing in the next.
+  const [hiddenNodeIds, setHiddenNodeIds] = useState<Set<string>>(new Set());
 
   const [trail, setTrail] = useState<NavEntry[]>([]);
 
@@ -495,67 +721,33 @@ export function WikiPage({ onClose }: WikiPageProps) {
   const loadPack = useCallback(async (id: string) => {
     setPackBusy(true);
     try {
-      const [p, bl] = await Promise.all([knowledgeContext(id), knowledgeExplore("backlinks", id)]);
-      setPack(p); setBacklinks(bl.nodes);
+      setPack(await knowledgeContext(id));
     } catch (e) { err(e); } finally { setPackBusy(false); }
   }, []);
   const loadGraph = useCallback(async (id: string) => {
-    setGraphBusy(true);
+    setGraphBusy(true); setHiddenNodeIds(new Set());
     setGraphScope({ title: "Local graph", detail: "Focused symbol neighbourhood" });
     try { setGraphData(await knowledgeGraph(id, 1)); } catch (e) { err(e); } finally { setGraphBusy(false); }
   }, []);
-  const loadFlow = useCallback(async (id: string) => {
-    setFlowBusy(true);
-    try { setFlow(await knowledgeFlow(id)); } catch (e) { err(e); } finally { setFlowBusy(false); }
-  }, []);
-
-  const runSearch = useCallback(async (query = searchQuery) => {
-    const q = query.trim();
-    setSearchQuery(query);
-    setTab("context");
-    setError(null);
-    if (!q) {
-      setSearchResults(null);
-      return;
-    }
-    setSearchBusy(true);
-    try {
-      setSearchResults(await knowledgeSearch(q));
-    } catch (e) { err(e); } finally { setSearchBusy(false); }
-  }, [searchQuery]);
-
-  const openTimeline = useCallback(async () => {
-    setTab("timeline");
-    if (timelineData) return;
-    setTimelineBusy(true);
-    try { setTimelineData((await knowledgeTimeline(60)).entries); } catch (e) { err(e); } finally { setTimelineBusy(false); }
-  }, [timelineData]);
 
   const selectSymbol = useCallback((id: string, record = true) => {
-    setError(null); setEditing(null); setFocusId(id);
-    if (record) setTrail((t) => [...t, { kind: "symbol", id }]);
+    setError(null); setFocusId(id);
+    // An empty trail means this is the FIRST symbol viewed this session (from
+    // a graph node click, or straight off the repo/branch home table) — seed
+    // an implicit "home" entry underneath it so "返回" has somewhere to go
+    // back to, instead of starting permanently disabled.
+    if (record) setTrail((t) => (t.length === 0 ? [{ kind: "home" }, { kind: "symbol", id }] : [...t, { kind: "symbol", id }]));
     void loadPack(id);
   }, [loadPack]);
 
-  const selectFile = useCallback((branchId: string, filePath: string, record = true) => {
-    setError(null); setEditing(null); setFocusId(null); setPack(null); setTab("context");
-    setSearchResults(null); setSearchBusy(false); setSelectedFile({ branchId, filePath }); setFileSymbols([]);
-    if (record) setTrail((t) => [...t, { kind: "file", branchId, filePath }]);
-    setFileSymbolsBusy(true);
-    knowledgeFileSymbols(branchId, filePath)
-      .then(setFileSymbols)
-      .catch((e) => { err(e); setFileSymbols([]); })
-      .finally(() => setFileSymbolsBusy(false));
-  }, []);
-
   const openRepoGraph = useCallback(async (repoId: string, branchId: string) => {
-    setError(null); setFocusId(null); setTab("graph"); setGraphBusy(true);
+    setError(null); setFocusId(null); setTab("graph"); setGraphBusy(true); setHiddenNodeIds(new Set());
     setGraphScope({ title: "Repo graph", detail: "Top connected symbols in this branch" });
     try { setGraphData(await knowledgeRepoGraph(repoId, branchId)); } catch (e) { err(e); } finally { setGraphBusy(false); }
   }, []);
 
   const openServiceGraph = useCallback(async () => {
-    setError(null); setFocusId(null); setTab("graph"); setGraphBusy(true);
+    setError(null); setFocusId(null); setTab("graph"); setGraphBusy(true); setHiddenNodeIds(new Set());
     setGraphScope({ title: "Service map", detail: "Only cross-service invokes and package dependencies" });
     try { setGraphData(await knowledgeServiceGraph()); } catch (e) { err(e); } finally { setGraphBusy(false); }
   }, []);
@@ -581,41 +773,21 @@ export function WikiPage({ onClose }: WikiPageProps) {
   useEffect(() => {
     if (!focusId) return;
     if (tab === "graph" && graphData?.focus !== focusId) void loadGraph(focusId);
-    if (tab === "flow" && flow?.root?.nodeId !== focusId) void loadFlow(focusId);
-  }, [focusId, tab, graphData?.focus, flow, loadGraph, loadFlow]);
+  }, [focusId, tab, graphData?.focus, loadGraph]);
+
+  // Graph tab with nothing selected: load the service map instead of showing
+  // a "needs a focus" empty card — the map is the natural whole-fleet default.
+  useEffect(() => {
+    if (tab === "graph" && !focusId && !graphData && !graphBusy) void openServiceGraph();
+  }, [tab, focusId, graphData, graphBusy, openServiceGraph]);
 
   const applyEntry = useCallback((e: NavEntry) => {
-    if (e.kind === "symbol") selectSymbol(e.id, false);
-    else selectFile(e.branchId, e.filePath, false);
-  }, [selectSymbol, selectFile]);
+    if (e.kind === "home") { setError(null); setFocusId(null); setPack(null); return; }
+    selectSymbol(e.id, false);
+  }, [selectSymbol]);
   const back = useCallback(() => {
     setTrail((t) => { if (t.length <= 1) return []; const next = t.slice(0, -1); applyEntry(next[next.length - 1]); return next; });
   }, [applyEntry]);
-
-  const noteBodyOf = (source: string): string => {
-    if (!source.startsWith("---")) return source;
-    const end = source.indexOf("\n---", 3);
-    return end === -1 ? source : source.slice(end + 4).replace(/^\r?\n+/, "");
-  };
-  const editNote = useCallback(async (slug: string) => {
-    setError(null);
-    try { const r = await knowledgeNoteRead(slug); setEditing({ slug, body: noteBodyOf(r.source) }); } catch (e) { err(e); }
-  }, []);
-  const saveNote = useCallback(async () => {
-    if (!editing) return; setSavingNote(true);
-    try { await knowledgeNoteWrite(editing.slug, editing.body); refreshStatus(); setEditing(null); } catch (e) { err(e); } finally { setSavingNote(false); }
-  }, [editing, refreshStatus]);
-  const submitCreate = useCallback(async () => {
-    if (!creating || !creating.title.trim()) return;
-    setCreatingBusy(true);
-    try {
-      const r = await knowledgeNoteNewTyped(creating.title.trim(), creating.type);
-      setCreating(null);
-      refreshStatus();
-      const rd = await knowledgeNoteRead(r.slug);
-      setEditing({ slug: r.slug, body: noteBodyOf(rd.source) });
-    } catch (e) { err(e); } finally { setCreatingBusy(false); }
-  }, [creating, refreshStatus]);
 
   const copyPack = () => {
     if (!pack?.focus) return;
@@ -632,101 +804,26 @@ export function WikiPage({ onClose }: WikiPageProps) {
   };
 
   const f = pack?.focus;
-  const activeScope = useMemo(() => {
-    if (tab === "graph" && graphScope) return graphScope.title;
-    if (f?.filePath) return f.filePath;
-    if (selectedFile) return selectedFile.filePath;
-    return "Search across indexed repos";
-  }, [f?.filePath, graphScope, selectedFile, tab]);
+  // Fresh install / index deleted: no DB yet, or a DB with zero repos.
+  const fresh = status != null && (!status.exists || status.repos === 0);
+  useEffect(() => {
+    if (!fresh) return;
+    const t = setInterval(refreshStatus, 5000);
+    return () => clearInterval(t);
+  }, [fresh, refreshStatus]);
+  if (fresh) {
+    return <WikiOnboarding onRefresh={refreshStatus} onClose={onClose} />;
+  }
 
   return (
     <div className="flex h-full flex-col bg-[#070b11] text-slate-100">
-      <header className="shrink-0 border-b border-slate-800 bg-[#0b111a] px-6 py-4">
-        <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-          <Database className="h-5 w-5 shrink-0 text-cyan-300" />
-          <h1 className="shrink-0 text-lg font-semibold tracking-normal">知识 Wiki</h1>
-          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2 text-xs text-slate-400">
-            <MetricPill label="repos" value={status?.repos ?? "-"} />
-            <MetricPill label="symbols" value={status?.symbols ?? "-"} />
-            <MetricPill label="notes" value={status?.notes ?? "-"} />
-          </div>
-          <button type="button" onClick={back} disabled={trail.length <= 1} title="返回上一步"
-            className="flex h-8 items-center gap-1 rounded-md border border-slate-800 px-2 text-xs text-slate-300 hover:bg-white/5 disabled:opacity-30">
-            <ArrowLeft className="h-3.5 w-3.5" /> 返回
-          </button>
-          <button type="button" onClick={onClose} className="rounded p-1.5 text-slate-400 hover:bg-white/5 hover:text-slate-100" aria-label="关闭"><X className="h-4 w-4" /></button>
-        </div>
+      {error && !isNoDatabaseError(error) && <div className="mx-6 mt-3 rounded-md border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-sm text-yellow-200">{error}</div>}
 
-        <div className="mt-4 flex flex-wrap items-center gap-3">
-          <div className="flex min-w-[420px] flex-1 items-center rounded-xl border border-slate-800 bg-slate-950/55 px-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] focus-within:border-cyan-500/50">
-            <Search className="h-4 w-4 shrink-0 text-cyan-300" />
-            <input
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              onKeyDown={(e) => { if (e.key === "Enter") void runSearch(); }}
-              placeholder="Search symbol, API, config, case, trace..."
-              className="h-10 min-w-0 flex-1 bg-transparent px-3 font-mono text-sm text-slate-100 outline-none placeholder:text-slate-600"
-            />
-            {searchBusy && <Loader2 className="mr-2 h-4 w-4 shrink-0 animate-spin text-cyan-300" />}
-            <button
-              type="button"
-              onClick={() => void runSearch()}
-              className="rounded-lg bg-cyan-400 px-3 py-1.5 text-xs font-bold text-[#04121a] hover:bg-cyan-300"
-            >
-              Search
-            </button>
-          </div>
-        </div>
-      </header>
-
-      {error && <div className="mx-6 mt-3 rounded-md border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-sm text-yellow-200">{error}</div>}
-
-      <div className="grid min-h-0 flex-1" style={{ gridTemplateColumns: "320px minmax(0,1fr) 360px" }}>
-        <aside className="flex min-h-0 min-w-0 flex-col border-r border-slate-800 bg-[#0c121b]">
-          <div className="flex h-12 shrink-0 items-center gap-2 border-b border-slate-800 px-3 text-xs font-bold text-slate-200">
-            <FileCode className="h-3.5 w-3.5 text-cyan-300" />Explorer
-            <button type="button" onClick={() => void openServiceGraph()} title="服务关系图"
-              className="ml-auto flex items-center gap-1 rounded-md border border-slate-700 px-2 py-1 text-[11px] font-semibold text-slate-300 hover:bg-white/5">
-              <Network className="h-3 w-3 text-cyan-300" />服务图
-            </button>
-          </div>
-          <div className="min-h-0 flex-1 overflow-auto p-2">
-            <WikiBrowseTree onSelectFile={(b, fp) => selectFile(b, fp)} onOpenRepoGraph={(r, b) => openRepoGraph(r, b)} selected={selectedFile} />
-          </div>
-          {selectedFile && (
-            <div className="max-h-[42%] shrink-0 overflow-auto border-t border-slate-800 bg-[#101826] p-2">
-              <div className="mb-2 flex items-center gap-2 px-1 text-[10px] font-bold uppercase text-slate-500">
-                <span className="min-w-0 flex-1 truncate font-mono normal-case text-slate-300">{selectedFile.filePath.split("/").pop()}</span>
-                <span className="rounded bg-slate-800 px-1.5 py-0.5 font-mono text-[10px]">{fileSymbolsBusy ? "..." : fileSymbols.length}</span>
-              </div>
-              {fileSymbolsBusy ? (
-                <div className="flex items-center gap-2 rounded-md px-2 py-2 text-xs text-slate-500">
-                  <Loader2 className="h-3.5 w-3.5 animate-spin text-cyan-300" /> Loading symbols
-                </div>
-              ) : (
-                fileSymbols.map((s) => (
-                  <button key={s.nodeId} type="button" onClick={() => selectSymbol(s.nodeId)}
-                    className={cn("flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left font-mono text-xs hover:bg-white/5", focusId === s.nodeId ? "bg-cyan-500/12 text-cyan-100" : "text-slate-300")}>
-                    <Box className="h-3 w-3 shrink-0 text-cyan-300/70" /><span className="min-w-0 flex-1 truncate">{s.title}</span>
-                    <span className="text-[9px] uppercase text-slate-600">{s.kind}</span>
-                  </button>
-                ))
-              )}
-            </div>
-          )}
-        </aside>
-
+      <div className="flex min-h-0 flex-1 flex-col">
         <section className="flex min-h-0 min-w-0 flex-col bg-[#080d14]">
           <div className="flex h-12 shrink-0 items-center gap-1 border-b border-slate-800 bg-[#0d1420] px-3">
-            <div className="mr-2 flex min-w-0 max-w-[34%] items-center gap-2">
-              {f ? <Dot t={f.nodeType} /> : <GitBranch className="h-3.5 w-3.5 shrink-0 text-slate-500" />}
-              <span className="truncate font-mono text-xs font-semibold text-slate-400">{f?.title ?? activeScope}</span>
-              {f?.kind && <span className="hidden shrink-0 rounded-md bg-slate-800 px-2 py-0.5 text-[10px] uppercase text-slate-300 xl:inline">{f.kind}</span>}
-            </div>
             <TabBtn on={tab === "context"} onClick={() => setTab("context")} icon={<Sparkles className="h-3.5 w-3.5" />}>Context</TabBtn>
             <TabBtn on={tab === "graph"} onClick={() => setTab("graph")} icon={<Network className="h-3.5 w-3.5" />}>Graph</TabBtn>
-            <TabBtn on={tab === "flow"} onClick={() => setTab("flow")} icon={<Workflow className="h-3.5 w-3.5" />}>Flow</TabBtn>
-            <TabBtn on={tab === "timeline"} onClick={() => void openTimeline()} icon={<Clock className="h-3.5 w-3.5" />}>Timeline</TabBtn>
             <div className="ml-auto flex items-center gap-2">
               {tab === "graph" && graphData && (
                 <div className="flex shrink-0 items-center gap-1 rounded-md border border-slate-800 bg-slate-950/40 p-0.5 text-xs">
@@ -738,67 +835,54 @@ export function WikiPage({ onClose }: WikiPageProps) {
               {tab === "context" && f && (
                 <button type="button" onClick={copyPack} className="flex h-8 items-center gap-1.5 rounded-lg bg-cyan-400 px-2.5 text-xs font-bold text-[#04121a] hover:bg-cyan-300"><Sparkles className="h-3.5 w-3.5" />Copy for AI</button>
               )}
+              <button type="button" onClick={back} disabled={trail.length <= 1} title="返回上一步"
+                className="flex h-7 items-center gap-1 rounded-md border border-slate-800 px-2 text-xs text-slate-300 hover:bg-white/5 disabled:opacity-30">
+                <ArrowLeft className="h-3.5 w-3.5" /> 返回
+              </button>
+              <button type="button" onClick={onClose} className="rounded p-1.5 text-slate-400 hover:bg-white/5 hover:text-slate-100" aria-label="关闭"><X className="h-4 w-4" /></button>
             </div>
           </div>
 
           {tab === "context" ? (
-            f ? <WikiContextPane packBusy={packBusy} pack={pack} onSelectSymbol={selectSymbol} /> : selectedFile ? (
-              <FileOverviewPanel
-                selectedFile={selectedFile}
-                fileSymbols={fileSymbols}
-                busy={fileSymbolsBusy}
-                onSelectSymbol={selectSymbol}
-              />
-            ) : (
+            f ? <WikiContextPane packBusy={packBusy} pack={pack} onSelectSymbol={selectSymbol} /> : (
               <KnowledgeHomePanel
-                status={status}
-                searchQuery={searchQuery}
-                searchResults={searchResults}
-                searchBusy={searchBusy}
-                selectedFile={selectedFile}
-                fileSymbols={fileSymbols}
-                onRunSearch={(q) => void runSearch(q)}
-                onSelectSymbol={selectSymbol}
-                onOpenServiceGraph={() => void openServiceGraph()}
-                onOpenTimeline={() => void openTimeline()}
-                onCreateIncident={() => setCreating({ type: "incident", title: searchQuery.trim() || "New incident" })}
+                onOpenRepoGraph={(r, b) => void openRepoGraph(r, b)}
               />
             )
-          ) : tab === "graph" ? (
+          ) : (
             <div className="relative flex min-h-0 flex-1">
               {graphBusy ? <div className="flex flex-1 items-center justify-center gap-2 text-sm text-slate-500"><Loader2 className="h-4 w-4 animate-spin" /> 加载图谱…</div>
                 : graphData && graphData.nodes.length > 0
-                  ? (
-                    <>
-                      {graphLayout === "3d"
-                        ? <WikiGraph3D data={graphData} onNodeClick={onGraphNodeClick} />
-                        : <WikiGraph data={graphData} layout={graphLayout} onNodeClick={onGraphNodeClick} />}
-                      <GraphStatsOverlay scope={graphScope} data={graphData} />
-                    </>
-                  )
+                  ? (() => {
+                      const shown = filterGraphView(graphData, hiddenNodeTypes, hiddenNodeIds);
+                      const toggleNode = (id: string) =>
+                        setHiddenNodeIds((cur) => {
+                          const next = new Set(cur);
+                          if (next.has(id)) next.delete(id);
+                          else next.add(id);
+                          return next;
+                        });
+                      const toggleType = (t: string) =>
+                        setHiddenNodeTypes((cur) => {
+                          const next = new Set(cur);
+                          if (next.has(t)) next.delete(t);
+                          else next.add(t);
+                          return next;
+                        });
+                      return (
+                        <>
+                          {graphLayout === "3d"
+                            ? <WikiGraph3D data={shown} onNodeClick={onGraphNodeClick} />
+                            : <WikiGraph data={shown} layout={graphLayout} onNodeClick={onGraphNodeClick} />}
+                          <GraphStatsOverlay scope={graphScope} raw={graphData} shown={shown} hidden={hiddenNodeTypes} hiddenIds={hiddenNodeIds} onToggleType={toggleType} onToggleNode={toggleNode} />
+                        </>
+                      );
+                    })()
                   : <GraphEmptyState onOpenServiceGraph={() => void openServiceGraph()} />}
             </div>
-          ) : tab === "timeline" ? <WikiTimelinePane timelineBusy={timelineBusy} timelineData={timelineData} />
-          : <WikiFlowPane flowBusy={flowBusy} flow={flow} onSelectSymbol={selectSymbol} />}
+          )}
         </section>
 
-        <aside className="flex min-h-0 min-w-0 flex-col overflow-auto border-l border-slate-800 bg-[#0c121b]">
-          <WikiWhyPanel
-            f={f ?? null}
-            pack={pack}
-            backlinks={backlinks}
-            editing={editing}
-            creating={creating}
-            creatingBusy={creatingBusy}
-            savingNote={savingNote}
-            onEditNote={editNote}
-            onSaveNote={saveNote}
-            onCancelEdit={() => setEditing(null)}
-            onSubmitCreate={submitCreate}
-            onSetCreating={setCreating}
-            onSetEditing={setEditing}
-          />
-        </aside>
       </div>
 
       <footer className="flex h-7 shrink-0 items-center gap-3 border-t border-slate-800 bg-[#101826] px-3 text-[11px] text-slate-400">

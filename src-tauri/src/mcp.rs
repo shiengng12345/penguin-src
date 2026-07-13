@@ -65,6 +65,26 @@ fn bundled_mcp_server_path<R: tauri::Runtime>(
     Err("Bundled MCP server (packages/mcp/dist/index.js) not found".to_string())
 }
 
+// The vendored native runtime shipped alongside the MCP server — a
+// self-contained `node` binary + `node_modules/better-sqlite3` closure built
+// by scripts/vendor-knowledge-runtime.mjs for a KNOWN Node ABI, so opening the
+// knowledge DB never depends on guessing which system Node (if any) happens
+// to have a compatible prebuilt native addon. None in `tauri dev` (the
+// workspace's own pnpm node_modules resolve better-sqlite3 directly there).
+fn bundled_mcp_runtime_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<PathBuf> {
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        for candidate in [
+            resource_dir.join("_up_/packages/mcp/bundle"),
+            resource_dir.join("packages/mcp/bundle"),
+        ] {
+            if candidate.join("node").exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
 // Parse "v18.20.8"-style directory names into a sortable tuple. Returns None
 // for non-version entries (e.g. ".DS_Store").
 fn parse_node_version(name: &str) -> Option<(u64, u64, u64)> {
@@ -96,6 +116,17 @@ fn nvm_latest_node(home: &Path) -> Option<PathBuf> {
 // inherit the user's interactive PATH, so we have to look in the common
 // homebrew / nvm / volta / fnm / asdf / system locations explicitly, then fall
 // back to asking a login shell.
+//
+// FALLBACK ONLY for the MCP server: this has no idea whether whatever `node`
+// it finds has a Node ABI compatible with the shipped better-sqlite3 prebuild
+// (a system Node found here first has no version priority over nvm's, and
+// neither carries any ABI guarantee) — a mismatch fails to load the native
+// module at runtime. Release builds should always have a vendored runtime
+// (see bundled_mcp_runtime_dir) with a KNOWN-matching Node; this function is
+// only reached when that's unavailable (`tauri dev`, or a corrupted install).
+// The CLI launcher script's own use of this function doesn't have this
+// concern — it runs the workspace's unbundled dist output against that same
+// workspace's real, already ABI-matched node_modules/better-sqlite3.
 pub(crate) fn detect_node_path() -> Option<PathBuf> {
     let candidates = [
         "/opt/homebrew/bin/node",
@@ -167,6 +198,27 @@ fn copy_if_different(src: &Path, dest: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
+// Recursive copy that dereferences symlinks (so the stable per-user copy is
+// fully self-contained, never pointing back into a possibly-transient
+// resource/DMG mount) and skips files whose content hasn't changed.
+fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dest).map_err(|e| e.to_string())?;
+    for entry in std::fs::read_dir(src).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let src_path = entry.path();
+        let dest_path = dest.join(entry.file_name());
+        // metadata() follows symlinks (unlike file_type(), which reports the
+        // link itself) — exactly the dereferencing behavior we want here.
+        let meta = std::fs::metadata(&src_path).map_err(|e| e.to_string())?;
+        if meta.is_dir() {
+            copy_dir_recursive(&src_path, &dest_path)?;
+        } else {
+            copy_if_different(&src_path, &dest_path)?;
+        }
+    }
+    Ok(())
+}
+
 // Sync the bundled server JS (plus the package.json that carries
 // "type": "module" — without it node would run the ESM bundle as CJS) into
 // stable_dir. Refreshes stale copies after app updates. Returns the stable
@@ -200,12 +252,44 @@ fn sync_stable_mcp_files(bundled_server: &Path, stable_dir: &Path) -> Result<Pat
     Ok(server_dest)
 }
 
+// Sync the vendored native runtime (node binary + node_modules/better-sqlite3
+// closure) into stable_dir, when the app ships one (release builds only —
+// `tauri dev` has none, and that's fine: the workspace's own node_modules
+// resolve better-sqlite3 directly there). Returns the stable `node` path.
+fn sync_stable_mcp_runtime(runtime_dir: &Path, stable_dir: &Path) -> Result<PathBuf, String> {
+    copy_dir_recursive(
+        &runtime_dir.join("node_modules"),
+        &stable_dir.join("node_modules"),
+    )?;
+    let node_dest = stable_dir.join("node");
+    copy_if_different(&runtime_dir.join("node"), &node_dest)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&node_dest)
+            .map_err(|e| e.to_string())?
+            .permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&node_dest, perms).map_err(|e| e.to_string())?;
+    }
+    Ok(node_dest)
+}
+
+// Resolves BOTH the stable server path and the node binary to launch it with.
+// Prefers the vendored runtime (known-good Node ABI, matches the shipped
+// better-sqlite3 prebuild) over guessing at a system Node — see
+// detect_node_path's doc comment for why that guess is unreliable.
 fn ensure_stable_mcp_server<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
-) -> Result<PathBuf, String> {
+) -> Result<(PathBuf, Option<PathBuf>), String> {
     let bundled = bundled_mcp_server_path(app)?;
     let dir = stable_mcp_dir().ok_or("No home directory")?;
-    sync_stable_mcp_files(&bundled, &dir)
+    let server = sync_stable_mcp_files(&bundled, &dir)?;
+    let node = match bundled_mcp_runtime_dir(app) {
+        Some(runtime_dir) => Some(sync_stable_mcp_runtime(&runtime_dir, &dir)?),
+        None => None,
+    };
+    Ok((server, node))
 }
 
 fn claude_desktop_configured_at(cfg_path: &Path) -> bool {
@@ -477,10 +561,13 @@ pub(crate) struct McpStatus {
 pub(crate) fn mcp_status<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> McpStatus {
     // Prefer the stable per-user copy (and refresh it while we're here so app
     // updates propagate); fall back to the in-bundle path for diagnostics.
-    let bundled = ensure_stable_mcp_server(&app)
-        .ok()
-        .or_else(|| bundled_mcp_server_path(&app).ok());
-    let node = detect_node_path();
+    let (bundled, vendored_node) = match ensure_stable_mcp_server(&app) {
+        Ok((server, node)) => (Some(server), node),
+        Err(_) => (bundled_mcp_server_path(&app).ok(), None),
+    };
+    // The vendored runtime's node (known-matching ABI) wins when the app
+    // shipped one; only guess at a system node as a last resort (dev builds).
+    let node = vendored_node.or_else(detect_node_path);
     let cfg_path = claude_desktop_config_path();
     let claude_code_cfg_path = claude_code_config_path();
     let codex_cfg_path = codex_config_path();
@@ -525,28 +612,69 @@ pub(crate) fn mcp_status<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> McpStat
     }
 }
 
+// Which AI clients exist on THIS machine. Configure only those — machines
+// differ, and writing config for an uninstalled client scaffolds junk dirs it
+// may later misread. Detection = the client's own state dir/file exists.
+fn detected_local_clients(home: &std::path::Path) -> Vec<(&'static str, PathBuf)> {
+    let mut clients = Vec::new();
+    let desktop_dir = home.join("Library/Application Support/Claude");
+    if desktop_dir.is_dir() {
+        clients.push(("Claude Desktop", desktop_dir.join("claude_desktop_config.json")));
+    }
+    if home.join(".claude.json").exists() || home.join(".claude").is_dir() {
+        clients.push(("Claude Code", home.join(".claude.json")));
+    }
+    if home.join(".codex").is_dir() {
+        clients.push(("Codex CLI", home.join(".codex/config.toml")));
+    }
+    clients
+}
+
 #[tauri::command]
 pub(crate) fn mcp_install_to_local_clients<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
 ) -> Result<String, String> {
-    let server = ensure_stable_mcp_server(&app)?;
-    let node = detect_node_path().ok_or("Could not locate a node binary in common paths")?;
-    let claude_cfg_path = claude_desktop_config_path().ok_or("No home directory")?;
-    let claude_code_cfg_path = claude_code_config_path().ok_or("No home directory")?;
-    let codex_cfg_path = codex_config_path().ok_or("No home directory")?;
+    let (server, vendored_node) = ensure_stable_mcp_server(&app)?;
+    // Vendored node (known-matching ABI for the shipped better-sqlite3
+    // prebuild) wins; only guess at a system node when the app shipped none
+    // (dev builds — the workspace's own node_modules resolve it directly).
+    let node = vendored_node
+        .or_else(detect_node_path)
+        .ok_or("Could not locate a node binary in common paths")?;
+    let home = dirs::home_dir().ok_or("No home directory")?;
 
-    write_claude_desktop_mcp_config_at(&claude_cfg_path, &node, &server)?;
-    // ~/.claude.json uses the same mcpServers shape, and the merge preserves
-    // all of Claude Code's other state in that file.
-    write_claude_desktop_mcp_config_at(&claude_code_cfg_path, &node, &server)?;
-    write_codex_mcp_config_at(&codex_cfg_path, &node, &server)?;
-
-    Ok(format!(
-        "Configured penguin MCP server for Claude Desktop ({}), Claude Code ({}) and Codex CLI ({}). Restart the clients to pick it up.",
-        claude_cfg_path.display(),
-        claude_code_cfg_path.display(),
-        codex_cfg_path.display()
-    ))
+    let clients = detected_local_clients(&home);
+    if clients.is_empty() {
+        return Err(
+            "未检测到 Claude Desktop / Claude Code / Codex — 先安装任意一个再配置 MCP".to_string(),
+        );
+    }
+    let mut configured = Vec::new();
+    for (name, cfg_path) in &clients {
+        match *name {
+            // ~/.claude.json uses the same mcpServers shape as Claude Desktop,
+            // and the merge preserves all of the client's other state.
+            "Claude Desktop" | "Claude Code" => {
+                write_claude_desktop_mcp_config_at(cfg_path, &node, &server)?
+            }
+            _ => write_codex_mcp_config_at(cfg_path, &node, &server)?,
+        }
+        configured.push(format!("{} ({})", name, cfg_path.display()));
+    }
+    let all = ["Claude Desktop", "Claude Code", "Codex CLI"];
+    let skipped: Vec<&str> = all
+        .iter()
+        .filter(|n| !clients.iter().any(|(c, _)| c == *n))
+        .copied()
+        .collect();
+    let mut msg = format!(
+        "Configured penguin MCP server for {}. Restart the clients to pick it up.",
+        configured.join(", ")
+    );
+    if !skipped.is_empty() {
+        msg.push_str(&format!(" Skipped (not installed): {}.", skipped.join(", ")));
+    }
+    Ok(msg)
 }
 
 #[cfg(test)]
@@ -554,6 +682,26 @@ mod mcp_config_tests {
     use super::*;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn detected_local_clients_matches_what_is_installed() {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let home = std::env::temp_dir().join(format!("pengvi-clients-{nonce}"));
+        fs::create_dir_all(&home).unwrap();
+        // Bare machine: nothing detected, nothing scaffolded.
+        assert!(detected_local_clients(&home).is_empty());
+        // Claude Code via ~/.claude.json only.
+        fs::write(home.join(".claude.json"), "{}").unwrap();
+        let c1 = detected_local_clients(&home);
+        assert_eq!(c1.len(), 1);
+        assert_eq!(c1[0].0, "Claude Code");
+        // Add Codex + Claude Desktop.
+        fs::create_dir_all(home.join(".codex")).unwrap();
+        fs::create_dir_all(home.join("Library/Application Support/Claude")).unwrap();
+        let names: Vec<_> = detected_local_clients(&home).iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, vec!["Claude Desktop", "Claude Code", "Codex CLI"]);
+        fs::remove_dir_all(&home).unwrap();
+    }
 
     fn temp_config_path(name: &str) -> PathBuf {
         let nonce = SystemTime::now()
@@ -619,6 +767,43 @@ mod mcp_config_tests {
         assert!(fs::read_to_string(stable.join("package.json"))
             .unwrap()
             .contains("\"type\": \"module\""));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sync_stable_mcp_runtime_copies_node_binary_and_native_closure() {
+        let cfg = temp_config_path("stable-runtime");
+        let root = cfg.parent().unwrap().to_path_buf();
+
+        // Fake vendored runtime: node binary + a nested native-module closure.
+        let runtime_dir = root.join("bundle/packages/mcp/bundle");
+        let bsq_dir = runtime_dir.join("node_modules/better-sqlite3/build/Release");
+        fs::create_dir_all(&bsq_dir).unwrap();
+        fs::write(bsq_dir.join("better_sqlite3.node"), b"fake-native-binary-v1").unwrap();
+        fs::write(runtime_dir.join("node"), "fake-node-binary-v1").unwrap();
+
+        let stable = root.join("stable");
+        let node = sync_stable_mcp_runtime(&runtime_dir, &stable).unwrap();
+
+        assert_eq!(node, stable.join("node"));
+        assert_eq!(fs::read_to_string(&node).unwrap(), "fake-node-binary-v1");
+        assert_eq!(
+            fs::read(stable.join("node_modules/better-sqlite3/build/Release/better_sqlite3.node"))
+                .unwrap(),
+            b"fake-native-binary-v1",
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(&node).unwrap().permissions().mode();
+            assert!(mode & 0o111 != 0, "vendored node must be executable");
+        }
+
+        // App update: vendored content changed → stable copy refreshes.
+        fs::write(runtime_dir.join("node"), "fake-node-binary-v2").unwrap();
+        sync_stable_mcp_runtime(&runtime_dir, &stable).unwrap();
+        assert_eq!(fs::read_to_string(&node).unwrap(), "fake-node-binary-v2");
 
         let _ = fs::remove_dir_all(&root);
     }

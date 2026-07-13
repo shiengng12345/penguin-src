@@ -22,6 +22,23 @@ runCli(process.argv.slice(2), {
   // Machine-parseable progress lines on stderr (stdout stays the --json report).
   // The Rust bridge reads "PENGUIN_PROGRESS {json}" lines → Tauri events.
   progressEvent: (payload) => process.stderr.write(`PENGUIN_PROGRESS ${JSON.stringify(payload)}\n`),
+  // Interactive multi-repo picker (init/index aimed at a folder of checkouts).
+  // TTY-only: the app bridge and pipes must never block on a prompt.
+  pickRepos: process.stdin.isTTY && process.stdout.isTTY
+    ? async (candidates) => {
+        const { default: checkbox } = await import("@inquirer/checkbox");
+        try {
+          return await checkbox({
+            message: "这个目录包含多个 git 仓库 — 空格勾选要索引的,回车开始",
+            choices: candidates.map((c) => ({ name: c.name, value: c.path })),
+            pageSize: 15,
+            loop: false,
+          });
+        } catch {
+          return null; // Ctrl+C / prompt aborted — index nothing
+        }
+      }
+    : undefined,
   openStore: () => {
     mkdirSync(dirname(DB_PATH), { recursive: true });
     return KnowledgeStore.open({ dbPath: DB_PATH, ledgerPath: LEDGER_PATH });

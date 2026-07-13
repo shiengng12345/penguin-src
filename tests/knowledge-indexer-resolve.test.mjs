@@ -78,6 +78,33 @@ test("resolveRefs still resolves a generic name when it is import-scoped", async
   assert.ok(r.edges.some((e) => e.dst === "n_create" && e.method === "EXTRACTED"));
 });
 
+test("resolveRefs: same-file tier-1 self-match falls through instead of silently dropping the edge", async () => {
+  // Real-world NestJS shape: a controller handler calls a same-named method on
+  // an injected processor (`getPlayerProfileByJwt` calling
+  // `this.processor.getPlayerProfileByJwt(...)`). Tier 1 (same-file, unique
+  // bare match) finds the ENCLOSING method itself — the only "getPlayerProfileByJwt"
+  // symbol in this file — resolves to a self-loop, and `push()` correctly
+  // refuses to emit it (no self-loops) but historically then `continue`d,
+  // meaning the real cross-file target was never looked up at all: the
+  // handler->processor edge vanished instead of falling through to tier 2/3.
+  const src = [
+    "class Ctrl {",
+    "  getProfile() {",
+    "    return this.processor.getProfile();",
+    "  }",
+    "}",
+  ].join("\n");
+  const out = await extractSymbols({ lang: "ts", source: src });
+  const ids = new Map([["Ctrl", "n_class"], ["Ctrl.getProfile", "n_handler"]]);
+  const lookup = fakeLookup({ bare: { getProfile: [{ id: "n_processor", filePath: "processor.ts" }] } });
+  const r = resolveRefs({ refs: out.refs, fileSymbols: out.symbols, fileSymbolIds: ids, lookup });
+  const calls = r.edges.filter((e) => e.edgeType === "calls");
+  assert.ok(
+    calls.some((e) => e.dst === "n_processor"),
+    "falls through to the cross-file processor instead of dropping the edge",
+  );
+});
+
 test("resolveRefs drops calls with no enclosing symbol (no caller)", async () => {
   const src = "topLevel();"; // call at file top level, not inside a symbol
   const out = await extractSymbols({ lang: "ts", source: src });

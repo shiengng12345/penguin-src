@@ -7,6 +7,16 @@
 //     node_modules/               (native better-sqlite3 + its runtime closure)
 //     wasm/                       (web-tree-sitter runtime + grammar .wasm — arch-independent)
 //
+// The MCP server (packages/mcp/dist/index.js) needs the identical native
+// closure + Node binary — it also opens the knowledge DB via better-sqlite3 —
+// so packages/mcp/bundle/ is a MIRROR of the same node_modules/ + node (no
+// wasm; MCP never parses source). Built once, copied twice: avoids a second
+// download/extract pass for what is bit-for-bit the same artifact.
+//
+//   packages/mcp/bundle/
+//     node                        (same vendored Node binary)
+//     node_modules/               (same native better-sqlite3 closure)
+//
 // Arch-aware: the release matrix cross-builds arm64 AND x64 on an arm64 runner,
 // so the vendored Node binary + better-sqlite3 .node must match the *target*
 // arch (PENGUIN_TARGET_ARCH), not the host. When target arch+ABI already match
@@ -24,6 +34,7 @@ const indexerRequire = createRequire(join(repoRoot, "packages/knowledge-indexer/
 const bundleDir = join(repoRoot, "packages/knowledge-cli/bundle");
 const vendoredModules = join(bundleDir, "node_modules");
 const wasmDir = join(bundleDir, "wasm");
+const mcpBundleDir = join(repoRoot, "packages/mcp/bundle");
 const cacheDir = join(repoRoot, ".cache/vendor");
 
 // --- target selection -------------------------------------------------------
@@ -131,3 +142,15 @@ console.log(
     `${hostMatches ? " [reused host]" : " [downloaded]"}\n` +
     `[vendor] better-sqlite3@${bsqVersion} + ${grammarCount} grammars + runtime wasm → ${bundleDir}`,
 );
+
+// --- 4) mirror node + node_modules (native closure only, no wasm) for MCP ---
+// The MCP server ships its own esbuild bundle (packages/mcp/dist/index.js,
+// built separately with better-sqlite3 externalized) but needs the identical
+// vendored native closure + Node binary to actually open the knowledge DB
+// when run standalone (no pnpm workspace node_modules alongside it).
+rmSync(join(mcpBundleDir, "node_modules"), { recursive: true, force: true });
+mkdirSync(mcpBundleDir, { recursive: true });
+cpSync(vendoredModules, join(mcpBundleDir, "node_modules"), { recursive: true, dereference: true });
+cpSync(nodeDst, join(mcpBundleDir, "node"), { dereference: true });
+chmodSync(join(mcpBundleDir, "node"), 0o755);
+console.log(`[vendor] mirrored node + better-sqlite3 closure → ${mcpBundleDir}`);

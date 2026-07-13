@@ -115,6 +115,25 @@ test("repoGraph limit keeps the highest-degree hubs", () => {
   store.close();
 });
 
+test("repoGraph: a node whose edges all lose the edge cap still shows its in-set edges", () => {
+  const { store, repoId, branchId, caller } = seed();
+  // A file node whose ONLY edge is a low-priority `imports` to an in-set node.
+  const f = store.upsertNode({ nodeType: "file", identityKey: `${repoId}::file::f.ts`, title: "f.ts", repoId });
+  store.replaceFileEdges({ branchId, filePath: "f.ts", edges: [
+    { src: f, dst: caller, edgeType: "imports", origin: "parser", method: "EXTRACTED" },
+  ] });
+  // edgeLimit 3: the three `calls` edges outrank the single `imports` edge and
+  // fill the cap. Without backfill the file node renders as a false isolate —
+  // shown in the view but with zero of its real in-set edges.
+  const g = repoGraph(store, repoId, branchId, { limit: 10, edgeLimit: 3 });
+  assert.ok(g.nodes.some((n) => n.nodeId === f), "file node is in the view");
+  assert.ok(
+    g.edges.some((e) => e.src === f || e.dst === f),
+    "file node keeps at least one of its in-set edges",
+  );
+  store.close();
+});
+
 test("exploreGraph branch-scope: multi-branch repo does not mix branches (Phase 1)", () => {
   const { store, repoId, branchId, login, caller } = seed();
   // second branch of the SAME repo with a different caller of `login`.

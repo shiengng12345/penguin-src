@@ -19,6 +19,7 @@
     "dev": "tsc -p tsconfig.json --watch"
   },
   "dependencies": {
+    "@inquirer/checkbox": "^2.5.0",
     "@penguin/knowledge-core": "workspace:*",
     "@penguin/knowledge-indexer": "workspace:*"
   },

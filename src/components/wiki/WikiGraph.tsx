@@ -57,6 +57,22 @@ const EDGE_LEGEND: Array<{ label: string; color: string }> = [
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type GNode = any;
 
+// zoomToFit on a 0/1-node graph computes a degenerate (point) bounding box and
+// zooms to the library maximum — the lone node's disc fills the whole canvas
+// as a solid color (real case: service map with a single indexed repo). Fit
+// normally for 2+ nodes; center a single node at a readable fixed zoom.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function safeFit(graph: any, ms = 400, padding = 60): void {
+  const nodes: GNode[] = graph?.graphData?.()?.nodes ?? [];
+  if (nodes.length > 1) {
+    graph.zoomToFit?.(ms, padding);
+  } else {
+    const n = nodes[0];
+    graph.centerAt?.(n?.x ?? 0, n?.y ?? 0, ms);
+    graph.zoom?.(3, ms);
+  }
+}
+
 export type GraphLayout = "radial" | "force" | "3d";
 
 export function WikiGraph({
@@ -133,7 +149,7 @@ export function WikiGraph({
     // tick and onEngineStop can fire before layout paints — a delayed fit is the
     // reliable one (the synchronous fit was zooming to an unpositioned graph →
     // focus stuck in a corner).
-    setTimeout(() => graph.zoomToFit?.(400, 60), 90);
+    setTimeout(() => safeFit(graph, 400, 60), 90);
   };
 
   const baseLinkColor = (l: GNode) => EDGE_COL[l.edgeType as string] ?? COL.link;
@@ -236,7 +252,7 @@ export function WikiGraph({
             if (el) el.style.cursor = n ? "pointer" : "default";
           })
           .onNodeClick((n: GNode) => onClickRef.current(String(n.id)))
-          .onEngineStop(() => graph.zoomToFit(400, 40))
+          .onEngineStop(() => safeFit(graph, 400, 40))
           // Stop the sim once it settles. Default cooldownTime is 15s, so a dense
           // repo graph (200 nodes / 2000 edges) churned the CPU — repainting every
           // node + edge each frame — for 15s straight ("super slow"). A tick cap
@@ -296,7 +312,7 @@ export function WikiGraph({
         {[
           { t: "放大", on: () => zoomBy(1.3), d: "M12 5v14M5 12h14" },
           { t: "缩小", on: () => zoomBy(0.77), d: "M5 12h14" },
-          { t: "适配", on: () => graphRef.current?.zoomToFit?.(400, 60), d: "M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4" },
+          { t: "适配", on: () => graphRef.current && safeFit(graphRef.current, 400, 60), d: "M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4" },
         ].map((b) => (
           <button key={b.t} type="button" title={b.t} onClick={b.on}
             className="grid h-7 w-7 place-items-center rounded-md border border-slate-700 bg-slate-950/70 text-slate-300 backdrop-blur hover:bg-white/5">

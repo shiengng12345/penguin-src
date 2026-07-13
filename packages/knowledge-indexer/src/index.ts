@@ -17,6 +17,5 @@ export { resolveNoteLinks } from "./fusion.js";
 export { readGitContext, type GitContext } from "./git.js";
 export { walkRepoFiles, isLikelyMinified, type WalkedFile } from "./walk.js";
 export { indexGitObjects, type GitGraphResult } from "./gitgraph.js";
-export { indexRepo, reconcileOnStartup, IndexTaskLock, type IndexReport } from "./pipeline.js";
+export { indexRepo, reconcileOnStartup, IndexTaskLock, type IndexReport, type IndexProgressEvent, type IndexStageId } from "./pipeline.js";
 export { startWatcher, type WatcherHandle, type WatcherStatus } from "./watcher.js";
-export { writeAgentGuidance, type AgentGuidanceResult } from "./agent-guidance.js";

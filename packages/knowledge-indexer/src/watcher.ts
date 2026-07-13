@@ -18,8 +18,11 @@ export interface WatcherHandle {
 }
 
 // Live incremental indexing: watch the repo, debounce bursts, run an
-// incremental indexRepo per settle (§6.3). The watcher lives only in the app
-// sidecar (§8.3) — never the CLI. Ignored dirs mirror the walk filter.
+// incremental indexRepo per settle (§6.3). Started via `penguin watch <path>`
+// — the app spawns that as a long-running child process (never waited on,
+// killed on toggle-off/app-exit) rather than embedding chokidar in the Rust
+// side, so CLI/MCP/app share the exact same indexing code path (§8.3).
+// Ignored dirs mirror the walk filter.
 export function startWatcher(input: {
   store: KnowledgeStore;
   rootPath: string;

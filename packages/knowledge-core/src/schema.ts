@@ -1,4 +1,20 @@
-import Database from "better-sqlite3";
+import type Database from "better-sqlite3";
+import { createRequire } from "node:module";
+
+// Lazy, `require()`-based load — deliberately NOT a static `import` of this
+// native module. A static ESM import of an external package is hoisted and
+// resolved at module-LINK time, before any code runs; that crashes the whole
+// process in a bundle that ships with zero node_modules (e.g. the MCP
+// server's release package) even when openDatabase() is never called there.
+// A plain function call has no such hoisting — it only resolves (and can only
+// fail) at the moment a DB is actually opened.
+let DatabaseCtor: typeof Database | null = null;
+function loadDatabaseCtor(): typeof Database {
+  if (!DatabaseCtor) {
+    DatabaseCtor = createRequire(import.meta.url)("better-sqlite3") as typeof Database;
+  }
+  return DatabaseCtor;
+}
 
 // spec §3.2 全量表。核心关系模型不用 SQLite 专有特性（D4）；
 // FTS5 虚表是可随时 drop 重建的加速索引，不属于核心模型。
@@ -237,10 +253,47 @@ function migrate(db: Database.Database, _from: number): void {
   if (!edgeCols.includes("source_type")) {
     db.exec("ALTER TABLE edges ADD COLUMN source_type TEXT");
   }
+  const branchCols = (db.prepare("PRAGMA table_info(branches)").all() as { name: string }[]).map(
+    (c) => c.name,
+  );
+  if (!branchCols.includes("pinned")) {
+    // Pinned branches are exempt from every automatic retention mechanism.
+    db.exec("ALTER TABLE branches ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0");
+  }
+}
+
+// Object names DDL creates (tables/indexes/triggers/views), parsed from the
+// DDL text itself so the steady-state probe below can verify completeness
+// without a hand-maintained list that would drift from the real schema.
+const DDL_OBJECT_NAMES: string[] = [
+  ...DDL.matchAll(
+    /CREATE\s+(?:VIRTUAL\s+)?(?:TABLE|INDEX|TRIGGER|VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_]\w*)/gi,
+  ),
+].map((m) => m[1]);
+
+// Read-only probe: does this DB already contain everything the write path of
+// openDatabase would create? Mirrors migrate()'s idempotent guards (which add
+// columns WITHOUT a SCHEMA_VERSION bump, so version equality alone doesn't
+// prove completeness). Keep the two in sync: a new guard in migrate() needs
+// its column check added here.
+function isSchemaCurrent(db: Database.Database): boolean {
+  const have = new Set(
+    (db.prepare("SELECT name FROM sqlite_master").all() as { name: string }[]).map((r) => r.name),
+  );
+  if (!DDL_OBJECT_NAMES.every((n) => have.has(n))) return false;
+  const edgeCols = (db.prepare("PRAGMA table_info(edges)").all() as { name: string }[]).map(
+    (c) => c.name,
+  );
+  if (!edgeCols.includes("status") || !edgeCols.includes("source_type")) return false;
+  const branchCols = (db.prepare("PRAGMA table_info(branches)").all() as { name: string }[]).map(
+    (c) => c.name,
+  );
+  if (!branchCols.includes("pinned")) return false;
+  return db.prepare("SELECT 1 FROM ledger_state WHERE id='main'").get() != null;
 }
 
 export function openDatabase(path: string): Database.Database {
-  const db = new Database(path);
+  const db = new (loadDatabaseCtor())(path);
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
   // 有意不开 foreign_keys：删库后 Ledger 先重放（§2.1 三源重建），
@@ -255,8 +308,6 @@ export function openDatabase(path: string): Database.Database {
     db
       .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'")
       .get() != null;
-
-  db.exec(DDL);
 
   const storedVersion = preexisting
     ? Number(
@@ -277,6 +328,16 @@ export function openDatabase(path: string): Database.Database {
         `supports (${SCHEMA_VERSION}); upgrade Penguin before opening it.`,
     );
   }
+
+  // Steady state (schema already current): return WITHOUT a single write.
+  // Everything below needs SQLite's one write lock, and a long-running writer
+  // (a multi-minute rebuild transaction) would SQLITE_BUSY this open after
+  // busy_timeout — killing even pure read commands like `penguin status`.
+  if (preexisting && storedVersion === SCHEMA_VERSION && isSchemaCurrent(db)) {
+    return db;
+  }
+
+  db.exec(DDL);
 
   migrate(db, storedVersion);
 

@@ -1,13 +1,40 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Boxes, ChevronDown, ChevronRight, FileCode, GitBranch, Loader2, Network, Search } from "lucide-react";
+import { Boxes, ChevronDown, ChevronRight, FileCode, GitBranch, Loader2, Network, Search, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   formatKnowledgeError,
+  isNoDatabaseError,
   knowledgeIndexStatus,
+  knowledgeRemoveRepo,
   knowledgeFiles,
   type KnowledgeIndexStatus,
   type KnowledgeFileRow,
 } from "@/lib/knowledge-client";
+
+// Fresh install / index intentionally deleted: knowledge.db doesn't exist yet.
+// This is onboarding, not a failure — teach the first command instead of alarming.
+function ExplorerEmpty({ onRefresh }: { onRefresh: () => void }) {
+  return (
+    <div className="m-2 rounded-xl border border-cyan-500/20 bg-cyan-500/[0.05] p-3">
+      <div className="text-sm font-semibold text-cyan-100">还没有索引任何仓库</div>
+      <p className="mt-1 text-xs leading-relaxed text-slate-400">
+        在终端对每个想加入知识库的仓库运行一次:
+      </p>
+      <code className="mt-2 block truncate rounded-md border border-cyan-500/15 bg-slate-950/60 px-2 py-1.5 text-[11px] text-cyan-200">
+        penguin init /path/to/repo
+      </code>
+      <div className="mt-3">
+        <button
+          type="button"
+          onClick={onRefresh}
+          className="rounded-md bg-cyan-200 px-2.5 py-1 text-xs font-bold text-slate-950 hover:bg-cyan-100"
+        >
+          刷新
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function ExplorerError({ message, onRetry }: { message: string; onRetry: () => void }) {
   return (
@@ -56,6 +83,14 @@ export function WikiBrowseTree({
       .then(setStatus)
       .catch((e) => setError(formatKnowledgeError(e)));
   }, []);
+  const removeRepo = useCallback(async (name: string) => {
+    if (!window.confirm(`从索引中删除 ${name}?\n(只删索引数据,不动仓库文件;重新 index 即可恢复)`)) return;
+    try {
+      await knowledgeRemoveRepo(name);
+    } finally {
+      loadStatus();
+    }
+  }, [loadStatus]);
   useEffect(loadStatus, [loadStatus]);
 
   const toggle = (setter: typeof setOpenRepos, id: string) =>
@@ -99,7 +134,9 @@ export function WikiBrowseTree({
   }, [repoFilter, status]);
 
   if (error) {
-    return <ExplorerError message={error} onRetry={loadStatus} />;
+    return isNoDatabaseError(error)
+      ? <ExplorerEmpty onRefresh={loadStatus} />
+      : <ExplorerError message={error} onRetry={loadStatus} />;
   }
   if (!status) {
     return (
@@ -134,16 +171,27 @@ export function WikiBrowseTree({
         const open = openRepos.has(repo.repoId);
         return (
           <div key={repo.repoId} className="rounded-lg border border-slate-800/70 bg-slate-950/20">
-            <button
-              type="button"
+            {/* div, not button: the delete control nests inside the click row */}
+            <div
+              role="button"
+              tabIndex={0}
               onClick={() => toggle(setOpenRepos, repo.repoId)}
-              className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left hover:bg-white/[0.04]"
+              onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") toggle(setOpenRepos, repo.repoId); }}
+              className="group flex w-full cursor-pointer items-center gap-2 rounded-lg px-2.5 py-2 text-left hover:bg-white/[0.04]"
             >
               {open ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-slate-500" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-slate-500" />}
               <Boxes className="h-4 w-4 shrink-0 text-cyan-300" />
               <span className="min-w-0 flex-1 truncate font-semibold text-slate-200">{repo.name}</span>
+              <button
+                type="button"
+                title={`删除 ${repo.name} 的索引`}
+                onClick={(e) => { e.stopPropagation(); void removeRepo(repo.name); }}
+                className="rounded p-1 text-slate-600 opacity-0 hover:bg-red-500/10 hover:text-red-300 group-hover:opacity-100"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </button>
               <span className="rounded bg-slate-900 px-1.5 py-0.5 font-mono text-[10px] text-slate-500">{repo.branches.length} br</span>
-            </button>
+            </div>
 
             {open &&
               repo.branches.map((br) => {

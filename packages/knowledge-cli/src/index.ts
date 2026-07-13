@@ -22,11 +22,15 @@ import {
   listTags,
   repoGraph,
   search,
+  resolveSymbolMatches,
+  renderAmbiguousSymbols,
   type GraphMode,
   type KnowledgeStore,
 } from "@penguin/knowledge-core";
-import { indexRepo, writeAgentGuidance, createNote, createIncident, appendNote, writeNoteBody, readNote, listNotes, reindexNotesDir } from "@penguin/knowledge-indexer";
+import { indexRepo, startWatcher, createNote, createIncident, appendNote, writeNoteBody, readNote, listNotes, reindexNotesDir } from "@penguin/knowledge-indexer";
 import { resolveProvider, aiComplete } from "./ai.js";
+import { createIndexRenderer } from "./render-progress.js";
+import { discoverSubRepos, isGitRepo, type RepoCandidate } from "./multi-repo.js";
 
 export interface CliDeps {
   cwd: string;
@@ -49,6 +53,12 @@ export interface CliDeps {
   // writes a machine-parseable line to stderr so the Rust bridge can turn each
   // into a Tauri event; stdout stays clean for the final --json report.
   progressEvent?: (payload: unknown) => void;
+  // Interactive multi-repo picker: called when init/index targets a NON-git
+  // folder that contains git checkouts one level down. Returns the chosen
+  // paths, [] for "none", or null when the user cancelled. Omitted in
+  // non-interactive contexts (tests, app bridge, pipes) — the CLI then
+  // refuses the multi-repo parent instead of guessing.
+  pickRepos?: (candidates: RepoCandidate[]) => Promise<string[] | null>;
 }
 
 const READ_VERBS = new Set([
@@ -87,23 +97,14 @@ function emit(deps: CliDeps, json: boolean, human: string, data: unknown): void 
   deps.out(json ? JSON.stringify(data) : human);
 }
 
-function progressBar(done: number, total: number): string {
-  const width = 24;
-  const frac = total > 0 ? Math.min(1, done / total) : 1;
-  const filled = Math.round(frac * width);
-  const bar = "█".repeat(filled) + "░".repeat(width - filled);
-  return `[${bar}] ${String(Math.round(frac * 100)).padStart(3)}%  ${done}/${total}`;
-}
-
-function truncPath(p: string, max = 44): string {
-  return p.length <= max ? p : "…" + p.slice(-(max - 1));
-}
-
 const HELP = `penguin — Penguin Knowledge CLI
 
-  penguin init [path]           register + first-index a repo
+  penguin init [path]           register + first-index a repo (folder of repos → interactive picker)
   penguin index [path]          one-shot incremental index
   penguin rebuild [path]        full re-index (parser-derived data)
+  penguin watch [path]          long-running auto-index (debounced, stays running until killed)
+  penguin remove <repo> [br]    remove a repo (or one branch) from the index
+  penguin pin <repo> <branch>   toggle pin (pinned branches are never auto-pruned)
   penguin status                repos / branches / staleness
   penguin search <query>        unified search
   penguin node <id|name>        node detail + versions + aliases
@@ -162,38 +163,65 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
   // write verbs
   if (verb === "init" || verb === "index" || verb === "rebuild") {
     const rootPath = pos[0] ?? deps.cwd;
+    // A NON-git folder full of checkouts (~/Projects): indexing it as ONE repo
+    // walks tens of thousands of files with wrong semantics. Offer a picker
+    // (interactive) or refuse with the candidate list (non-interactive).
+    let targets = [rootPath];
+    if (!isGitRepo(rootPath)) {
+      const subs = discoverSubRepos(rootPath);
+      if (subs.length > 0) {
+        if (deps.pickRepos) {
+          const picked = await deps.pickRepos(subs);
+          if (picked == null) return 0; // cancelled — nothing indexed
+          if (picked.length === 0) {
+            deps.err("nothing selected");
+            return 0;
+          }
+          targets = picked;
+        } else {
+          deps.err(
+            `${rootPath} is not a git repo but contains ${subs.length} git repos — pass one explicitly:`,
+          );
+          for (const s of subs) deps.err(`  penguin ${verb} ${s.path}`);
+          return 2;
+        }
+      }
+    }
     const store = deps.openStore();
     try {
       // --progress-events: emit structured progress (for the app/Rust bridge to
-      // parse into Tauri events). Otherwise the human bar on stderr (TTY only).
+      // parse into Tauri events). Otherwise the live stage-tree renderer on
+      // stderr (TTY only — bin.ts gates the sink on isTTY).
       const emitEvents = flags.includes("--progress-events") && !!deps.progressEvent;
-      const progress = !emitEvents && !json ? deps.progress : undefined;
-      const step = (total: number) => Math.max(1, Math.floor(total / 100)); // ~1% cadence
-      const report = await indexRepo({
-        store, rootPath, mode: verb === "rebuild" ? "rebuild" : "incremental",
-        onProgress: emitEvents
-          ? (p) => deps.progressEvent!(p)
-          : progress
-          ? (p) => {
-              if (p.phase === "scan") {
-                progress(`  Scanning files — ${p.total} found\n`);
-                return;
-              }
-              if (p.done === p.total || p.done % step(p.total) === 0) {
-                progress(`\r  Indexing  ${progressBar(p.done, p.total)}  ${truncPath(p.file)}\x1b[K`);
-              }
-            }
-          : undefined,
-      });
-      if (progress) progress("\n");
-      // `init` drops (idempotent) usage guidance into the repo's CLAUDE.md /
-      // AGENTS.md so AI agents query Penguin first. Only on init — index/rebuild
-      // re-run often and shouldn't keep rewriting repo files.
-      const guidance = verb === "init" ? writeAgentGuidance(rootPath).written : [];
-      emit(deps, json,
-        `${verb}: ${report.branchName} — ${report.parsed} parsed, ${report.skipped} skipped, ${report.deleted} deleted, ${report.renamed} renamed, ${report.errors} errors`
-          + (guidance.length ? `\nwrote agent guidance: ${guidance.map((p) => p.replace(/^.*\//, "")).join(", ")}` : ""),
-        { ...report, agentGuidance: guidance });
+      const mode = verb === "rebuild" ? "rebuild" : "incremental";
+      for (const target of targets) {
+        const renderer = !emitEvents && !json && deps.progress
+          ? createIndexRenderer({
+              write: deps.progress,
+              label: target.replace(/\/+$/, "").replace(/^.*\//, "") || target,
+              mode,
+              width: process.stderr.columns,
+            })
+          : undefined;
+        const report = await indexRepo({
+          store, rootPath: target, mode,
+          onProgress: emitEvents
+            ? (p) => deps.progressEvent!(p)
+            : renderer
+            ? (p) => renderer.handle(p)
+            : undefined,
+        });
+        renderer?.finish(report);
+        // Agent guidance (penguin usage tips for AI coding agents) is written
+        // ONLY to the user's global CLAUDE.md/AGENTS.md (the "AI 集成" setup),
+        // never into a project's own repo — that used to create uncommitted
+        // changes in every single indexed repo just from running `init`.
+        if (!renderer) {
+          emit(deps, json,
+            `${verb}: ${report.branchName} — ${report.parsed} parsed, ${report.skipped} skipped, ${report.deleted} deleted, ${report.renamed} renamed, ${report.errors} errors`,
+            report);
+        }
+      }
       return 0;
     } catch (e) {
       const msg = (e as Error).message;
@@ -202,6 +230,49 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     } finally {
       store.close();
     }
+  }
+
+  // watch: long-running incremental auto-index. Debounces file-change bursts
+  // (chokidar, 2s settle) into an incremental re-index per settle — the
+  // Wiki's "自动同步" toggle spawns `penguin watch <path> --progress-events`
+  // and keeps this process alive; it never exits on its own, only on
+  // SIGTERM/SIGINT (the Rust side owns the child's lifecycle).
+  if (verb === "watch") {
+    if (!deps.storeExists()) { deps.err("no knowledge database — run `penguin init` first"); return 3; }
+    const rootPath = pos[0] ?? deps.cwd;
+    const store = deps.openStore();
+    const emitEvents = flags.includes("--progress-events") && !!deps.progressEvent;
+    const handle = startWatcher({
+      store,
+      rootPath,
+      onRun: (report) => {
+        if (emitEvents) deps.progressEvent!({ phase: "watch-run", rootPath, report });
+        else deps.out(`watch: ${report.branchName} — ${report.parsed} parsed, ${report.errors} errors`);
+      },
+    });
+    // Wait for chokidar's actual "ready" state before announcing watch-started
+    // — emitting it right after startWatcher() races the watcher's own async
+    // setup, so a caller that writes a file the instant it sees this event
+    // could have that very first change silently missed.
+    for (let i = 0; i < 200 && !handle.status().watching; i++) {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    if (emitEvents) deps.progressEvent!({ phase: "watch-started", rootPath });
+    return new Promise<number>((resolve) => {
+      let stopping = false;
+      const shutdown = () => {
+        if (stopping) return;
+        stopping = true;
+        process.off("SIGTERM", shutdown);
+        process.off("SIGINT", shutdown);
+        void handle.stop().then(() => {
+          store.close();
+          resolve(0);
+        });
+      };
+      process.on("SIGTERM", shutdown);
+      process.on("SIGINT", shutdown);
+    });
   }
 
   // install: symlink penguin onto PATH (system verb)
@@ -217,6 +288,56 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     }
     deps.out("To install: symlink the built CLI onto your PATH, e.g.\n  ln -sf <…>/packages/knowledge-cli/dist/bin.js ~/.local/bin/penguin");
     return 0;
+  }
+
+  // remove: purge one repo (or a single branch of it). The Wiki delete
+  // buttons and "oops, indexed ~/" recovery both land here.
+  if (verb === "remove" || verb === "pin") {
+    const target = pos[0];
+    if (!target) { deps.err(`usage: penguin ${verb} <repo-name|path> [branch]`); return 2; }
+    if (!deps.storeExists()) { deps.err("no knowledge database"); return 3; }
+    const store = deps.openStore();
+    try {
+      const norm = target.replace(/\/+$/, "");
+      const row = store.db
+        .prepare("SELECT id, name, root_path FROM repos WHERE name = ? OR root_path = ?")
+        .get(norm, norm) as { id: string; name: string; root_path: string } | undefined;
+      if (!row) {
+        deps.err(`no indexed repo matches "${target}" — see \`penguin status\` for names`);
+        return 1;
+      }
+      const branchName = pos[1];
+      if (verb === "pin") {
+        if (!branchName) { deps.err("usage: penguin pin <repo> <branch>"); return 2; }
+        const br = store.getBranch(row.id, branchName);
+        if (!br) { deps.err(`no branch "${branchName}" in ${row.name}`); return 1; }
+        const pinned = store.toggleBranchPinned(br.id);
+        emit(deps, json, `${pinned ? "pinned" : "unpinned"} ${row.name}/${branchName}`, {
+          ok: true, repoId: row.id, branchId: br.id, pinned,
+        });
+        return 0;
+      }
+      if (branchName) {
+        const br = store.getBranch(row.id, branchName);
+        if (!br) { deps.err(`no branch "${branchName}" in ${row.name}`); return 1; }
+        if ((br as { pinned?: number }).pinned) {
+          deps.err(`${row.name}/${branchName} is pinned — unpin first (penguin pin ${row.name} ${branchName})`);
+          return 1;
+        }
+        store.removeBranch(br.id);
+        emit(deps, json, `removed branch ${branchName} of ${row.name} from the index`, {
+          ok: true, repoId: row.id, branchId: br.id, name: row.name, branch: branchName,
+        });
+        return 0;
+      }
+      store.removeRepo(row.id);
+      emit(deps, json, `removed ${row.name} (${row.root_path}) from the index`, {
+        ok: true, repoId: row.id, name: row.name, rootPath: row.root_path,
+      });
+      return 0;
+    } finally {
+      store.close();
+    }
   }
 
   // file-backed knowledge notes (C9): new/append/list/reindex under notesDir.
@@ -315,7 +436,12 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     const store = deps.openStore();
     try {
       const pack = buildContextPack(store, target);
-      if (!pack.focus) { deps.err(`no context for "${target}"`); return 1; }
+      if (!pack.focus) {
+        if (pack.ambiguous) deps.err(renderAmbiguousSymbols(target, pack.ambiguous));
+        else if (pack.assemblyError) deps.err(`"${target}" resolved to a symbol, but building its context failed: ${pack.assemblyError}`);
+        else deps.err(`no context for "${target}" — not indexed, or the name doesn't match any symbol/note`);
+        return 1;
+      }
       const cfg = resolveProvider({ provider: flagVal("provider"), model: flagVal("model"), apiKey: flagVal("key") });
       const md = renderContextPackMarkdown(pack);
       const answer = await aiComplete(cfg, [
@@ -396,27 +522,46 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
       switch (verb) {
         case "search": {
           const hits = search(store, pos.join(" "), { includeSensitive: false });
-          emit(deps, json, hits.map((h) => `${h.nodeType}\t${h.title}`).join("\n") || "(no results)", hits);
+          const table = hits
+            .map((h) => `${h.nodeType}\t${h.identityKey}\t${h.filePath ?? "-"}\t${h.branch ?? "-"}\t${h.rank ?? "-"}`)
+            .join("\n");
+          emit(deps, json, table || "(no results)", hits);
           return 0;
         }
         case "node": {
-          const detail = getNodeDetail(store, pos[0] ?? "");
-          if (!detail) { deps.err("node not found"); return 1; }
+          const target = pos[0] ?? "";
+          const detail = getNodeDetail(store, target);
+          if (!detail) {
+            const resolution = resolveSymbolMatches(store, target);
+            if (resolution.kind === "ambiguous") {
+              deps.err(renderAmbiguousSymbols(target, resolution.candidates));
+              return 1;
+            }
+            deps.err(`no node found for "${target}" — not indexed, or the name doesn't match any symbol/note title or qualified name`);
+            return 1;
+          }
           emit(deps, json, `${detail.node.nodeType} ${detail.node.title}\nversions: ${detail.versions.length}\naliases: ${detail.aliases.length}`, detail);
           return 0;
         }
         case "context": {
           // AI Context Pack: --json → structured; default → Markdown for an agent.
           const pack = buildContextPack(store, pos.join(" "));
-          if (!pack.focus) { deps.err(`no context for "${pack.target}"`); return 1; }
+          if (!pack.focus) {
+            emit(deps, json, renderContextPackMarkdown(pack), pack);
+            return 1;
+          }
           emit(deps, json, renderContextPackMarkdown(pack), pack);
           return 0;
         }
         case "flow": {
           // Flow Explorer: linear execution chain from an endpoint/symbol.
           const flow = buildFlow(store, pos.join(" "));
-          if (!flow.root) { deps.err(`no flow for "${flow.target}"`); return 1; }
+          if (!flow.root) {
+            emit(deps, json, renderFlowMarkdown(flow), flow);
+            return 1;
+          }
           emit(deps, json, renderFlowMarkdown(flow), flow);
+          if (flow.diagnostic) return 1; // resolved, but a dead end — signal via exit code, still print the (partial) flow
           return 0;
         }
         case "affected": {

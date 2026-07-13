@@ -14,7 +14,10 @@ export const KNOWLEDGE_TOOL_DEFS = [
       properties: {
         query: { type: "string" },
         type: { type: "array", items: { type: "string" } },
-        repo: { type: "string" },
+        repo: {
+          type: "string",
+          description: "Repo's display name (as shown by index_status, e.g. \"fpms\" — case-insensitive) or its internal repo id. Unknown name → zero results, not an error.",
+        },
         include_sensitive: { type: "boolean" },
         limit: { type: "number" },
       },

@@ -89,6 +89,26 @@ test("reopening an older DB advances the stored schema_version", () => {
   db.close();
 });
 
+test("steady-state open is read-only: succeeds while another connection holds the write lock", () => {
+  const path = tempDbPath();
+  openDatabase(path).close(); // create + migrate to current schema
+  // A long-running writer (e.g. a multi-minute rebuild transaction) holds THE
+  // write lock. Opening for a read command (status/search) must not need a
+  // single write in steady state — otherwise every CLI open dies with
+  // SQLITE_BUSY after busy_timeout, which is exactly the reported failure.
+  const writer = openDatabase(path);
+  writer.exec("BEGIN IMMEDIATE");
+  let db;
+  try {
+    db = openDatabase(path);
+    assert.ok(db.prepare("SELECT 1 FROM ledger_state WHERE id='main'").get(), "opened and readable");
+  } finally {
+    writer.exec("ROLLBACK");
+    writer.close();
+  }
+  db.close();
+});
+
 test("opening a DB from a newer build fails loud instead of silently downgrading", () => {
   const path = tempDbPath();
   const first = openDatabase(path);

@@ -112,6 +112,7 @@ test("Tauri release resources include the MCP ESM package marker", async () => {
     "../.penguin.config.json",
     "../packages/mcp/package.json",
     "../packages/mcp/dist/index.js",
+    "../packages/mcp/bundle/**/*",
   ]) {
     assert.ok(
       tauriConfig.bundle.resources.includes(marker),

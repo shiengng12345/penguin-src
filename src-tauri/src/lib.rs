@@ -135,6 +135,7 @@ pub fn run() {
     }
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
@@ -142,6 +143,7 @@ pub fn run() {
         .manage(auth_popover::AuthPopoverState::default())
         .manage(redis::RedisState::default())
         .manage(redis::RedisRegistry::default())
+        .manage(knowledge::WatchRegistry::default())
         .setup(|app| {
             packages::start_package_watcher(app.handle().clone());
             // Warm the knowledge CLI (node resolution + cold-start + DB) in the
@@ -157,6 +159,11 @@ pub fn run() {
             knowledge::knowledge_query,
             knowledge::knowledge_reindex,
             knowledge::knowledge_db_status,
+            knowledge::knowledge_cli_status,
+            knowledge::knowledge_cli_setup,
+            knowledge::knowledge_agent_guidance_setup,
+            knowledge::knowledge_watch_toggle,
+            knowledge::knowledge_watch_status,
             packages::ensure_packages_dir,
             packages::get_packages_dir,
             packages::list_installed_packages,
@@ -288,6 +295,15 @@ pub fn run() {
             auth_popover::auth_save_standalone,
             auth_popover::auth_capture_qr,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // An orphaned `penguin watch` child would otherwise keep running
+            // (and writing to the DB) after the app that started it quits.
+            if let tauri::RunEvent::Exit = event {
+                app_handle
+                    .state::<knowledge::WatchRegistry>()
+                    .stop_all();
+            }
+        });
 }

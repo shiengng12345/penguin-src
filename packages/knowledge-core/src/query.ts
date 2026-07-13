@@ -10,20 +10,97 @@ export interface SearchResultRow {
   nodeType: string;
   title: string;
   snippet: string | null;
+  identityKey: string;
+  filePath: string | null;
+  branch: string | null;
+  rank: number | null;
 }
 
 function resolveNodeId(store: KnowledgeStore, idOrKey: string): string | null {
-  if (store.getNode(idOrKey)) return idOrKey;
-  const r = store.resolveIdentity(idOrKey);
-  if (r) return r.nodeId;
-  // friendly-name fallback: a unique node by title or qualified-name suffix
-  // (so CLI/MCP callers can pass "login" or "Svc.login", not just full keys).
+  const r = resolveSymbolMatches(store, idOrKey);
+  return r.kind === "unique" ? r.nodeId : null;
+}
+
+// A candidate when a name resolves to more than one symbol — enough to both
+// display ("which one?") and act on directly (nodeId feeds straight back into
+// context/flow, no re-typing the ambiguous name).
+export interface SymbolCandidate {
+  nodeId: string;
+  nodeType: string;
+  identityKey: string;
+  title: string;
+  filePath: string | null;
+  branch: string | null;
+  startLine: number | null;
+}
+
+export type SymbolResolution =
+  | { kind: "unique"; nodeId: string }
+  | { kind: "ambiguous"; candidates: SymbolCandidate[] }
+  | { kind: "none" };
+
+// Cap on ambiguous candidates returned/rendered — a name shared by hundreds of
+// symbols (generic getters etc.) would otherwise dump an unusable wall of text;
+// zero/unique/truly-few-candidates are the cases this feature is for.
+const MAX_AMBIGUOUS_CANDIDATES = 20;
+
+function symbolCandidateOf(store: KnowledgeStore, nodeId: string): SymbolCandidate {
+  const n = store.getNode(nodeId)!;
+  const v = store.db
+    .prepare(
+      `SELECT file_path AS filePath, branch_id AS branchId, start_line AS startLine
+       FROM symbol_versions WHERE node_id=? ORDER BY (status='fresh') DESC LIMIT 1`,
+    )
+    .get(nodeId) as { filePath: string | null; branchId: string | null; startLine: number | null } | undefined;
+  const branch = v?.branchId
+    ? ((store.db.prepare("SELECT name FROM branches WHERE id=?").get(v.branchId) as { name: string } | undefined)?.name ?? v.branchId)
+    : null;
+  return {
+    nodeId, nodeType: n.node_type, identityKey: n.identity_key, title: n.title,
+    filePath: v?.filePath ?? null, branch, startLine: v?.startLine ?? null,
+  };
+}
+
+// Resolve a user-typed name/id to EXACTLY one of three outcomes — ambiguity
+// must never collapse into "not found" (that's what silently broke `context`/
+// `flow` for any name shared by 2+ symbols, e.g. several classes each with a
+// same-named method). `symbol:<node-id>` is an explicit escape hatch a
+// disambiguation prompt can suggest back to the caller.
+export function resolveSymbolMatches(store: KnowledgeStore, idOrKey: string): SymbolResolution {
+  const raw = idOrKey.startsWith("symbol:") ? idOrKey.slice("symbol:".length) : idOrKey;
+  if (store.getNode(raw)) return { kind: "unique", nodeId: raw };
+  const r = store.resolveIdentity(raw);
+  if (r) return { kind: "unique", nodeId: r.nodeId };
+  // friendly-name fallback: title match, or qualified-name suffix (so CLI/MCP
+  // callers can pass "login" or "Svc.login", not just full identity keys).
   const rows = store.db
     .prepare(
-      "SELECT id FROM nodes WHERE title = ? OR identity_key LIKE ? OR identity_key LIKE ? LIMIT 2",
+      `SELECT id FROM nodes WHERE title = ? OR identity_key LIKE ? OR identity_key LIKE ?
+       LIMIT ${MAX_AMBIGUOUS_CANDIDATES + 1}`,
     )
-    .all(idOrKey, `%::${idOrKey}`, `%.${idOrKey}`) as { id: string }[];
-  return rows.length === 1 ? rows[0].id : null;
+    .all(raw, `%::${raw}`, `%.${raw}`) as { id: string }[];
+  if (rows.length === 0) return { kind: "none" };
+  if (rows.length === 1) return { kind: "unique", nodeId: rows[0].id };
+  return { kind: "ambiguous", candidates: rows.slice(0, MAX_AMBIGUOUS_CANDIDATES).map((row) => symbolCandidateOf(store, row.id)) };
+}
+
+// Shared renderer for an ambiguous SymbolResolution — used by `context`/`node`
+// CLI verbs so the message shape (candidates + concrete next commands) stays
+// consistent wherever a name resolves to more than one symbol.
+export function renderAmbiguousSymbols(
+  target: string,
+  candidates: SymbolCandidate[],
+  verb: "context" | "flow" = "context",
+): string {
+  const lines = [`Multiple symbols found for "${target}":`, ""];
+  candidates.forEach((c, i) => {
+    const loc = c.filePath ? `${c.filePath}${c.startLine ? `:${c.startLine}` : ""}` : "(no file)";
+    lines.push(`${i + 1}. ${c.nodeType} ${c.identityKey.includes("::") ? c.identityKey.slice(c.identityKey.indexOf("::") + 2) : c.title}`);
+    lines.push(`   ${loc}${c.branch ? `  [${c.branch}]` : ""}  node:${c.nodeId}`);
+  });
+  lines.push("", "Next step: pick one and re-run with its node id, e.g.:");
+  lines.push(`  penguin ${verb} symbol:${candidates[0].nodeId}`);
+  return lines.join("\n");
 }
 
 // knowledge_search: title→FTS unified retrieval with scope filters (§8.1).
@@ -41,7 +118,7 @@ export function search(
   const repoScope: Set<string> | null = filters?.workspace
     ? new Set(store.workspaceRepoIds(filters.workspace))
     : filters?.repo
-      ? new Set([filters.repo])
+      ? new Set(store.resolveRepoIds(filters.repo))
       : null;
   if (!repoScope) return hits;
   return hits.filter((h) => {
@@ -305,7 +382,7 @@ export function compareBranches(
 export interface IndexStatus {
   repos: Array<{
     repoId: string; name: string; rootPath: string;
-    branches: Array<{ branchId: string; name: string; status: string; lastIndexedAt: string | null; staleSymbols: number }>;
+    branches: Array<{ branchId: string; name: string; status: string; lastIndexedAt: string | null; staleSymbols: number; pinned: boolean }>;
   }>;
 }
 
@@ -433,7 +510,7 @@ export function repoGraph(
   store: KnowledgeStore,
   repoId: string,
   branchId: string,
-  options?: { limit?: number },
+  options?: { limit?: number; edgeLimit?: number },
 ): GraphView {
   const limit = options?.limit ?? 150;
   const top = store.db
@@ -450,7 +527,7 @@ export function repoGraph(
     .all(branchId, branchId, repoId, limit) as { id: string }[];
   const ids = top.map((r) => r.id);
   if (ids.length === 0) return { focus: null, nodes: [], edges: [] };
-  return { focus: null, ...collectGraph(store, ids, branchId) };
+  return { focus: null, ...collectGraph(store, ids, branchId, options?.edgeLimit) };
 }
 
 // Build {nodes, edges} for a fixed node-id set — edges only where BOTH ends are
@@ -480,6 +557,39 @@ function collectGraph(
        LIMIT ?`,
     )
     .all(...params) as GraphView["edges"];
+  // Backfill false isolates: the priority order above decides which edge TYPES
+  // survive the cap, but within the losing rank the cut is arbitrary — a node
+  // can lose every one of its edges and render as if it had no relationships
+  // at all (which reads as an indexing error, not a display cap). Any in-set
+  // node with zero selected edges gets its top few in-set edges back; the
+  // per-node bound keeps the overflow small.
+  const touched = new Set<string>();
+  for (const e of edges) {
+    touched.add(e.src);
+    if (e.dst) touched.add(e.dst);
+  }
+  const isolated = ids.filter((id) => !touched.has(id));
+  if (isolated.length > 0) {
+    const seen = new Set(edges.map((e) => `${e.src} ${e.dst} ${e.edgeType}`));
+    const perNode = store.db.prepare(
+      `SELECT src, dst, edge_type AS edgeType, source_type AS sourceType FROM edges
+       WHERE status='active' AND dst IS NOT NULL ${branchClause}
+         AND (src = ? OR dst = ?) AND src IN (${ph}) AND dst IN (${ph})
+       ORDER BY CASE edge_type
+         WHEN 'invokes' THEN 0 WHEN 'handles' THEN 1 WHEN 'calls' THEN 2
+         WHEN 'references' THEN 3 WHEN 'tests' THEN 4 WHEN 'imports' THEN 5 ELSE 6 END,
+         src, dst LIMIT 5`,
+    );
+    for (const id of isolated) {
+      const extraParams = branchId ? [branchId, id, id, ...ids, ...ids] : [id, id, ...ids, ...ids];
+      for (const e of perNode.all(...extraParams) as GraphView["edges"]) {
+        const key = `${e.src} ${e.dst} ${e.edgeType}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        edges.push(e);
+      }
+    }
+  }
   return { nodes, edges };
 }
 
@@ -488,12 +598,12 @@ export function indexStatus(store: KnowledgeStore): IndexStatus {
   const repos = store.db.prepare("SELECT id, name, root_path AS rootPath FROM repos ORDER BY name").all() as Array<{ id: string; name: string; rootPath: string }>;
   return {
     repos: repos.map((repo) => {
-      const branches = store.db.prepare("SELECT id, name, status, last_indexed_at AS lastIndexedAt FROM branches WHERE repo_id=? ORDER BY name").all(repo.id) as Array<{ id: string; name: string; status: string; lastIndexedAt: string | null }>;
+      const branches = store.db.prepare("SELECT id, name, status, last_indexed_at AS lastIndexedAt, pinned FROM branches WHERE repo_id=? ORDER BY name").all(repo.id) as Array<{ id: string; name: string; status: string; lastIndexedAt: string | null; pinned: number }>;
       return {
         repoId: repo.id, name: repo.name, rootPath: repo.rootPath,
         branches: branches.map((b) => {
           const stale = store.db.prepare("SELECT COUNT(*) AS n FROM symbol_versions WHERE branch_id=? AND status='stale'").get(b.id) as { n: number };
-          return { branchId: b.id, name: b.name, status: b.status, lastIndexedAt: b.lastIndexedAt, staleSymbols: stale.n };
+          return { branchId: b.id, name: b.name, status: b.status, lastIndexedAt: b.lastIndexedAt, staleSymbols: stale.n, pinned: !!b.pinned };
         }),
       };
     }),
@@ -539,6 +649,16 @@ export interface ContextPack {
   notes: ContextBrief[]; // notes linked to the focus
   importers: ContextBrief[]; // files importing the focus's file
   signals: string[]; // risk/attention heuristics
+  // Populated ONLY when `target` matched 2+ symbols and no single focus could
+  // be chosen; null (not []) otherwise, so callers can tell "ambiguous" apart
+  // from "zero matches" — both used to look identical (silent empty focus).
+  ambiguous: SymbolCandidate[] | null;
+  // Populated ONLY when `target` resolved to exactly one symbol but assembling
+  // its context pack then threw (e.g. a corrupt/incomplete DB row) — a FOURTH
+  // distinct outcome from zero/one/ambiguous: the symbol demonstrably exists,
+  // so reporting this as "no context" would be misleading (looks like a typo
+  // when it's actually an internal failure worth investigating/reporting).
+  assemblyError: string | null;
 }
 
 function briefsFrom(store: KnowledgeStore, rows: Array<{ id: string }>): ContextBrief[] {
@@ -558,10 +678,31 @@ export function buildContextPack(
     target, focus: null, callers: [], calls: [], remoteCalls: [], invokedBy: [],
     referencedBy: [], usesTypes: [],
     routes: [], tests: [], errors: [], envs: [], notes: [], importers: [], signals: [],
+    ambiguous: null, assemblyError: null,
   };
-  const focusId = resolveNodeId(store, target);
-  if (!focusId) return empty;
+  const resolution = resolveSymbolMatches(store, target);
+  if (resolution.kind === "none") return empty;
+  if (resolution.kind === "ambiguous") return { ...empty, ambiguous: resolution.candidates };
+  const focusId = resolution.nodeId;
 
+  // The symbol DID resolve uniquely at this point — any throw from here on is
+  // an internal assembly failure (corrupt/incomplete row, disk read fault,
+  // etc.), NOT "not found". Surfacing it as assemblyError keeps it from being
+  // silently indistinguishable from a genuine zero-match.
+  try {
+    return buildContextPackBody(store, target, focusId, limit, options);
+  } catch (e) {
+    return { ...empty, assemblyError: (e as Error).message };
+  }
+}
+
+function buildContextPackBody(
+  store: KnowledgeStore,
+  target: string,
+  focusId: string,
+  limit: number,
+  options: { branchId?: string; limit?: number } | undefined,
+): ContextPack {
   const detail = getNodeDetail(store, focusId);
   const active = "status='active'";
   // Branch-scope to the focus's live branch (or an explicit one) so a repo indexed
@@ -674,6 +815,8 @@ export function buildContextPack(
     notes,
     importers,
     signals,
+    ambiguous: null,
+    assemblyError: null,
   };
 }
 
@@ -687,7 +830,13 @@ export function renderContextPackMarkdown(pack: ContextPack): string {
     L.push("");
   };
   if (!pack.focus) {
-    return `# Context Pack: ${pack.target}\n\n_No matching symbol/note found._\n`;
+    if (pack.ambiguous) {
+      return `# Context Pack: ${pack.target}\n\n${renderAmbiguousSymbols(pack.target, pack.ambiguous)}\n`;
+    }
+    if (pack.assemblyError) {
+      return `# Context Pack: ${pack.target}\n\n_"${pack.target}" resolved to a symbol, but building its context failed: ${pack.assemblyError}_\n`;
+    }
+    return `# Context Pack: ${pack.target}\n\n_No matching symbol/note found for "${pack.target}". Not indexed, or the name doesn't match any symbol/note title or qualified name._\n`;
   }
   const f = pack.focus;
   L.push(`# Context Pack: ${f.title}`);
@@ -750,21 +899,136 @@ export interface FlowStep {
   nodeType: string;
   via: string; // edge type from its parent ("root" for the entry)
 }
+export type FlowDiagnosticReason =
+  | "not_indexed" // no gRPC endpoint or symbol/note matches the target at all
+  | "ambiguous" // 2+ candidates (gRPC services sharing a method, or same-named symbols)
+  | "endpoint_no_handler" // target resolved to a gRPC endpoint with no `handles` edge yet
+  | "no_outgoing_edges"; // target resolved uniquely but is a dead end (leaf, or callees unindexed)
+export interface FlowDiagnostic {
+  reason: FlowDiagnosticReason;
+  message: string;
+  suggestions?: string[]; // "did you mean" — e.g. `penguin flow <nodeId>` for each candidate
+}
 export interface FlowResult {
   target: string;
   root: FlowStep | null;
   steps: FlowStep[];
+  diagnostic?: FlowDiagnostic;
+  ambiguous?: SymbolCandidate[]; // populated only when diagnostic.reason === "ambiguous"
 }
 
 const DOWNSTREAM = ["calls", "invokes", "references", "reads", "writes", "throws", "uses", "handles"];
+
+// gRPC route-string resolution for `flow`/`context` targets. NestJS
+// `@GrpcMethod('Service','Method')` handlers are indexed as a single GLOBAL
+// endpoint node keyed `grpc::<service>.<method-lowercased>` (see
+// grpcEndpointKey in knowledge-indexer); callers refer to that endpoint by any
+// of several conventional shapes, so a route string must be normalized to
+// that key before a plain node/identity lookup has a chance of finding it.
+export type GrpcResolution =
+  | { kind: "unique"; nodeId: string }
+  | { kind: "ambiguous"; candidates: SymbolCandidate[] }
+  | { kind: "not_grpc" } // doesn't look like any gRPC route shape — try plain symbol resolution
+  | { kind: "not_found"; attemptedKey: string }; // looked like a route, but no such endpoint is indexed
+
+export function resolveGrpcEndpoint(store: KnowledgeStore, input: string): GrpcResolution {
+  const raw = input.trim();
+  const lookup = (service: string, method: string): GrpcResolution => {
+    if (!service || !method) return { kind: "not_grpc" };
+    const key = `grpc::${service}.${method.toLowerCase()}`;
+    const id = store.findNodeIdByIdentity(key);
+    return id ? { kind: "unique", nodeId: id } : { kind: "not_found", attemptedKey: key };
+  };
+
+  // 1. literal identity key: grpc::Service.method
+  if (raw.startsWith("grpc::")) {
+    const id = store.findNodeIdByIdentity(raw);
+    return id ? { kind: "unique", nodeId: id } : { kind: "not_found", attemptedKey: raw };
+  }
+
+  // 2. slash-form route strings: /pkg.Service/Method or /pkg/pkg.Service/Method.
+  // The service segment is always the second-to-last path component (whatever
+  // package-path prefix precedes it), and the service name itself is the
+  // substring after the LAST '.' in that segment (proto package qualifiers
+  // are dot-separated, e.g. "pkg.sub.Service").
+  if (raw.includes("/")) {
+    const parts = raw.split("/").filter(Boolean);
+    if (parts.length < 2) return { kind: "not_grpc" };
+    const method = parts[parts.length - 1];
+    const serviceSeg = parts[parts.length - 2];
+    const service = serviceSeg.includes(".") ? serviceSeg.slice(serviceSeg.lastIndexOf(".") + 1) : serviceSeg;
+    return lookup(service, method);
+  }
+
+  // 3. dot-form: Service.Method (also matches a qualified symbol name like
+  // "Ctrl.create" — if no gRPC endpoint exists for it, the caller falls
+  // through to plain symbol resolution, where the exact-title fallback tier
+  // still finds it).
+  if (raw.includes(".")) {
+    const idx = raw.lastIndexOf(".");
+    return lookup(raw.slice(0, idx), raw.slice(idx + 1));
+  }
+
+  // 4. bare method name — ambiguous whenever 2+ distinct services expose a
+  // method with this (lowercased) name; this is the exact shape of the
+  // originally reported bug (FrontendPlayerService vs PlayerService both
+  // expose getPlayerProfileByJwt).
+  const services = store.findEndpointServicesByMethod(raw.toLowerCase());
+  if (services.length === 0) return { kind: "not_grpc" };
+  if (services.length === 1) return lookup(services[0], raw);
+  const candidates = services
+    .map((svc) => store.findNodeIdByIdentity(`grpc::${svc}.${raw.toLowerCase()}`))
+    .filter((id): id is string => id != null)
+    .map((id) => symbolCandidateOf(store, id));
+  return { kind: "ambiguous", candidates };
+}
 
 export function buildFlow(
   store: KnowledgeStore,
   target: string,
   options?: { branchId?: string; depth?: number; limit?: number },
 ): FlowResult {
-  const focus = resolveNodeId(store, target);
-  if (!focus) return { target, root: null, steps: [] };
+  const grpc = resolveGrpcEndpoint(store, target);
+  let focus: string | null = null;
+  let attemptedKey: string | null = null;
+  if (grpc.kind === "unique") {
+    focus = grpc.nodeId;
+  } else if (grpc.kind === "ambiguous") {
+    return {
+      target, root: null, steps: [], ambiguous: grpc.candidates,
+      diagnostic: {
+        reason: "ambiguous",
+        message: `"${target}" matches ${grpc.candidates.length} gRPC endpoints across different services — specify one.`,
+        suggestions: grpc.candidates.map((c) => `penguin flow symbol:${c.nodeId}`),
+      },
+    };
+  } else {
+    if (grpc.kind === "not_found") attemptedKey = grpc.attemptedKey;
+    const sym = resolveSymbolMatches(store, target);
+    if (sym.kind === "unique") {
+      focus = sym.nodeId;
+    } else if (sym.kind === "ambiguous") {
+      return {
+        target, root: null, steps: [], ambiguous: sym.candidates,
+        diagnostic: {
+          reason: "ambiguous",
+          message: `"${target}" matches ${sym.candidates.length} symbols — specify one.`,
+          suggestions: sym.candidates.map((c) => `penguin flow symbol:${c.nodeId}`),
+        },
+      };
+    }
+  }
+  if (!focus) {
+    return {
+      target, root: null, steps: [],
+      diagnostic: {
+        reason: "not_indexed",
+        message: attemptedKey
+          ? `No symbol found for "${target}", and no gRPC endpoint "${attemptedKey}" is indexed. Check the service/method spelling, or that the provider repo has been indexed.`
+          : `"${target}" is not indexed — no symbol, note, or gRPC endpoint matches this name.`,
+      },
+    };
+  }
   const depthCap = options?.depth ?? 5;
   const limit = options?.limit ?? 60;
   const branchId = options?.branchId ?? liveBranchOf(store, focus);
@@ -799,6 +1063,19 @@ export function buildFlow(
     }
   };
   visit(focus, 0);
+  if (steps.length === 1) {
+    const node = store.getNode(focus);
+    const isEndpoint = node?.node_type === "endpoint";
+    return {
+      target, root, steps,
+      diagnostic: {
+        reason: isEndpoint ? "endpoint_no_handler" : "no_outgoing_edges",
+        message: isEndpoint
+          ? `Endpoint "${root.title}" is indexed but has no \`handles\` edge to a handler yet — the provider service may not be indexed, or its @GrpcMethod handler wasn't recognized.`
+          : `"${root.title}" is indexed but has no outgoing calls/references — it may be a terminal/leaf symbol, or its callees aren't indexed.`,
+      },
+    };
+  }
   return { target, root, steps };
 }
 
@@ -808,7 +1085,12 @@ function nodeBriefStep(store: KnowledgeStore, id: string) {
 }
 
 export function renderFlowMarkdown(flow: FlowResult): string {
-  if (!flow.root) return `# Flow: ${flow.target}\n\n_No matching entry point/symbol._\n`;
+  if (!flow.root) {
+    const L = [`# Flow: ${flow.target}`, ""];
+    if (flow.ambiguous) L.push(renderAmbiguousSymbols(flow.target, flow.ambiguous, "flow"));
+    else L.push(flow.diagnostic?.message ?? "_No matching entry point/symbol._");
+    return L.join("\n") + "\n";
+  }
   const L: string[] = [`# Flow: ${flow.root.title}`, ""];
   for (const s of flow.steps) {
     const indent = "  ".repeat(s.depth);
@@ -816,6 +1098,7 @@ export function renderFlowMarkdown(flow: FlowResult): string {
     const tag = s.nodeType !== "symbol" ? ` _(${s.nodeType})_` : "";
     L.push(`${indent}${s.depth === 0 ? "" : "↳ "}${arrow}\`${s.title}\`${tag}`);
   }
+  if (flow.diagnostic) L.push("", `⚠ ${flow.diagnostic.message}`);
   return L.join("\n");
 }
 

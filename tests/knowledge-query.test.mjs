@@ -44,6 +44,36 @@ test("search finds a symbol by FTS", () => {
   store.close();
 });
 
+test("search's repo filter accepts the repo's display NAME, not just its internal id", () => {
+  // Real bug: an MCP caller has no way to know the internal repo_id (a UUID)
+  // without first calling index_status — passing the human-readable name
+  // shown everywhere else in the UI/CLI (e.g. "fpms") silently filtered
+  // every result away instead of scoping to that repo.
+  const { store, repoId, login } = seed();
+  const otherRepoId = store.registerRepo({ name: "auth", rootPath: "/work/auth" });
+  const otherLogin = store.upsertNode({ nodeType: "symbol", identityKey: `${otherRepoId}::login`, title: "login", repoId: otherRepoId });
+  store.indexSymbolText({ nodeId: otherLogin, name: "login", signature: null });
+
+  // unscoped: both repos' "login" come back
+  const unscoped = search(store, "login");
+  assert.ok(unscoped.some((h) => h.nodeId === login));
+  assert.ok(unscoped.some((h) => h.nodeId === otherLogin));
+
+  // by internal id — already worked, must keep working
+  const byId = search(store, "login", { repo: repoId });
+  assert.deepEqual(byId.map((h) => h.nodeId), [login]);
+
+  // by display name — this is the fix; case-insensitive too
+  const byName = search(store, "login", { repo: "fpms" });
+  assert.deepEqual(byName.map((h) => h.nodeId), [login]);
+  const byNameCasedDifferently = search(store, "login", { repo: "FPMS" });
+  assert.deepEqual(byNameCasedDifferently.map((h) => h.nodeId), [login]);
+
+  // a name matching no repo at all is a real miss — stays empty, not an error
+  assert.deepEqual(search(store, "login", { repo: "nonexistent-repo" }), []);
+  store.close();
+});
+
 test("getNodeDetail returns node + versions + aliases", () => {
   const { store, login } = seed();
   const d = getNodeDetail(store, login);
