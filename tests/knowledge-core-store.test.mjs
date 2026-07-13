@@ -58,6 +58,59 @@ test("upsertNode is idempotent on (node_type, identity_key)", () => {
   store.close();
 });
 
+test("upsertNode: a later write with a real repoId fixes an earlier null-owner placeholder", () => {
+  // Real bug: a CONSUMING repo indexed first creates a package placeholder
+  // node with repoId=null (it doesn't know who provides that package). The
+  // repo that actually PUBLISHES it is indexed later and re-upserts the same
+  // identity_key with its own repoId — that write must win, or the package
+  // node stays permanently unowned (repo_id null forever) and shows as a
+  // disconnected node in the service map no matter how many times the real
+  // provider gets re-indexed.
+  const { store } = openTemp();
+  const id = store.upsertNode({
+    nodeType: "service", identityKey: "npm-package::@snsoft/auth-grpc-web", repoId: null, title: "@snsoft/auth-grpc-web",
+  });
+  assert.equal(store.getNode(id).repo_id, null);
+  const same = store.upsertNode({
+    nodeType: "service", identityKey: "npm-package::@snsoft/auth-grpc-web", repoId: "repo_flyover", title: "@snsoft/auth-grpc-web",
+  });
+  assert.equal(same, id, "same node, not a duplicate");
+  assert.equal(store.getNode(id).repo_id, "repo_flyover", "the real owner's write fills in repo_id");
+  store.close();
+});
+
+test("upsertNode: a null-repoId write (dependency reference) never clobbers an already-known owner", () => {
+  const { store } = openTemp();
+  const id = store.upsertNode({
+    nodeType: "service", identityKey: "npm-package::@snsoft/auth-grpc-web", repoId: "repo_flyover", title: "@snsoft/auth-grpc-web",
+  });
+  store.upsertNode({
+    nodeType: "service", identityKey: "npm-package::@snsoft/auth-grpc-web", repoId: null, title: "@snsoft/auth-grpc-web",
+  });
+  assert.equal(store.getNode(id).repo_id, "repo_flyover", "a later dependency-only reference must not null out the known owner");
+  store.close();
+});
+
+test("upsertNode: once a REAL owner is set, a later write from a DIFFERENT real repoId must not steal ownership", () => {
+  // Real bug found in independent codex + deepcode review: the CASE clause
+  // only guarded against null, so two non-null repoIds racing for the same
+  // identity_key silently let the LAST writer win ("last non-null wins"),
+  // contradicting the "first non-null wins, never downgrade" comment. If two
+  // repos both index something that maps to the same shared npm-package
+  // identity_key, whichever re-indexes last would incorrectly steal
+  // ownership of a node that a different real repo already legitimately
+  // owns.
+  const { store } = openTemp();
+  const id = store.upsertNode({
+    nodeType: "service", identityKey: "npm-package::@snsoft/auth-grpc-web", repoId: "repo_flyover", title: "@snsoft/auth-grpc-web",
+  });
+  store.upsertNode({
+    nodeType: "service", identityKey: "npm-package::@snsoft/auth-grpc-web", repoId: "repo_impostor", title: "@snsoft/auth-grpc-web",
+  });
+  assert.equal(store.getNode(id).repo_id, "repo_flyover", "the first real owner must stay pinned; a later different real repoId must not steal ownership");
+  store.close();
+});
+
 test("replaceFileEdges rejects non-parser edges (§2.2 iron rule)", () => {
   const { store } = openTemp();
   const a = store.upsertNode({ nodeType: "symbol", identityKey: "r:a", title: "a" });

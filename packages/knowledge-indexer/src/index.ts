@@ -19,3 +19,4 @@ export { walkRepoFiles, isLikelyMinified, type WalkedFile } from "./walk.js";
 export { indexGitObjects, type GitGraphResult } from "./gitgraph.js";
 export { indexRepo, reconcileOnStartup, IndexTaskLock, type IndexReport, type IndexProgressEvent, type IndexStageId } from "./pipeline.js";
 export { startWatcher, type WatcherHandle, type WatcherStatus } from "./watcher.js";
+export { detectPackages, flyoverPackageNames, buildPackageRegistry, type PackageInfo, type PackageRegistry } from "./package-detect.js";

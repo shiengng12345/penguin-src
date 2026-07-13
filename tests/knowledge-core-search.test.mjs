@@ -67,6 +67,22 @@ test("type filter narrows results", () => {
   store.close();
 });
 
+test("searchText: multi-word queries AND-match individual terms (any order), not a strict adjacent phrase", () => {
+  // Real bug: the whole query string was wrapped in ONE pair of quotes, which
+  // FTS5 treats as a required contiguous PHRASE (exact word order, adjacent).
+  // Any realistic multi-word query — including a caller just listing several
+  // relevant terms, or the words appearing in a different order than an exact
+  // memorized phrase — returned zero results even though every term is
+  // genuinely present in the document. The note body is "providerId 2043
+  // returns empty gameURL" — "gameURL" comes AFTER "providerId"; a reversed
+  // 2-word query must still find it.
+  const store = openTemp();
+  const { note } = seed(store);
+  const hits = store.searchText("gameURL providerId");
+  assert.ok(hits.map((h) => h.nodeId).includes(note), "words present anywhere in the doc, any order, must match");
+  store.close();
+});
+
 test("re-indexing a note replaces its FTS row (no duplicates)", () => {
   const store = openTemp();
   const { note } = seed(store);

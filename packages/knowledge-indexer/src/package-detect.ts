@@ -79,16 +79,28 @@ export function detectPackages(
   return { name: pkgName, repoId, dependencies: deps, subPackages: subs.length > 0 ? subs : undefined };
 }
 
+// Every proto module is codegen'd into FOUR published package variants
+// (confirmed on disk: fly/apps/<module>/{output-grpc,output-grpc-json,
+// output-grpc-web,output-grpc-web-coco}/package.json, each with a matching
+// "name" field) — a consumer can depend on any of the four, and all four are
+// genuinely published BY the flyover repo.
+const FLYOVER_PACKAGE_SUFFIXES = ["grpc", "grpc-json", "grpc-web", "grpc-web-coco"];
+
 /**
- * For the flyover proto monorepo: generate @snsoft/<module>-grpc package names
- * from proto module names detected by the proto parser.
+ * For the flyover proto monorepo: generate @snsoft/<module>-{grpc,grpc-json,
+ * grpc-web,grpc-web-coco} package names from proto module names detected by
+ * the proto parser — flyover is the provider of all four variants.
  */
 export function flyoverPackageNames(protoModules: string[]): string[] {
-  return protoModules.map((m) => {
+  const names: string[] = [];
+  for (const m of protoModules) {
     // Normalize: some modules have sub-paths (e.g. ccms/internal, telesales/packet)
     const name = m.replace(/\//g, "-");
-    return `@snsoft/${name}-grpc`;
-  });
+    for (const suffix of FLYOVER_PACKAGE_SUFFIXES) {
+      names.push(`@snsoft/${name}-${suffix}`);
+    }
+  }
+  return names;
 }
 
 /**

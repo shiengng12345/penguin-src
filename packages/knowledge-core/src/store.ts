@@ -170,7 +170,21 @@ export class KnowledgeStore {
          VALUES (@id, @nodeType, @identityKey, @repoId, @title, @meta, @createdAt)
          ON CONFLICT (node_type, identity_key) DO UPDATE SET
            title = excluded.title,
-           meta = CASE WHEN @metaProvided = 1 THEN excluded.meta ELSE nodes.meta END
+           meta = CASE WHEN @metaProvided = 1 THEN excluded.meta ELSE nodes.meta END,
+           -- A node referenced (as a bare dependency, repoId=null) before its
+           -- real owner is indexed must not stay orphaned forever once that
+           -- owner DOES get indexed and asserts ownership — but a null-repoId
+           -- write (someone else merely depending on it) must never erase an
+           -- already-known owner. First non-null repo_id wins; never downgrade,
+           -- and never let a LATER different non-null repo_id steal ownership
+           -- either (independent codex + deepcode review both caught the
+           -- previous CASE only guarding against null, which let two real
+           -- repoIds race and made the last writer silently win).
+           repo_id = CASE
+             WHEN nodes.repo_id IS NOT NULL THEN nodes.repo_id
+             WHEN excluded.repo_id IS NOT NULL THEN excluded.repo_id
+             ELSE NULL
+           END
          RETURNING id`,
       )
       .get({
@@ -919,8 +933,19 @@ export class KnowledgeStore {
     opts?: { types?: string[]; includeSensitive?: boolean; limit?: number },
   ): SearchHit[] {
     const limit = opts?.limit ?? 50;
-    // FTS5 查询串加引号转义，避免用户输入被当作查询语法
-    const match = `"${query.replace(/"/g, '""')}"`;
+    // Split into individual terms and AND them together (FTS5's implicit
+    // operator between space-separated quoted phrases) instead of wrapping
+    // the WHOLE query as one quoted PHRASE. A phrase requires every word
+    // adjacent, in that exact order — almost no real multi-word query is:
+    // reversed word order, an extra word, or a qualified "Class.method" name
+    // (only the bare method name is indexed) all used to return zero
+    // results even though the terms genuinely exist in the document. Each
+    // term is individually quoted so a single token can never be
+    // interpreted as FTS5 query syntax (AND/OR/NOT/NEAR/column filters).
+    const terms = query.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+    const match = terms.length > 0
+      ? terms.map((t) => `"${t.replace(/"/g, '""')}"`).join(" ")
+      : `"${query.replace(/"/g, '""')}"`;
 
     const noteRows = this.db
       .prepare(

@@ -5,6 +5,7 @@ import type { KnowledgeStore, ParsedEdge } from "@penguin/knowledge-core";
 import { extractSymbols, type ExtractedSymbol } from "./extract.js";
 import { grpcEndpointKey } from "./grpc-client.js";
 import { allForwardingMethods, extractFunctionNameCalls } from "./frontend-grpc-client.js";
+import { verifiedConnectRpcGetters, extractConnectRpcCalls } from "./connect-rpc-client.js";
 import { loadParser } from "./parser.js";
 import { readGitContext } from "./git.js";
 import { indexGitObjects } from "./gitgraph.js";
@@ -765,6 +766,28 @@ export async function indexRepo(input: {
       for (const m of allForwardingMethods(tree.rootNode)) verifiedMethods.add(m);
     }
 
+    // Same whole-repo-every-run treatment for the @connectrpc/connect
+    // convention (see connect-rpc-client.ts) — a 4th frontend calling shape,
+    // independent of the `this._net` wrapper pattern above. Backend repos
+    // have no createClient()-backed getters → empty set → the call-site scan
+    // below is skipped entirely, same safety property as verifiedMethods.
+    const verifiedGetters = new Set<string>();
+    for (const file of tsxFiles) {
+      let wSource: string;
+      try {
+        wSource = readFileSync(file.absPath, "utf8");
+      } catch { continue; }
+      if (!wSource.includes("createClient")) continue;
+      const wLang = langForExtension(file.relPath) as "ts" | "tsx";
+      let tree;
+      try {
+        const parser = await loadParser(wLang);
+        tree = parser.parse(wSource);
+      } catch { continue; }
+      if (!tree) continue;
+      for (const m of verifiedConnectRpcGetters(tree.rootNode)) verifiedGetters.add(m);
+    }
+
     // Call-site scan+enqueue is scoped to files REPROCESSED this run (unlike
     // verifiedMethods above, which must stay whole-repo for correctness — see
     // the reprocessedFiles comment above). This is required for idempotency,
@@ -803,6 +826,33 @@ export async function indexRepo(input: {
           // Only-correct guarantee: link ONLY when EXACTLY ONE gRPC service
           // defines this method; 0 → deferred (service="", re-resolved on a
           // later replayPendingFrontendEdges()); >1 → skip, never link.
+          const services = store.findEndpointServicesByMethod(call.functionName.toLowerCase());
+          if (services.length > 1) continue;
+          store.enqueuePendingFrontendEdge({
+            repoId, filePath: file.relPath, srcNodeId,
+            service: services.length === 1 ? services[0] : "",
+            functionName: call.functionName, sourceType: "frontend_web",
+          });
+        }
+      }
+    }
+    if (verifiedGetters.size > 0) {
+      for (const file of callScanFiles) {
+        let wSource: string;
+        try {
+          wSource = readFileSync(file.absPath, "utf8");
+        } catch { continue; }
+        const wLang = langForExtension(file.relPath) as "ts" | "tsx";
+        let tree;
+        try {
+          const parser = await loadParser(wLang);
+          tree = parser.parse(wSource);
+        } catch { continue; }
+        if (!tree) continue;
+        for (const call of extractConnectRpcCalls(tree.rootNode, verifiedGetters)) {
+          const srcNodeId = enclosingSymbolNodeId(store, branchId, file.relPath, call.startLine);
+          if (!srcNodeId) continue; // no symbol wraps this call site
+          // Same only-correct guarantee as the functionName pattern above.
           const services = store.findEndpointServicesByMethod(call.functionName.toLowerCase());
           if (services.length > 1) continue;
           store.enqueuePendingFrontendEdge({
