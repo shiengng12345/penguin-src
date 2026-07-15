@@ -32,7 +32,9 @@ jobs:
         run: pnpm typecheck
 
       - name: Run JS tests
-        run: pnpm test
+        # Keep local `pnpm test` compact, but never hide the failing test's
+        # diagnostic in CI. The dot reporter only prints `X` for a failure.
+        run: pnpm test:verbose
 
   rust:
     name: Rust tests
@@ -41,6 +43,21 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Tauri resource dependencies
+        run: pnpm typecheck
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
