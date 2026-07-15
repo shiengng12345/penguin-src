@@ -23,11 +23,16 @@ const TS_QUERY = `
 (enum_declaration name: (identifier) @name) @definition.enum
 (variable_declarator name: (identifier) @name value: (arrow_function)) @definition.function
 (variable_declarator name: (identifier) @name value: (function_expression)) @definition.function
+(variable_declarator
+  name: (identifier) @name
+  value: (call_expression
+    arguments: (arguments [(arrow_function) (function_expression)]))) @definition.function
 (pair key: (property_identifier) @name value: (function_expression)) @definition.method
 (pair key: (property_identifier) @name value: (arrow_function)) @definition.method
 (call_expression function: (identifier) @reference.call)
 (call_expression function: (member_expression property: (property_identifier) @reference.call))
 (import_statement source: (string (string_fragment) @reference.import))
+(call_expression function: (import) arguments: (arguments (string (string_fragment) @reference.import)))
 (type_annotation (type_identifier) @reference.type)
 (type_arguments (type_identifier) @reference.type)
 (generic_type name: (type_identifier) @reference.type)
@@ -43,11 +48,16 @@ const JS_QUERY = `
 (class_declaration name: (identifier) @name) @definition.class
 (variable_declarator name: (identifier) @name value: (arrow_function)) @definition.function
 (variable_declarator name: (identifier) @name value: (function_expression)) @definition.function
+(variable_declarator
+  name: (identifier) @name
+  value: (call_expression
+    arguments: (arguments [(arrow_function) (function_expression)]))) @definition.function
 (pair key: (property_identifier) @name value: (function_expression)) @definition.method
 (pair key: (property_identifier) @name value: (arrow_function)) @definition.method
 (call_expression function: (identifier) @reference.call)
 (call_expression function: (member_expression property: (property_identifier) @reference.call))
 (import_statement source: (string (string_fragment) @reference.import))
+(call_expression function: (import) arguments: (arguments (string (string_fragment) @reference.import)))
 `;
 
 const PYTHON_QUERY = `
@@ -75,6 +85,7 @@ const RUST_QUERY = `
 (trait_item name: (type_identifier) @name) @definition.interface
 (call_expression function: (identifier) @reference.call)
 (call_expression function: (field_expression field: (field_identifier) @reference.call))
+(call_expression function: (scoped_identifier name: (identifier) @reference.call))
 (use_declaration argument: (scoped_identifier) @reference.import)
 `;
 

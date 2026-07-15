@@ -383,6 +383,11 @@ type ResponseView = "pretty" | "raw" | "headers";
 
 // How long the floating "Copied" toast stays up after a header is copied.
 const COPIED_FEEDBACK_MS = 1500;
+const COMPACT_GRPC_HEADERS = new Set([
+  "x-penguin-http-status",
+  "x-penguin-http-version",
+  "x-penguin-id",
+]);
 
 export function ResponsePanel() {
   const tab = useActiveTab();
@@ -390,6 +395,7 @@ export function ResponsePanel() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [activeMatch, setActiveMatch] = useState(0);
+  const [showAllHeaders, setShowAllHeaders] = useState(false);
   const [copyToast, setCopyToast] = useState<{ x: number; y: number; nonce: number } | null>(null);
 
   // Click-to-copy for response header values (mirrors the Vault copy UX): copy
@@ -412,6 +418,10 @@ export function ResponsePanel() {
   // must not re-run on unrelated tab re-renders (e.g. request-body keystrokes).
   const response = tab?.response ?? null;
   const isRest = tab?.protocolTab === "rest";
+  const responseHeaders = response ? Object.entries(response.headers) : [];
+  const compactHeaders = responseHeaders.filter(([key]) => COMPACT_GRPC_HEADERS.has(key.toLowerCase()));
+  const hiddenHeaderCount = responseHeaders.length - compactHeaders.length;
+  const visibleHeaders = showAllHeaders ? responseHeaders : compactHeaders;
 
   const bodyJson = useMemo(() => {
     if (!response) return "(empty)";
@@ -570,11 +580,22 @@ export function ResponsePanel() {
       {/* Response headers */}
       {!isRest && Object.keys(tab.response.headers).length > 0 && (
         <div className="border-b border-border bg-card/95 px-4 py-2">
-          <div className="mb-1 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-            Headers
+          <div className="mb-1 flex items-center justify-between gap-2">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+              Headers
+            </div>
+            {hiddenHeaderCount > 0 && (
+              <button
+                type="button"
+                onClick={() => setShowAllHeaders((expanded) => !expanded)}
+                className="shrink-0 text-[10px] text-primary hover:underline"
+              >
+                {showAllHeaders ? "Hide extra headers" : `Show all headers (${responseHeaders.length})`}
+              </button>
+            )}
           </div>
           <div className="grid gap-y-1">
-            {Object.entries(tab.response.headers).map(([key, value]) => (
+            {visibleHeaders.map(([key, value]) => (
               <button
                 key={key}
                 type="button"

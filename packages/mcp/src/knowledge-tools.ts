@@ -7,7 +7,13 @@ import {
   exploreGraph,
   getNodeDetail,
   indexStatus,
+  compactIndexStatus,
+  resolveSymbolMatches,
   search,
+  architecture,
+  buildExplorePack,
+  communities,
+  deadCode,
   type GraphMode,
 } from "@penguin/knowledge-core";
 
@@ -73,13 +79,36 @@ export function handleKnowledgeTool(
         limit: a.limit as number | undefined,
         to: a.to as string | undefined,
       });
+    case "knowledge_explore": {
+      const target = String(a.target ?? "");
+      const requestedBranch = a.branch as string | undefined;
+      let branchId: string | undefined;
+      if (requestedBranch) {
+        const exact = store.db.prepare("SELECT id FROM branches WHERE id=?").get(requestedBranch) as { id: string } | undefined;
+        branchId = exact?.id;
+        if (!branchId) {
+          const resolution = resolveSymbolMatches(store, target);
+          const repoId = resolution.kind === "unique" ? store.getNode(resolution.nodeId)?.repo_id : null;
+          const named = repoId
+            ? store.db.prepare("SELECT id FROM branches WHERE repo_id=? AND name=? LIMIT 1").get(repoId, requestedBranch) as { id: string } | undefined
+            : undefined;
+          branchId = named?.id;
+        }
+        if (!branchId) return { error: `branch "${requestedBranch}" was not found for "${target}"` };
+      }
+      return buildExplorePack(store, target, {
+        branchId,
+        depth: a.depth as number | undefined,
+        limit: a.limit as number | undefined,
+      });
+    }
     case "compare_branches":
       return (
         compareBranches(store, String(a.symbol ?? ""), String(a.branch_a ?? ""), String(a.branch_b ?? "")) ??
         { error: "symbol not found on one or both branches" }
       );
     case "index_status":
-      return indexStatus(store);
+      return a.mode === "compact" ? compactIndexStatus(store) : indexStatus(store);
     case "list_suggestions":
       return { suggestions: store.listSuggestions() };
     case "suggest_links": {
@@ -100,6 +129,12 @@ export function handleKnowledgeTool(
       return { ok: true };
     case "write_note":
       return writeNote(store, a);
+    case "get_architecture":
+      return architecture(store);
+    case "find_communities":
+      return communities(store, { limit: a.limit as number | undefined, minSize: a.min_size as number | undefined });
+    case "find_dead_code":
+      return deadCode(store, { limit: a.limit as number | undefined });
     default:
       throw new Error(`not a knowledge tool: ${name}`);
   }

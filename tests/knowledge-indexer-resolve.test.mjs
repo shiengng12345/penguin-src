@@ -33,6 +33,46 @@ test("resolveRefs tier 1: same-file call resolves EXTRACTED", async () => {
   assert.ok(calls.some((e) => e.src === "n_outer" && e.dst === "n_inner" && e.method === "EXTRACTED"));
 });
 
+test("Rust: Self::associated_method resolves to the method in the same impl file", async () => {
+  const src = [
+    "struct CustomerServiceProcessor;",
+    "impl CustomerServiceProcessor {",
+    "  pub async fn process() {",
+    "    Self::filter_service();",
+    "  }",
+    "  fn filter_service() {}",
+    "}",
+  ].join("\n");
+  const out = await extractSymbols({ lang: "rust", source: src, relPath: "src/customer_service.rs" });
+  const process = out.symbols.find((symbol) => symbol.name === "process");
+  const filterService = out.symbols.find((symbol) => symbol.name === "filter_service");
+  assert.ok(process, "expected process symbol");
+  assert.ok(filterService, "expected filter_service symbol");
+
+  const call = out.refs.find((ref) => ref.kind === "call" && ref.rawName === "filter_service");
+  assert.equal(call?.enclosingQualifiedName, process.qualifiedName);
+
+  const ids = new Map([
+    [process.qualifiedName, "n_process"],
+    [filterService.qualifiedName, "n_filter_service"],
+  ]);
+  const resolved = resolveRefs({
+    refs: out.refs,
+    fileSymbols: out.symbols,
+    fileSymbolIds: ids,
+    lookup: fakeLookup(),
+    currentFile: "src/customer_service.rs",
+  });
+  assert.ok(
+    resolved.edges.some((edge) =>
+      edge.edgeType === "calls"
+      && edge.src === "n_process"
+      && edge.dst === "n_filter_service"
+      && edge.method === "EXTRACTED"),
+    "expected process -> filter_service EXTRACTED call edge",
+  );
+});
+
 test("resolveRefs tier 3: unique bare hit EXTRACTED, multi INFERRED conf<1, none dropped", async () => {
   const src = "function caller() { one(); two(); three(); }";
   const out = await extractSymbols({ lang: "ts", source: src });

@@ -7,10 +7,10 @@
 // below; everything else here is one-shot index + query + status commands
 // the Wiki UI (Plan 5) calls via `invoke`.
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
 use crate::mcp::detect_node_path;
@@ -325,6 +325,9 @@ fn global_guidance_block() -> String {
         "knowledge graph). Before reading files to understand or change code, query it —",
         "faster and more precise than grep/manual reading:",
         "",
+        "- Start MCP code-understanding work with `knowledge_explore` (source, flow, tests, trust)",
+        "- Use `knowledge_search` for exact symbol discovery and `get_node` for one source",
+        "- Use `explore_graph` for narrow traversal; inspect `queryDiagnostics` before trusting empty results",
         "- `penguin context <symbol|route>` — callers, callees, types, routes, tests, notes",
         "- `penguin flow <endpoint|symbol>` — linear execution chain (endpoint→service→db→…)",
         "- `penguin affected <file>…` — blast radius of a change; `penguin search <query>` — find symbols",
@@ -351,6 +354,209 @@ fn reconcile_guidance_block(existing: Option<&str>, fresh: &str) -> Option<Strin
     }
     let sep = if existing.ends_with('\n') { "\n" } else { "\n\n" };
     Some(format!("{existing}{sep}{fresh}\n"))
+}
+
+const PENGUIN_HOOK_MARKER: &str = "--managed-by=penguin";
+
+fn is_penguin_managed_hook(value: &serde_json::Value) -> bool {
+    value
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|command| command.contains(PENGUIN_HOOK_MARKER))
+}
+
+// Reconcile only Penguin-owned command hooks inside Claude Code settings.
+// Unknown top-level fields, event groups, matchers, and third-party commands
+// are preserved. Invalid JSON is an error so callers never overwrite it.
+fn reconcile_claude_hooks(
+    existing: &str,
+    session_start: bool,
+    user_prompt_submit: bool,
+) -> Result<Option<String>, String> {
+    let mut root: serde_json::Value =
+        serde_json::from_str(existing).map_err(|e| format!("invalid Claude settings JSON: {e}"))?;
+    if !root.is_object() {
+        return Err("invalid Claude settings JSON: root must be an object".to_string());
+    }
+    let before = root.clone();
+    let needs_hooks = session_start || user_prompt_submit || root.get("hooks").is_some();
+    if !needs_hooks {
+        return Ok(None);
+    }
+    let hooks = root
+        .as_object_mut()
+        .expect("object checked above")
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}));
+    let hooks = hooks
+        .as_object_mut()
+        .ok_or("invalid Claude settings JSON: hooks must be an object")?;
+
+    for event in ["SessionStart", "UserPromptSubmit"] {
+        if let Some(groups) = hooks.get_mut(event) {
+            let groups = groups
+                .as_array_mut()
+                .ok_or_else(|| format!("invalid Claude settings JSON: hooks.{event} must be an array"))?;
+            groups.retain_mut(|group| {
+                let Some(commands) = group.get_mut("hooks") else {
+                    return true;
+                };
+                let Some(commands) = commands.as_array_mut() else {
+                    return true;
+                };
+                commands.retain(|command| !is_penguin_managed_hook(command));
+                !commands.is_empty()
+            });
+        }
+    }
+
+    let mut install = |event: &str, enabled: bool, command: &str, matcher: bool| {
+        if !enabled {
+            return;
+        }
+        let mut group = serde_json::json!({
+            "hooks": [{"type": "command", "command": command}]
+        });
+        if matcher {
+            group
+                .as_object_mut()
+                .expect("literal object")
+                .insert("matcher".to_string(), serde_json::json!(""));
+        }
+        hooks
+            .entry(event.to_string())
+            .or_insert_with(|| serde_json::json!([]))
+            .as_array_mut()
+            .expect("event validated or newly created")
+            .push(group);
+    };
+    install(
+        "SessionStart",
+        session_start,
+        "penguin hook session-start --managed-by=penguin",
+        true,
+    );
+    install(
+        "UserPromptSubmit",
+        user_prompt_submit,
+        "penguin hook user-prompt-submit --managed-by=penguin",
+        false,
+    );
+
+    if root == before {
+        Ok(None)
+    } else {
+        serde_json::to_string_pretty(&root)
+            .map(|next| Some(format!("{next}\n")))
+            .map_err(|e| e.to_string())
+    }
+}
+
+#[derive(Serialize)]
+pub struct HookSetupResult {
+    pub supported: bool,
+    pub written: bool,
+    pub settings_path: String,
+    pub enabled: Vec<&'static str>,
+}
+
+fn atomic_write_preserving_permissions(
+    path: &std::path::Path,
+    content: &str,
+) -> Result<(), String> {
+    use std::io::Write as _;
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    let temp = path.with_extension(
+        path.extension()
+            .and_then(std::ffi::OsStr::to_str)
+            .map(|ext| format!("{ext}.penguin.tmp"))
+            .unwrap_or_else(|| "penguin.tmp".to_string()),
+    );
+    // A previous interrupted write may have left only Penguin's temporary
+    // file. Remove that path first; remove_file does not follow symlinks.
+    if temp.exists() {
+        std::fs::remove_file(&temp).map_err(|e| format!("{}: {e}", temp.display()))?;
+    }
+
+    let result = (|| -> Result<(), String> {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(|e| format!("{}: {e}", temp.display()))?;
+        if let Ok(metadata) = std::fs::metadata(path) {
+            file.set_permissions(metadata.permissions())
+                .map_err(|e| format!("{}: {e}", temp.display()))?;
+        }
+        file.write_all(content.as_bytes())
+            .map_err(|e| format!("{}: {e}", temp.display()))?;
+        file.sync_all()
+            .map_err(|e| format!("{}: {e}", temp.display()))?;
+        drop(file);
+        std::fs::rename(&temp, path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(())
+    })();
+
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
+    result
+}
+
+fn setup_claude_hooks_at(
+    settings_path: &std::path::Path,
+    session_start: bool,
+    user_prompt_submit: bool,
+) -> Result<HookSetupResult, String> {
+    let existing = if settings_path.exists() {
+        std::fs::read_to_string(settings_path)
+            .map_err(|e| format!("{}: {e}", settings_path.display()))?
+    } else {
+        "{}".to_string()
+    };
+    let next = reconcile_claude_hooks(&existing, session_start, user_prompt_submit)?;
+    let written = next.is_some();
+    if let Some(next) = next {
+        atomic_write_preserving_permissions(settings_path, &next)?;
+    }
+    let mut enabled = Vec::new();
+    if session_start {
+        enabled.push("SessionStart");
+    }
+    if user_prompt_submit {
+        enabled.push("UserPromptSubmit");
+    }
+    Ok(HookSetupResult {
+        supported: true,
+        written,
+        settings_path: settings_path.display().to_string(),
+        enabled,
+    })
+}
+
+// Claude Code exposes native lifecycle hooks. Codex receives the same Penguin
+// context through the canonical MCP plus its managed AGENTS.md instructions;
+// it does not currently expose an equivalent settings hook contract here.
+#[tauri::command]
+pub(crate) fn knowledge_agent_hook_setup(
+    session_start: bool,
+    user_prompt_submit: bool,
+) -> Result<HookSetupResult, String> {
+    let home = PathBuf::from(std::env::var_os("HOME").ok_or("no HOME")?);
+    let settings = home.join(".claude/settings.json");
+    if !home.join(".claude").is_dir() && !home.join(".claude.json").exists() {
+        return Ok(HookSetupResult {
+            supported: false,
+            written: false,
+            settings_path: settings.display().to_string(),
+            enabled: Vec::new(),
+        });
+    }
+    setup_claude_hooks_at(&settings, session_start, user_prompt_submit)
 }
 
 #[derive(Serialize)]
@@ -484,12 +690,20 @@ fn write_launcher_script(target: &std::path::Path, script: &str) -> std::io::Res
 
 #[cfg(test)]
 mod tests {
-    use super::{ensure_zshrc_path, reconcile_guidance_block, write_launcher_script};
+    use super::{
+        ensure_zshrc_path, reconcile_claude_hooks, reconcile_guidance_block,
+        write_launcher_script,
+    };
     use std::path::PathBuf;
 
     #[test]
     fn guidance_block_appends_replaces_and_noops() {
         let fresh = super::global_guidance_block();
+        assert!(
+            fresh.find("knowledge_explore").unwrap()
+                < fresh.find("knowledge_search").unwrap()
+        );
+        assert!(fresh.contains("queryDiagnostics"));
         // Missing file → block plus trailing newline.
         let created = reconcile_guidance_block(None, &fresh).unwrap();
         assert!(created.starts_with(super::GUIDANCE_BEGIN) && created.ends_with("-->\n"));
@@ -551,6 +765,92 @@ mod tests {
         let t2 = super::guidance_targets(&d);
         assert_eq!(t2.len(), 2);
         assert!(t2[1].ends_with(".codex/AGENTS.md"));
+    }
+
+    #[test]
+    fn claude_hooks_are_opt_in_preserve_existing_and_are_idempotent() {
+        let existing = r#"{
+          "theme": "dark",
+          "hooks": {
+            "PreToolUse": [{
+              "matcher": "Bash",
+              "hooks": [{"type":"command","command":"rtk hook claude"}]
+            }],
+            "UserPromptSubmit": [{
+              "hooks": [{"type":"command","command":"codegraph prompt-hook"}]
+            }]
+          }
+        }"#;
+        let installed = reconcile_claude_hooks(existing, true, true)
+            .unwrap()
+            .expect("first setup writes");
+        let json: serde_json::Value = serde_json::from_str(&installed).unwrap();
+        assert_eq!(json["theme"], "dark");
+        let rendered = serde_json::to_string(&json).unwrap();
+        assert!(rendered.contains("rtk hook claude"));
+        assert!(rendered.contains("codegraph prompt-hook"));
+        assert!(rendered.contains("penguin hook session-start --managed-by=penguin"));
+        assert!(rendered.contains("penguin hook user-prompt-submit --managed-by=penguin"));
+        assert!(reconcile_claude_hooks(&installed, true, true).unwrap().is_none());
+    }
+
+    #[test]
+    fn disabling_claude_hooks_removes_only_penguin_managed_entries() {
+        let existing = r#"{
+          "hooks": {
+            "SessionStart": [{"matcher":"","hooks":[
+              {"type":"command","command":"penguin hook session-start --managed-by=penguin"},
+              {"type":"command","command":"other session hook"}
+            ]}],
+            "UserPromptSubmit": [
+              {"hooks":[{"type":"command","command":"penguin hook user-prompt-submit --managed-by=penguin"}]},
+              {"hooks":[{"type":"command","command":"other prompt hook"}]}
+            ]
+          }
+        }"#;
+        let disabled = reconcile_claude_hooks(existing, false, false)
+            .unwrap()
+            .expect("managed hooks removed");
+        assert!(!disabled.contains("--managed-by=penguin"));
+        assert!(disabled.contains("other session hook"));
+        assert!(disabled.contains("other prompt hook"));
+    }
+
+    #[test]
+    fn invalid_claude_settings_are_never_rewritten() {
+        assert!(reconcile_claude_hooks("{broken", true, true).is_err());
+    }
+
+    #[test]
+    fn hook_setup_writes_once_and_reports_enabled_events() {
+        let d = tmp_dir("claude-hook-setup");
+        let settings = d.join("settings.json");
+        std::fs::write(&settings, "{\"custom\":true}\n").unwrap();
+        let first = super::setup_claude_hooks_at(&settings, true, false).unwrap();
+        assert!(first.written);
+        assert_eq!(first.enabled, vec!["SessionStart"]);
+        assert!(std::fs::read_to_string(&settings)
+            .unwrap()
+            .contains("penguin hook session-start"));
+        let second = super::setup_claude_hooks_at(&settings, true, false).unwrap();
+        assert!(!second.written, "same setup is a no-op");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_settings_write_preserves_permissions_and_leaves_no_temp_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let d = tmp_dir("atomic-settings");
+        let settings = d.join("settings.json");
+        std::fs::write(&settings, "{\"before\":true}\n").unwrap();
+        std::fs::set_permissions(&settings, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        super::atomic_write_preserving_permissions(&settings, "{\"after\":true}\n").unwrap();
+
+        assert_eq!(std::fs::read_to_string(&settings).unwrap(), "{\"after\":true}\n");
+        assert_eq!(std::fs::metadata(&settings).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(!settings.with_extension("json.penguin.tmp").exists());
     }
 
     #[test]
@@ -620,6 +920,97 @@ mod tests {
         // Second write with same content is a no-op and must not error.
         write_launcher_script(&target, wrapper).unwrap();
         assert_eq!(std::fs::read_to_string(&target).unwrap(), wrapper);
+    }
+
+    #[test]
+    fn watch_status_serializes_repo_id_as_camel_case() {
+        // Real bug: the frontend's `WatchStatus` TS interface
+        // (src/lib/knowledge-client.ts) expects `repoId`, but this struct had
+        // no #[serde(rename_all = "camelCase")], so it serialized as
+        // `repo_id`. Every call to knowledge_watch_status (on mount, and on
+        // every auto-refresh tick) silently produced `repoId: undefined` on
+        // every row, so the frontend's `watching` Set could never contain a
+        // real repo id — the "自动同步" toggle highlight reverted to
+        // off-looking on every refresh even though the watcher was still
+        // genuinely running.
+        let status = super::WatchStatus { repo_id: "repo_abc".into(), watching: true };
+        let json = serde_json::to_value(&status).unwrap();
+        assert_eq!(json["repoId"], "repo_abc", "must serialize as camelCase repoId, not repo_id");
+        assert_eq!(json["watching"], true);
+    }
+
+    #[test]
+    fn watch_lease_key_uses_the_canonical_repository_path() {
+        let d = tmp_dir("watch-canonical");
+        let repo = d.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let plain = super::watch_lease_path(&d, &repo).unwrap();
+        let dotted = super::watch_lease_path(&d, &repo.join(".")).unwrap();
+        assert_eq!(plain, dotted);
+    }
+
+    #[test]
+    fn watch_lease_rejects_a_second_live_owner() {
+        let d = tmp_dir("watch-live-owner");
+        let repo = d.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let first = super::try_acquire_watch_lease(
+            &d,
+            "repo-a",
+            &repo,
+            std::process::id(),
+        )
+        .unwrap();
+        let second = super::try_acquire_watch_lease(
+            &d,
+            "repo-b",
+            &repo,
+            std::process::id(),
+        );
+        assert!(second.is_err(), "a live canonical root must have one owner");
+        std::fs::remove_file(first).unwrap();
+    }
+
+    #[test]
+    fn watch_lease_replaces_a_stale_owner() {
+        let d = tmp_dir("watch-stale-owner");
+        let repo = d.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let path = super::watch_lease_path(&d, &repo).unwrap();
+        std::fs::write(
+            &path,
+            serde_json::json!({
+                "repo_id": "old",
+                "root_path": repo,
+                "child_pid": 999_999_999_u32,
+                "owner_pid": 999_999_999_u32
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let acquired = super::try_acquire_watch_lease(
+            &d,
+            "new",
+            &repo,
+            std::process::id(),
+        )
+        .unwrap();
+        let lease: super::WatchLease =
+            serde_json::from_str(&std::fs::read_to_string(acquired).unwrap()).unwrap();
+        assert_eq!(lease.repo_id, "new");
+        assert_eq!(lease.owner_pid, std::process::id());
+    }
+
+    #[test]
+    fn watch_command_parser_accepts_only_penguin_watch_processes() {
+        assert_eq!(
+            super::parse_watch_command(
+                "node /opt/penguin/bin.js watch /Users/me/repo --progress-events",
+            ),
+            Some(PathBuf::from("/Users/me/repo")),
+        );
+        assert_eq!(super::parse_watch_command("node app.js index /Users/me/repo"), None);
+        assert_eq!(super::parse_watch_command("npm run watch /Users/me/repo"), None);
     }
 }
 
@@ -820,32 +1211,236 @@ fn db_status_blocking() -> KnowledgeDbStatus {
 // repo, spawned on toggle-on, kept in this registry, and stopped on
 // toggle-off or app exit. Killed via SIGTERM (graceful — lets the CLI's watch
 // verb close its DB cleanly) rather than a hard kill, wherever possible.
-#[derive(Default)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct WatchLease {
+    repo_id: String,
+    root_path: PathBuf,
+    child_pid: u32,
+    owner_pid: u32,
+}
+
+fn canonical_watch_root(root_path: &Path) -> Result<PathBuf, String> {
+    std::fs::canonicalize(root_path)
+        .map_err(|e| format!("cannot canonicalize watcher root {}: {e}", root_path.display()))
+}
+
+fn stable_watch_hash(value: &str) -> u64 {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn watch_lease_dir() -> Result<PathBuf, String> {
+    dirs::home_dir()
+        .map(|home| home.join(".penguin").join("watch-locks"))
+        .ok_or_else(|| "home directory unavailable for watcher lease".to_string())
+}
+
+fn watch_lease_path(lease_dir: &Path, root_path: &Path) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(lease_dir)
+        .map_err(|e| format!("cannot create watcher lease directory: {e}"))?;
+    let canonical = canonical_watch_root(root_path)?;
+    let key = stable_watch_hash(&canonical.to_string_lossy());
+    Ok(lease_dir.join(format!("{key:016x}.json")))
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    pid > 0
+        && Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false)
+}
+
+fn lease_is_live(lease: &WatchLease) -> bool {
+    if lease.child_pid > 0 {
+        process_is_alive(lease.child_pid)
+    } else {
+        process_is_alive(lease.owner_pid)
+    }
+}
+
+fn read_watch_lease(path: &Path) -> Option<WatchLease> {
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+fn write_watch_lease(path: &Path, lease: &WatchLease) -> Result<(), String> {
+    use std::io::Write;
+
+    let body = serde_json::to_vec(lease).map_err(|e| format!("cannot encode watcher lease: {e}"))?;
+    let temp = path.with_extension(format!("{}.tmp", std::process::id()));
+    let result = (|| {
+        let mut file = std::fs::File::create(&temp)
+            .map_err(|e| format!("cannot create watcher lease update: {e}"))?;
+        file.write_all(&body)
+            .and_then(|_| file.sync_all())
+            .map_err(|e| format!("cannot write watcher lease update: {e}"))?;
+        std::fs::rename(&temp, path).map_err(|e| format!("cannot publish watcher lease: {e}"))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temp);
+    }
+    result
+}
+
+fn try_acquire_watch_lease(
+    lease_dir: &Path,
+    repo_id: &str,
+    root_path: &Path,
+    owner_pid: u32,
+) -> Result<PathBuf, String> {
+    use std::io::Write;
+
+    let canonical = canonical_watch_root(root_path)?;
+    let path = watch_lease_path(lease_dir, &canonical)?;
+    let lease = WatchLease {
+        repo_id: repo_id.to_string(),
+        root_path: canonical,
+        child_pid: 0,
+        owner_pid,
+    };
+    let body = serde_json::to_vec(&lease).map_err(|e| format!("cannot encode watcher lease: {e}"))?;
+
+    for _ in 0..2 {
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut file) => {
+                if let Err(e) = file.write_all(&body).and_then(|_| file.sync_all()) {
+                    let _ = std::fs::remove_file(&path);
+                    return Err(format!("cannot write watcher lease: {e}"));
+                }
+                return Ok(path);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if read_watch_lease(&path).as_ref().is_some_and(lease_is_live) {
+                    return Err(format!("watcher already running for {}", root_path.display()));
+                }
+                std::fs::remove_file(&path)
+                    .map_err(|remove| format!("cannot replace stale watcher lease: {remove}"))?;
+            }
+            Err(e) => return Err(format!("cannot acquire watcher lease: {e}")),
+        }
+    }
+    Err(format!("could not acquire watcher lease for {}", root_path.display()))
+}
+
+fn remove_matching_watch_lease(path: &Path, child_pid: u32) {
+    if read_watch_lease(path).is_some_and(|lease| lease.child_pid == child_pid) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+fn live_watch_lease_for_repo(repo_id: &str) -> Option<(PathBuf, WatchLease)> {
+    let dir = watch_lease_dir().ok()?;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        let Some(lease) = read_watch_lease(&path) else { continue };
+        if !lease_is_live(&lease) {
+            let _ = std::fs::remove_file(path);
+            continue;
+        }
+        if lease.repo_id == repo_id {
+            return Some((path, lease));
+        }
+    }
+    None
+}
+
+fn parse_watch_command(command: &str) -> Option<PathBuf> {
+    let marker = " watch ";
+    let index = command.find(marker)?;
+    let executable = &command[..index];
+    if !executable.contains("knowledge-cli") && !executable.contains("/penguin") {
+        return None;
+    }
+    let args = &command[index + marker.len()..];
+    let root = args.strip_suffix(" --progress-events")?.trim();
+    (!root.is_empty()).then(|| PathBuf::from(root))
+}
+
+// One-time migration for old app versions that had no lease. Only exact,
+// orphaned `knowledge-cli ... watch <root> --progress-events` processes are
+// touched; watchers still owned by a live parent are never killed here.
+fn cleanup_legacy_orphan_watchers() {
+    let leased_pids: std::collections::HashSet<u32> = watch_lease_dir()
+        .ok()
+        .and_then(|dir| std::fs::read_dir(dir).ok())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| read_watch_lease(&entry.path()))
+        .filter(|lease| lease_is_live(lease))
+        .map(|lease| lease.child_pid)
+        .filter(|pid| *pid > 0)
+        .collect();
+    let Ok(output) = Command::new("ps").args(["-axo", "pid=,ppid=,command="]).output() else {
+        return;
+    };
+    let body = String::from_utf8_lossy(&output.stdout);
+    for line in body.lines() {
+        let mut parts = line.split_whitespace();
+        let (Some(pid), Some(ppid)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        let command = parts.collect::<Vec<_>>().join(" ");
+        let (Ok(pid), Ok(ppid)) = (pid.parse::<u32>(), ppid.parse::<u32>()) else { continue };
+        if ppid == 1 && !leased_pids.contains(&pid) && parse_watch_command(&command).is_some() {
+            let _ = Command::new("kill").args(["-TERM", &pid.to_string()]).status();
+        }
+    }
+}
+
+struct WatchChild {
+    child: std::process::Child,
+    lease_path: PathBuf,
+}
+
 pub struct WatchRegistry {
-    children: std::sync::Mutex<HashMap<String, std::process::Child>>,
+    children: std::sync::Mutex<HashMap<String, WatchChild>>,
+}
+
+impl Default for WatchRegistry {
+    fn default() -> Self {
+        cleanup_legacy_orphan_watchers();
+        Self { children: std::sync::Mutex::new(HashMap::new()) }
+    }
 }
 
 impl WatchRegistry {
     fn is_running(&self, repo_id: &str) -> bool {
         let mut guard = self.children.lock().unwrap();
-        let Some(child) = guard.get_mut(repo_id) else { return false };
-        match child.try_wait() {
+        let Some(entry) = guard.get_mut(repo_id) else {
+            return live_watch_lease_for_repo(repo_id).is_some();
+        };
+        match entry.child.try_wait() {
             Ok(None) => true,
             _ => {
-                guard.remove(repo_id);
+                if let Some(entry) = guard.remove(repo_id) {
+                    remove_matching_watch_lease(&entry.lease_path, entry.child.id());
+                }
                 false
             }
         }
     }
 
-    fn insert(&self, repo_id: String, child: std::process::Child) {
-        self.children.lock().unwrap().insert(repo_id, child);
+    fn insert(&self, repo_id: String, child: std::process::Child, lease_path: PathBuf) {
+        self.children.lock().unwrap().insert(repo_id, WatchChild { child, lease_path });
     }
 
     fn stop(&self, repo_id: &str) {
-        let child = self.children.lock().unwrap().remove(repo_id);
-        if let Some(child) = child {
-            terminate_gracefully(child);
+        let entry = self.children.lock().unwrap().remove(repo_id);
+        if let Some(entry) = entry {
+            let pid = entry.child.id();
+            terminate_gracefully(entry.child);
+            remove_matching_watch_lease(&entry.lease_path, pid);
+        } else if let Some((path, lease)) = live_watch_lease_for_repo(repo_id) {
+            if lease.child_pid > 0 {
+                terminate_pid_gracefully(lease.child_pid);
+            }
+            let _ = std::fs::remove_file(path);
         }
     }
 
@@ -857,10 +1452,12 @@ impl WatchRegistry {
             .lock()
             .unwrap()
             .drain()
-            .map(|(_, c)| c)
+            .map(|(_, entry)| entry)
             .collect();
-        for child in children {
-            terminate_gracefully(child);
+        for entry in children {
+            let pid = entry.child.id();
+            terminate_gracefully(entry.child);
+            remove_matching_watch_lease(&entry.lease_path, pid);
         }
     }
 }
@@ -881,7 +1478,20 @@ fn terminate_gracefully(mut child: std::process::Child) {
     let _ = child.wait();
 }
 
-#[derive(Serialize)]
+fn terminate_pid_gracefully(pid: u32) {
+    let pid_text = pid.to_string();
+    let _ = Command::new("kill").args(["-TERM", &pid_text]).status();
+    for _ in 0..40 {
+        if !process_is_alive(pid) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let _ = Command::new("kill").args(["-KILL", &pid_text]).status();
+}
+
+#[derive(Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct WatchStatus {
     repo_id: String,
     watching: bool,
@@ -920,18 +1530,54 @@ pub(crate) fn knowledge_watch_toggle<R: tauri::Runtime>(
     use std::process::Stdio;
     use tauri::Emitter;
 
-    let inv = resolve_invocation(&app)?;
+    let lease_dir = watch_lease_dir()?;
+    let lease_path = match try_acquire_watch_lease(
+        &lease_dir,
+        &repo_id,
+        Path::new(&root_path),
+        std::process::id(),
+    ) {
+        Ok(path) => path,
+        Err(message) if message.starts_with("watcher already running") => return Ok(true),
+        Err(message) => return Err(message),
+    };
+
+    let inv = match resolve_invocation(&app) {
+        Ok(inv) => inv,
+        Err(error) => {
+            let _ = std::fs::remove_file(&lease_path);
+            return Err(error);
+        }
+    };
     let mut cmd = Command::new(&inv.node);
     cmd.arg(&inv.cli).arg("watch").arg(&root_path).arg("--progress-events");
     if let Some(wasm) = &inv.wasm_dir {
         cmd.env("PENGUIN_WASM_DIR", wasm);
     }
-    let mut child = cmd
+    let mut child = match cmd
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("penguin watch failed to launch: {e}"))?;
+    {
+        Ok(child) => child,
+        Err(error) => {
+            let _ = std::fs::remove_file(&lease_path);
+            return Err(format!("penguin watch failed to launch: {error}"));
+        }
+    };
+    let child_pid = child.id();
+    let lease = WatchLease {
+        repo_id: repo_id.clone(),
+        root_path: canonical_watch_root(Path::new(&root_path))?,
+        child_pid,
+        owner_pid: std::process::id(),
+    };
+    if let Err(error) = write_watch_lease(&lease_path, &lease) {
+        terminate_gracefully(child);
+        let _ = std::fs::remove_file(&lease_path);
+        return Err(error);
+    }
 
     // This thread lives for the child's whole lifetime (until stopped), not
     // just one call — same PENGUIN_PROGRESS-line convention as
@@ -940,6 +1586,7 @@ pub(crate) fn knowledge_watch_toggle<R: tauri::Runtime>(
     if let Some(stderr) = child.stderr.take() {
         let app_evt = app.clone();
         let repo_id_evt = repo_id.clone();
+        let lease_path_evt = lease_path.clone();
         std::thread::spawn(move || {
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 if let Some(rest) = line.strip_prefix("PENGUIN_PROGRESS ") {
@@ -949,10 +1596,17 @@ pub(crate) fn knowledge_watch_toggle<R: tauri::Runtime>(
                             serde_json::json!({ "repoId": repo_id_evt, "payload": payload }),
                         );
                     }
+                } else {
+                    // A real crash/error the child prints to stderr (anything
+                    // that isn't a PENGUIN_PROGRESS line) used to be silently
+                    // dropped here — surface it so a dying watcher is
+                    // diagnosable from the app's own log instead of invisible.
+                    eprintln!("penguin watch ({repo_id_evt}) stderr: {line}");
                 }
             }
+            remove_matching_watch_lease(&lease_path_evt, child_pid);
         });
     }
-    registry.insert(repo_id, child);
+    registry.insert(repo_id, child, lease_path);
     Ok(true)
 }

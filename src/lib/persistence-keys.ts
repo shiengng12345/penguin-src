@@ -24,6 +24,11 @@ export const APP_VALUE_KEYS = {
   // app-level poller keeps the registry cache warm in the background while the
   // installer is closed. Strictly gated to a valid dev token at run time.
   installerAutoRefresh: "penguin-installer-auto-refresh",
+  // Wiki's "Indexed repositories" auto-refresh toggle (superadmin only, same
+  // gating as installerAutoRefresh). Persisted so the toggle — and the
+  // interval it drives — survives a webview reload instead of silently
+  // reverting to off, matching the installer's precedent above.
+  wikiAutoRefresh: "penguin-wiki-auto-refresh",
   devModeEnabled: "penguin-dev-mode-enabled",
   devModeToken: "penguin-dev-mode-token",
   devModeAdminToken: "penguin-dev-mode-admin-token",

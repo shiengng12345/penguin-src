@@ -143,14 +143,15 @@ console.log(
     `[vendor] better-sqlite3@${bsqVersion} + ${grammarCount} grammars + runtime wasm → ${bundleDir}`,
 );
 
-// --- 4) mirror node + node_modules (native closure only, no wasm) for MCP ---
-// The MCP server ships its own esbuild bundle (packages/mcp/dist/index.js,
-// built separately with better-sqlite3 externalized) but needs the identical
-// vendored native closure + Node binary to actually open the knowledge DB
-// when run standalone (no pnpm workspace node_modules alongside it).
+// --- 4) materialize a self-contained MCP release directory -----------------
+// Keep dist beside node_modules so Node cannot accidentally resolve a pnpm
+// workspace addon compiled for a different ABI during doctor/release checks.
 rmSync(join(mcpBundleDir, "node_modules"), { recursive: true, force: true });
+rmSync(join(mcpBundleDir, "dist"), { recursive: true, force: true });
 mkdirSync(mcpBundleDir, { recursive: true });
 cpSync(vendoredModules, join(mcpBundleDir, "node_modules"), { recursive: true, dereference: true });
+cpSync(join(repoRoot, "packages/mcp/dist"), join(mcpBundleDir, "dist"), { recursive: true, dereference: true });
+cpSync(join(repoRoot, "packages/mcp/package.json"), join(mcpBundleDir, "package.json"), { dereference: true });
 cpSync(nodeDst, join(mcpBundleDir, "node"), { dereference: true });
 chmodSync(join(mcpBundleDir, "node"), 0o755);
-console.log(`[vendor] mirrored node + better-sqlite3 closure → ${mcpBundleDir}`);
+console.log(`[vendor] materialized self-contained MCP runtime → ${mcpBundleDir}`);

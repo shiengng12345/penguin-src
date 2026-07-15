@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
@@ -9,6 +11,72 @@ export interface GitContext {
   // Repo name derived from the `origin` remote URL (e.g. penguin-src), or null
   // when there's no remote — callers fall back to the local folder name.
   repoName: string | null;
+  // `unknown` is deliberately distinct from clean: inability to inspect git
+  // must never make dirty source look committed.
+  worktreeState: "clean" | "dirty" | "unknown" | "not_applicable";
+  dirtyFiles: string[];
+  worktreeFingerprint: string;
+  statusError: string | null;
+}
+
+interface WorktreeStatus {
+  state: "clean" | "dirty" | "unknown";
+  files: string[];
+  fingerprint: string;
+  error: string | null;
+}
+
+// Hash both path and current bytes for every overlay file. `git status` alone
+// is insufficient because a second edit to an already-dirty file would leave
+// the same status text while changing the indexed source.
+function fingerprintWorktree(checkoutPath: string, commit: string | null, files: string[]): string {
+  const hash = createHash("sha256");
+  hash.update(commit ?? "(no-head)");
+  for (const file of files) {
+    hash.update("\0");
+    hash.update(file);
+    const absolute = join(checkoutPath, file);
+    if (existsSync(absolute)) {
+      hash.update("\0present\0");
+      hash.update(readFileSync(absolute));
+    } else {
+      hash.update("\0deleted");
+    }
+  }
+  return hash.digest("hex");
+}
+
+// Ask Git for tracked changes against HEAD plus all untracked files. This is a
+// bounded, read-only query and gracefully degrades for synthetic/incomplete
+// `.git` fixtures or machines where the git executable is unavailable.
+function readWorktreeStatus(checkoutPath: string, commit: string | null): WorktreeStatus {
+  try {
+    const changed = execFileSync(
+      "git",
+      ["-C", checkoutPath, "diff", "--name-only", "-z", "HEAD"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+    const untracked = execFileSync(
+      "git",
+      ["-C", checkoutPath, "ls-files", "--others", "--exclude-standard", "-z"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
+    );
+    const files = [...new Set(`${changed}${untracked}`.split("\0").filter(Boolean))].sort();
+    return {
+      state: files.length > 0 ? "dirty" : "clean",
+      files,
+      fingerprint: fingerprintWorktree(checkoutPath, commit, files),
+      error: null,
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return {
+      state: "unknown",
+      files: [],
+      fingerprint: fingerprintWorktree(checkoutPath, commit, []),
+      error: message,
+    };
+  }
 }
 
 // Pull the `origin` remote URL out of .git/config and reduce it to a repo name:
@@ -94,7 +162,11 @@ export function readGitContext(rootPath: string): GitContext {
   // duplicate). Non-git falls back to the given path.
   const checkoutPath = found ? found.worktreeRoot : resolve(rootPath);
   if (!found || !existsSync(join(found.gitDir, "HEAD"))) {
-    return { isGit: false, branch: "(workdir)", commit: null, checkoutPath, repoName: null };
+    return {
+      isGit: false, branch: "(workdir)", commit: null, checkoutPath, repoName: null,
+      worktreeState: "not_applicable", dirtyFiles: [],
+      worktreeFingerprint: fingerprintWorktree(checkoutPath, null, []), statusError: null,
+    };
   }
   const gitDir = found.gitDir;
   const repoName = readRepoName(gitDir);
@@ -103,11 +175,27 @@ export function readGitContext(rootPath: string): GitContext {
   if (refMatch) {
     const ref = refMatch[1].trim(); // refs/heads/<branch>
     const branch = ref.replace(/^refs\/heads\//, "");
-    return { isGit: true, branch, commit: resolveRef(gitDir, ref), checkoutPath, repoName };
+    const commit = resolveRef(gitDir, ref);
+    const status = readWorktreeStatus(checkoutPath, commit);
+    return {
+      isGit: true, branch, commit, checkoutPath, repoName,
+      worktreeState: status.state, dirtyFiles: status.files,
+      worktreeFingerprint: status.fingerprint, statusError: status.error,
+    };
   }
   // detached HEAD: HEAD is a raw sha
   if (/^[0-9a-f]{7,40}$/i.test(head)) {
-    return { isGit: true, branch: "(detached)", commit: head, checkoutPath, repoName };
+    const status = readWorktreeStatus(checkoutPath, head);
+    return {
+      isGit: true, branch: "(detached)", commit: head, checkoutPath, repoName,
+      worktreeState: status.state, dirtyFiles: status.files,
+      worktreeFingerprint: status.fingerprint, statusError: status.error,
+    };
   }
-  return { isGit: true, branch: "(workdir)", commit: null, checkoutPath, repoName };
+  return {
+    isGit: true, branch: "(workdir)", commit: null, checkoutPath, repoName,
+    worktreeState: "unknown", dirtyFiles: [],
+    worktreeFingerprint: fingerprintWorktree(checkoutPath, null, []),
+    statusError: "HEAD is neither a symbolic ref nor a commit hash",
+  };
 }

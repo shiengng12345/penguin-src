@@ -165,3 +165,17 @@ test("extractConnectRpcCalls: real-world FUNCTION-scoped binding — `const x = 
   const names = calls.map((c) => c.functionName);
   assert.ok(names.includes("getPlatforms"), "a function-scoped (not module-level) client binding must still be found");
 });
+
+test("extractConnectRpcCalls: preserves verified client identity through TypeScript `as` casts", async () => {
+  const getters = await verifiedConnectRpcGettersFromSource("tsx", GRPC_CLIENT_SERVICE_SRC);
+  const calls = await extractConnectRpcCallsFromSource(
+    "tsx",
+    `
+      const client = grpcClientService.getClient();
+      export const getComponentV2 = async () => (client as any).getComponentV2({});
+      export const getNavTagList = async () => (client as unknown as any).getNavTagList({});
+    `,
+    getters,
+  );
+  assert.deepEqual(calls.map((call) => call.functionName), ["getComponentV2", "getNavTagList"]);
+});

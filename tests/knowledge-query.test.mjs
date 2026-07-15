@@ -8,8 +8,11 @@ import {
   search,
   getNodeDetail,
   exploreGraph,
+  buildExplorePack,
   compareBranches,
+  compactIndexStatus,
   indexStatus,
+  resolveSymbolMatches,
 } from "../packages/knowledge-core/dist/index.js";
 
 function seed() {
@@ -17,7 +20,7 @@ function seed() {
   const store = KnowledgeStore.open({ dbPath: join(dir, "k.db"), ledgerPath: join(dir, "l.jsonl") });
   const repoId = store.registerRepo({ name: "fpms", rootPath: "/work/fpms" });
   const main = store.registerBranch({ repoId, name: "main", status: "live" });
-  const feat = store.registerBranch({ repoId, name: "feature", status: "live" });
+  const feat = store.registerBranch({ repoId, name: "feature", status: "snapshot" });
 
   const login = store.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::login`, title: "login", repoId });
   const helper = store.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::helper`, title: "helper", repoId });
@@ -41,6 +44,56 @@ function seed() {
 test("search finds a symbol by FTS", () => {
   const { store, login } = seed();
   assert.ok(search(store, "login").some((h) => h.nodeId === login));
+  store.close();
+});
+
+test("bare symbol lookup uses the repo/type/title index instead of suffix LIKE scans", () => {
+  const { store, repoId } = seed();
+  const indexes = store.db.prepare("PRAGMA index_list('nodes')").all().map((row) => row.name);
+  assert.ok(indexes.includes("idx_nodes_repo_type_title"));
+  const plan = store.db.prepare(
+    "EXPLAIN QUERY PLAN SELECT id FROM nodes WHERE repo_id=? AND node_type='symbol' AND title=?",
+  ).all(repoId, "login");
+  assert.ok(plan.some((row) => String(row.detail).includes("idx_nodes_repo_type_title")), JSON.stringify(plan));
+  store.close();
+});
+
+test("friendly symbol lookup ignores stale identities left behind by a rebuild", () => {
+  const { store, repoId, main } = seed();
+  const stale = store.upsertNode({
+    nodeType: "symbol",
+    identityKey: `${repoId}::Service.run`,
+    title: "run",
+    repoId,
+  });
+  store.upsertSymbolVersion({
+    nodeId: stale,
+    branchId: main,
+    commitSha: "c0",
+    filePath: "service.ts",
+    lang: "ts",
+    kind: "method",
+    contentHash: "old",
+    status: "stale",
+  });
+  const fresh = store.upsertNode({
+    nodeType: "symbol",
+    identityKey: `${repoId}::service.ts::Service.run`,
+    title: "run",
+    repoId,
+  });
+  store.upsertSymbolVersion({
+    nodeId: fresh,
+    branchId: main,
+    commitSha: "c1",
+    filePath: "service.ts",
+    lang: "ts",
+    kind: "method",
+    contentHash: "new",
+    status: "fresh",
+  });
+
+  assert.deepEqual(resolveSymbolMatches(store, "Service.run"), { kind: "unique", nodeId: fresh });
   store.close();
 });
 
@@ -96,6 +149,138 @@ test("exploreGraph who_calls / calls_of / backlinks / impact / path", () => {
   store.close();
 });
 
+test("graph diagnostics distinguish no match from a resolved node with no static edge", () => {
+  const { store, caller } = seed();
+  const missing = exploreGraph(store, "who_calls", "does-not-exist");
+  assert.equal(missing.diagnostics.resolutionStatus, "no_match");
+  assert.equal(missing.diagnostics.resultStatus, "query_error");
+  assert.equal(missing.diagnostics.target.resolvedNodeId, null);
+
+  const isolated = exploreGraph(store, "who_calls", caller);
+  assert.equal(isolated.diagnostics.resolutionStatus, "resolved");
+  assert.equal(isolated.diagnostics.resultStatus, "no_static_edge");
+  assert.equal(isolated.diagnostics.target.resolvedNodeId, caller);
+  assert.equal(isolated.diagnostics.evidence.incomingByType.calls ?? 0, 0);
+  assert.ok(
+    isolated.diagnostics.coverageGaps.includes(
+      "unresolved_reference_counts_not_persisted",
+    ),
+  );
+  store.close();
+});
+
+test("graph diagnostics distinguish ambiguous and stale-only targets", () => {
+  const { store, repoId, main } = seed();
+  const otherRepoId = store.registerRepo({ name: "auth", rootPath: "/work/auth" });
+  const otherMain = store.registerBranch({
+    repoId: otherRepoId,
+    name: "main",
+    status: "live",
+  });
+  const duplicateA = store.upsertNode({
+    nodeType: "symbol",
+    identityKey: `${repoId}::a.ts::Service.run`,
+    title: "run",
+    repoId,
+  });
+  const duplicateB = store.upsertNode({
+    nodeType: "symbol",
+    identityKey: `${otherRepoId}::b.ts::Service.run`,
+    title: "run",
+    repoId: otherRepoId,
+  });
+  store.upsertSymbolVersion({
+    nodeId: duplicateA,
+    branchId: main,
+    commitSha: "c0",
+    filePath: "a.ts",
+    lang: "ts",
+    kind: "method",
+    contentHash: "a",
+  });
+  store.upsertSymbolVersion({
+    nodeId: duplicateB,
+    branchId: otherMain,
+    commitSha: "c0",
+    filePath: "b.ts",
+    lang: "ts",
+    kind: "method",
+    contentHash: "b",
+  });
+  assert.equal(
+    exploreGraph(store, "who_calls", "Service.run").diagnostics.resolutionStatus,
+    "ambiguous",
+  );
+
+  const stale = store.upsertNode({
+    nodeType: "symbol",
+    identityKey: `${repoId}::StaleService.run`,
+    title: "StaleService.run",
+    repoId,
+  });
+  store.upsertSymbolVersion({
+    nodeId: stale,
+    branchId: main,
+    commitSha: "c0",
+    filePath: "stale.ts",
+    lang: "ts",
+    kind: "method",
+    contentHash: "old",
+    status: "stale",
+  });
+  assert.equal(
+    exploreGraph(store, "who_calls", "StaleService.run").diagnostics.resolutionStatus,
+    "stale_target",
+  );
+  store.close();
+});
+
+test("buildExplorePack returns one trust-aware editing payload", () => {
+  const { store, login, helper, caller } = seed();
+  const pack = buildExplorePack(store, login);
+  assert.equal(pack.focus?.nodeId, login);
+  assert.ok(pack.calls.some((node) => node.nodeId === helper));
+  assert.ok(pack.callPath.some((step) => step.nodeId === helper));
+  assert.ok(pack.blastRadius.some((node) => node.nodeId === caller));
+  assert.equal(pack.confidence.level, "high");
+  assert.equal(pack.provenance.some((item) => item.method === "EXTRACTED"), true);
+  assert.ok(Array.isArray(pack.tests));
+  assert.ok(Array.isArray(pack.routes));
+  assert.ok(Array.isArray(pack.freshness.coverageGaps));
+  assert.equal(pack.queryDiagnostics.resolutionStatus, "resolved");
+  assert.equal(pack.queryDiagnostics.resultStatus, "has_results");
+  store.close();
+});
+
+test("buildExplorePack reports a missing target without disguising it as an empty graph", () => {
+  const { store } = seed();
+  const pack = buildExplorePack(store, "does-not-exist");
+  assert.equal(pack.focus, null);
+  assert.equal(pack.queryDiagnostics.resolutionStatus, "no_match");
+  assert.equal(pack.queryDiagnostics.resultStatus, "query_error");
+  store.close();
+});
+
+test("buildExplorePack promotes an endpoint handler as the source-bearing implementation", () => {
+  const { store, main, login } = seed();
+  const endpoint = store.upsertNode({
+    nodeType: "endpoint",
+    identityKey: "grpc::AuthService.Login",
+    title: "gRPC AuthService.Login",
+  });
+  store.replaceFileEdges({ branchId: main, filePath: "route.ts", edges: [
+    { src: endpoint, dst: login, edgeType: "handles", origin: "parser", method: "EXTRACTED" },
+  ] });
+
+  const pack = buildExplorePack(store, endpoint);
+  assert.equal(pack.focus?.nodeId, endpoint, "focus remains the requested endpoint");
+  assert.equal(pack.implementation?.nodeId, login, "handler supplies editable source context");
+  assert.equal(pack.trust?.branchId, main, "freshness follows the handler repo/branch");
+  assert.ok(pack.routes.some((route) => route.route === "gRPC AuthService.Login" && route.via === "direct"));
+  assert.equal(pack.routes.filter((route) => route.route === "gRPC AuthService.Login").length, 1);
+  store.close();
+});
+
 test("compareBranches: differing hash not identical, same hash identical", () => {
   const { store, login, helper, main, feat } = seed();
   assert.equal(compareBranches(store, login, main, feat).identical, false); // L1 vs L2
@@ -110,5 +295,25 @@ test("indexStatus lists repos, branches, staleness", () => {
   const repo = st.repos.find((r) => r.repoId === repoId);
   assert.equal(repo.name, "fpms");
   assert.ok(repo.branches.some((b) => b.name === "main" && b.staleSymbols >= 1));
+  store.close();
+});
+
+test("compactIndexStatus keeps one bounded row per repo", () => {
+  const { store } = seed();
+  const compact = compactIndexStatus(store);
+  assert.equal(compact.summary.totalRepos, 1);
+  assert.equal(compact.repos.length, 1);
+  assert.deepEqual(Object.keys(compact.repos[0]).sort(), [
+    "dirtyFileCount",
+    "freshness",
+    "headCommit",
+    "indexErrorCount",
+    "indexedCommit",
+    "liveBranch",
+    "parserVersion",
+    "repo",
+  ]);
+  assert.equal(compact.repos[0].repo, "fpms");
+  assert.equal(compact.repos[0].liveBranch, "main");
   store.close();
 });

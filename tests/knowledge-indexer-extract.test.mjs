@@ -1,6 +1,59 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import { extractSymbols } from "../packages/knowledge-indexer/dist/index.js";
+
+test("releases tree-sitter WASM resources during repeated extraction", { timeout: 120_000 }, () => {
+  const childSource = String.raw`
+    import { extractSymbols } from "./packages/knowledge-indexer/dist/index.js";
+    import { extractIdentifiersFromSource } from "./packages/knowledge-indexer/dist/identifiers.js";
+
+    const source = Array.from({ length: 250 }, (_, i) => [
+      "export interface I" + i + " { field" + i + ": string; status: number }",
+      "export class C" + i + " { value = " + i + "; method" + i + "() { return helper" + i + "(this.value); } }",
+      "function helper" + i + "(x) { return x + " + i + "; }",
+    ].join("\n")).join("\n");
+
+    for (let i = 0; i < 10; i++) {
+      await extractSymbols({ lang: "ts", source, relPath: "src/warm.ts" });
+      await extractIdentifiersFromSource("ts", source);
+    }
+    global.gc();
+    const baseline = process.memoryUsage().rss;
+    for (let i = 0; i < 120; i++) {
+      await extractSymbols({ lang: "ts", source, relPath: "src/file-" + i + ".ts" });
+      await extractIdentifiersFromSource("ts", source);
+      if (i % 20 === 19) global.gc();
+    }
+    global.gc();
+    const growthMb = (process.memoryUsage().rss - baseline) / 1024 / 1024;
+    process.stdout.write(JSON.stringify({ baselineMb: baseline / 1024 / 1024, growthMb }));
+    if (growthMb > 180) process.exitCode = 1;
+  `;
+
+  const child = spawnSync(process.execPath, ["--expose-gc", "--input-type=module", "-e", childSource], {
+    cwd: process.cwd(),
+    encoding: "utf8",
+    timeout: 110_000,
+  });
+  assert.equal(
+    child.status,
+    0,
+    `tree-sitter RSS must stay bounded after warmup; stdout=${child.stdout}; stderr=${child.stderr}`,
+  );
+  const result = JSON.parse(child.stdout);
+  assert.ok(result.growthMb <= 180, `RSS grew ${result.growthMb.toFixed(1)} MB after warmup`);
+});
+
+test("languages without a tags query stay file-level even when their grammar rejects valid syntax", async () => {
+  const extracted = await extractSymbols({
+    lang: "bash",
+    relPath: "scripts/branch.sh",
+    source: 'case "$value" in ok) echo yes ;; esac',
+  });
+  assert.equal(extracted.parseError, null);
+  assert.deepEqual(extracted.symbols, []);
+});
 
 test("TS: extracts functions, classes, methods with kinds + line ranges", async () => {
   const src = [
@@ -33,6 +86,76 @@ test("TS: captures call refs + import targets", async () => {
   assert.ok(out.refs.some((r) => r.kind === "call" && r.rawName === "bar"));
   assert.ok(out.fileImports.includes("./dep"));
   assert.ok(out.refs.some((r) => r.kind === "import" && r.rawName === "./dep"));
+});
+
+test("TS: extracts identifiers and static log sites in the same AST pass", async () => {
+  const src = [
+    "interface Detail { accountStatus: string }",
+    "class BpAccountClosureService {",
+    "  closeAccount() {",
+    "    this.logger.info('[BpAccountClosureService] closeAccount started');",
+    "    this.appLogger.warn(`closing account ${playerId}`);",
+    "  }",
+    "}",
+  ].join("\n");
+  const out = await extractSymbols({ lang: "ts", relPath: "closure.ts", source: src });
+
+  assert.ok(out.identifiers.some((entry) => entry.name === "accountStatus" && entry.kind === "field"));
+  assert.deepEqual(
+    out.logSites.map(({ message, level, startLine, enclosingQualifiedName }) => ({
+      message, level, startLine, enclosingQualifiedName,
+    })),
+    [
+      {
+        message: "[BpAccountClosureService] closeAccount started",
+        level: "info",
+        startLine: 4,
+        enclosingQualifiedName: "BpAccountClosureService.closeAccount",
+      },
+      {
+        message: "closing account ",
+        level: "warn",
+        startLine: 5,
+        enclosingQualifiedName: "BpAccountClosureService.closeAccount",
+      },
+    ],
+  );
+});
+
+test("TS: captures dynamic import targets for test-to-symbol scoping", async () => {
+  const src = [
+    "async function exerciseProvider() {",
+    "  const { Provider } = await import('./provider');",
+    "  return new Provider().checkBlacklist();",
+    "}",
+  ].join("\n");
+  const out = await extractSymbols({ lang: "ts", source: src });
+  assert.ok(out.fileImports.includes("./provider"));
+  assert.ok(out.refs.some((ref) => ref.kind === "import" && ref.rawName === "./provider"));
+});
+
+test("TS: factory-call variables enclose callbacks and their gRPC client calls", async () => {
+  const src = [
+    "export const loadProfile = createAsyncThunk('profile/load', async () => {",
+    "  return playerService.getPlayerInfo({});",
+    "});",
+  ].join("\n");
+  const out = await extractSymbols({ lang: "ts", relPath: "profile-slice.ts", source: src });
+  const symbol = out.symbols.find((item) => item.name === "loadProfile");
+  assert.equal(symbol?.kind, "function");
+  assert.equal(symbol?.startLine, 1);
+  assert.equal(symbol?.endLine, 3);
+  const call = out.refs.find((item) => item.kind === "call" && item.rawName === "getPlayerInfo");
+  assert.equal(call?.enclosingQualifiedName, "profile-slice.ts::loadProfile");
+});
+
+test("TS: ordinary call-valued constants are not promoted to function symbols", async () => {
+  const out = await extractSymbols({
+    lang: "ts",
+    relPath: "config.ts",
+    source: "export const config = makeConfig();",
+  });
+  assert.equal(out.symbols.some((item) => item.name === "config"), false);
 });
 
 test("contentHash is stable per symbol and independent of other symbols", async () => {

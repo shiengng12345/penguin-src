@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { basename, dirname, relative, resolve as pathResolve } from "node:path";
-import type { KnowledgeStore, ParsedEdge } from "@penguin/knowledge-core";
+import { SCHEMA_VERSION, type KnowledgeStore, type ParsedEdge } from "@penguin/knowledge-core";
 import { extractSymbols, type ExtractedSymbol } from "./extract.js";
 import { grpcEndpointKey } from "./grpc-client.js";
 import { allForwardingMethods, extractFunctionNameCalls } from "./frontend-grpc-client.js";
 import { verifiedConnectRpcGetters, extractConnectRpcCalls } from "./connect-rpc-client.js";
-import { loadParser } from "./parser.js";
+import { withParsedTree } from "./parser.js";
 import { readGitContext } from "./git.js";
 import { indexGitObjects } from "./gitgraph.js";
 import { langForExtension } from "./registry.js";
@@ -22,6 +22,16 @@ export interface IndexReport {
   branchId: string;
   branchName: string;
   commit: string | null;
+  headCommit: string | null;
+  indexedCommit: string | null;
+  worktreeState: "clean" | "dirty" | "unknown" | "not_applicable";
+  dirtyFiles: string[];
+  pendingFiles: string[];
+  worktreeFingerprint: string;
+  parserVersion: string;
+  schemaVersion: number;
+  staleReason: "worktree_dirty" | "git_status_unavailable" | null;
+  coverageGaps: string[];
   scanned: number;
   parsed: number;
   skipped: number;
@@ -31,6 +41,8 @@ export interface IndexReport {
   commits: number; // git commit nodes captured
   tags: number; // git tag nodes captured
 }
+
+export const KNOWLEDGE_PARSER_VERSION = "tree-sitter-wasm-v5-single-pass-log-sites";
 
 // In-process index task lock: one active task per repo+branch+checkout (§8.3).
 const activeLocks = new Set<string>();
@@ -50,8 +62,14 @@ function sha256(input: string): string {
   return createHash("sha256").update(input, "utf8").digest("hex");
 }
 
-function symbolIdentityKey(repoId: string, qualifiedName: string): string {
-  return `${repoId}::${qualifiedName}`;
+function symbolIdentityKey(repoId: string, relPath: string, qualifiedName: string): string {
+  // Top-level declarations already carry their file prefix. Class members do
+  // not (`PlayerClientGrpc.getPlayerInfo`), so add it here to keep identical
+  // copied classes in different physical files from collapsing onto one node.
+  const fileScopedName = qualifiedName.startsWith(`${relPath}::`)
+    ? qualifiedName
+    : `${relPath}::${qualifiedName}`;
+  return `${repoId}::${fileScopedName}`;
 }
 
 // Test files (*.spec.ts / *.test.ts / __tests__/…) get `tests` edges to the
@@ -93,12 +111,22 @@ function resolveRelativeImport(fromAbsPath: string, spec: string, rootPath: stri
 function storeSymbolIndex(store: KnowledgeStore, repoId: string): SymbolIndex {
   return {
     byQualifiedName: (qn) => {
-      const row = store.db
+      const bare = qn.split("::").at(-1)!.split(".").at(-1)!;
+      const rows = store.db
         .prepare(
-          "SELECT id FROM nodes WHERE node_type='symbol' AND repo_id=? AND identity_key=?",
+          `SELECT id, meta FROM nodes
+           WHERE node_type='symbol' AND repo_id=?
+             AND title=?`,
         )
-        .get(repoId, symbolIdentityKey(repoId, qn)) as { id: string } | undefined;
-      return row?.id ?? null;
+        .all(repoId, bare) as Array<{ id: string; meta: string }>;
+      const exact = rows.filter((row) => {
+        try {
+          return (JSON.parse(row.meta) as { qualifiedName?: string }).qualifiedName === qn;
+        } catch {
+          return false;
+        }
+      });
+      return exact.length === 1 ? exact[0].id : null;
     },
     bareNameCandidates: (bare) => {
       const rows = store.db
@@ -108,9 +136,9 @@ function storeSymbolIndex(store: KnowledgeStore, repoId: string): SymbolIndex {
                      WHERE sv.node_id = n.id AND sv.status='fresh' LIMIT 1) AS filePath
            FROM nodes n
            WHERE n.node_type='symbol' AND n.repo_id=?
-             AND (n.identity_key = ? OR n.identity_key LIKE ? OR n.identity_key LIKE ?)`,
+             AND n.title=?`,
         )
-        .all(repoId, symbolIdentityKey(repoId, bare), `%::${bare}`, `%.${bare}`) as Array<{
+        .all(repoId, bare) as Array<{
         id: string;
         filePath: string | null;
       }>;
@@ -156,14 +184,14 @@ function priorSymbols(
 ): ExtractedSymbol[] {
   const rows = store.db
     .prepare(
-      `SELECT n.identity_key AS ik, sv.content_hash AS hash, sv.kind AS kind
+      `SELECT json_extract(n.meta, '$.qualifiedName') AS qn,
+              sv.content_hash AS hash, sv.kind AS kind
        FROM symbol_versions sv JOIN nodes n ON n.id = sv.node_id
        WHERE sv.branch_id=? AND sv.file_path=? AND sv.status='fresh'`,
     )
-    .all(branchId, filePath) as Array<{ ik: string; hash: string; kind: string }>;
-  const prefix = `${repoId}::`;
+    .all(branchId, filePath) as Array<{ qn: string; hash: string; kind: string }>;
   return rows.map((r) => ({
-    qualifiedName: r.ik.startsWith(prefix) ? r.ik.slice(prefix.length) : r.ik,
+    qualifiedName: r.qn,
     name: "",
     kind: r.kind,
     signature: null,
@@ -188,6 +216,7 @@ async function indexFileWithSource(
     contentHash: string;
     mtimeMs: number;
     sizeBytes: number;
+    recordRenames?: boolean;
   },
 ): Promise<{
   error: string | null;
@@ -211,6 +240,10 @@ async function indexFileWithSource(
   }
 
   const extracted = await extractSymbols({ lang, source: p.source, relPath: p.relPath });
+  // Object-literal keys / interface / type-alias / class field names — none
+  // of these are symbol nodes, so this feeds fts_identifiers only (see
+  // identifiers.ts). TS/JS-only for now: the grammar node types it looks for
+  // (property_signature, public_field_definition, pair) are TS/JS-specific.
   if (extracted.parseError) {
     store.upsertFileCheckpoint({
       repoId: p.repoId, branchId: p.branchId, filePath: p.relPath, lang,
@@ -231,13 +264,16 @@ async function indexFileWithSource(
   const renames = detectRenames({ disappeared, appeared });
   // Ambiguous same-body moves go to a confirmation queue (Ledger), never
   // auto-applied (§11 相似度检测进确认队列).
-  for (const s of renames.suggested) {
+  for (const s of p.recordRenames === false ? [] : renames.suggested) {
     store.recordKnowledge({
       type: "rename_suggested",
       origin: "system",
       method: "INFERRED",
       actor: { type: "system", id: "knowledge-indexer" },
-      payload: { old_key: symbolIdentityKey(p.repoId, s.oldKey), candidate_keys: s.candidateKeys.map((k) => symbolIdentityKey(p.repoId, k)) },
+      payload: {
+        old_key: symbolIdentityKey(p.repoId, p.relPath, s.oldKey),
+        candidate_keys: s.candidateKeys.map((k) => symbolIdentityKey(p.repoId, p.relPath, k)),
+      },
     });
   }
 
@@ -264,12 +300,34 @@ async function indexFileWithSource(
     for (const sym of extracted.symbols) {
       const nodeId = store.upsertNode({
         nodeType: "symbol",
-        identityKey: symbolIdentityKey(p.repoId, sym.qualifiedName),
+        identityKey: symbolIdentityKey(p.repoId, p.relPath, sym.qualifiedName),
         repoId: p.repoId,
         title: sym.name,
         meta: { kind: sym.kind, qualifiedName: sym.qualifiedName },
       });
       fileSymbolIds.set(sym.qualifiedName, nodeId);
+    }
+
+    // log_site nodes are rebuildable parser output. Replace this file's full
+    // set so removed/changed log messages cannot remain searchable.
+    store.clearLogSitesForFile(p.repoId, p.relPath);
+    const logSiteNodes: Array<{ site: (typeof extracted.logSites)[number]; nodeId: string }> = [];
+    for (const site of extracted.logSites) {
+      const identityKey = `${p.repoId}::log::${p.relPath}:${site.startLine}:${sha256(site.message).slice(0, 16)}`;
+      const nodeId = store.upsertNode({
+        nodeType: "log_site",
+        identityKey,
+        repoId: p.repoId,
+        title: site.message,
+        meta: {
+          filePath: p.relPath,
+          startLine: site.startLine,
+          level: site.level,
+          message: site.message,
+          enclosingQualifiedName: site.enclosingQualifiedName,
+        },
+      });
+      logSiteNodes.push({ site, nodeId });
     }
 
     // 2. mark this file's prior versions stale, then upsert fresh versions
@@ -286,9 +344,10 @@ async function indexFileWithSource(
 
     // 3. resolve call/type refs → edges (import-scoped), plus structural edges:
     //    file →defines→ symbol, and file →imports→ imported file.
+    const symbolLookup = storeSymbolIndex(store, p.repoId);
     const resolved = resolveRefs({
       refs: extracted.refs, fileSymbols: extracted.symbols,
-      fileSymbolIds, lookup: storeSymbolIndex(store, p.repoId),
+      fileSymbolIds, lookup: symbolLookup,
       currentFile: p.relPath, importedFiles,
     });
     // Cap: a file with hundreds of external (node_modules/stdlib) misses would
@@ -312,9 +371,37 @@ async function indexFileWithSource(
     // targets that live outside this file). Grounded in real usage, not guessed.
     if (isTestFile(p.relPath)) {
       const localIds = new Set(fileSymbolIds.values());
-      const tested = new Set(resolved.edges.map((e) => e.dst).filter((d): d is string => !!d && !localIds.has(d)));
-      for (const dst of tested) {
-        structural.push({ src: fileNodeId, dst, edgeType: "tests", origin: "parser", method: "EXTRACTED" });
+      const tested = new Map<string, { method: "EXTRACTED" | "INFERRED"; confidence?: number }>();
+      for (const edge of resolved.edges) {
+        if (!edge.dst || localIds.has(edge.dst)) continue;
+        tested.set(edge.dst, { method: edge.method, confidence: edge.confidence });
+      }
+      // Jest/Vitest callbacks are commonly anonymous, so their calls have no
+      // enclosing symbol and cannot form normal calls edges. Import scoping is
+      // still strong evidence: accept only a unique symbol from an imported file.
+      for (const ref of extracted.refs) {
+        if (ref.enclosingQualifiedName || (ref.kind !== "call" && ref.kind !== "type")) continue;
+        const importedCandidates = symbolLookup
+          .bareNameCandidates(ref.rawName)
+          .filter((candidate) => candidate.filePath && importedFiles.has(candidate.filePath));
+        if (importedCandidates.length === 0) {
+          retryNames = [...new Set([...retryNames, ref.rawName])].slice(0, 100);
+          continue;
+        }
+        if (importedCandidates.length === 1) {
+          tested.set(importedCandidates[0].id, { method: "EXTRACTED" });
+          continue;
+        }
+        const confidence = 1 / importedCandidates.length;
+        for (const candidate of importedCandidates) {
+          if (!tested.has(candidate.id)) tested.set(candidate.id, { method: "INFERRED", confidence });
+        }
+      }
+      for (const [dst, evidence] of tested) {
+        structural.push({
+          src: fileNodeId, dst, edgeType: "tests", origin: "parser",
+          method: evidence.method, ...(evidence.confidence != null ? { confidence: evidence.confidence } : {}),
+        });
       }
     }
     // endpoints (NestJS gRPC/kafka/http): an `endpoint` node → its handler method
@@ -399,6 +486,11 @@ async function indexFileWithSource(
         origin: "parser", method: "EXTRACTED",
       });
     }
+    for (const { site, nodeId: dst } of logSiteNodes) {
+      const src = site.enclosingQualifiedName ? fileSymbolIds.get(site.enclosingQualifiedName) : undefined;
+      if (!src || !dst) continue;
+      structural.push({ src, dst, edgeType: "emits_log", origin: "parser", method: "EXTRACTED" });
+    }
     store.replaceFileEdges({
       repoId: p.repoId, branchId: p.branchId, filePath: p.relPath,
       edges: [...resolved.edges, ...structural],
@@ -410,6 +502,9 @@ async function indexFileWithSource(
         nodeId: fileSymbolIds.get(sym.qualifiedName)!, name: sym.name, signature: sym.signature,
       });
     }
+
+    // 4b. field/object-key identifier index (file:line only, not graph nodes)
+    store.indexIdentifiers({ repoId: p.repoId, filePath: p.relPath, entries: extracted.identifiers });
 
     // 5. checkpoint
     store.upsertFileCheckpoint({
@@ -424,7 +519,7 @@ async function indexFileWithSource(
 
   // Apply rename aliases now that node ids exist (Ledger-first, outside the txn).
   let renamed = 0;
-  for (const ev of renames.auto) {
+  for (const ev of p.recordRenames === false ? [] : renames.auto) {
     // the alias's node = the appeared symbol sharing the gone symbol's hash
     const gone = disappeared.find((d) => d.qualifiedName === ev.aliasKey);
     const arrived = appeared.find((a) => a.contentHash === gone?.contentHash);
@@ -436,7 +531,11 @@ async function indexFileWithSource(
         method: "EXTRACTED",
         actor: { type: "system", id: "knowledge-indexer" },
         target: { node_id: nodeId },
-        payload: { alias_key: symbolIdentityKey(p.repoId, ev.aliasKey), alias_type: "qualified_name", reason: "rename" },
+        payload: {
+          alias_key: symbolIdentityKey(p.repoId, p.relPath, ev.aliasKey),
+          alias_type: "qualified_name",
+          reason: "rename",
+        },
       });
       renamed += 1;
     }
@@ -488,6 +587,9 @@ export async function indexRepo(input: {
   // index SUCCEEDS (validation V1 — a failed run must not look trustworthy).
   // Existing branches keep their current status during the run.
   const prior = store.getBranch(repoId, git.branch);
+  const effectiveMode = mode === "rebuild" || prior?.parser_version !== KNOWLEDGE_PARSER_VERSION
+    ? "rebuild"
+    : "incremental";
   const branchId = store.registerBranch({
     repoId, name: git.branch, headCommit: git.commit, checkoutPath: git.checkoutPath,
     status: (prior?.status as "live" | "snapshot" | "gone" | undefined) ?? "snapshot",
@@ -504,8 +606,27 @@ export async function indexRepo(input: {
 
   const report: IndexReport = {
     repoId, branchId, branchName: git.branch, commit: git.commit,
+    headCommit: git.commit,
+    indexedCommit: git.worktreeState === "clean" ? git.commit : null,
+    worktreeState: git.worktreeState,
+    dirtyFiles: [...git.dirtyFiles],
+    pendingFiles: [],
+    worktreeFingerprint: git.worktreeFingerprint,
+    parserVersion: KNOWLEDGE_PARSER_VERSION,
+    schemaVersion: SCHEMA_VERSION,
+    staleReason: git.worktreeState === "dirty"
+      ? "worktree_dirty"
+      : git.worktreeState === "unknown"
+        ? "git_status_unavailable"
+        : null,
+    coverageGaps: git.worktreeState === "unknown" ? ["git_status_unavailable"] : [],
     scanned: 0, parsed: 0, skipped: 0, deleted: 0, errors: 0, renamed: 0,
     commits: 0, tags: 0,
+  };
+  const dirtyFiles = new Set(git.dirtyFiles);
+  const commitForFile = (relPath: string): string | null => {
+    if (git.worktreeState === "unknown") return "(worktree)";
+    return dirtyFiles.has(relPath) ? "(worktree)" : git.commit;
   };
 
   const emit = input.onProgress;
@@ -533,8 +654,12 @@ export async function indexRepo(input: {
     emit({ phase: "metric", symbols, edges, endpoints: endpointsFound });
   };
 
+  let rebuildTransactionOpen = false;
+
   try {
-    if (mode === "rebuild") {
+    if (effectiveMode === "rebuild") {
+      store.db.exec("BEGIN IMMEDIATE");
+      rebuildTransactionOpen = true;
       store.db.prepare("DELETE FROM files_index WHERE repo_id=? AND branch_id=?").run(repoId, branchId);
     }
 
@@ -578,7 +703,7 @@ export async function indexRepo(input: {
 
       // quick filter: mtime+size unchanged (and not previously errored) → skip
       if (
-        mode === "incremental" && prev && prev.status !== "error" &&
+        effectiveMode === "incremental" && prev && prev.status !== "error" &&
         prev.mtime_ms === file.mtimeMs && prev.size_bytes === file.sizeBytes
       ) {
         report.skipped += 1;
@@ -590,7 +715,7 @@ export async function indexRepo(input: {
 
       // hash unchanged (touch / format-revert) → refresh checkpoint mtime, skip parse
       if (
-        mode === "incremental" && prev && prev.status !== "error" &&
+        effectiveMode === "incremental" && prev && prev.status !== "error" &&
         prev.content_hash === contentHash
       ) {
         store.upsertFileCheckpoint({
@@ -604,9 +729,10 @@ export async function indexRepo(input: {
 
       reprocessedFiles.add(file.relPath);
       const r = await indexFileWithSource(store, {
-        repoId, branchId, commit: git.commit, relPath: file.relPath,
+        repoId, branchId, commit: commitForFile(file.relPath), relPath: file.relPath,
         absPath: file.absPath, rootPath: scanRoot,
         source, contentHash, mtimeMs: file.mtimeMs, sizeBytes: file.sizeBytes,
+        recordRenames: effectiveMode !== "rebuild",
       });
       if (r.error) report.errors += 1;
       else report.parsed += 1;
@@ -638,9 +764,10 @@ export async function indexRepo(input: {
           source = readFileSync(file.absPath, "utf8");
         } catch { continue; }
         const r2 = await indexFileWithSource(store, {
-          repoId, branchId, commit: git.commit, relPath: file.relPath,
+          repoId, branchId, commit: commitForFile(file.relPath), relPath: file.relPath,
           absPath: file.absPath, rootPath: scanRoot,
           source, contentHash: sha256(source), mtimeMs: file.mtimeMs, sizeBytes: file.sizeBytes,
+          recordRenames: effectiveMode !== "rebuild",
         });
         if (!r2.error) reResolved += 1;
       }
@@ -658,6 +785,7 @@ export async function indexRepo(input: {
       store.markFileDeleted({ repoId, branchId, filePath: cp.file_path });
       store.markFileSymbolsStale({ branchId, filePath: cp.file_path });
       store.replaceFileEdges({ repoId, branchId, filePath: cp.file_path, edges: [] });
+      store.clearLogSitesForFile(repoId, cp.file_path);
       store.db
         .prepare(
           `DELETE FROM fts_symbols WHERE node_id IN (
@@ -757,13 +885,10 @@ export async function indexRepo(input: {
       } catch { continue; }
       if (!wSource.includes("this._net")) continue;
       const wLang = langForExtension(file.relPath) as "ts" | "tsx";
-      let tree;
       try {
-        const parser = await loadParser(wLang);
-        tree = parser.parse(wSource);
+        const methods = await withParsedTree(wLang, wSource, allForwardingMethods, new Set<string>());
+        for (const m of methods) verifiedMethods.add(m);
       } catch { continue; }
-      if (!tree) continue;
-      for (const m of allForwardingMethods(tree.rootNode)) verifiedMethods.add(m);
     }
 
     // Same whole-repo-every-run treatment for the @connectrpc/connect
@@ -779,13 +904,10 @@ export async function indexRepo(input: {
       } catch { continue; }
       if (!wSource.includes("createClient")) continue;
       const wLang = langForExtension(file.relPath) as "ts" | "tsx";
-      let tree;
       try {
-        const parser = await loadParser(wLang);
-        tree = parser.parse(wSource);
+        const getters = await withParsedTree(wLang, wSource, verifiedConnectRpcGetters, new Set<string>());
+        for (const m of getters) verifiedGetters.add(m);
       } catch { continue; }
-      if (!tree) continue;
-      for (const m of verifiedConnectRpcGetters(tree.rootNode)) verifiedGetters.add(m);
     }
 
     // Call-site scan+enqueue is scoped to files REPROCESSED this run (unlike
@@ -814,26 +936,28 @@ export async function indexRepo(input: {
         } catch { continue; }
         if (!wSource.includes("functionName")) continue;
         const wLang = langForExtension(file.relPath) as "ts" | "tsx";
-        let tree;
         try {
-          const parser = await loadParser(wLang);
-          tree = parser.parse(wSource);
+          const calls = await withParsedTree(
+            wLang,
+            wSource,
+            (root) => extractFunctionNameCalls(root, verifiedMethods),
+            [],
+          );
+          for (const call of calls) {
+            const srcNodeId = enclosingSymbolNodeId(store, branchId, file.relPath, call.startLine);
+            if (!srcNodeId) continue; // no symbol wraps this call site
+            // Only-correct guarantee: link ONLY when EXACTLY ONE gRPC service
+            // defines this method; 0 → deferred (service="", re-resolved on a
+            // later replayPendingFrontendEdges()); >1 → skip, never link.
+            const services = store.findEndpointServicesByMethod(call.functionName.toLowerCase());
+            if (services.length > 1) continue;
+            store.enqueuePendingFrontendEdge({
+              repoId, filePath: file.relPath, srcNodeId,
+              service: services.length === 1 ? services[0] : "",
+              functionName: call.functionName, sourceType: "frontend_web",
+            });
+          }
         } catch { continue; }
-        if (!tree) continue;
-        for (const call of extractFunctionNameCalls(tree.rootNode, verifiedMethods)) {
-          const srcNodeId = enclosingSymbolNodeId(store, branchId, file.relPath, call.startLine);
-          if (!srcNodeId) continue; // no symbol wraps this call site
-          // Only-correct guarantee: link ONLY when EXACTLY ONE gRPC service
-          // defines this method; 0 → deferred (service="", re-resolved on a
-          // later replayPendingFrontendEdges()); >1 → skip, never link.
-          const services = store.findEndpointServicesByMethod(call.functionName.toLowerCase());
-          if (services.length > 1) continue;
-          store.enqueuePendingFrontendEdge({
-            repoId, filePath: file.relPath, srcNodeId,
-            service: services.length === 1 ? services[0] : "",
-            functionName: call.functionName, sourceType: "frontend_web",
-          });
-        }
       }
     }
     if (verifiedGetters.size > 0) {
@@ -843,24 +967,26 @@ export async function indexRepo(input: {
           wSource = readFileSync(file.absPath, "utf8");
         } catch { continue; }
         const wLang = langForExtension(file.relPath) as "ts" | "tsx";
-        let tree;
         try {
-          const parser = await loadParser(wLang);
-          tree = parser.parse(wSource);
+          const calls = await withParsedTree(
+            wLang,
+            wSource,
+            (root) => extractConnectRpcCalls(root, verifiedGetters),
+            [],
+          );
+          for (const call of calls) {
+            const srcNodeId = enclosingSymbolNodeId(store, branchId, file.relPath, call.startLine);
+            if (!srcNodeId) continue; // no symbol wraps this call site
+            // Same only-correct guarantee as the functionName pattern above.
+            const services = store.findEndpointServicesByMethod(call.functionName.toLowerCase());
+            if (services.length > 1) continue;
+            store.enqueuePendingFrontendEdge({
+              repoId, filePath: file.relPath, srcNodeId,
+              service: services.length === 1 ? services[0] : "",
+              functionName: call.functionName, sourceType: "frontend_web",
+            });
+          }
         } catch { continue; }
-        if (!tree) continue;
-        for (const call of extractConnectRpcCalls(tree.rootNode, verifiedGetters)) {
-          const srcNodeId = enclosingSymbolNodeId(store, branchId, file.relPath, call.startLine);
-          if (!srcNodeId) continue; // no symbol wraps this call site
-          // Same only-correct guarantee as the functionName pattern above.
-          const services = store.findEndpointServicesByMethod(call.functionName.toLowerCase());
-          if (services.length > 1) continue;
-          store.enqueuePendingFrontendEdge({
-            repoId, filePath: file.relPath, srcNodeId,
-            service: services.length === 1 ? services[0] : "",
-            functionName: call.functionName, sourceType: "frontend_web",
-          });
-        }
       }
     }
     // Unconditional: also replays pending rows left by OTHER repos (e.g. this
@@ -953,13 +1079,32 @@ export async function indexRepo(input: {
     stageDone("git", gitGraph.commits > 0 ? `${gitGraph.commits} commits` : undefined);
     emitMetric();
 
-    store.recordBranchIndexed({ branchId, commit: git.commit });
+    store.recordBranchIndexed({
+      branchId,
+      commit: report.indexedCommit,
+      worktreeState: report.worktreeState,
+      worktreeFingerprint: report.worktreeFingerprint,
+      dirtyFiles: report.dirtyFiles,
+      parserVersion: report.parserVersion,
+      schemaVersion: report.schemaVersion,
+      staleReason: report.staleReason,
+    });
     // Success: NOW the branch is trustworthy — promote it to live and flip the
     // previously-indexed branch of THIS checkout to snapshot (design review
     // Q5 + validation V1: neither may happen on a failed run).
     store.setBranchStatus(branchId, "live");
     store.demoteSiblingBranches({ repoId, keepBranchId: branchId, checkoutPath: git.checkoutPath });
+    if (rebuildTransactionOpen) {
+      store.db.exec("COMMIT");
+      rebuildTransactionOpen = false;
+    }
     return report;
+  } catch (error) {
+    if (rebuildTransactionOpen && store.db.inTransaction) {
+      store.db.exec("ROLLBACK");
+      rebuildTransactionOpen = false;
+    }
+    throw error;
   } finally {
     store.releaseIndexMarker(branchId);
     lock.release();

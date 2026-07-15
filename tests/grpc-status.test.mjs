@@ -27,6 +27,18 @@ async function loadGrpcJsonModule() {
   return import(`data:text/javascript;base64,${encoded}`);
 }
 
+async function loadGrpcWebDebugModule() {
+  const source = await readFile(new URL("../packages/core/src/grpc-web-debug.ts", import.meta.url), "utf8");
+  const { outputText } = ts.transpileModule(source, {
+    compilerOptions: {
+      module: ts.ModuleKind.ES2022,
+      target: ts.ScriptTarget.ES2022,
+    },
+  });
+  const encoded = Buffer.from(outputText).toString("base64");
+  return import(`data:text/javascript;base64,${encoded}`);
+}
+
 test("summarizes gRPC 14 HTTP 504 as unavailable gateway timeout", async () => {
   const { formatGrpcStatusBadgeLabel, summarizeGrpcStatusResponse } = await loadGrpcStatusModule();
 
@@ -83,6 +95,14 @@ test("ResponsePanel renders response bodies as a contained code viewer", async (
   assert.doesNotMatch(source, /whitespace-pre-wrap break-all/);
 });
 
+test("ResponsePanel keeps gRPC headers compact with an explicit expand-all action", async () => {
+  const source = await readFile(new URL("../src/components/request/ResponsePanel.tsx", import.meta.url), "utf8");
+  assert.match(source, /showAllHeaders/);
+  assert.match(source, /Show all headers/);
+  assert.match(source, /x-penguin-http-version/);
+  assert.match(source, /x-penguin-id/);
+});
+
 test("normalizes proto enum strings through the generated request fromJson", async () => {
   const { normalizeGrpcJsonBody } = await loadGrpcJsonModule();
   const requestType = {
@@ -123,4 +143,85 @@ test("gRPC-Web ConnectError responses are marked as errors", async () => {
   const source = await readFile(new URL("../packages/core/src/grpc-web-client.ts", import.meta.url), "utf8");
 
   assert.match(source, /error: ce\.rawMessage/);
+  assert.match(source, /safeResponseMetadata\(ce\.metadata\)/);
+});
+
+test("gRPC-Web transport inspection records safe response framing diagnostics", async () => {
+  const { inspectGrpcWebResponse } = await loadGrpcWebDebugModule();
+  const response = new Response(new Uint8Array([0, 0, 0, 0, 2, 0x7b, 0x7d]), {
+    status: 200,
+    statusText: "OK",
+    headers: {
+      "content-type": "application/grpc-web+proto",
+      "content-encoding": "identity",
+      "grpc-status": "0",
+      "grpc-message": "",
+      "x-penguin-http-status": "200",
+      "x-penguin-response-bytes": "7",
+      "x-penguin-response-prefix": "00000000027b7d",
+    },
+  });
+
+  const result = await inspectGrpcWebResponse(response);
+
+  assert.deepEqual(result, {
+    status: 200,
+    statusText: "OK",
+    url: "",
+    contentType: "application/grpc-web+proto",
+    contentEncoding: "identity",
+    grpcStatus: "0",
+    grpcMessage: "",
+    contentLength: null,
+    bytes: 7,
+    prefixHex: "00000000027b7d",
+  });
+});
+
+test("Tauri gRPC-Web proxy preserves raw response inspection headers", async () => {
+  const source = await readFile(new URL("../src/lib/proxy-fetch.ts", import.meta.url), "utf8");
+
+  assert.match(source, /x-penguin-http-status/);
+  assert.match(source, /x-penguin-response-bytes/);
+  assert.match(source, /x-penguin-response-prefix/);
+  assert.match(source, /x-penguin-grpc-status/);
+});
+
+test("Rust proxy preserves framing diagnostics when response body reading fails", async () => {
+  const source = await readFile(new URL("../src-tauri/src/proxy.rs", import.meta.url), "utf8");
+
+  assert.match(source, /x-penguin-http-version/);
+  assert.match(source, /x-penguin-content-length/);
+  assert.match(source, /x-penguin-transfer-encoding/);
+  assert.match(source, /body read failed/);
+});
+
+test("desktop gRPC-Web wrapper carries proxy diagnostics through Connect errors", async () => {
+  const source = await readFile(new URL("../src/lib/grpc-web-client.ts", import.meta.url), "utf8");
+
+  assert.match(source, /transportHeaders/);
+  assert.match(source, /headers:\s*\{\s*\.\.\.transportHeaders/);
+});
+
+test("gRPC-Web inspection accepts diagnostics already attached by the Tauri proxy", async () => {
+  const { inspectGrpcWebResponse } = await loadGrpcWebDebugModule();
+  const response = new Response(null, {
+    status: 200,
+    headers: {
+      "x-penguin-http-status": "200",
+      "x-penguin-content-type": "application/grpc-web+proto",
+      "x-penguin-content-encoding": "identity",
+      "x-penguin-grpc-status": "2",
+      "x-penguin-grpc-message": "error decoding response body",
+      "x-penguin-response-bytes": "19",
+      "x-penguin-response-prefix": "7b22636f6465223a327d",
+    },
+  });
+
+  const result = await inspectGrpcWebResponse(response);
+
+  assert.equal(result.bytes, 19);
+  assert.equal(result.prefixHex, "7b22636f6465223a327d");
+  assert.equal(result.grpcStatus, "2");
+  assert.equal(result.grpcMessage, "error decoding response body");
 });

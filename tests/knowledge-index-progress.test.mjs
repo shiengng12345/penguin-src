@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -59,4 +59,10 @@ test("without --progress-events, no structured events (bar path)", async () => {
   // --json (no progress-events) → structured sink untouched
   assert.equal(await runCli(["index", "--json"], deps), 0);
   assert.equal(events.length, 0);
+});
+
+test("progress events identify the repository and finish cleanly", async () => {
+  const source = readFileSync(new URL("../packages/knowledge-cli/src/index.ts", import.meta.url), "utf8");
+  assert.match(source, /progressEvent!\(\{ \.\.\.p, rootPath: target \}\)/);
+  assert.match(source, /phase: "complete"/);
 });

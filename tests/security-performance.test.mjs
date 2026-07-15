@@ -75,7 +75,7 @@ test("npm-package shell scope allows the current prefer-online install command",
   assert.equal(npmPackageValidators.length, 2);
 
   const installCommand =
-    'export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; command -v nvm >/dev/null 2>&1 && (nvm use default >/dev/null 2>&1 || nvm use node >/dev/null 2>&1) || true; export VOLTA_HOME="$HOME/.volta"; export PATH="$VOLTA_HOME/bin:$HOME/.fnm:/opt/homebrew/bin:/usr/local/bin:$PATH"; command -v fnm >/dev/null 2>&1 && eval "$(fnm env 2>/dev/null)"; cd "/Users/shieng/.penguin/grpc-web" && npm install --save --no-audit --no-fund --fetch-timeout=30000 --fetch-retries=1 --prefer-online "@snsoft/auth-grpc-web@2.1.2-20260701140327"';
+    'export NVM_DIR="$HOME/.nvm"; [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"; command -v nvm >/dev/null 2>&1 && (nvm use default >/dev/null 2>&1 || nvm use node >/dev/null 2>&1) || true; export VOLTA_HOME="$HOME/.volta"; export PATH="$VOLTA_HOME/bin:$HOME/.fnm:/opt/homebrew/bin:/usr/local/bin:$PATH"; command -v fnm >/dev/null 2>&1 && eval "$(fnm env 2>/dev/null)"; command -v npm >/dev/null 2>&1 && export PATH="$(npm prefix -g)/bin:$PATH" || true; cd "/Users/shieng/.penguin/grpc-web" && npm install --save --no-audit --no-fund --fetch-timeout=30000 --fetch-retries=1 --prefer-online "@snsoft/auth-grpc-web@2.1.2-20260701140327"';
 
   for (const validator of npmPackageValidators) {
     assert.match(installCommand, new RegExp(validator));
@@ -95,7 +95,7 @@ test("HTTP proxy and REST sender stream responses through explicit byte caps", a
   const rest = await loadSource("../src-tauri/src/rest/commands.rs");
   const cargo = await loadSource("../src-tauri/Cargo.toml");
 
-  assert.match(cargo, /reqwest = \{ version = "0\.12", features = \[[^\]]*"stream"/);
+  assert.match(cargo, /reqwest = \{ version = "0\.12", default-features = false, features = \[[^\]]*"stream"/);
   assert.match(proxy, /const MAX_PROXY_RESPONSE_BYTES:/);
   assert.match(proxy, /const PROXY_TIMEOUT_SECS:/);
   assert.match(proxy, /\.timeout\(std::time::Duration::from_secs\(PROXY_TIMEOUT_SECS\)\)/);

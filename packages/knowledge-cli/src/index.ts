@@ -1,5 +1,6 @@
 import {
   buildContextPack,
+  buildExplorePack,
   renderContextPackMarkdown,
   buildFlow,
   renderFlowMarkdown,
@@ -16,6 +17,7 @@ import {
   graphNeighborhood,
   serviceGraph,
   indexStatus,
+  compactIndexStatus,
   listFileSymbols,
   listIndexedFiles,
   listSuggestions,
@@ -29,6 +31,7 @@ import {
 } from "@penguin/knowledge-core";
 import { indexRepo, startWatcher, createNote, createIncident, appendNote, writeNoteBody, readNote, listNotes, reindexNotesDir } from "@penguin/knowledge-indexer";
 import { resolveProvider, aiComplete } from "./ai.js";
+import { runClaudeHook } from "./claude-hook.js";
 import { createIndexRenderer } from "./render-progress.js";
 import { discoverSubRepos, isGitRepo, type RepoCandidate } from "./multi-repo.js";
 
@@ -59,12 +62,15 @@ export interface CliDeps {
   // non-interactive contexts (tests, app bridge, pipes) — the CLI then
   // refuses the multi-repo parent instead of guessing.
   pickRepos?: (candidates: RepoCandidate[]) => Promise<string[] | null>;
+  // Hook input is supplied only by the executable entrypoint and is bounded
+  // there before parsing. Tests inject it directly; normal CLI verbs ignore it.
+  readStdin?: () => Promise<string>;
 }
 
 const READ_VERBS = new Set([
   "search", "node", "callers", "calls", "impact", "backlinks",
   "path", "recent", "compare", "status", "suggestions", "snapshots", "doctor",
-  "files", "filesymbols", "graph", "repograph", "services", "tags", "context", "flow", "affected", "architecture", "communities", "timeline", "samples", "deadcode",
+  "files", "filesymbols", "graph", "repograph", "services", "tags", "context", "explore", "locate", "flow", "affected", "architecture", "communities", "timeline", "samples", "deadcode",
 ]);
 
 // repo/branch args accept an id OR a name (humans pass names; the Wiki passes
@@ -112,6 +118,8 @@ const HELP = `penguin — Penguin Knowledge CLI
   penguin calls <symbol>        what it calls
   penguin impact <symbol>       transitive blast radius
   penguin context <symbol|api>  AI context pack (branch+code+notes+tests+risks); --json for structured
+  penguin explore <symbol|api>  source+flow+impact+tests+routes+trust in one result
+  penguin locate <symbol|api>   one-shot code location (alias of explore; source+callers+callees+tests+trust)
   penguin explain <symbol>      plain-English summary via BYOK AI (--provider/--model/--key)
   penguin flow <endpoint|symbol> linear execution chain (endpoint→service→db→…)
   penguin affected <file>…      blast radius of changed files (impacted symbols/tests/routes)
@@ -142,6 +150,7 @@ const HELP = `penguin — Penguin Knowledge CLI
   penguin link <src> <dst> [t]  manually link two nodes (Ledger)
   penguin snapshots             list snapshot manifests
   penguin doctor                DB / ledger health check
+  penguin hook <event>          bounded, read-only agent context hook
   penguin install               symlink penguin onto PATH
   penguin help                  this help
 
@@ -152,12 +161,81 @@ Global: --json (machine-readable), --branch <b>`;
 export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
   const verb = argv[0];
   const flags = argv.filter((a) => a.startsWith("--"));
-  const pos = argv.slice(1).filter((a) => !a.startsWith("--"));
+  const valueFlags = new Set(["--branch", "--depth", "--limit", "--repo"]);
+  const pos: string[] = [];
+  for (let i = 1; i < argv.length; i++) {
+    const arg = argv[i];
+    if (valueFlags.has(arg)) {
+      i += 1;
+      continue;
+    }
+    if (!arg.startsWith("--")) pos.push(arg);
+  }
+  const optionValue = (name: string): string | undefined => {
+    const key = `--${name}`;
+    const inline = argv.find((arg) => arg.startsWith(`${key}=`));
+    if (inline) return inline.slice(key.length + 1);
+    const index = argv.indexOf(key);
+    return index >= 0 ? argv[index + 1] : undefined;
+  };
+  const numberOption = (name: string): number | undefined => {
+    const raw = optionValue(name);
+    if (raw == null) return undefined;
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+  };
   const json = flags.includes("--json");
 
   if (!verb || verb === "help") {
     deps.out(HELP);
     return 0;
+  }
+
+  // Agent hooks are deliberately handled before write/read verbs. They never
+  // create a database, index code, write notes, persist prompts, or use AI.
+  if (verb === "hook") {
+    const event = pos[0];
+    if (event !== "session-start" && event !== "user-prompt-submit") {
+      deps.err("usage: penguin hook <session-start|user-prompt-submit>");
+      return 2;
+    }
+    if (!deps.storeExists()) {
+      deps.out("[Penguin index context unavailable]");
+      return 0;
+    }
+
+    let prompt = "";
+    if (event === "user-prompt-submit") {
+      try {
+        const raw = await deps.readStdin?.();
+        if (!raw) return 0;
+        const input = JSON.parse(raw) as { prompt?: unknown };
+        if (typeof input.prompt !== "string") return 0;
+        prompt = input.prompt;
+      } catch {
+        return 0;
+      }
+    }
+
+    const store = deps.openStore();
+    try {
+      const output = await runClaudeHook(
+        { event, prompt },
+        {
+          runPenguin: async (args) => {
+            if (args[0] === "status") return compactIndexStatus(store);
+            if (args[0] === "context" && typeof args[1] === "string") {
+              return buildContextPack(store, args[1]);
+            }
+            throw new Error("hook attempted an unsupported Penguin query");
+          },
+        },
+      );
+      if (output) deps.out(output);
+      return 0;
+    } finally {
+      store.close();
+    }
   }
 
   // write verbs
@@ -206,12 +284,15 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
         const report = await indexRepo({
           store, rootPath: target, mode,
           onProgress: emitEvents
-            ? (p) => deps.progressEvent!(p)
+            ? (p) => deps.progressEvent!({ ...p, rootPath: target })
             : renderer
             ? (p) => renderer.handle(p)
             : undefined,
         });
         renderer?.finish(report);
+        if (emitEvents) {
+          deps.progressEvent!({ phase: "complete", rootPath: target, report });
+        }
         // Agent guidance (penguin usage tips for AI coding agents) is written
         // ONLY to the user's global CLAUDE.md/AGENTS.md (the "AI 集成" setup),
         // never into a project's own repo — that used to create uncommitted
@@ -553,6 +634,32 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
           emit(deps, json, renderContextPackMarkdown(pack), pack);
           return 0;
         }
+        case "locate":
+        case "explore": {
+          const target = pos.join(" ");
+          const requestedBranch = optionValue("branch");
+          let branchId: string | undefined;
+          if (requestedBranch) {
+            const exact = store.db.prepare("SELECT id FROM branches WHERE id=?").get(requestedBranch) as { id: string } | undefined;
+            branchId = exact?.id;
+            if (!branchId) {
+              const resolution = resolveSymbolMatches(store, target);
+              const repoId = resolution.kind === "unique" ? store.getNode(resolution.nodeId)?.repo_id : null;
+              if (repoId) branchId = resolveBranchId(store, repoId, requestedBranch) ?? undefined;
+            }
+            if (!branchId) {
+              deps.err(`branch "${requestedBranch}" was not found for "${target}"`);
+              return 1;
+            }
+          }
+          const pack = buildExplorePack(store, target, {
+            branchId,
+            depth: numberOption("depth"),
+            limit: numberOption("limit"),
+          });
+          emit(deps, json, JSON.stringify(pack, null, 2), pack);
+          return pack.focus || pack.callPath.length > 0 ? 0 : 1;
+        }
         case "flow": {
           // Flow Explorer: linear execution chain from an endpoint/symbol.
           const flow = buildFlow(store, pos.join(" "));
@@ -622,10 +729,24 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
           return 0;
         }
         case "status": {
-          const st = indexStatus(store);
+          const compact = flags.includes("--compact");
+          const st = compact ? compactIndexStatus(store) : indexStatus(store);
+          if (compact) {
+            const summary = st as ReturnType<typeof compactIndexStatus>;
+            emit(
+              deps,
+              json,
+              summary.repos
+                .map((repo) => `${repo.repo}\t${repo.liveBranch ?? "—"}\t${repo.freshness}\terrors=${repo.indexErrorCount}`)
+                .join("\n") || "(no repos)",
+              summary,
+            );
+            return 0;
+          }
+          const detailed = st as ReturnType<typeof indexStatus>;
           emit(deps, json,
-            st.repos.map((r) => `${r.name}\t${r.branches.map((b) => `${b.name}(${b.status},stale=${b.staleSymbols})`).join(" ")}`).join("\n") || "(no repos)",
-            st);
+            detailed.repos.map((r) => `${r.name}\t${r.branches.map((b) => `${b.name}(${b.status},stale=${b.staleSymbols})`).join(" ")}`).join("\n") || "(no repos)",
+            detailed);
           return 0;
         }
         case "path": {

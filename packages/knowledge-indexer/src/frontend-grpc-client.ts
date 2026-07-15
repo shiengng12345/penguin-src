@@ -1,5 +1,5 @@
-import { Parser, type Node } from "web-tree-sitter";
-import { loadLanguage } from "./parser.js";
+import { type Node } from "web-tree-sitter";
+import { withParsedTree } from "./parser.js";
 import type { Lang } from "./registry.js";
 
 // Zero-config frontend→backend gRPC-web linking (no `.penguin-frontend-grpc.json`
@@ -64,11 +64,7 @@ export async function extractFunctionNameCallsFromSource(
   source: string,
   verifiedMethods: Set<string>,
 ): Promise<FrontendGrpcCall[]> {
-  const language = await loadLanguage(lang);
-  const parser = new Parser();
-  parser.setLanguage(language);
-  const tree = parser.parse(source);
-  return tree ? extractFunctionNameCalls(tree.rootNode, verifiedMethods) : [];
+  return withParsedTree(lang, source, (root) => extractFunctionNameCalls(root, verifiedMethods), []);
 }
 
 // Count occurrences of `this._net.<X>(` in a body node; true iff there is
@@ -180,17 +176,9 @@ export async function verifiedMethodsFromSource(
   source: string,
   className: string,
 ): Promise<Set<string>> {
-  const language = await loadLanguage(lang);
-  const parser = new Parser();
-  parser.setLanguage(language);
-  const tree = parser.parse(source);
-  return tree ? verifiedForwardingMethods(tree.rootNode, className) : new Set();
+  return withParsedTree(lang, source, (root) => verifiedForwardingMethods(root, className), new Set());
 }
 
 export async function allForwardingMethodsFromSource(lang: Lang, source: string): Promise<Set<string>> {
-  const language = await loadLanguage(lang);
-  const parser = new Parser();
-  parser.setLanguage(language);
-  const tree = parser.parse(source);
-  return tree ? allForwardingMethods(tree.rootNode) : new Set();
+  return withParsedTree(lang, source, allForwardingMethods, new Set());
 }

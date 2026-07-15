@@ -680,6 +680,11 @@ export const useAppStore = create<AppState>((set, get) => {
       setPersistedValue(APP_VALUE_KEYS.installerAutoRefresh, value ? "true" : "false");
       set({ installerAutoRefresh: value });
     },
+    wikiAutoRefresh: getPersistedValue(APP_VALUE_KEYS.wikiAutoRefresh) === "true",
+    setWikiAutoRefresh: (value) => {
+      setPersistedValue(APP_VALUE_KEYS.wikiAutoRefresh, value ? "true" : "false");
+      set({ wikiAutoRefresh: value });
+    },
     installLog: [],
     addInstallLog: (line) =>
       set((s) => ({ installLog: [...s.installLog, line] })),

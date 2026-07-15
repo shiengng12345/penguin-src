@@ -151,6 +151,14 @@ test("onboarding offers one-click indexing (folder picker → in-app reindex →
   assert.match(page, /选择仓库并索引/, "primary one-click CTA");
 });
 
+test("Wiki home shows live indexing progress outside onboarding", async () => {
+  const page = await readFile(new URL("../src/components/wiki/WikiPage.tsx", import.meta.url), "utf8");
+  assert.match(page, /function IndexProgressBanner\(/);
+  assert.match(page, /onIndexProgress/);
+  assert.match(page, /phase === "complete"/);
+  assert.match(page, /IndexProgressBanner/);
+});
+
 test("onboarding one-click AI setup: penguin command + MCP clients + global agent guidance", async () => {
   const client = await readFile(new URL("../src/lib/knowledge-client.ts", import.meta.url), "utf8");
   assert.match(client, /knowledge_cli_status/, "cli status wrapper");
@@ -165,6 +173,33 @@ test("onboarding one-click AI setup: penguin command + MCP clients + global agen
   assert.match(page, /knowledgeAgentGuidanceSetup\(/, "guidance setup wired");
   assert.match(page, /一键配置 AI 集成/, "single aggregated CTA");
   assert.match(page, /新开一个终端/, "explains rc change needs a fresh terminal");
+});
+
+test("agent integration exposes opt-in Claude hooks and keeps Codex on canonical MCP guidance", async () => {
+  const client = await readFile(new URL("../src/lib/knowledge-client.ts", import.meta.url), "utf8");
+  assert.match(client, /knowledge_agent_hook_setup/, "typed hook setup wrapper");
+
+  const rust = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+  assert.match(rust, /knowledge::knowledge_agent_hook_setup/, "hook command registered");
+
+  const page = await readFile(new URL("../src/components/wiki/WikiPage.tsx", import.meta.url), "utf8");
+  assert.match(page, /SessionStart compact status/);
+  assert.match(page, /UserPromptSubmit bounded context/);
+  assert.match(page, /Codex.*MCP.*AGENTS\.md/s, "Codex capability is stated honestly");
+  assert.match(page, /knowledgeAgentHookSetup\(/, "selected hooks are wired");
+  assert.match(page, /useState\(false\)/, "hook opt-in starts disabled");
+});
+
+test("Claude hook settings have an explicit apply/remove action", async () => {
+  const page = await readFile(new URL("../src/components/wiki/WikiPage.tsx", import.meta.url), "utf8");
+  assert.match(page, /应用 Hook 设置/);
+  assert.match(page, /两项均关闭时移除 Penguin hooks/);
+  assert.match(page, /const applyHooks = useCallback/);
+  assert.match(
+    page,
+    /knowledgeAgentHookSetup\(hookSessionStart, hookPromptSubmit\)/,
+    "false/false must reach the backend so managed hooks can be removed",
+  );
 });
 
 test("filterGraphView hides unchecked node types and drops dangling edges", async () => {
@@ -233,6 +268,48 @@ test("KnowledgeHomePanel: per-repo live auto-index toggle (penguin watch wire-up
   assert.match(panel, /knowledgeWatchStatus/, "re-syncs from the Rust-side registry, not just local state");
   assert.match(panel, /knowledgeWatchToggle\(repo\.repoId, repo\.rootPath, enable\)/, "toggles by repoId + rootPath");
   assert.match(panel, /void toggleWatch\(repo\)/, "wired to a click handler on the repo row");
+});
+
+test("KnowledgeHomePanel: 自动刷新 preference survives a webview reload (persisted, not plain useState)", async () => {
+  // Real bug: autoRefresh was a plain useState(false) — any webview reload
+  // (right-click → Reload, or a full app restart) silently dropped the
+  // toggle back to off, even though the user's whole point in turning it on
+  // was to keep it running continuously in the background. Now persisted
+  // the same way as the installer's registryAutoRefresh precedent.
+  const page = await readFile(new URL("../src/components/wiki/WikiPage.tsx", import.meta.url), "utf8");
+  const panel = page.slice(page.indexOf("function KnowledgeHomePanel"), page.indexOf("function GraphEmptyState"));
+  assert.match(panel, /useAppStore\(\(s\) => s\.wikiAutoRefresh\)/, "reads from the persisted store, not a local useState");
+  assert.match(panel, /useAppStore\(\(s\) => s\.setWikiAutoRefresh\)/, "writes through the persisted store setter");
+  assert.doesNotMatch(panel, /const \[autoRefresh, setAutoRefresh\] = useState/, "no longer a plain unpersisted useState");
+
+  const persistenceKeys = await readFile(new URL("../src/lib/persistence-keys.ts", import.meta.url), "utf8");
+  assert.match(persistenceKeys, /wikiAutoRefresh: "penguin-wiki-auto-refresh"/, "registered under the shared APP_VALUE_KEYS registry");
+
+  const store = await readFile(new URL("../src/lib/store.ts", import.meta.url), "utf8");
+  assert.match(
+    store,
+    /wikiAutoRefresh: getPersistedValue\(APP_VALUE_KEYS\.wikiAutoRefresh\) === "true"/,
+    "store initializes from the persisted value, not hardcoded false",
+  );
+});
+
+test("KnowledgeHomePanel: bulk toggle turns watch on/off for every repo in one click", async () => {
+  // Toggling watch one repo at a time doesn't scale once there are a dozen+
+  // indexed repos — one button flips them all to the opposite of whatever
+  // the current majority state is.
+  const page = await readFile(new URL("../src/components/wiki/WikiPage.tsx", import.meta.url), "utf8");
+  const panel = page.slice(page.indexOf("function KnowledgeHomePanel"), page.indexOf("function GraphEmptyState"));
+  assert.match(
+    panel,
+    /indexRows!\.repos\.every\(\(r\) => watching\.has\(r\.repoId\)\)/,
+    "allWatching reflects every currently-listed repo, not just one row",
+  );
+  assert.match(panel, /void bulkToggleWatch\(\)/, "wired to a click handler in the panel header");
+  assert.match(
+    panel,
+    /indexRows\.repos\.map\(\(r\) =>\s*\n\s*knowledgeWatchToggle\(r\.repoId, r\.rootPath, enable\)/,
+    "toggles every repo via the same knowledge_watch_toggle command as the per-row toggle",
+  );
 });
 
 test("返回 (back) is not permanently disabled for the first symbol opened this session", async () => {

@@ -73,6 +73,22 @@ test("multi-language repo renders one bar per language, single-language keeps th
   assert.match(stext, /Parse & extract\s+\[[█░]+\]\s+50% · 2\/4/);
 });
 
+test("colored multi-language progress uses semantic colors instead of one cyan bar", () => {
+  const state = initialRenderState("polyglot", "rebuild", T0);
+  drive(state, [
+    { phase: "stage", stage: "parse", state: "start" },
+    { phase: "scan", done: 0, total: 5, file: "", langs: { ts: 1, js: 1, rust: 1, java: 1, python: 1 } },
+    { phase: "index", done: 1, total: 5, file: "a.ts", lang: "ts" },
+  ]);
+  const text = renderRegionLines(state, 100, true, T0 + 5000).join("\n");
+  assert.match(text, /\x1b\[34m█/, "TypeScript bar is blue");
+  assert.match(text, /\x1b\[33m/, "JavaScript bar is yellow");
+  assert.match(text, /\x1b\[91m/, "Rust bar is bright red/orange");
+  assert.match(text, /\x1b\[35m/, "Java bar is magenta");
+  assert.match(text, /\x1b\[32m/, "Python bar is green");
+  assert.ok(new Set([...text.matchAll(/\x1b\[([0-9;]+)m/g)].map((m) => m[1])).size >= 6);
+});
+
 test("finalize group: shows the running sub-step, then one done line with summed elapsed", () => {
   const state = initialRenderState("r", "incremental", T0);
   drive(state, [

@@ -43,6 +43,8 @@ fn bundled_mcp_server_path<R: tauri::Runtime>(
     // whether the resource is declared with a relative path or not.
     if let Ok(resource_dir) = app.path().resource_dir() {
         let candidates = [
+            resource_dir.join("_up_/packages/mcp/bundle/dist/index.js"),
+            resource_dir.join("packages/mcp/bundle/dist/index.js"),
             resource_dir.join("_up_/packages/mcp/dist/index.js"),
             resource_dir.join("packages/mcp/dist/index.js"),
             resource_dir.join("index.js"),
@@ -56,9 +58,13 @@ fn bundled_mcp_server_path<R: tauri::Runtime>(
     // Dev mode fallback: walk up from the dev cwd until we find the workspace.
     if let Ok(cwd) = std::env::current_dir() {
         for ancestor in cwd.ancestors() {
-            let candidate = ancestor.join("packages/mcp/dist/index.js");
-            if candidate.exists() {
-                return Ok(candidate);
+            for candidate in [
+                ancestor.join("packages/mcp/bundle/dist/index.js"),
+                ancestor.join("packages/mcp/dist/index.js"),
+            ] {
+                if candidate.exists() {
+                    return Ok(candidate);
+                }
             }
         }
     }
@@ -300,20 +306,49 @@ fn claude_desktop_configured_at(cfg_path: &Path) -> bool {
         .is_some()
 }
 
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+struct LegacyAliasDiagnostic {
+    name: String,
+    classification: String,
+    safe_to_migrate: bool,
+    reason: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+struct CanonicalMigrationResult {
+    canonical: &'static str,
+    written: bool,
+    removed_aliases: Vec<String>,
+    ambiguous_aliases: Vec<LegacyAliasDiagnostic>,
+    preserved_servers: usize,
+}
+
+fn is_owned_penguin_target(command: &str, server: &str) -> bool {
+    let normalized = format!("{command}\n{server}").to_ascii_lowercase();
+    normalized.contains("/.penguin/")
+        || normalized.contains("/.pengvi/")
+        || normalized.contains("/pengvi/packages/mcp/")
+        || normalized.contains("/penguin/packages/mcp/")
+}
+
 fn write_claude_desktop_mcp_config_at(
     cfg_path: &Path,
     node: &Path,
     server: &Path,
-) -> Result<(), String> {
+) -> Result<CanonicalMigrationResult, String> {
     if let Some(parent) = cfg_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    let mut root: serde_json::Value = if cfg_path.exists() {
-        let raw = std::fs::read_to_string(cfg_path).map_err(|e| e.to_string())?;
-        serde_json::from_str(&raw).map_err(|e| format!("Existing config is not valid JSON: {e}"))?
+    let existing_raw = if cfg_path.exists() {
+        Some(std::fs::read_to_string(cfg_path).map_err(|e| e.to_string())?)
     } else {
-        serde_json::json!({})
+        None
+    };
+    let mut root: serde_json::Value = match existing_raw.as_deref() {
+        Some(raw) => serde_json::from_str(raw)
+            .map_err(|e| format!("Existing config is not valid JSON: {e}"))?,
+        None => serde_json::json!({}),
     };
 
     if !root.is_object() {
@@ -330,16 +365,55 @@ fn write_claude_desktop_mcp_config_at(
         return Err("mcpServers field exists but is not an object".to_string());
     }
 
-    servers.as_object_mut().unwrap().insert(
+    let servers = servers.as_object_mut().unwrap();
+    let mut removed_aliases = Vec::new();
+    let mut ambiguous_aliases = Vec::new();
+    if let Some(legacy) = servers.get("pengvi") {
+        let command = legacy
+            .get("command")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let legacy_server = legacy
+            .get("args")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|args| args.first())
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if is_owned_penguin_target(command, legacy_server) {
+            servers.remove("pengvi");
+            removed_aliases.push("pengvi".to_string());
+        } else {
+            ambiguous_aliases.push(LegacyAliasDiagnostic {
+                name: "pengvi".to_string(),
+                classification: "name_collision".to_string(),
+                safe_to_migrate: false,
+                reason: "legacy name exists but its command/args are not recognizably Penguin"
+                    .to_string(),
+            });
+        }
+    }
+
+    servers.insert(
         "penguin".to_string(),
         serde_json::json!({
             "command": node.to_string_lossy(),
             "args": [server.to_string_lossy()],
         }),
     );
+    let preserved_servers = servers.len().saturating_sub(1);
 
     let pretty = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
-    std::fs::write(cfg_path, pretty).map_err(|e| e.to_string())
+    let written = existing_raw.as_deref() != Some(pretty.as_str());
+    if written {
+        std::fs::write(cfg_path, pretty).map_err(|e| e.to_string())?;
+    }
+    Ok(CanonicalMigrationResult {
+        canonical: "penguin",
+        written,
+        removed_aliases,
+        ambiguous_aliases,
+        preserved_servers,
+    })
 }
 
 fn codex_mcp_configured_at(cfg_path: &Path) -> bool {
@@ -501,13 +575,21 @@ fn check_mcp_server_runtime(node: &Path, server: &Path) -> McpRuntimeHealth {
     }
 }
 
-fn write_codex_mcp_config_at(cfg_path: &Path, node: &Path, server: &Path) -> Result<(), String> {
+fn write_codex_mcp_config_at(
+    cfg_path: &Path,
+    node: &Path,
+    server: &Path,
+) -> Result<CanonicalMigrationResult, String> {
     if let Some(parent) = cfg_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
 
-    let mut doc = if cfg_path.exists() {
-        let raw = std::fs::read_to_string(cfg_path).map_err(|e| e.to_string())?;
+    let existing_raw = if cfg_path.exists() {
+        Some(std::fs::read_to_string(cfg_path).map_err(|e| e.to_string())?)
+    } else {
+        None
+    };
+    let mut doc = if let Some(raw) = existing_raw.as_deref() {
         if raw.trim().is_empty() {
             DocumentMut::new()
         } else {
@@ -530,6 +612,40 @@ fn write_codex_mcp_config_at(cfg_path: &Path, node: &Path, server: &Path) -> Res
     let servers = servers_item
         .as_table_like_mut()
         .ok_or_else(|| "mcp_servers field exists but is not a TOML table".to_string())?;
+    let legacy_target = servers
+        .get("pengvi")
+        .and_then(Item::as_table_like)
+        .map(|legacy| {
+            let command = legacy
+                .get("command")
+                .and_then(Item::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let legacy_server = legacy
+                .get("args")
+                .and_then(Item::as_array)
+                .and_then(|args| args.get(0))
+                .and_then(toml_edit::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            (command, legacy_server)
+        });
+    let mut removed_aliases = Vec::new();
+    let mut ambiguous_aliases = Vec::new();
+    if let Some((command, legacy_server)) = legacy_target {
+        if is_owned_penguin_target(&command, &legacy_server) {
+            servers.remove("pengvi");
+            removed_aliases.push("pengvi".to_string());
+        } else {
+            ambiguous_aliases.push(LegacyAliasDiagnostic {
+                name: "pengvi".to_string(),
+                classification: "name_collision".to_string(),
+                safe_to_migrate: false,
+                reason: "legacy name exists but its command/args are not recognizably Penguin"
+                    .to_string(),
+            });
+        }
+    }
 
     let mut args = Array::new();
     args.push(server.to_string_lossy().to_string());
@@ -539,7 +655,19 @@ fn write_codex_mcp_config_at(cfg_path: &Path, node: &Path, server: &Path) -> Res
     penguin["args"] = value(args);
 
     servers.insert("penguin", Item::Table(penguin));
-    std::fs::write(cfg_path, doc.to_string()).map_err(|e| e.to_string())
+    let preserved_servers = servers.len().saturating_sub(1);
+    let rendered = doc.to_string();
+    let written = existing_raw.as_deref() != Some(rendered.as_str());
+    if written {
+        std::fs::write(cfg_path, rendered).map_err(|e| e.to_string())?;
+    }
+    Ok(CanonicalMigrationResult {
+        canonical: "penguin",
+        written,
+        removed_aliases,
+        ambiguous_aliases,
+        preserved_servers,
+    })
 }
 
 #[derive(serde::Serialize)]
@@ -655,9 +783,11 @@ pub(crate) fn mcp_install_to_local_clients<R: tauri::Runtime>(
             // ~/.claude.json uses the same mcpServers shape as Claude Desktop,
             // and the merge preserves all of the client's other state.
             "Claude Desktop" | "Claude Code" => {
-                write_claude_desktop_mcp_config_at(cfg_path, &node, &server)?
+                let _ = write_claude_desktop_mcp_config_at(cfg_path, &node, &server)?;
             }
-            _ => write_codex_mcp_config_at(cfg_path, &node, &server)?,
+            _ => {
+                let _ = write_codex_mcp_config_at(cfg_path, &node, &server)?;
+            }
         }
         configured.push(format!("{} ({})", name, cfg_path.display()));
     }
@@ -839,6 +969,125 @@ mod mcp_config_tests {
             saved["mcpServers"]["penguin"]["args"][0],
             "/Users/u/.penguin/mcp/dist/index.js"
         );
+
+        let _ = fs::remove_dir_all(cfg_path.parent().unwrap());
+    }
+
+    #[test]
+    fn claude_migration_removes_owned_pengvi_and_preserves_other_servers() {
+        let cfg_path = temp_config_path("claude-legacy-owned").with_extension("json");
+        fs::write(
+            &cfg_path,
+            r#"{
+              "mcpServers": {
+                "other": {"command": "other-mcp"},
+                "pengvi": {
+                  "command": "/Users/u/.nvm/node",
+                  "args": ["/Users/u/Desktop/Pengvi/packages/mcp/dist/index.js"]
+                }
+              },
+              "numStartups": 42
+            }"#,
+        )
+        .unwrap();
+
+        let result = write_claude_desktop_mcp_config_at(
+            &cfg_path,
+            &PathBuf::from("/Users/u/.penguin/mcp/node"),
+            &PathBuf::from("/Users/u/.penguin/mcp/dist/index.js"),
+        )
+        .unwrap();
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&cfg_path).unwrap()).unwrap();
+        assert!(saved["mcpServers"].get("pengvi").is_none());
+        assert_eq!(saved["mcpServers"]["other"]["command"], "other-mcp");
+        assert_eq!(saved["numStartups"], 42);
+        assert_eq!(result.removed_aliases, vec!["pengvi"]);
+        assert!(result.ambiguous_aliases.is_empty());
+
+        let _ = fs::remove_dir_all(cfg_path.parent().unwrap());
+    }
+
+    #[test]
+    fn claude_migration_preserves_ambiguous_pengvi() {
+        let cfg_path = temp_config_path("claude-legacy-ambiguous").with_extension("json");
+        fs::write(
+            &cfg_path,
+            r#"{
+              "mcpServers": {
+                "pengvi": {
+                  "command": "/opt/custom/bin/server",
+                  "args": ["serve"]
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let result = write_claude_desktop_mcp_config_at(
+            &cfg_path,
+            &PathBuf::from("/Users/u/.penguin/mcp/node"),
+            &PathBuf::from("/Users/u/.penguin/mcp/dist/index.js"),
+        )
+        .unwrap();
+
+        let saved: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&cfg_path).unwrap()).unwrap();
+        assert_eq!(
+            saved["mcpServers"]["pengvi"]["command"],
+            "/opt/custom/bin/server"
+        );
+        assert!(result.removed_aliases.is_empty());
+        assert_eq!(result.ambiguous_aliases.len(), 1);
+        assert_eq!(result.ambiguous_aliases[0].name, "pengvi");
+        assert!(!result.ambiguous_aliases[0].safe_to_migrate);
+
+        let _ = fs::remove_dir_all(cfg_path.parent().unwrap());
+    }
+
+    #[test]
+    fn claude_migration_is_idempotent() {
+        let cfg_path = temp_config_path("claude-idempotent").with_extension("json");
+        fs::write(&cfg_path, r#"{"mcpServers":{}}"#).unwrap();
+        let node = PathBuf::from("/Users/u/.penguin/mcp/node");
+        let server = PathBuf::from("/Users/u/.penguin/mcp/dist/index.js");
+
+        let first =
+            write_claude_desktop_mcp_config_at(&cfg_path, &node, &server).unwrap();
+        let after_first = fs::read(&cfg_path).unwrap();
+        let second =
+            write_claude_desktop_mcp_config_at(&cfg_path, &node, &server).unwrap();
+        let after_second = fs::read(&cfg_path).unwrap();
+
+        assert!(first.written);
+        assert!(!second.written);
+        assert_eq!(after_first, after_second);
+
+        let _ = fs::remove_dir_all(cfg_path.parent().unwrap());
+    }
+
+    #[test]
+    fn codex_migration_removes_owned_pengvi_and_preserves_existing_servers() {
+        let cfg_path = temp_config_path("codex-legacy");
+        fs::write(
+            &cfg_path,
+            "[mcp_servers.github]\ncommand = \"github-mcp\"\nargs = [\"stdio\"]\n\n[mcp_servers.pengvi]\ncommand = \"/Users/u/.nvm/node\"\nargs = [\"/Users/u/Desktop/Pengvi/packages/mcp/dist/index.js\"]\n",
+        )
+        .unwrap();
+
+        let result = write_codex_mcp_config_at(
+            &cfg_path,
+            &PathBuf::from("/Users/u/.penguin/mcp/node"),
+            &PathBuf::from("/Users/u/.penguin/mcp/dist/index.js"),
+        )
+        .unwrap();
+        let saved = fs::read_to_string(&cfg_path).unwrap();
+
+        assert!(saved.contains("[mcp_servers.github]"));
+        assert!(saved.contains("[mcp_servers.penguin]"));
+        assert!(!saved.contains("[mcp_servers.pengvi]"));
+        assert_eq!(result.removed_aliases, vec!["pengvi"]);
 
         let _ = fs::remove_dir_all(cfg_path.parent().unwrap());
     }

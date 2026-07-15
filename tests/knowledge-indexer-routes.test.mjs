@@ -138,7 +138,7 @@ test("indexRepo: throw + process.env → error/env entity nodes + edges (P3)", a
   const err = store.db.prepare("SELECT id FROM nodes WHERE node_type='entity' AND identity_key=?").get(`${r.repoId}::entity::error::ConfigError`);
   const env = store.db.prepare("SELECT id FROM nodes WHERE node_type='entity' AND identity_key=?").get(`${r.repoId}::entity::env::JWT_SECRET`);
   assert.ok(err && env, "error + env entity nodes created");
-  const load = store.resolveIdentity(`${r.repoId}::load`);
+  const load = store.resolveIdentity(`${r.repoId}::src/svc.ts::load`);
   const throws = store.db.prepare("SELECT COUNT(*) AS n FROM edges WHERE edge_type='throws' AND src=? AND dst=?").get(load.nodeId, err.id);
   const uses = store.db.prepare("SELECT COUNT(*) AS n FROM edges WHERE edge_type='uses' AND src=? AND dst=?").get(load.nodeId, env.id);
   assert.equal(throws.n, 1, "load →throws→ ConfigError");

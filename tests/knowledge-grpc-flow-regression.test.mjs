@@ -118,10 +118,13 @@ test("flow walks endpoint -> handler -> injected processor -> provider -> reposi
   const { store, repoId } = await grpcRepo();
   // node.title is just the bare method name (e.g. "getPlayerProfileByJwt") —
   // identity_key carries the class-qualified name, so look up expected node
-  // ids by identity_key rather than matching on title text.
+  // ids by the source-qualified name rather than matching on title text.
   const idFor = (suffix) => {
-    const row = store.db.prepare("SELECT id FROM nodes WHERE identity_key = ?").get(`${repoId}::${suffix}`);
-    assert.ok(row, `expected a node for identity_key ${repoId}::${suffix}`);
+    const rows = store.db.prepare(
+      "SELECT id FROM nodes WHERE repo_id=? AND json_extract(meta, '$.qualifiedName')=?",
+    ).all(repoId, suffix);
+    assert.equal(rows.length, 1, `expected one node for qualified name ${suffix}`);
+    const row = rows[0];
     return row.id;
   };
   const handlerId = idFor("FrontendPlayerController.getPlayerProfileByJwt");

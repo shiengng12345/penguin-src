@@ -60,6 +60,16 @@ export interface SearchHit {
   rank: number | null;
 }
 
+// file:line only, deliberately not a graph node — see fts_identifiers in
+// schema.ts for why (object keys / interface / type / class field names).
+export interface IdentifierHit {
+  name: string;
+  repoId: string;
+  filePath: string;
+  startLine: number;
+  kind: string;
+}
+
 export type BranchStatus = "live" | "snapshot" | "gone";
 
 export interface RepoRow {
@@ -79,6 +89,7 @@ export interface BranchRow {
   last_indexed_at: string | null;
   checkout_path: string | null;
   status: string;
+  parser_version: string | null;
 }
 
 export type FileStatus = "indexed" | "deleted" | "error" | "skipped";
@@ -304,15 +315,44 @@ export class KnowledgeStore {
     this.db.prepare("UPDATE branches SET status = ? WHERE id = ?").run(status, branchId);
   }
 
-  recordBranchIndexed(p: { branchId: string; commit?: string | null }): void {
+  recordBranchIndexed(p: {
+    branchId: string;
+    commit?: string | null;
+    worktreeState?: "clean" | "dirty" | "unknown" | "not_applicable";
+    worktreeFingerprint?: string | null;
+    dirtyFiles?: string[];
+    parserVersion?: string | null;
+    schemaVersion?: number | null;
+    staleReason?: string | null;
+  }): void {
     const r = this.db
       .prepare(
         `UPDATE branches
          SET last_indexed_at = @at,
-             last_indexed_commit = COALESCE(@commit, last_indexed_commit)
+             last_indexed_commit = CASE
+               WHEN @updateCommit = 1 THEN @commit
+               ELSE last_indexed_commit
+             END,
+             indexed_worktree_state = @worktreeState,
+             indexed_worktree_fingerprint = @worktreeFingerprint,
+             indexed_dirty_files = @dirtyFiles,
+             parser_version = @parserVersion,
+             indexed_schema_version = @schemaVersion,
+             stale_reason = @staleReason
          WHERE id = @branchId`,
       )
-      .run({ branchId: p.branchId, commit: p.commit ?? null, at: new Date().toISOString() });
+      .run({
+        branchId: p.branchId,
+        commit: p.commit ?? null,
+        updateCommit: Object.hasOwn(p, "commit") ? 1 : 0,
+        worktreeState: p.worktreeState ?? "unknown",
+        worktreeFingerprint: p.worktreeFingerprint ?? null,
+        dirtyFiles: JSON.stringify(p.dirtyFiles ?? []),
+        parserVersion: p.parserVersion ?? null,
+        schemaVersion: p.schemaVersion ?? null,
+        staleReason: p.staleReason ?? null,
+        at: new Date().toISOString(),
+      });
     // Fail loud, not silent: the branch row disappearing mid-index means a
     // concurrent removeBranch won — this run's rows are orphans, surface it.
     if (r.changes === 0) {
@@ -928,6 +968,55 @@ export class KnowledgeStore {
     tx();
   }
 
+  // (repo_id, file_path) is the idempotency key — a full re-parse of that
+  // file replaces its whole prior set, same delete-then-insert convention as
+  // indexSymbolText/indexNoteText above, scoped to the file since these
+  // entries aren't individually addressable graph nodes with their own id.
+  indexIdentifiers(p: {
+    repoId: string;
+    filePath: string;
+    entries: Array<{ name: string; startLine: number; kind: string }>;
+  }): void {
+    const tx = this.db.transaction(() => {
+      this.db.prepare("DELETE FROM fts_identifiers WHERE repo_id = ? AND file_path = ?").run(p.repoId, p.filePath);
+      const insert = this.db.prepare(
+        "INSERT INTO fts_identifiers (name, repo_id, file_path, start_line, kind) VALUES (?, ?, ?, ?, ?)",
+      );
+      for (const e of p.entries) insert.run(e.name, p.repoId, p.filePath, e.startLine, e.kind);
+    });
+    tx();
+  }
+
+  clearLogSitesForFile(repoId: string, filePath: string): void {
+    const rows = this.db.prepare(
+      `SELECT id FROM nodes
+       WHERE node_type = 'log_site' AND repo_id = ?
+         AND json_extract(meta, '$.filePath') = ?`,
+    ).all(repoId, filePath) as Array<{ id: string }>;
+    const delFts = this.db.prepare("DELETE FROM fts_symbols WHERE node_id = ?");
+    const delNode = this.db.prepare("DELETE FROM nodes WHERE id = ?");
+    for (const row of rows) {
+      delFts.run(row.id);
+      delNode.run(row.id);
+    }
+  }
+
+  // Same AND-per-term FTS5 construction as searchText — see its comment for
+  // why the whole query must not be wrapped as one quoted phrase.
+  searchIdentifiers(query: string, opts?: { limit?: number }): IdentifierHit[] {
+    const limit = opts?.limit ?? 50;
+    const terms = query.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+    const match = terms.length > 0
+      ? terms.map((t) => `"${t.replace(/"/g, '""')}"`).join(" ")
+      : `"${query.replace(/"/g, '""')}"`;
+    return this.db
+      .prepare(
+        `SELECT name, repo_id AS repoId, file_path AS filePath, start_line AS startLine, kind
+         FROM fts_identifiers WHERE fts_identifiers MATCH ? ORDER BY bm25(fts_identifiers) LIMIT ?`,
+      )
+      .all(match, limit) as IdentifierHit[];
+  }
+
   searchText(
     query: string,
     opts?: { types?: string[]; includeSensitive?: boolean; limit?: number },
@@ -973,7 +1062,7 @@ export class KnowledgeStore {
         `SELECT n.id AS nodeId, n.node_type AS nodeType, n.title AS title,
                 n.identity_key AS identityKey, sv.file_path AS filePath, br.name AS branch,
                 bm25(fts_symbols) AS rank,
-                NULL AS snippet
+                NULLIF(f.signature, '') AS snippet
          FROM fts_symbols f
          JOIN nodes n ON n.id = f.node_id
          LEFT JOIN symbol_versions sv ON sv.id = (
@@ -982,6 +1071,7 @@ export class KnowledgeStore {
          )
          LEFT JOIN branches br ON br.id = sv.branch_id
          WHERE fts_symbols MATCH ?
+           AND (sv.id IS NULL OR sv.status = 'fresh')
          ORDER BY rank
          LIMIT ?`,
       )
@@ -1000,7 +1090,7 @@ export class KnowledgeStore {
     key: string,
   ): { nodeId: string; via: "identity" | "alias" } | null {
     const direct = this.db
-      .prepare("SELECT id FROM nodes WHERE identity_key = ?")
+      .prepare("SELECT id FROM nodes WHERE identity_key = ? COLLATE NOCASE")
       .get(key) as { id: string } | undefined;
     if (direct) return { nodeId: direct.id, via: "identity" };
 
@@ -1011,11 +1101,31 @@ export class KnowledgeStore {
       .prepare(
         `SELECT a.node_id FROM node_aliases a
          JOIN nodes n ON n.id = a.node_id
-         WHERE a.alias_key = ? AND a.valid_to IS NULL
+         WHERE a.alias_key = ? COLLATE NOCASE AND a.valid_to IS NULL
          ORDER BY a.created_at DESC LIMIT 1`,
       )
       .get(key) as { node_id: string } | undefined;
     if (alias) return { nodeId: alias.node_id, via: "alias" };
+
+    // Backward compatibility for pre file-scoped symbol keys such as
+    // `repo_x::PlayerClientGrpc.getPlayerInfo`. New symbol identities include
+    // the physical file path to avoid collapsing copied classes. Resolve the
+    // old shape only when its repo + qualified name identifies exactly one
+    // node; duplicates deliberately remain ambiguous instead of guessing.
+    const separator = key.indexOf("::");
+    if (separator > 0) {
+      const repoId = key.slice(0, separator);
+      const qualifiedName = key.slice(separator + 2);
+      const legacyMatches = this.db
+        .prepare(
+          `SELECT id FROM nodes
+           WHERE node_type='symbol' AND repo_id=?
+             AND json_extract(meta, '$.qualifiedName')=? COLLATE NOCASE
+           LIMIT 2`,
+        )
+        .all(repoId, qualifiedName) as Array<{ id: string }>;
+      if (legacyMatches.length === 1) return { nodeId: legacyMatches[0].id, via: "identity" };
+    }
     return null;
   }
 

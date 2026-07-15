@@ -113,6 +113,35 @@ export async function proxyFetch(
     responseHeaders.set(key, value);
   }
 
+  // Keep transport evidence on the synthetic Response itself. ConnectRPC can
+  // fail while decoding the body, so the caller must still be able to inspect
+  // the raw status, framing prefix, and content headers in the UI. This is
+  // metadata only; never log authorization, request bodies, or response text.
+  const rawHeader = (name: string): string => {
+    const entry = Object.entries(resp.headers).find(([key]) => key.toLowerCase() === name);
+    return entry?.[1] ?? "";
+  };
+  const responsePrefix = Array.from(responseBytes.slice(0, 32), (byte) =>
+    byte.toString(16).padStart(2, "0"),
+  ).join("");
+  const inspection = {
+    status: resp.status,
+    contentType: rawHeader("content-type") || null,
+    contentEncoding: rawHeader("content-encoding") || null,
+    grpcStatus: rawHeader("grpc-status") || null,
+    grpcMessage: rawHeader("grpc-message") || null,
+    bytes: responseBytes.byteLength,
+    prefixHex: responsePrefix,
+  };
+  responseHeaders.set("x-penguin-http-status", String(inspection.status));
+  responseHeaders.set("x-penguin-content-type", inspection.contentType ?? "");
+  responseHeaders.set("x-penguin-content-encoding", inspection.contentEncoding ?? "");
+  responseHeaders.set("x-penguin-grpc-status", inspection.grpcStatus ?? "");
+  responseHeaders.set("x-penguin-grpc-message", inspection.grpcMessage ?? "");
+  responseHeaders.set("x-penguin-response-bytes", String(inspection.bytes));
+  responseHeaders.set("x-penguin-response-prefix", inspection.prefixHex);
+  console.info("[Penguin gRPC-Web proxy response inspection]", inspection);
+
   return new Response(responseBytes.buffer as ArrayBuffer, {
     status: resp.status,
     headers: responseHeaders,

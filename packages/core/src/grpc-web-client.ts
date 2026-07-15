@@ -3,6 +3,7 @@ import { createGrpcWebTransport } from "@connectrpc/connect-web";
 import type { ResponseState, MetadataEntry, ConnectServiceDef } from "./types.js";
 import { discoverServices } from "./discover-services.js";
 import { normalizeGrpcJsonBody } from "./grpc-json.js";
+import { inspectGrpcWebResponse, type GrpcWebResponseInspection } from "./grpc-web-debug.js";
 
 // Module loader signature. Penguin desktop injects a Tauri-backed loader that
 // reads bundle.js via the Rust side and dynamic-imports a blob URL; Node
@@ -45,6 +46,45 @@ function buildErrorResponse(message: string, startTime: number): ResponseState {
     duration: Math.round(performance.now() - startTime),
     error: message,
   };
+}
+
+function inspectionHeaders(inspection: GrpcWebResponseInspection | null): Record<string, string> {
+  if (!inspection) return {};
+  return {
+    "x-penguin-http-status": String(inspection.status),
+    "x-penguin-content-type": inspection.contentType ?? "",
+    "x-penguin-content-encoding": inspection.contentEncoding ?? "",
+    "x-penguin-content-length": String(inspection.contentLength ?? ""),
+    "x-penguin-grpc-status": inspection.grpcStatus ?? "",
+    "x-penguin-grpc-message": inspection.grpcMessage ?? "",
+    "x-penguin-response-bytes": String(inspection.bytes),
+    "x-penguin-response-prefix": inspection.prefixHex,
+  };
+}
+
+function safeResponseMetadata(metadata?: Headers): Record<string, string> {
+  if (!metadata) return {};
+  const allowed = new Set([
+    "content-type",
+    "content-encoding",
+    "grpc-status",
+    "grpc-message",
+    "x-penguin-http-status",
+    "x-penguin-content-type",
+    "x-penguin-content-encoding",
+    "x-penguin-content-length",
+    "x-penguin-transfer-encoding",
+    "x-penguin-connection",
+    "x-penguin-grpc-status",
+    "x-penguin-grpc-message",
+    "x-penguin-response-bytes",
+    "x-penguin-response-prefix",
+  ]);
+  const out: Record<string, string> = {};
+  metadata.forEach((value, key) => {
+    if (allowed.has(key.toLowerCase())) out[key] = value;
+  });
+  return out;
 }
 
 const serviceCache = new Map<string, ConnectServiceDef>();
@@ -140,10 +180,21 @@ export async function callGrpcWeb(
     return await next(req);
   };
 
+  let transportInspection: Promise<GrpcWebResponseInspection | null> = Promise.resolve(null);
   const transport = createGrpcWebTransport({
     baseUrl,
     interceptors: [headerInterceptor],
-    fetch: fetchImpl,
+    fetch: async (input, init) => {
+      const response = await fetchImpl(input, init);
+      transportInspection = inspectGrpcWebResponse(response)
+        .then((inspection) => {
+          // Safe metadata only: no authorization, request body, or response body.
+          console.info("[Penguin gRPC-Web response inspection]", inspection);
+          return inspection;
+        })
+        .catch(() => null);
+      return response;
+    },
   });
 
   // ConnectRPC service definition types are not exported publicly; the cast
@@ -185,6 +236,7 @@ export async function callGrpcWeb(
 
     const duration = performance.now() - startTime;
     const formattedBody = cleanProtoResponse(result);
+    const inspection = await transportInspection;
 
     return {
       status: "OK",
@@ -193,6 +245,7 @@ export async function callGrpcWeb(
       headers: {
         "x-penguin-request-url": `${baseUrl}/${typeName}/${methodName}`,
         "x-penguin-protocol": "grpc-web+proto",
+        ...inspectionHeaders(inspection),
       },
       duration: Math.round(duration),
     };
@@ -209,9 +262,12 @@ export async function callGrpcWeb(
 
     if (isConnectError) {
       const ce = error as { code: string; rawMessage: string; metadata?: Headers };
+      const inspection = await transportInspection;
       const grpcHeaders: Record<string, string> = {
+        ...safeResponseMetadata(ce.metadata),
         "grpc-status": ce.code,
         "grpc-message": ce.rawMessage,
+        ...inspectionHeaders(inspection),
       };
       return {
         status: `gRPC ${ce.code}`,
@@ -231,7 +287,7 @@ export async function callGrpcWeb(
       status: "ERROR",
       statusCode: 0,
       body: "",
-      headers: {},
+      headers: inspectionHeaders(await transportInspection),
       duration: Math.round(duration),
       error: errMsg,
     };

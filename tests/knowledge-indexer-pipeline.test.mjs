@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { KnowledgeStore } from "../packages/knowledge-core/dist/index.js";
+import { search } from "../packages/knowledge-core/dist/index.js";
 import {
   readGitContext,
   walkRepoFiles,
@@ -28,6 +30,64 @@ function writeGit(root, headContent, refs = {}) {
     writeFileSync(join(root, ".git", "refs", "heads", name), sha + "\n");
   }
 }
+
+function initRealGitRepo(root) {
+  execFileSync("git", ["init", "-q", "-b", "main", root]);
+  execFileSync("git", ["-C", root, "config", "user.email", "penguin-test@example.invalid"]);
+  execFileSync("git", ["-C", root, "config", "user.name", "Penguin Test"]);
+  mkdirSync(join(root, "src"), { recursive: true });
+  writeFileSync(join(root, "src", "clean.ts"), "export function clean() { return 1; }\n");
+  execFileSync("git", ["-C", root, "add", "src/clean.ts"]);
+  execFileSync("git", ["-C", root, "commit", "-q", "-m", "fixture"]);
+}
+
+test("readGitContext: reports clean, modified, and untracked worktree fingerprints", () => {
+  const root = tempRepo();
+  initRealGitRepo(root);
+  const clean = readGitContext(root);
+  assert.equal(clean.worktreeState, "clean");
+  assert.deepEqual(clean.dirtyFiles, []);
+  assert.match(clean.worktreeFingerprint, /^[a-f0-9]{64}$/);
+
+  writeFileSync(join(root, "src", "clean.ts"), "export function clean() { return 2; }\n");
+  writeFileSync(join(root, "src", "new.ts"), "export const fresh = true;\n");
+  const dirty = readGitContext(root);
+  assert.equal(dirty.worktreeState, "dirty");
+  assert.deepEqual(dirty.dirtyFiles, ["src/clean.ts", "src/new.ts"]);
+  assert.notEqual(dirty.worktreeFingerprint, clean.worktreeFingerprint);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("indexRepo: dirty overlay is not attributed to HEAD commit", async () => {
+  const root = tempRepo();
+  initRealGitRepo(root);
+  writeFileSync(join(root, "src", "clean.ts"), "export function clean() { return 2; }\n");
+  const store = openStore();
+  const report = await indexRepo({ store, rootPath: root, mode: "incremental" });
+  assert.equal(report.worktreeState, "dirty");
+  assert.equal(report.headCommit, report.commit);
+  assert.equal(report.indexedCommit, null);
+  assert.equal(report.staleReason, "worktree_dirty");
+  assert.deepEqual(report.dirtyFiles, ["src/clean.ts"]);
+  assert.match(report.worktreeFingerprint, /^[a-f0-9]{64}$/);
+  assert.equal(typeof report.parserVersion, "string");
+  assert.equal(typeof report.schemaVersion, "number");
+
+  const branchTrust = store.db
+    .prepare("SELECT indexed_worktree_state, indexed_worktree_fingerprint, indexed_dirty_files, stale_reason FROM branches WHERE id=?")
+    .get(report.branchId);
+  assert.equal(branchTrust.indexed_worktree_state, "dirty");
+  assert.equal(branchTrust.indexed_worktree_fingerprint, report.worktreeFingerprint);
+  assert.deepEqual(JSON.parse(branchTrust.indexed_dirty_files), ["src/clean.ts"]);
+  assert.equal(branchTrust.stale_reason, "worktree_dirty");
+
+  const version = store.db
+    .prepare("SELECT commit_sha FROM symbol_versions WHERE file_path=? LIMIT 1")
+    .get("src/clean.ts");
+  assert.equal(version.commit_sha, "(worktree)");
+  store.close();
+  rmSync(root, { recursive: true, force: true });
+});
 
 test("readGitContext: branch, detached, and non-git degrade", () => {
   const a = tempRepo();
@@ -112,11 +172,105 @@ test("indexRepo: full index then incremental skip; rename detection", async () =
   store.close();
 });
 
-test("indexRepo: delete detection marks gone file's symbols stale", async () => {
+test("indexRepo: log literal is a searchable log_site linked to its enclosing method", async () => {
   const root = tempRepo();
   writeGit(root, "ref: refs/heads/main\n", { main: "c0" });
   mkdirSync(join(root, "src"), { recursive: true });
-  writeFileSync(join(root, "src", "gone.ts"), "export function willVanish() {}");
+  writeFileSync(
+    join(root, "src", "closure.ts"),
+    [
+      "export class BpAccountClosureService {",
+      "  closeAccount() {",
+      "    this.logger.info('[BpAccountClosureService] closeAccount started'); this.logger.warn('closure warning');",
+      "  }",
+      "}",
+    ].join("\n"),
+  );
+  const store = openStore();
+  const report = await indexRepo({ store, rootPath: root, mode: "rebuild" });
+
+  const hits = search(store, "[BpAccountClosureService] closeAccount started");
+  const log = hits.find((hit) => hit.nodeType === "log_site");
+  assert.ok(log, JSON.stringify(hits));
+  assert.equal(log.filePath, "src/closure.ts");
+  assert.equal(log.startLine, 3);
+  assert.equal(log.snippet, "[BpAccountClosureService] closeAccount started");
+
+  const method = store.resolveIdentity(`${report.repoId}::BpAccountClosureService.closeAccount`);
+  const edge = store.db.prepare(
+    "SELECT edge_type FROM edges WHERE src=? AND dst=?",
+  ).get(method.nodeId, log.nodeId);
+  assert.equal(edge?.edge_type, "emits_log");
+  const emitted = store.db.prepare(
+    "SELECT COUNT(DISTINCT dst) AS n FROM edges WHERE src=? AND edge_type='emits_log'",
+  ).get(method.nodeId);
+  assert.equal(emitted.n, 2, "two logger calls on one source line keep distinct destinations");
+  store.close();
+});
+
+test("indexRepo: parser version drift forces a rebuild instead of reusing stale identities", async () => {
+  const root = tempRepo();
+  writeGit(root, "ref: refs/heads/main\n", { main: "c0" });
+  mkdirSync(join(root, "src"), { recursive: true });
+  writeFileSync(join(root, "src", "svc.ts"), "export class Svc { login() { return true; } }");
+  const store = openStore();
+
+  const first = await indexRepo({ store, rootPath: root, mode: "incremental" });
+  assert.ok(first.parsed > 0);
+  store.db.prepare("UPDATE branches SET parser_version='obsolete-parser' WHERE id=?").run(first.branchId);
+
+  const second = await indexRepo({ store, rootPath: root, mode: "incremental" });
+  assert.ok(second.parsed > 0, "unchanged files must be reparsed after parser identity semantics change");
+  store.close();
+});
+
+test("indexRepo: rebuild rollback preserves the previously published graph", async () => {
+  const root = tempRepo();
+  writeGit(root, "ref: refs/heads/main\n", { main: "c0" });
+  mkdirSync(join(root, "src"), { recursive: true });
+  writeFileSync(join(root, "src", "a.ts"), "export function alpha() { return 1; }\n");
+  writeFileSync(join(root, "src", "b.ts"), "export function beta() { return alpha(); }\n");
+  const store = openStore();
+  const initial = await indexRepo({ store, rootPath: root, mode: "rebuild" });
+
+  const snapshot = () => ({
+    branches: store.db.prepare("SELECT * FROM branches ORDER BY id").all(),
+    files: store.db.prepare("SELECT * FROM files_index ORDER BY repo_id, branch_id, file_path").all(),
+    nodes: store.db.prepare("SELECT * FROM nodes ORDER BY id").all(),
+    versions: store.db.prepare("SELECT * FROM symbol_versions ORDER BY node_id, branch_id").all(),
+    edges: store.db.prepare("SELECT * FROM edges ORDER BY id").all(),
+    events: store.db.prepare("SELECT * FROM events ORDER BY ledger_seq, id").all(),
+    ledger: existsSync(store.ledgerPath) ? readFileSync(store.ledgerPath, "utf8") : null,
+  });
+  const before = snapshot();
+
+  writeFileSync(join(root, "src", "a.ts"), "export function alphaRenamed() { return 1; }\n");
+  writeFileSync(join(root, "src", "b.ts"), "export function betaRenamed() { return alphaRenamed(); }\n");
+  await assert.rejects(
+    () => indexRepo({
+      store,
+      rootPath: root,
+      mode: "rebuild",
+      onProgress(event) {
+        if (event.phase === "index" && event.done === 2) throw new Error("injected rebuild interruption");
+      },
+    }),
+    /injected rebuild interruption/,
+  );
+
+  assert.deepEqual(snapshot(), before, "failed rebuild must not publish a partial graph or ledger event");
+  assert.equal(store.getBranch(initial.repoId, "main").status, "live");
+  store.close();
+});
+
+test("indexRepo: delete detection marks gone file's symbols stale and removes log sites", async () => {
+  const root = tempRepo();
+  writeGit(root, "ref: refs/heads/main\n", { main: "c0" });
+  mkdirSync(join(root, "src"), { recursive: true });
+  writeFileSync(
+    join(root, "src", "gone.ts"),
+    "export function willVanish() { console.info('vanishing log literal'); }",
+  );
   const store = openStore();
   const r1 = await indexRepo({ store, rootPath: root, mode: "incremental" });
   const nodeId = store.resolveIdentity(`${r1.repoId}::src/gone.ts::willVanish`).nodeId;
@@ -129,6 +283,7 @@ test("indexRepo: delete detection marks gone file's symbols stale", async () => 
   assert.equal(store.getSymbolVersion(nodeId, branch.id).status, "stale");
   const cp = store.getFileCheckpoint(r1.repoId, branch.id, "src/gone.ts");
   assert.equal(cp.status, "deleted");
+  assert.equal(search(store, "vanishing log literal").length, 0);
   store.close();
 });
 
@@ -216,6 +371,69 @@ test("indexRepo: spec file gets tests edges to exercised symbols (Plan B P1)", a
     .prepare("SELECT COUNT(*) AS n FROM edges WHERE edge_type='tests' AND src=? AND dst=?")
     .get(specFile.id, addSym.nodeId);
   assert.equal(testsEdge.n, 1, "spec file → add() tests edge");
+  store.close();
+});
+
+test("indexRepo: anonymous Jest callback maps dynamic-import calls to tested symbols", async () => {
+  const root = tempRepo();
+  writeGit(root, "ref: refs/heads/main\n", { main: "c0" });
+  mkdirSync(join(root, "src"), { recursive: true });
+  writeFileSync(
+    join(root, "src", "provider.ts"),
+    "export class Provider { checkBlacklist() { return false; } }",
+  );
+  writeFileSync(
+    join(root, "src", "provider.spec.ts"),
+    [
+      "it('checks the provider', async () => {",
+      "  const { Provider } = await import('./provider');",
+      "  const provider = new Provider();",
+      "  return provider.checkBlacklist();",
+      "});",
+    ].join("\n"),
+  );
+  const store = openStore();
+  const report = await indexRepo({ store, rootPath: root, mode: "rebuild" });
+
+  const specFile = store.db
+    .prepare("SELECT id FROM nodes WHERE identity_key=?")
+    .get(`${report.repoId}::file::src/provider.spec.ts`);
+  const checkedSymbol = store.resolveIdentity(`${report.repoId}::Provider.checkBlacklist`);
+  const testsEdge = store.db
+    .prepare("SELECT COUNT(*) AS n FROM edges WHERE edge_type='tests' AND src=? AND dst=?")
+    .get(specFile.id, checkedSymbol.nodeId);
+  assert.equal(testsEdge.n, 1, "anonymous callback should map to the uniquely imported method");
+  store.close();
+});
+
+test("indexRepo: ambiguous imported test targets are retained as low-confidence INFERRED edges", async () => {
+  const root = tempRepo();
+  writeGit(root, "ref: refs/heads/main\n", { main: "c0" });
+  mkdirSync(join(root, "src"), { recursive: true });
+  writeFileSync(join(root, "src", "bp.ts"), "export class Bp { checkBlacklist() { return false; } }");
+  writeFileSync(join(root, "src", "cp.ts"), "export class Cp { checkBlacklist() { return false; } }");
+  writeFileSync(
+    join(root, "src", "providers.spec.ts"),
+    [
+      "it('checks both providers', async () => {",
+      "  const { Bp } = await import('./bp');",
+      "  const { Cp } = await import('./cp');",
+      "  new Bp().checkBlacklist();",
+      "  new Cp().checkBlacklist();",
+      "});",
+    ].join("\n"),
+  );
+  const store = openStore();
+  const report = await indexRepo({ store, rootPath: root, mode: "rebuild" });
+  const rows = store.db.prepare(
+    `SELECT e.method, e.confidence, n.identity_key AS identityKey
+       FROM edges e JOIN nodes n ON n.id=e.dst
+      WHERE e.edge_type='tests'
+        AND json_extract(n.meta, '$.qualifiedName') IN (?, ?)
+      ORDER BY n.identity_key`,
+  ).all("Bp.checkBlacklist", "Cp.checkBlacklist");
+  assert.equal(rows.length, 2);
+  assert.ok(rows.every((row) => row.method === "INFERRED" && row.confidence === 0.5));
   store.close();
 });
 

@@ -41,6 +41,12 @@ CREATE TABLE IF NOT EXISTS branches (
   last_indexed_at TEXT,
   checkout_path TEXT,
   status TEXT NOT NULL,
+  indexed_worktree_state TEXT NOT NULL DEFAULT 'unknown',
+  indexed_worktree_fingerprint TEXT,
+  indexed_dirty_files TEXT NOT NULL DEFAULT '[]',
+  parser_version TEXT,
+  indexed_schema_version INTEGER,
+  stale_reason TEXT,
   UNIQUE (repo_id, name)
 );
 
@@ -54,6 +60,10 @@ CREATE TABLE IF NOT EXISTS nodes (
   created_at TEXT NOT NULL,
   UNIQUE (node_type, identity_key)
 );
+-- Hot path for parser resolution: every call/type reference looks up symbols
+-- by exact bare title inside one repo. Without this, suffix identity_key LIKE
+-- scans make full rebuild second-pass resolution quadratic on large repos.
+CREATE INDEX IF NOT EXISTS idx_nodes_repo_type_title ON nodes(repo_id, node_type, title);
 
 CREATE TABLE IF NOT EXISTS node_aliases (
   id TEXT PRIMARY KEY,
@@ -232,9 +242,17 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts_notes USING fts5(
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_symbols USING fts5(
   node_id UNINDEXED, name, signature
 );
+-- Lightweight, non-graph identifier index: object-literal property keys,
+-- interface/type-alias member names, class field names — none of these are
+-- symbol nodes (they'd explode node/edge count for no real graph value), but
+-- an agent searching for a real field name (e.g. "suspensionPeriod") deserves
+-- SOMETHING better than a bare empty result. file:line only, on purpose.
+CREATE VIRTUAL TABLE IF NOT EXISTS fts_identifiers USING fts5(
+  name, repo_id UNINDEXED, file_path UNINDEXED, start_line UNINDEXED, kind UNINDEXED
+);
 `;
 
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 // Idempotent additive migrations for schemas that predate SCHEMA_VERSION.
 // Each step guards on actual schema state (column presence) rather than the
@@ -259,6 +277,24 @@ function migrate(db: Database.Database, _from: number): void {
   if (!branchCols.includes("pinned")) {
     // Pinned branches are exempt from every automatic retention mechanism.
     db.exec("ALTER TABLE branches ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!branchCols.includes("indexed_worktree_state")) {
+    db.exec("ALTER TABLE branches ADD COLUMN indexed_worktree_state TEXT NOT NULL DEFAULT 'unknown'");
+  }
+  if (!branchCols.includes("indexed_worktree_fingerprint")) {
+    db.exec("ALTER TABLE branches ADD COLUMN indexed_worktree_fingerprint TEXT");
+  }
+  if (!branchCols.includes("indexed_dirty_files")) {
+    db.exec("ALTER TABLE branches ADD COLUMN indexed_dirty_files TEXT NOT NULL DEFAULT '[]'");
+  }
+  if (!branchCols.includes("parser_version")) {
+    db.exec("ALTER TABLE branches ADD COLUMN parser_version TEXT");
+  }
+  if (!branchCols.includes("indexed_schema_version")) {
+    db.exec("ALTER TABLE branches ADD COLUMN indexed_schema_version INTEGER");
+  }
+  if (!branchCols.includes("stale_reason")) {
+    db.exec("ALTER TABLE branches ADD COLUMN stale_reason TEXT");
   }
 }
 
@@ -288,7 +324,16 @@ function isSchemaCurrent(db: Database.Database): boolean {
   const branchCols = (db.prepare("PRAGMA table_info(branches)").all() as { name: string }[]).map(
     (c) => c.name,
   );
-  if (!branchCols.includes("pinned")) return false;
+  const requiredBranchColumns = [
+    "pinned",
+    "indexed_worktree_state",
+    "indexed_worktree_fingerprint",
+    "indexed_dirty_files",
+    "parser_version",
+    "indexed_schema_version",
+    "stale_reason",
+  ];
+  if (!requiredBranchColumns.every((column) => branchCols.includes(column))) return false;
   return db.prepare("SELECT 1 FROM ledger_state WHERE id='main'").get() != null;
 }
 

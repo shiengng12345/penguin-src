@@ -55,16 +55,50 @@ function seed() {
   return { store, repoId, login, caller };
 }
 
-test("knowledge tools registered (6-pack + suggestion flow)", () => {
+test("knowledge tools registered (6-pack + suggestion flow + architecture/communities/deadcode)", () => {
   const names = KNOWLEDGE_TOOL_DEFS.map((t) => t.name).sort();
   assert.deepEqual(names, [
-    "accept_suggestion", "compare_branches", "explore_graph", "get_node",
-    "index_status", "knowledge_search", "list_suggestions", "reject_suggestion",
+    "accept_suggestion", "compare_branches", "explore_graph", "find_communities",
+    "find_dead_code", "get_architecture", "get_node", "index_status",
+    "knowledge_explore", "knowledge_search", "list_suggestions", "reject_suggestion",
     "suggest_links", "write_note",
   ]);
   assert.ok(isKnowledgeTool("knowledge_search"));
+  assert.ok(isKnowledgeTool("knowledge_explore"));
   assert.ok(isKnowledgeTool("suggest_links"));
+  assert.ok(isKnowledgeTool("get_architecture"));
+  assert.ok(isKnowledgeTool("find_communities"));
+  assert.ok(isKnowledgeTool("find_dead_code"));
   assert.ok(!isKnowledgeTool("mcp_health"));
+});
+
+test("knowledge_explore is the documented hero entry and empty graphs require diagnostics", () => {
+  const explore = KNOWLEDGE_TOOL_DEFS.find((tool) => tool.name === "knowledge_explore");
+  const graph = KNOWLEDGE_TOOL_DEFS.find((tool) => tool.name === "explore_graph");
+  const status = KNOWLEDGE_TOOL_DEFS.find((tool) => tool.name === "index_status");
+  assert.match(explore.description, /default first|start .* first/i);
+  assert.match(explore.description, /queryDiagnostics/);
+  assert.match(graph.description, /no_static_edge/);
+  assert.match(graph.description, /diagnostics/);
+  assert.match(status.description, /compact/);
+});
+
+test("MCP get_architecture / find_communities / find_dead_code call the same functions the CLI already uses — real gap was these existed but weren't MCP-reachable", () => {
+  const { store, login, caller } = seed();
+  const arch = handleKnowledgeTool("get_architecture", {}, store);
+  assert.ok(Array.isArray(arch.repos));
+  assert.ok(arch.nodeCounts);
+
+  const comm = handleKnowledgeTool("find_communities", { limit: 5 }, store);
+  assert.ok(Array.isArray(comm.communities));
+
+  const dead = handleKnowledgeTool("find_dead_code", { limit: 5 }, store);
+  assert.ok(Array.isArray(dead.candidates));
+  // `caller` has no incoming edges at all → a real dead-code candidate.
+  assert.ok(dead.candidates.some((c) => c.nodeId === caller));
+  // `login` IS called (by caller) → must not appear as dead code.
+  assert.ok(!dead.candidates.some((c) => c.nodeId === login));
+  store.close();
 });
 
 test("MCP suggest_links → list_suggestions → accept round-trips", () => {
@@ -82,6 +116,17 @@ test("null store → not-initialized hint (no crash)", () => {
   assert.match(r.error, /not initialized/);
 });
 
+test("index_status compact mode returns the shared bounded projection", () => {
+  const { store } = seed();
+  const detailed = handleKnowledgeTool("index_status", {}, store);
+  const compact = handleKnowledgeTool("index_status", { mode: "compact" }, store);
+  assert.ok(Array.isArray(detailed.repos[0].branches));
+  assert.equal(compact.summary.totalRepos, 1);
+  assert.equal(compact.repos[0].repo, detailed.repos[0].name);
+  assert.equal("branches" in compact.repos[0], false);
+  store.close();
+});
+
 test("knowledge_search / get_node / explore_graph adapt the query layer", () => {
   const { store, login, caller } = seed();
   const s = handleKnowledgeTool("knowledge_search", { query: "login" }, store);
@@ -92,6 +137,16 @@ test("knowledge_search / get_node / explore_graph adapt the query layer", () => 
 
   const g = handleKnowledgeTool("explore_graph", { mode: "who_calls", node: "login" }, store);
   assert.ok(g.nodes.some((x) => x.nodeId === caller));
+  assert.equal(g.diagnostics.resolutionStatus, "resolved");
+
+  const explored = handleKnowledgeTool("knowledge_explore", { target: "login" }, store);
+  assert.equal(explored.focus.title, "login");
+  assert.ok(explored.blastRadius.some((x) => x.nodeId === caller));
+  assert.equal(explored.queryDiagnostics.resolutionStatus, "resolved");
+
+  const branchScoped = handleKnowledgeTool("knowledge_explore", { target: "login", branch: "main", depth: 0 }, store);
+  assert.equal(branchScoped.trust.branchName, "main", "MCP branch names resolve within the target repo");
+  assert.deepEqual(branchScoped.blastRadius, []);
   store.close();
 });
 

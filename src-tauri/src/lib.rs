@@ -162,6 +162,7 @@ pub fn run() {
             knowledge::knowledge_cli_status,
             knowledge::knowledge_cli_setup,
             knowledge::knowledge_agent_guidance_setup,
+            knowledge::knowledge_agent_hook_setup,
             knowledge::knowledge_watch_toggle,
             knowledge::knowledge_watch_status,
             packages::ensure_packages_dir,

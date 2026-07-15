@@ -6,9 +6,11 @@ export {
   type ExtractedFile,
   type ExtractedSymbol,
   type ExtractedRef,
+  type ExtractedLogSite,
 } from "./extract.js";
 export { extractEndpoints, extractRoutes, type ExtractedEndpoint, type ExtractedRoute } from "./routes.js";
 export { extractGrpcClientCalls, grpcEndpointKey, type GrpcClientCall } from "./grpc-client.js";
+export { parseProtoEndpoints, collectProtoEndpoints, type ProtoEndpoint } from "./proto-parser.js";
 export { resolveRefs, type SymbolIndex, type ResolvedEdges } from "./resolve.js";
 export { detectRenames, type RenameAliasEvent } from "./rename.js";
 export { parseNote, indexNote, extractEntities, type ParsedNote } from "./notes.js";
@@ -20,3 +22,4 @@ export { indexGitObjects, type GitGraphResult } from "./gitgraph.js";
 export { indexRepo, reconcileOnStartup, IndexTaskLock, type IndexReport, type IndexProgressEvent, type IndexStageId } from "./pipeline.js";
 export { startWatcher, type WatcherHandle, type WatcherStatus } from "./watcher.js";
 export { detectPackages, flyoverPackageNames, buildPackageRegistry, type PackageInfo, type PackageRegistry } from "./package-detect.js";
+export { extractIdentifiers, extractIdentifiersFromSource, type IdentifierEntry } from "./identifiers.js";

@@ -18,6 +18,7 @@ import {
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { useAppStore } from "@/lib/store";
 import { useDeveloperMode } from "@/hooks/useDeveloperMode";
 import { TabBtn } from "@/components/wiki/WikiUIKit";
 import { WikiGraph, type GraphLayout } from "@/components/wiki/WikiGraph";
@@ -28,6 +29,7 @@ import {
   formatKnowledgeError,
   isNoDatabaseError,
   knowledgeAgentGuidanceSetup,
+  knowledgeAgentHookSetup,
   knowledgeCliSetup,
   knowledgeCliStatus,
   knowledgeReindex,
@@ -48,6 +50,7 @@ import {
   type KnowledgeDbStatus,
   type KnowledgeGraphView,
   type ContextPack,
+  type IndexProgress,
 } from "@/lib/knowledge-client";
 
 interface WikiPageProps { onClose: () => void }
@@ -60,6 +63,51 @@ type CenterTab = "context" | "graph";
 // matter how the user got there.
 type NavEntry = { kind: "symbol"; id: string } | { kind: "home" };
 type GraphScope = { title: string; detail: string };
+
+function IndexProgressBanner() {
+  const [progress, setProgress] = useState<IndexProgress | null>(null);
+
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    let active = true;
+    void onIndexProgress((payload) => {
+      if (!active) return;
+      if (payload.phase === "complete") {
+        setProgress(null);
+      } else {
+        setProgress(payload);
+      }
+    }).then((stop) => {
+      if (active) unlisten = stop;
+      else stop();
+    });
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, []);
+
+  if (!progress) return null;
+  const done = progress.done ?? 0;
+  const total = progress.total ?? 0;
+  const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  const repo = progress.rootPath?.replace(/\/+$/, "").split("/").pop() ?? "repository";
+  const phase = progress.phase === "scan" ? "Scanning" : "Indexing";
+  return (
+    <div className="mx-6 mt-3 rounded-lg border border-cyan-500/25 bg-cyan-500/10 px-3 py-2 text-xs text-cyan-100">
+      <div className="flex items-center justify-between gap-3">
+        <span className="min-w-0 truncate">{phase} {repo}</span>
+        <span className="shrink-0 font-mono text-cyan-300">
+          {total > 0 ? `${pct}% · ${done}/${total}` : "starting…"}
+        </span>
+      </div>
+      <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-slate-800">
+        <div className="h-full rounded-full bg-cyan-400 transition-[width] duration-200" style={{ width: `${pct}%` }} />
+      </div>
+      {progress.file && <div className="mt-1 truncate font-mono text-[10px] text-cyan-200/60">{progress.file}</div>}
+    </div>
+  );
+}
 
 
 // Full-screen teaching page shown while the knowledge base is empty (no DB or
@@ -74,6 +122,10 @@ function WikiOnboarding({ onRefresh, onClose }: { onRefresh: () => void; onClose
   // global CLAUDE.md/AGENTS.md guidance. `done` carries the per-item summary.
   const [cliReady, setCliReady] = useState<boolean | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
+  const [hookSessionStart, setHookSessionStart] = useState(false);
+  const [hookPromptSubmit, setHookPromptSubmit] = useState(false);
+  const [hookBusy, setHookBusy] = useState(false);
+  const [hookResult, setHookResult] = useState<{ state: "ok" | "warn" | "fail"; text: string } | null>(null);
   // Per-item outcome — machines differ (shell, which AI clients are installed,
   // node present or not), so each step runs independently and reports honestly:
   // ok / skipped / failed, never one blanket success or one blanket error.
@@ -132,6 +184,31 @@ function WikiOnboarding({ onRefresh, onClose }: { onRefresh: () => void; onClose
     setAiBusy(false);
   }, []);
 
+  const applyHooks = useCallback(async () => {
+    setHookBusy(true);
+    setHookResult(null);
+    try {
+      const hooks = await knowledgeAgentHookSetup(hookSessionStart, hookPromptSubmit);
+      if (!hooks.supported) {
+        setHookResult({ state: "warn", text: "Claude Code hooks:未检测到客户端,已跳过" });
+      } else if (hooks.enabled.length === 0) {
+        setHookResult({
+          state: "ok",
+          text: hooks.written ? "Penguin hooks 已移除" : "Penguin hooks 已是关闭状态",
+        });
+      } else {
+        setHookResult({
+          state: "ok",
+          text: `Claude Code hooks ${hooks.written ? "已更新" : "已是最新"}:${hooks.enabled.join("、")}`,
+        });
+      }
+    } catch (e) {
+      setHookResult({ state: "fail", text: `Claude Code hooks:${formatKnowledgeError(e)}` });
+    } finally {
+      setHookBusy(false);
+    }
+  }, [hookPromptSubmit, hookSessionStart]);
+
   const pickAndIndex = useCallback(async () => {
     setObError(null);
     const { open } = await import("@tauri-apps/plugin-dialog");
@@ -139,7 +216,8 @@ function WikiOnboarding({ onRefresh, onClose }: { onRefresh: () => void; onClose
     if (typeof dir !== "string") return; // cancelled
     setIndexing({ dir, done: 0, total: 0, file: "" });
     const unlisten = await onIndexProgress((p) => {
-      setIndexing((cur) => (cur ? { ...cur, done: p.done, total: p.total, file: p.file ?? "" } : cur));
+      if (p.phase !== "scan" && p.phase !== "index") return;
+      setIndexing((cur) => (cur ? { ...cur, done: p.done ?? 0, total: p.total ?? 0, file: p.file ?? "" } : cur));
     });
     try {
       await knowledgeReindex(dir);
@@ -230,6 +308,9 @@ function WikiOnboarding({ onRefresh, onClose }: { onRefresh: () => void; onClose
               <p className="mt-1 text-xs leading-relaxed text-slate-500">
                 penguin 终端命令 · Claude / Codex 的 MCP 接入 · 全局 CLAUDE.md / AGENTS.md 指引
               </p>
+              <p className="mt-1 text-[11px] leading-relaxed text-slate-600">
+                Claude Code 可选原生 hooks；Codex 使用 canonical MCP + AGENTS.md，不伪装成相同的事件 hook。
+              </p>
             </div>
             <button type="button" disabled={aiBusy} onClick={() => void setupAi()}
               className="flex shrink-0 items-center gap-2 rounded-lg border border-cyan-500/40 px-3 py-1.5 text-xs font-bold text-cyan-200 hover:bg-cyan-500/10 disabled:opacity-50">
@@ -237,6 +318,35 @@ function WikiOnboarding({ onRefresh, onClose }: { onRefresh: () => void; onClose
               {aiResults ? "重新配置" : "一键配置 AI 集成"}
             </button>
           </div>
+          <div className="mt-3 flex flex-wrap gap-x-4 gap-y-2 text-xs text-slate-400">
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={hookSessionStart}
+                onChange={(event) => setHookSessionStart(event.target.checked)}
+              />
+              SessionStart compact status
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={hookPromptSubmit}
+                onChange={(event) => setHookPromptSubmit(event.target.checked)}
+              />
+              UserPromptSubmit bounded context
+            </label>
+            <button type="button" disabled={hookBusy} onClick={() => void applyHooks()}
+              className="flex items-center gap-1.5 rounded-md border border-slate-700 px-2.5 py-1 text-xs font-semibold text-slate-300 hover:bg-white/5 disabled:opacity-50">
+              {hookBusy && <Loader2 className="h-3 w-3 animate-spin" />}
+              应用 Hook 设置
+            </button>
+          </div>
+          <p className="mt-1.5 text-[11px] text-slate-600">两项均关闭时移除 Penguin hooks；其他工具管理的 hooks 不受影响。</p>
+          {hookResult && (
+            <p className={cn("mt-2 text-xs", hookResult.state === "ok" ? "text-emerald-300/90" : hookResult.state === "warn" ? "text-amber-300/90" : "text-red-300/90")}>
+              {hookResult.state === "ok" ? "✓" : hookResult.state === "warn" ? "⚠" : "✗"} {hookResult.text}
+            </p>
+          )}
           {cliReady === false && !aiResults && !aiBusy && (
             <p className="mt-2 text-xs text-amber-300/90">检测到终端里还没有 penguin 命令 — 点右侧一键配置。</p>
           )}
@@ -278,7 +388,11 @@ function KnowledgeHomePanel({
   // else can only trigger a single refresh per click. hasValidToken alone
   // (the "admin" tier) does NOT unlock it.
   const { isSuperAdmin } = useDeveloperMode();
-  const [autoRefresh, setAutoRefresh] = useState(false);
+  // Persisted (APP_VALUE_KEYS.wikiAutoRefresh), not a plain useState — a
+  // webview reload must not silently drop the user's "keep polling" choice
+  // back to off (same precedent as the installer's registry auto-refresh).
+  const autoRefresh = useAppStore((s) => s.wikiAutoRefresh);
+  const setAutoRefresh = useAppStore((s) => s.setWikiAutoRefresh);
   const toggleRepo = (id: string) =>
     setExpanded((cur) => {
       const next = new Set(cur);
@@ -316,6 +430,31 @@ function KnowledgeHomePanel({
       // best-effort — leave the toggle showing its prior state on failure
     }
   }, [watching]);
+  // One click for every repo instead of clicking each row — flips ALL repos
+  // to the opposite of their current majority state: if every repo is
+  // already watching, turn them all off; otherwise turn them all on
+  // (including any already on, which is a harmless no-op per repo since
+  // knowledge_watch_toggle's enable path is itself idempotent).
+  const allWatching = (indexRows?.repos.length ?? 0) > 0
+    && indexRows!.repos.every((r) => watching.has(r.repoId));
+  const bulkToggleWatch = useCallback(async () => {
+    if (!indexRows) return;
+    const enable = !indexRows.repos.every((r) => watching.has(r.repoId));
+    const results = await Promise.all(
+      indexRows.repos.map((r) =>
+        knowledgeWatchToggle(r.repoId, r.rootPath, enable)
+          .then((result) => ({ repoId: r.repoId, result }))
+          .catch(() => ({ repoId: r.repoId, result: false })),
+      ),
+    );
+    setWatching((cur) => {
+      const next = new Set(cur);
+      for (const { repoId, result } of results) {
+        if (result) next.add(repoId); else next.delete(repoId);
+      }
+      return next;
+    });
+  }, [indexRows, watching]);
   // Auto-refresh only ever runs for a superadmin who has turned it on; if
   // their tier drops (token cleared) mid-session, the effect cleanup below
   // tears the interval down since isSuperAdmin becomes a dependency.
@@ -368,6 +507,18 @@ function KnowledgeHomePanel({
             <span className="text-sm font-semibold text-slate-100">Indexed repositories</span>
             <span className="text-xs text-slate-500">点仓库展开分支,点分支进图谱</span>
             <div className="ml-auto flex items-center gap-2">
+              <button
+                type="button"
+                title={allWatching ? "关闭全部仓库的自动同步" : "开启全部仓库的自动同步"}
+                onClick={() => void bulkToggleWatch()}
+                className={cn(
+                  "flex items-center gap-1 rounded px-1.5 py-1 text-[11px]",
+                  allWatching ? "text-cyan-300" : "text-slate-500 hover:text-cyan-200",
+                )}
+              >
+                <Radio className={cn("h-3.5 w-3.5", allWatching && "animate-pulse")} />
+                全部同步
+              </button>
               {isSuperAdmin && (
                 <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-slate-400 hover:text-slate-200">
                   <input
@@ -818,6 +969,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
   return (
     <div className="flex h-full flex-col bg-[#070b11] text-slate-100">
       {error && !isNoDatabaseError(error) && <div className="mx-6 mt-3 rounded-md border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-sm text-yellow-200">{error}</div>}
+      <IndexProgressBanner />
 
       <div className="flex min-h-0 flex-1 flex-col">
         <section className="flex min-h-0 min-w-0 flex-col bg-[#080d14]">

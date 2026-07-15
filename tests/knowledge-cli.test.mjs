@@ -48,6 +48,15 @@ test("init indexes a repo, then status + search + callers work", async () => {
   assert.ok(status.repos.some((r) => r.branches.some((b) => b.name === "main")));
 
   lines.length = 0;
+  assert.equal(await runCli(["status", "--compact", "--json"], deps), 0);
+  const compactStatus = JSON.parse(lines[0]);
+  assert.equal(compactStatus.summary.totalRepos, 1);
+  assert.deepEqual(compactStatus.repos.map((repo) => repo.repo), [
+    dir.split("/").at(-1),
+  ]);
+  assert.equal("branches" in compactStatus.repos[0], false);
+
+  lines.length = 0;
   assert.equal(await runCli(["search", "inner", "--json"], deps), 0);
   const hits = JSON.parse(lines[0]);
   assert.ok(hits.some((h) => h.title === "inner"));
@@ -56,6 +65,33 @@ test("init indexes a repo, then status + search + callers work", async () => {
   assert.equal(await runCli(["callers", "inner", "--json"], deps), 0);
   const callers = JSON.parse(lines[0]);
   assert.ok(callers.nodes.some((n) => n.title === "outer"), "outer calls inner");
+
+  lines.length = 0;
+  assert.equal(await runCli(["explore", "inner", "--json"], deps), 0);
+  const explored = JSON.parse(lines[0]);
+  assert.equal(explored.focus.title, "inner");
+  assert.ok(explored.blastRadius.some((node) => node.title === "outer"));
+  assert.ok(explored.provenance.length >= 1);
+
+  const store = deps.openStore();
+  const branchId = store.db.prepare("SELECT id FROM branches WHERE name='main'").get().id;
+  store.close();
+  lines.length = 0;
+  assert.equal(await runCli([
+    "explore", "inner", "--branch", "main", "--depth", "0", "--limit", "1", "--json",
+  ], deps), 0);
+  const boundedExplore = JSON.parse(lines[0]);
+  assert.equal(boundedExplore.focus.title, "inner", "option values must not be appended to the target");
+  assert.equal(boundedExplore.trust.branchId, branchId);
+  assert.deepEqual(boundedExplore.blastRadius, [], "--depth must reach the shared core query");
+
+  lines.length = 0;
+  assert.equal(await runCli(["locate", "inner", "--json"], deps), 0);
+  const located = JSON.parse(lines[0]);
+  assert.equal(located.focus.title, "inner");
+  assert.match(located.focus.source, /function inner/);
+  assert.ok(located.blastRadius.some((node) => node.title === "outer"));
+  assert.ok(located.trust, "locate returns index trust alongside code context");
 });
 
 test("suggestion flow via CLI: link/suggestions/accept + doctor + snapshots", async () => {
@@ -97,6 +133,38 @@ test("install prints guidance when no installSelf provided", async () => {
   const { deps, lines } = harness();
   assert.equal(await runCli(["install"], deps), 0);
   assert.match(lines.join("\n"), /ln -sf|symlink/i);
+});
+
+test("hook verbs read bounded Claude input and never create or write knowledge", async () => {
+  const { dir, deps, lines } = harness();
+  mkdirSync(join(dir, ".git", "refs", "heads"), { recursive: true });
+  writeFileSync(join(dir, ".git", "HEAD"), "ref: refs/heads/main\n");
+  writeFileSync(join(dir, ".git", "refs", "heads", "main"), "c0\n");
+  writeFileSync(
+    join(dir, "service.ts"),
+    "class Service { run(){ return 1; } }\n",
+  );
+  assert.equal(await runCli(["init"], deps), 0);
+
+  lines.length = 0;
+  deps.readStdin = async () => "{}";
+  assert.equal(
+    await runCli(["hook", "session-start", "--managed-by=penguin"], deps),
+    0,
+  );
+  assert.match(lines[0], /^\[Penguin index context\]/);
+
+  lines.length = 0;
+  deps.readStdin = async () =>
+    JSON.stringify({ prompt: "who calls Service.run?" });
+  assert.equal(
+    await runCli(
+      ["hook", "user-prompt-submit", "--managed-by=penguin"],
+      deps,
+    ),
+    0,
+  );
+  assert.match(lines[0], /target=Service\.run/);
 });
 
 test("help + unknown command exit codes", async () => {

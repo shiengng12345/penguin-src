@@ -35,7 +35,9 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 toml_edit = "0.25"
 glob = "0.3"
 dirs = "6"
-reqwest = { version = "0.12", features = ["json", "stream"] }
+# Use rustls so gRPC-Web requests can negotiate HTTP/2 via ALPN on macOS.
+# Native-tls reached this CDN but failed when the request was pinned to h2.
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "http2"] }
 tokio = { version = "1", features = ["full"] }
 base64 = "0.22"
 # Set-Cookie `Expires=` HTTP-date parsing (zero-dep; many servers send only

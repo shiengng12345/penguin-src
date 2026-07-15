@@ -6,7 +6,10 @@ import type { KnowledgeStore } from "./store.js";
 // (§8). Results carry provenance/staleness where applicable (§3.3/§4.4).
 
 export interface SearchResultRow {
-  nodeId: string;
+  // null only for a "field" hit (object-literal key / interface / type-alias
+  // / class field name) — these are file:line index entries, not graph
+  // nodes, so there's no id get_node could ever resolve.
+  nodeId: string | null;
   nodeType: string;
   title: string;
   snippet: string | null;
@@ -14,6 +17,9 @@ export interface SearchResultRow {
   filePath: string | null;
   branch: string | null;
   rank: number | null;
+  // Only populated for "field" hits — symbol/note hits carry their line via
+  // the caller looking up symbol_versions/get_node instead.
+  startLine?: number | null;
 }
 
 function resolveNodeId(store: KnowledgeStore, idOrKey: string): string | null {
@@ -71,11 +77,43 @@ export function resolveSymbolMatches(store: KnowledgeStore, idOrKey: string): Sy
   if (store.getNode(raw)) return { kind: "unique", nodeId: raw };
   const r = store.resolveIdentity(raw);
   if (r) return { kind: "unique", nodeId: r.nodeId };
+  // Human-friendly repo prefix: `auth::Class.method` or
+  // `auth::src/file.ts::Class.method`. Repo ids are random on a fresh DB, so
+  // prompts, benchmarks and notes must not need to preserve `repo_<uuid>`.
+  const repoSeparator = raw.indexOf("::");
+  if (repoSeparator > 0 && !raw.startsWith("repo_") && !raw.startsWith("grpc::")) {
+    const repoPrefix = raw.slice(0, repoSeparator);
+    const suffix = raw.slice(repoSeparator + 2);
+    const resolvedIds = new Set<string>();
+    for (const repoId of store.resolveRepoIds(repoPrefix)) {
+      const match = store.resolveIdentity(`${repoId}::${suffix}`);
+      if (match) resolvedIds.add(match.nodeId);
+    }
+    if (resolvedIds.size === 1) return { kind: "unique", nodeId: [...resolvedIds][0] };
+    if (resolvedIds.size > 1) {
+      return {
+        kind: "ambiguous",
+        candidates: [...resolvedIds].slice(0, MAX_AMBIGUOUS_CANDIDATES).map((nodeId) => symbolCandidateOf(store, nodeId)),
+      };
+    }
+  }
   // friendly-name fallback: title match, or qualified-name suffix (so CLI/MCP
   // callers can pass "login" or "Svc.login", not just full identity keys).
   const rows = store.db
     .prepare(
-      `SELECT id FROM nodes WHERE title = ? OR identity_key LIKE ? OR identity_key LIKE ?
+      `SELECT id FROM nodes
+       WHERE (title = ? OR identity_key LIKE ? OR identity_key LIKE ?)
+         AND (
+           node_type <> 'symbol'
+           OR NOT EXISTS (
+             SELECT 1 FROM symbol_versions sv
+             WHERE sv.node_id = nodes.id
+           )
+           OR EXISTS (
+             SELECT 1 FROM symbol_versions sv
+             WHERE sv.node_id = nodes.id AND sv.status = 'fresh'
+           )
+         )
        LIMIT ${MAX_AMBIGUOUS_CANDIDATES + 1}`,
     )
     .all(raw, `%::${raw}`, `%.${raw}`) as { id: string }[];
@@ -104,27 +142,100 @@ export function renderAmbiguousSymbols(
 }
 
 // knowledge_search: title→FTS unified retrieval with scope filters (§8.1).
+// "field" is a pseudo node-type — object-literal keys / interface / type-alias
+// / class field names, backed by fts_identifiers (see store.searchIdentifiers),
+// not real symbol/note nodes. It's included when the caller explicitly asks
+// for it (type: ["field"]) OR automatically when a normal, type-unfiltered
+// search comes back empty — a real field name deserves file:line, not a bare
+// empty result (the reporting session's longest-stuck point: searching for
+// object-literal keys/interface fields always returned nothing).
 export function search(
   store: KnowledgeStore,
   query: string,
   filters?: { type?: string[]; repo?: string; workspace?: string; includeSensitive?: boolean; limit?: number },
 ): SearchResultRow[] {
-  const hits = store.searchText(query, {
-    types: filters?.type,
-    includeSensitive: filters?.includeSensitive,
-    limit: filters?.limit,
-  });
+  const requestedTypes = filters?.type;
+  const wantsFields = requestedTypes?.includes("field") ?? false;
+  const otherTypes = requestedTypes?.filter((t) => t !== "field");
+  // type: ["field"] alone means "fields only" — skip the symbol/note query.
+  const skipSymbolSearch = wantsFields && otherTypes?.length === 0;
+
+  let hits: SearchResultRow[] = skipSymbolSearch
+    ? []
+    : store.searchText(query, {
+        types: otherTypes?.length ? otherTypes : undefined,
+        includeSensitive: filters?.includeSensitive,
+        limit: filters?.limit,
+      });
+
+  // Endpoints/services/entities are graph nodes rather than source symbols, so
+  // they have no fts_symbols row. Include them by title/identity to make real
+  // routes and proto RPCs discoverable through the same search entry point.
+  const structuralTypes = ["endpoint", "service", "entity", "log_site"]
+    .filter((nodeType) => !requestedTypes?.length || requestedTypes.includes(nodeType));
+  if (!skipSymbolSearch && structuralTypes.length > 0) {
+    const placeholders = structuralTypes.map(() => "?").join(",");
+    const structuralQuery = `%${query}%`;
+    const structuralHits = store.db
+      .prepare(
+        `SELECT id AS nodeId, node_type AS nodeType, title, identity_key AS identityKey,
+                CASE WHEN node_type='log_site' THEN json_extract(meta, '$.filePath') ELSE NULL END AS filePath,
+                NULL AS branch, NULL AS rank,
+                CASE WHEN node_type='log_site' THEN json_extract(meta, '$.message') ELSE NULL END AS snippet,
+                CASE WHEN node_type='log_site' THEN json_extract(meta, '$.startLine') ELSE NULL END AS startLine
+           FROM nodes
+          WHERE node_type IN (${placeholders})
+            AND (title LIKE ? COLLATE NOCASE OR identity_key LIKE ? COLLATE NOCASE)
+          LIMIT ?`,
+      )
+      .all(...structuralTypes, structuralQuery, structuralQuery, filters?.limit ?? 50) as SearchResultRow[];
+    const seenNodeIds = new Set(hits.map((hit) => hit.nodeId).filter(Boolean));
+    hits = hits.concat(structuralHits.filter((hit) => !seenNodeIds.has(hit.nodeId)));
+  }
+
   // Scope by repo, or by all repos in a workspace (§8.1 workspace filter).
   const repoScope: Set<string> | null = filters?.workspace
     ? new Set(store.workspaceRepoIds(filters.workspace))
     : filters?.repo
       ? new Set(store.resolveRepoIds(filters.repo))
       : null;
-  if (!repoScope) return hits;
-  return hits.filter((h) => {
-    const n = store.getNode(h.nodeId);
-    return n?.repo_id != null && repoScope.has(n.repo_id);
-  });
+  if (repoScope) {
+    hits = hits.filter((h) => {
+      const n = store.getNode(h.nodeId!);
+      const isDirectRepoMatch = n?.repo_id != null && repoScope.has(n.repo_id);
+      if (isDirectRepoMatch) return true;
+      if (!n || n.repo_id != null) return false;
+      const linkedRepos = store.db
+        .prepare(
+          `SELECT DISTINCT linked.repo_id AS repoId
+             FROM edges e
+             JOIN nodes linked ON linked.id = CASE WHEN e.src = ? THEN e.dst ELSE e.src END
+            WHERE (e.src = ? OR e.dst = ?) AND linked.repo_id IS NOT NULL`,
+        )
+        .all(n.id, n.id, n.id) as Array<{ repoId: string }>;
+      return linkedRepos.some((row) => repoScope.has(row.repoId));
+    });
+  }
+
+  const shouldSearchFields = wantsFields || (hits.length === 0 && !requestedTypes?.length);
+  if (shouldSearchFields) {
+    const idHits = store.searchIdentifiers(query, { limit: filters?.limit });
+    const scoped = repoScope ? idHits.filter((h) => repoScope.has(h.repoId)) : idHits;
+    hits = hits.concat(
+      scoped.map((h) => ({
+        nodeId: null,
+        nodeType: "field",
+        title: h.name,
+        snippet: null,
+        identityKey: `field::${h.repoId}::${h.filePath}::${h.startLine}::${h.name}`,
+        filePath: h.filePath,
+        branch: null,
+        rank: null,
+        startLine: h.startLine,
+      })),
+    );
+  }
+  return hits;
 }
 
 export interface NodeDetail {
@@ -209,12 +320,13 @@ export function getNodeDetail(store: KnowledgeStore, idOrKey: string): NodeDetai
 }
 
 export type GraphMode =
-  | "who_calls" | "calls_of" | "impact" | "backlinks" | "path" | "timeline" | "recent_changes";
+  | "who_calls" | "calls_of" | "impact" | "backlinks" | "path" | "timeline" | "recent_changes" | "who_injects";
 
 export interface GraphResult {
   mode: GraphMode;
   nodes: Array<{ nodeId: string; title: string; nodeType: string }>;
   events?: Array<{ eventType: string; ts: string; origin: string; method: string; nodeId: string | null }>;
+  diagnostics?: QueryDiagnostics;
 }
 
 function nodeBrief(store: KnowledgeStore, id: string) {
@@ -233,6 +345,70 @@ export interface BranchFreshness {
   indexedAt: string | null;
   stale: boolean;
   reason: string;
+}
+
+export interface TrustEnvelope {
+  repoId: string;
+  repoName: string;
+  branchId: string;
+  branchName: string;
+  headCommit: string | null;
+  indexedCommit: string | null;
+  indexedAt: string | null;
+  worktreeState: "clean" | "dirty" | "unknown" | "not_applicable";
+  worktreeFingerprint: string | null;
+  dirtyFiles: string[];
+  parserVersion: string | null;
+  schemaVersion: number | null;
+  stale: boolean;
+  staleReason: string | null;
+  coverageGaps: string[];
+}
+
+// Read the trust facts persisted by the successful indexing transaction. All
+// query surfaces call this helper so repo/branch/freshness semantics cannot
+// drift between Context, Flow, CLI, MCP, and the Wiki UI.
+export function trustEnvelopeForBranch(
+  store: KnowledgeStore,
+  branchId: string | null,
+): TrustEnvelope | null {
+  if (!branchId) return null;
+  const row = store.db.prepare(
+    `SELECT r.id AS repoId, r.name AS repoName,
+            b.id AS branchId, b.name AS branchName,
+            b.head_commit AS headCommit,
+            b.last_indexed_commit AS indexedCommit,
+            b.last_indexed_at AS indexedAt,
+            b.indexed_worktree_state AS worktreeState,
+            b.indexed_worktree_fingerprint AS worktreeFingerprint,
+            b.indexed_dirty_files AS dirtyFiles,
+            b.parser_version AS parserVersion,
+            b.indexed_schema_version AS schemaVersion,
+            b.stale_reason AS staleReason
+       FROM branches b JOIN repos r ON r.id=b.repo_id
+      WHERE b.id=?`,
+  ).get(branchId) as {
+    repoId: string; repoName: string; branchId: string; branchName: string;
+    headCommit: string | null; indexedCommit: string | null; indexedAt: string | null;
+    worktreeState: TrustEnvelope["worktreeState"]; worktreeFingerprint: string | null;
+    dirtyFiles: string; parserVersion: string | null; schemaVersion: number | null;
+    staleReason: string | null;
+  } | undefined;
+  if (!row) return null;
+  let dirtyFiles: string[] = [];
+  try {
+    const parsed = JSON.parse(row.dirtyFiles);
+    dirtyFiles = Array.isArray(parsed) ? parsed.filter((file): file is string => typeof file === "string") : [];
+  } catch {
+    dirtyFiles = [];
+  }
+  const coverageGaps = row.worktreeState === "unknown" ? ["git_status_unavailable"] : [];
+  return {
+    ...row,
+    dirtyFiles,
+    stale: row.staleReason != null,
+    coverageGaps,
+  };
 }
 
 // "Which branch am I answering for, and is it current?" — compares the live git
@@ -268,6 +444,147 @@ export function liveBranchOf(store: KnowledgeStore, nodeId: string): string | nu
   return b?.id ?? null;
 }
 
+export interface QueryDiagnostics {
+  resolutionStatus:
+    | "resolved"
+    | "no_match"
+    | "ambiguous"
+    | "stale_target"
+    | "not_indexed"
+    | "assembly_error";
+  resultStatus:
+    | "has_results"
+    | "no_static_edge"
+    | "unresolved_edges"
+    | "query_error";
+  target: {
+    requested: string;
+    resolvedNodeId: string | null;
+    repo: string | null;
+    branch: string | null;
+  };
+  freshness: {
+    status: "fresh" | "dirty" | "stale" | "unknown";
+    indexedCommit: string | null;
+    headCommit: string | null;
+    dirtyFileCount: number | null;
+  } | null;
+  evidence: {
+    incomingByType: Record<string, number>;
+    outgoingByType: Record<string, number>;
+    unresolvedReferenceCount: number;
+  };
+  coverageGaps: string[];
+}
+
+function edgeCountsByType(
+  store: KnowledgeStore,
+  nodeId: string,
+  direction: "incoming" | "outgoing",
+): Record<string, number> {
+  const column = direction === "incoming" ? "dst" : "src";
+  const rows = store.db
+    .prepare(
+      `SELECT edge_type AS edgeType, COUNT(*) AS count
+         FROM edges
+        WHERE ${column}=? AND status='active'
+        GROUP BY edge_type
+        ORDER BY edge_type`,
+    )
+    .all(nodeId) as Array<{ edgeType: string; count: number }>;
+  return Object.fromEntries(rows.map((row) => [row.edgeType, row.count]));
+}
+
+function staleExactTargetExists(store: KnowledgeStore, requested: string): boolean {
+  const row = store.db
+    .prepare(
+      `SELECT n.id
+         FROM nodes n
+         JOIN symbol_versions sv ON sv.node_id=n.id
+        WHERE (n.id=? OR n.identity_key=? OR n.title=?)
+        GROUP BY n.id
+       HAVING SUM(CASE WHEN sv.status='fresh' THEN 1 ELSE 0 END)=0
+        LIMIT 1`,
+    )
+    .get(requested, requested, requested) as { id: string } | undefined;
+  return !!row;
+}
+
+function buildQueryDiagnostics(
+  store: KnowledgeStore,
+  requested: string,
+  resolvedNodeId: string | null,
+  resultCount: number,
+  options?: { branchId?: string; assemblyError?: string | null },
+): QueryDiagnostics {
+  const repoCount = (
+    store.db.prepare("SELECT COUNT(*) AS count FROM repos").get() as { count: number }
+  ).count;
+  const symbolResolution = resolvedNodeId ? null : resolveSymbolMatches(store, requested);
+  const resolutionStatus: QueryDiagnostics["resolutionStatus"] = options?.assemblyError
+    ? "assembly_error"
+    : resolvedNodeId
+      ? "resolved"
+      : repoCount === 0
+        ? "not_indexed"
+        : symbolResolution?.kind === "ambiguous"
+          ? "ambiguous"
+          : staleExactTargetExists(store, requested)
+            ? "stale_target"
+            : "no_match";
+  const branchId = resolvedNodeId
+    ? options?.branchId ?? liveBranchOf(store, resolvedNodeId)
+    : null;
+  const trust = trustEnvelopeForBranch(store, branchId);
+  const node = resolvedNodeId ? store.getNode(resolvedNodeId) : null;
+  const repo = node?.repo_id
+    ? (store.db.prepare("SELECT name FROM repos WHERE id=?").get(node.repo_id) as
+        | { name: string }
+        | undefined)
+    : undefined;
+  const freshness = trust
+    ? {
+        status: trust.stale
+          ? "stale" as const
+          : trust.worktreeState === "dirty"
+            ? "dirty" as const
+            : trust.worktreeState === "unknown"
+              ? "unknown" as const
+              : "fresh" as const,
+        indexedCommit: trust.indexedCommit,
+        headCommit: trust.headCommit,
+        dirtyFileCount: trust.dirtyFiles.length,
+      }
+    : null;
+  const coverageGaps = new Set(trust?.coverageGaps ?? []);
+  coverageGaps.add("unresolved_reference_counts_not_persisted");
+  return {
+    resolutionStatus,
+    resultStatus: resolutionStatus !== "resolved"
+      ? "query_error"
+      : resultCount > 0
+        ? "has_results"
+        : "no_static_edge",
+    target: {
+      requested,
+      resolvedNodeId,
+      repo: repo?.name ?? trust?.repoName ?? null,
+      branch: trust?.branchName ?? null,
+    },
+    freshness,
+    evidence: {
+      incomingByType: resolvedNodeId
+        ? edgeCountsByType(store, resolvedNodeId, "incoming")
+        : {},
+      outgoingByType: resolvedNodeId
+        ? edgeCountsByType(store, resolvedNodeId, "outgoing")
+        : {},
+      unresolvedReferenceCount: 0,
+    },
+    coverageGaps: [...coverageGaps],
+  };
+}
+
 // explore_graph: one traversal entry point across modes (§8.1).
 export function exploreGraph(
   store: KnowledgeStore,
@@ -292,7 +609,26 @@ export function exploreGraph(
   }
 
   const nodeId = resolveNodeId(store, nodeOrKey);
-  if (!nodeId) return { mode, nodes: [] };
+  if (!nodeId) {
+    return {
+      mode,
+      nodes: [],
+      diagnostics: buildQueryDiagnostics(store, nodeOrKey, null, 0, {
+        branchId: options?.branchId,
+      }),
+    };
+  }
+  const graphResult = (
+    nodes: GraphResult["nodes"],
+    events?: GraphResult["events"],
+  ): GraphResult => ({
+    mode,
+    nodes,
+    ...(events ? { events } : {}),
+    diagnostics: buildQueryDiagnostics(store, nodeOrKey, nodeId, nodes.length, {
+      branchId: options?.branchId,
+    }),
+  });
 
   // Trust filter (§3.3/§11): default traversal only follows confirmed edges —
   // unconfirmed AI suggestions (status='suggested') and rejected edges are out.
@@ -300,21 +636,46 @@ export function exploreGraph(
   // Branch-scope (correctness): when a branch is given, only follow edges on that
   // branch (plus branch-less edges like git topology / cross-repo endpoints).
   // Without it, a repo indexed on multiple branches would silently mix branches.
-  const branchId = options?.branchId ?? null;
+  const branchId = options?.branchId ?? liveBranchOf(store, nodeId);
   const bx = branchId ? " AND (branch_id = ? OR branch_id IS NULL)" : "";
   const P = (nid: string) => (branchId ? [nid, branchId, limit] : [nid, limit]);
   const Pd = (nid: string) => (branchId ? [nid, branchId] : [nid]); // no LIMIT (impact/path)
   if (mode === "who_calls") {
     const rows = store.db.prepare(`SELECT DISTINCT src FROM edges WHERE dst=? AND edge_type='calls' AND ${ACTIVE}${bx} LIMIT ?`).all(...P(nodeId)) as { src: string }[];
-    return { mode, nodes: rows.map((r) => nodeBrief(store, r.src)) };
+    return graphResult(rows.map((r) => nodeBrief(store, r.src)));
+  }
+  // NestJS-style constructor-injection dependents. A constructor parameter's
+  // type annotation is already extracted as a `references` edge from
+  // `<Class>.constructor` (who_calls never looks at this edge type, only
+  // `calls` — real gap: `who_calls SomeInjectedService` always came back
+  // empty even though the dependency data already existed). Restricting to
+  // src identity_keys ending ".constructor" is what excludes an unrelated
+  // type reference elsewhere from being mistaken for injection, and
+  // resolving to the enclosing class (not the constructor symbol itself) is
+  // what makes the result read as "X depends on Y" instead of
+  // "X.constructor depends on Y".
+  if (mode === "who_injects") {
+    const CTOR_SUFFIX = ".constructor";
+    const rows = store.db
+      .prepare(`SELECT DISTINCT src FROM edges WHERE dst=? AND edge_type='references' AND ${ACTIVE}${bx}`)
+      .all(...Pd(nodeId)) as { src: string }[];
+    const classIds = new Set<string>();
+    for (const r of rows) {
+      const srcNode = store.getNode(r.src);
+      if (!srcNode?.identity_key.endsWith(CTOR_SUFFIX)) continue;
+      const classKey = srcNode.identity_key.slice(0, -CTOR_SUFFIX.length);
+      const classId = store.findNodeIdByIdentity(classKey);
+      if (classId) classIds.add(classId);
+    }
+    return graphResult([...classIds].slice(0, limit).map((id) => nodeBrief(store, id)));
   }
   if (mode === "calls_of") {
     const rows = store.db.prepare(`SELECT DISTINCT dst FROM edges WHERE src=? AND edge_type='calls' AND dst IS NOT NULL AND ${ACTIVE}${bx} LIMIT ?`).all(...P(nodeId)) as { dst: string }[];
-    return { mode, nodes: rows.map((r) => nodeBrief(store, r.dst)) };
+    return graphResult(rows.map((r) => nodeBrief(store, r.dst)));
   }
   if (mode === "backlinks") {
     const rows = store.db.prepare(`SELECT DISTINCT src FROM edges WHERE dst=? AND ${ACTIVE}${bx} LIMIT ?`).all(...P(nodeId)) as { src: string }[];
-    return { mode, nodes: rows.map((r) => nodeBrief(store, r.src)) };
+    return graphResult(rows.map((r) => nodeBrief(store, r.src)));
   }
   if (mode === "impact") {
     // transitive who_calls up to depth
@@ -330,11 +691,11 @@ export function exploreGraph(
       frontier = next;
     }
     seen.delete(nodeId);
-    return { mode, nodes: [...seen].slice(0, limit).map((id) => nodeBrief(store, id)) };
+    return graphResult([...seen].slice(0, limit).map((id) => nodeBrief(store, id)));
   }
   if (mode === "path") {
     const to = options?.to ? resolveNodeId(store, options.to) : null;
-    if (!to) return { mode, nodes: [] };
+    if (!to) return graphResult([]);
     // BFS over active edges src→dst
     const prev = new Map<string, string>();
     const queue = [nodeId];
@@ -345,12 +706,12 @@ export function exploreGraph(
       const outs = store.db.prepare(`SELECT DISTINCT dst FROM edges WHERE src=? AND dst IS NOT NULL AND ${ACTIVE}${bx}`).all(...Pd(cur)) as { dst: string }[];
       for (const o of outs) if (!visited.has(o.dst)) { visited.add(o.dst); prev.set(o.dst, cur); queue.push(o.dst); }
     }
-    if (!visited.has(to)) return { mode, nodes: [] };
+    if (!visited.has(to)) return graphResult([]);
     const chain: string[] = [];
     for (let c: string | undefined = to; c; c = prev.get(c)) chain.unshift(c);
-    return { mode, nodes: chain.map((id) => nodeBrief(store, id)) };
+    return graphResult(chain.map((id) => nodeBrief(store, id)));
   }
-  return { mode, nodes: [] };
+  return graphResult([]);
 }
 
 export interface BranchDiff {
@@ -382,8 +743,34 @@ export function compareBranches(
 export interface IndexStatus {
   repos: Array<{
     repoId: string; name: string; rootPath: string;
-    branches: Array<{ branchId: string; name: string; status: string; lastIndexedAt: string | null; staleSymbols: number; pinned: boolean }>;
+    branches: Array<{
+      branchId: string; name: string; status: string; lastIndexedAt: string | null;
+      staleSymbols: number; pinned: boolean; trust: TrustEnvelope | null;
+    }>;
   }>;
+}
+
+export interface CompactRepoStatus {
+  repo: string;
+  liveBranch: string | null;
+  freshness: "fresh" | "dirty" | "stale" | "unknown";
+  dirtyFileCount: number | null;
+  indexedCommit: string | null;
+  headCommit: string | null;
+  parserVersion: string | null;
+  indexErrorCount: number;
+}
+
+export interface CompactIndexStatus {
+  summary: {
+    totalRepos: number;
+    fresh: number;
+    dirty: number;
+    stale: number;
+    unknown: number;
+    errors: number;
+  };
+  repos: CompactRepoStatus[];
 }
 
 // The pending AI-suggestion queue (edges awaiting accept/reject, §8.2).
@@ -513,6 +900,8 @@ export function repoGraph(
   options?: { limit?: number; edgeLimit?: number },
 ): GraphView {
   const limit = options?.limit ?? 150;
+  const genericNames = [...GENERIC_UTILITY_HUB_NAMES];
+  const genericPlaceholders = genericNames.map(() => "?").join(",");
   const top = store.db
     .prepare(
       `SELECT d.id AS id FROM (
@@ -522,9 +911,10 @@ export function repoGraph(
            SELECT dst AS node FROM edges WHERE branch_id=? AND status='active' AND dst IS NOT NULL
          ) GROUP BY node
        ) d JOIN nodes n ON n.id = d.id
-       WHERE n.repo_id=? ORDER BY d.cnt DESC, d.id LIMIT ?`,
+       WHERE n.repo_id=? AND LOWER(n.title) NOT IN (${genericPlaceholders})
+       ORDER BY d.cnt DESC, d.id LIMIT ?`,
     )
-    .all(branchId, branchId, repoId, limit) as { id: string }[];
+    .all(branchId, branchId, repoId, ...genericNames, limit) as { id: string }[];
   const ids = top.map((r) => r.id);
   if (ids.length === 0) return { focus: null, nodes: [], edges: [] };
   return { focus: null, ...collectGraph(store, ids, branchId, options?.edgeLimit) };
@@ -603,10 +993,59 @@ export function indexStatus(store: KnowledgeStore): IndexStatus {
         repoId: repo.id, name: repo.name, rootPath: repo.rootPath,
         branches: branches.map((b) => {
           const stale = store.db.prepare("SELECT COUNT(*) AS n FROM symbol_versions WHERE branch_id=? AND status='stale'").get(b.id) as { n: number };
-          return { branchId: b.id, name: b.name, status: b.status, lastIndexedAt: b.lastIndexedAt, staleSymbols: stale.n, pinned: !!b.pinned };
+          return {
+            branchId: b.id, name: b.name, status: b.status,
+            lastIndexedAt: b.lastIndexedAt, staleSymbols: stale.n,
+            pinned: !!b.pinned, trust: trustEnvelopeForBranch(store, b.id),
+          };
         }),
       };
     }),
+  };
+}
+
+export function compactIndexStatus(store: KnowledgeStore): CompactIndexStatus {
+  const detailed = indexStatus(store);
+  const repos = detailed.repos.map((repo): CompactRepoStatus => {
+    const live = repo.branches.find((branch) => branch.status === "live") ?? null;
+    const trust = live?.trust ?? null;
+    const errorRow = store.db
+      .prepare(
+        `SELECT COUNT(*) AS count
+           FROM files_index
+          WHERE repo_id=? AND status='error'`,
+      )
+      .get(repo.repoId) as { count: number };
+    const freshness: CompactRepoStatus["freshness"] = trust === null
+      ? "unknown"
+      : trust.stale
+        ? "stale"
+        : trust.worktreeState === "dirty"
+          ? "dirty"
+          : trust.worktreeState === "unknown"
+            ? "unknown"
+            : "fresh";
+    return {
+      repo: repo.name,
+      liveBranch: live?.name ?? null,
+      freshness,
+      dirtyFileCount: trust?.dirtyFiles.length ?? null,
+      indexedCommit: trust?.indexedCommit ?? null,
+      headCommit: trust?.headCommit ?? null,
+      parserVersion: trust?.parserVersion ?? null,
+      indexErrorCount: errorRow.count,
+    };
+  });
+  return {
+    summary: {
+      totalRepos: repos.length,
+      fresh: repos.filter((repo) => repo.freshness === "fresh").length,
+      dirty: repos.filter((repo) => repo.freshness === "dirty").length,
+      stale: repos.filter((repo) => repo.freshness === "stale").length,
+      unknown: repos.filter((repo) => repo.freshness === "unknown").length,
+      errors: repos.reduce((sum, repo) => sum + repo.indexErrorCount, 0),
+    },
+    repos,
   };
 }
 
@@ -624,6 +1063,7 @@ export interface ContextBrief {
 
 export interface ContextPack {
   target: string;
+  trust: TrustEnvelope | null;
   focus:
     | {
         nodeId: string;
@@ -675,12 +1115,17 @@ export function buildContextPack(
 ): ContextPack {
   const limit = options?.limit ?? 25;
   const empty: ContextPack = {
-    target, focus: null, callers: [], calls: [], remoteCalls: [], invokedBy: [],
+    target, trust: null, focus: null, callers: [], calls: [], remoteCalls: [], invokedBy: [],
     referencedBy: [], usesTypes: [],
     routes: [], tests: [], errors: [], envs: [], notes: [], importers: [], signals: [],
     ambiguous: null, assemblyError: null,
   };
-  const resolution = resolveSymbolMatches(store, target);
+  let resolution: SymbolResolution;
+  try {
+    resolution = resolveSymbolMatches(store, target);
+  } catch (e) {
+    return { ...empty, assemblyError: (e as Error).message };
+  }
   if (resolution.kind === "none") return empty;
   if (resolution.kind === "ambiguous") return { ...empty, ambiguous: resolution.candidates };
   const focusId = resolution.nodeId;
@@ -790,6 +1235,7 @@ function buildContextPackBody(
 
   return {
     target,
+    trust: trustEnvelopeForBranch(store, branchId),
     focus: detail
       ? {
           nodeId: detail.node.id,
@@ -911,6 +1357,7 @@ export interface FlowDiagnostic {
 }
 export interface FlowResult {
   target: string;
+  trust: TrustEnvelope | null;
   root: FlowStep | null;
   steps: FlowStep[];
   diagnostic?: FlowDiagnostic;
@@ -995,7 +1442,7 @@ export function buildFlow(
     focus = grpc.nodeId;
   } else if (grpc.kind === "ambiguous") {
     return {
-      target, root: null, steps: [], ambiguous: grpc.candidates,
+      target, trust: null, root: null, steps: [], ambiguous: grpc.candidates,
       diagnostic: {
         reason: "ambiguous",
         message: `"${target}" matches ${grpc.candidates.length} gRPC endpoints across different services — specify one.`,
@@ -1009,7 +1456,7 @@ export function buildFlow(
       focus = sym.nodeId;
     } else if (sym.kind === "ambiguous") {
       return {
-        target, root: null, steps: [], ambiguous: sym.candidates,
+        target, trust: null, root: null, steps: [], ambiguous: sym.candidates,
         diagnostic: {
           reason: "ambiguous",
           message: `"${target}" matches ${sym.candidates.length} symbols — specify one.`,
@@ -1020,7 +1467,7 @@ export function buildFlow(
   }
   if (!focus) {
     return {
-      target, root: null, steps: [],
+      target, trust: null, root: null, steps: [],
       diagnostic: {
         reason: "not_indexed",
         message: attemptedKey
@@ -1067,7 +1514,7 @@ export function buildFlow(
     const node = store.getNode(focus);
     const isEndpoint = node?.node_type === "endpoint";
     return {
-      target, root, steps,
+      target, trust: trustEnvelopeForBranch(store, branchId), root, steps,
       diagnostic: {
         reason: isEndpoint ? "endpoint_no_handler" : "no_outgoing_edges",
         message: isEndpoint
@@ -1076,12 +1523,136 @@ export function buildFlow(
       },
     };
   }
-  return { target, root, steps };
+  return { target, trust: trustEnvelopeForBranch(store, branchId), root, steps };
 }
 
 function nodeBriefStep(store: KnowledgeStore, id: string) {
   const b = nodeBrief(store, id);
   return { nodeId: b.nodeId, title: b.title, nodeType: b.nodeType };
+}
+
+export interface ExplorePack {
+  target: string;
+  focus: ContextPack["focus"];
+  implementation: ContextPack["focus"];
+  trust: TrustEnvelope | null;
+  freshness: {
+    stale: boolean;
+    reason: string | null;
+    indexedAt: string | null;
+    coverageGaps: string[];
+  };
+  callers: ContextBrief[];
+  calls: ContextBrief[];
+  callPath: FlowStep[];
+  blastRadius: ContextBrief[];
+  tests: ContextBrief[];
+  routes: ContextPack["routes"];
+  provenance: Array<{
+    edgeType: string;
+    origin: string;
+    method: string;
+    confidence: number;
+    count: number;
+  }>;
+  confidence: {
+    level: "high" | "mixed" | "low";
+    minimum: number;
+    inferredEdges: number;
+    totalEdges: number;
+  };
+  diagnostics: string[];
+  queryDiagnostics: QueryDiagnostics;
+}
+
+// One editing-oriented result shared by CLI and MCP. It composes the existing
+// deterministic context, flow, and impact queries and adds edge trust metadata.
+export function buildExplorePack(
+  store: KnowledgeStore,
+  target: string,
+  options?: { branchId?: string; depth?: number; limit?: number },
+): ExplorePack {
+  const context = buildContextPack(store, target, options);
+  const flow = buildFlow(store, target, options);
+  const focusId = context.focus?.nodeId ?? flow.root?.nodeId ?? null;
+  const handler = context.focus?.nodeType === "endpoint"
+    ? flow.steps.find((step) => step.via === "handles" && step.nodeType === "symbol")
+    : undefined;
+  const implementationContext = handler ? buildContextPack(store, handler.nodeId, options) : null;
+  const effectiveContext = implementationContext ?? context;
+  const trust = context.trust ?? implementationContext?.trust ?? flow.trust;
+  const blastRadius = focusId
+    ? exploreGraph(store, "impact", focusId, { depth: options?.depth, limit: options?.limit }).nodes
+    : [];
+  const rows = focusId
+    ? store.db.prepare(
+        `SELECT edge_type AS edgeType, origin, method,
+                COALESCE(confidence, CASE WHEN method='INFERRED' THEN 0.5 ELSE 1.0 END) AS confidence,
+                COUNT(*) AS count
+           FROM edges
+          WHERE (src=? OR dst=?) AND status='active'
+          GROUP BY edge_type, origin, method, confidence
+          ORDER BY edge_type, method`,
+      ).all(focusId, focusId) as Array<{
+        edgeType: string; origin: string; method: string; confidence: number; count: number;
+      }>
+    : [];
+  const totalEdges = rows.reduce((sum, row) => sum + row.count, 0);
+  const inferredEdges = rows
+    .filter((row) => row.method === "INFERRED")
+    .reduce((sum, row) => sum + row.count, 0);
+  const minimum = rows.length > 0 ? Math.min(...rows.map((row) => row.confidence)) : 0;
+  const level = inferredEdges === 0 ? "high" : minimum >= 0.5 ? "mixed" : "low";
+  const diagnostics = [
+    ...context.signals,
+    ...(implementationContext?.signals ?? []),
+    ...(context.ambiguous ? [`ambiguous target: ${context.ambiguous.length} matches`] : []),
+    ...(context.assemblyError ? [`context assembly failed: ${context.assemblyError}`] : []),
+    ...(flow.diagnostic ? [flow.diagnostic.message] : []),
+  ];
+  const routes = context.focus?.nodeType === "endpoint"
+    ? [{ route: context.focus.title, via: "direct" as const }, ...effectiveContext.routes]
+    : context.routes;
+  const uniqueRoutes = routes.filter((route, index) =>
+    routes.findIndex((candidate) => candidate.route === route.route && candidate.via === route.via) === index);
+  const resultCount =
+    effectiveContext.callers.length
+    + effectiveContext.calls.length
+    + flow.steps.filter((step) => step.depth > 0).length
+    + blastRadius.length
+    + effectiveContext.tests.length
+    + uniqueRoutes.length;
+  return {
+    target,
+    focus: context.focus,
+    implementation: effectiveContext.focus,
+    trust,
+    freshness: {
+      stale: trust?.stale ?? true,
+      reason: trust?.staleReason ?? (trust ? null : "trust_unavailable"),
+      indexedAt: trust?.indexedAt ?? null,
+      coverageGaps: trust?.coverageGaps ?? ["trust_unavailable"],
+    },
+    callers: effectiveContext.callers,
+    calls: effectiveContext.calls,
+    callPath: flow.steps,
+    blastRadius,
+    tests: effectiveContext.tests,
+    routes: uniqueRoutes,
+    provenance: rows,
+    confidence: { level, minimum, inferredEdges, totalEdges },
+    diagnostics: [...new Set(diagnostics)],
+    queryDiagnostics: buildQueryDiagnostics(
+      store,
+      target,
+      focusId,
+      resultCount,
+      {
+        branchId: trust?.branchId ?? options?.branchId,
+        assemblyError: context.assemblyError,
+      },
+    ),
+  };
 }
 
 export function renderFlowMarkdown(flow: FlowResult): string {
@@ -1170,6 +1741,13 @@ export interface ArchitectureOverview {
   hubs: Array<{ title: string; nodeType: string; degree: number }>;
   entryPoints: string[];
 }
+const GENERIC_UTILITY_HUB_NAMES = new Set([
+  "get", "set", "find", "findone", "map", "filter", "reduce", "resolve",
+  "log", "error", "warn", "info", "debug", "trace", "handle", "call",
+  "apply", "create", "update", "delete", "read", "write", "parse", "format",
+  "t", "$translate", "translate", "logerror", "emitter", "size", "populate",
+]);
+
 export function architecture(store: KnowledgeStore): ArchitectureOverview {
   const rows = <T,>(sql: string, ...p: unknown[]) => store.db.prepare(sql).all(...p) as T[];
   const repos = rows<{ name: string; n: number }>(
@@ -1187,7 +1765,7 @@ export function architecture(store: KnowledgeStore): ArchitectureOverview {
         UNION ALL SELECT dst AS node FROM edges WHERE status='active' AND edge_type IN ('calls','references') AND dst IS NOT NULL
      ) GROUP BY node ORDER BY degree DESC LIMIT 40`,
   ).map((h) => { const b = nodeBrief(store, h.id); return { title: b.title, nodeType: b.nodeType, degree: h.degree }; })
-   .filter((h) => h.nodeType === "symbol").slice(0, 12);
+   .filter((h) => h.nodeType === "symbol" && !GENERIC_UTILITY_HUB_NAMES.has(h.title.toLowerCase())).slice(0, 12);
   const entryPoints = rows<{ title: string }>("SELECT title FROM nodes WHERE node_type='endpoint' ORDER BY title LIMIT 30").map((r) => r.title);
   return { repos, nodeCounts, edgeCounts, languages, hubs, entryPoints };
 }
@@ -1202,6 +1780,7 @@ export interface CommunityResult {
   communities: Community[];
   totalNodes: number;
   totalCommunities: number;
+  suppressedHubs: Array<{ nodeId: string; title: string; degree: number; reason: "generic_utility_name" }>;
 }
 
 // Module/community detection over the active structural graph via label
@@ -1212,11 +1791,35 @@ export interface CommunityResult {
 export function communities(store: KnowledgeStore, opts: { limit?: number; minSize?: number } = {}): CommunityResult {
   const limit = opts.limit ?? 20;
   const minSize = opts.minSize ?? 3;
-  const edges = store.db
+  const rawEdges = store.db
     .prepare(
       "SELECT src, dst FROM edges WHERE status='active' AND dst IS NOT NULL AND edge_type IN ('calls','references','imports','defines')",
     )
     .all() as { src: string; dst: string }[];
+  const rawDegree = new Map<string, number>();
+  for (const edge of rawEdges) {
+    rawDegree.set(edge.src, (rawDegree.get(edge.src) ?? 0) + 1);
+    rawDegree.set(edge.dst, (rawDegree.get(edge.dst) ?? 0) + 1);
+  }
+  const nodeRows = store.db
+    .prepare("SELECT id, title, repo_id AS repoId FROM nodes")
+    .all() as Array<{ id: string; title: string; repoId: string | null }>;
+  const suppressedIds = new Set(
+    nodeRows
+      .filter((node) => GENERIC_UTILITY_HUB_NAMES.has(node.title.toLowerCase()))
+      .map((node) => node.id),
+  );
+  const suppressedHubs = nodeRows
+    .filter((node) => suppressedIds.has(node.id) && (rawDegree.get(node.id) ?? 0) >= Math.max(minSize, 3))
+    .map((node) => ({
+      nodeId: node.id,
+      title: node.title,
+      degree: rawDegree.get(node.id) ?? 0,
+      reason: "generic_utility_name" as const,
+    }))
+    .sort((a, b) => b.degree - a.degree)
+    .slice(0, 50);
+  const edges = rawEdges.filter((edge) => !suppressedIds.has(edge.src) && !suppressedIds.has(edge.dst));
 
   const adj = new Map<string, string[]>();
   const degree = new Map<string, number>();
@@ -1270,12 +1873,7 @@ export function communities(store: KnowledgeStore, opts: { limit?: number; minSi
   const repoName = new Map<string, string>(
     (store.db.prepare("SELECT id, name FROM repos").all() as { id: string; name: string }[]).map((r) => [r.id, r.name]),
   );
-  const nodeRepo = new Map<string, string | null>(
-    (store.db.prepare("SELECT id, repo_id FROM nodes").all() as { id: string; repo_id: string | null }[]).map((r) => [
-      r.id,
-      r.repo_id,
-    ]),
-  );
+  const nodeRepo = new Map<string, string | null>(nodeRows.map((row) => [row.id, row.repoId]));
 
   const chosen = [...groups.values()].filter((g) => g.length >= minSize).sort((a, b) => b.length - a.length).slice(0, limit);
   const communitiesOut: Community[] = chosen.map((members, i) => {
@@ -1297,7 +1895,7 @@ export function communities(store: KnowledgeStore, opts: { limit?: number; minSi
     return { id: i + 1, size: members.length, repos, topMembers };
   });
 
-  return { communities: communitiesOut, totalNodes: nodes.length, totalCommunities: groups.size };
+  return { communities: communitiesOut, totalNodes: nodes.length, totalCommunities: groups.size, suppressedHubs };
 }
 
 export interface TimelineEntry {

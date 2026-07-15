@@ -1,6 +1,6 @@
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
-import { Language, Parser } from "web-tree-sitter";
+import { Language, Parser, type Node } from "web-tree-sitter";
 import { WASM_FILE, type Lang } from "./registry.js";
 
 // Grammar wasm ships in the tree-sitter-wasms package; resolve its dir at
@@ -52,4 +52,24 @@ export async function loadParser(lang: Lang): Promise<Parser> {
   const parser = new Parser();
   parser.setLanguage(language);
   return parser;
+}
+
+// Parser and Tree own WASM allocations that JavaScript GC does not release
+// promptly. Keep their ownership in one helper so every short-lived parse is
+// disposed deterministically, including visitor exceptions.
+export async function withParsedTree<T>(
+  lang: Lang,
+  source: string,
+  visit: (root: Node) => T,
+  empty: T,
+): Promise<T> {
+  const parser = await loadParser(lang);
+  let tree: ReturnType<Parser["parse"]> = null;
+  try {
+    tree = parser.parse(source);
+    return tree ? visit(tree.rootNode) : empty;
+  } finally {
+    tree?.delete();
+    parser.delete();
+  }
 }

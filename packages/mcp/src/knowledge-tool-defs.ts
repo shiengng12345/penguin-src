@@ -7,7 +7,14 @@ export const KNOWLEDGE_TOOL_DEFS = [
   {
     name: "knowledge_search",
     description:
-      "Unified knowledge search: titles → full text → graph neighbors, mixing notes/symbols/entities. Sensitive pages excluded unless include_sensitive. Filters: type[], repo, limit.",
+      "Searches SYMBOL NAMES + SIGNATURES and note bodies — NOT call-site text, NOT object-literal/type field names, NOT string literals. " +
+      "Query terms are AND-matched (any order) against each symbol's bare name (e.g. searching \"CpmsRedisService.hset\" will find nothing — " +
+      "search the bare method name \"hset\" instead; qualified/class-prefixed names are not indexed as a unit). " +
+      "To answer \"who calls method X\": search the bare method name here first (results include identityKey/filePath to disambiguate " +
+      "same-named methods across classes), then call explore_graph mode=who_calls on the matching node's id — call-graph edges already " +
+      "exist and who_calls resolves them; searching for a call-site expression like \"obj.method()\" here will not. " +
+      "An empty result means \"no symbol/note name matched\", not \"this doesn't exist in the code\" — a real field name, string literal, or " +
+      "local variable reference can still be present in source but absent from this index. Sensitive pages excluded unless include_sensitive. Filters: type[], repo, limit.",
     inputSchema: {
       type: "object",
       required: ["query"],
@@ -35,19 +42,40 @@ export const KNOWLEDGE_TOOL_DEFS = [
   {
     name: "explore_graph",
     description:
-      "Graph traversal. mode = who_calls | calls_of | impact | backlinks | path | timeline | recent_changes. options: depth, limit, to (for path).",
+      "Graph traversal. mode = who_calls | calls_of | impact | backlinks | path | timeline | recent_changes | who_injects. " +
+      "who_calls only follows direct call expressions — a NestJS/DI service that's constructor-injected (never directly called) " +
+      "will show empty there even when heavily used; use who_injects on the SERVICE CLASS node (not a specific method) to find " +
+      "every class that constructor-injects it. An empty nodes array is not enough to claim there is no relation: inspect " +
+      "diagnostics.resolutionStatus and diagnostics.resultStatus (especially no_static_edge). options: depth, limit, to (for path).",
     inputSchema: {
       type: "object",
       required: ["mode", "node"],
       properties: {
         mode: {
           type: "string",
-          enum: ["who_calls", "calls_of", "impact", "backlinks", "path", "timeline", "recent_changes"],
+          enum: ["who_calls", "calls_of", "impact", "backlinks", "path", "timeline", "recent_changes", "who_injects"],
         },
         node: { type: "string" },
         depth: { type: "number" },
         limit: { type: "number" },
         to: { type: "string" },
+      },
+    },
+  },
+  {
+    name: "knowledge_explore",
+    description:
+      "Default first call for code-understanding or editing work. Returns one bounded symbol/endpoint result with source, callers/calls, " +
+      "linear call path, transitive blast radius, tests, routes, edge provenance/confidence, freshness, and queryDiagnostics. " +
+      "Inspect queryDiagnostics before treating an empty relation as authoritative. Uses the same core result as `penguin explore`.",
+    inputSchema: {
+      type: "object",
+      required: ["target"],
+      properties: {
+        target: { type: "string" },
+        branch: { type: "string" },
+        depth: { type: "number" },
+        limit: { type: "number" },
       },
     },
   },
@@ -80,8 +108,19 @@ export const KNOWLEDGE_TOOL_DEFS = [
   },
   {
     name: "index_status",
-    description: "Index status across repos/branches/workspaces: staleness + counts (also answers list_repos / list_branches).",
-    inputSchema: { type: "object", properties: {} },
+    description:
+      "Index status across repos/branches/workspaces. Use mode=compact for one bounded freshness row per repo; " +
+      "the default detailed mode keeps full branches, trust, staleness, and counts.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        mode: {
+          type: "string",
+          enum: ["detailed", "compact"],
+          description: "compact returns one bounded freshness row per repo; default is detailed.",
+        },
+      },
+    },
   },
   {
     name: "list_suggestions",
@@ -109,6 +148,27 @@ export const KNOWLEDGE_TOOL_DEFS = [
     name: "reject_suggestion",
     description: "Reject a pending suggestion by its event id.",
     inputSchema: { type: "object", required: ["suggestion_event_id"], properties: { suggestion_event_id: { type: "string" } } },
+  },
+  {
+    name: "get_architecture",
+    description:
+      "Repo/branch/language overview: node+edge counts, per-language symbol counts, entry points, and \"hubs\" (highest-fan-in god-nodes — " +
+      "the closest thing to 'what's the architecture' or 'what's most depended-on here').",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "find_communities",
+    description:
+      "Detects clusters of densely-interconnected nodes (community detection over the call/reference graph) — answers \"what are the major " +
+      "subsystems/modules\" without a manual graph crawl. Returns each community's size, member repos, and top members by connectivity.",
+    inputSchema: { type: "object", properties: { limit: { type: "number" }, min_size: { type: "number" } } },
+  },
+  {
+    name: "find_dead_code",
+    description:
+      "Symbols with zero incoming calls/invokes/references edges — candidate dead code. A candidate can be a false positive (dynamic dispatch, " +
+      "public API, reflection) — treat as leads to verify, not a deletion list.",
+    inputSchema: { type: "object", properties: { limit: { type: "number" } } },
   },
 ] as const;
 

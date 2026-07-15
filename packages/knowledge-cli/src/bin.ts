@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { KnowledgeStore } from "@penguin/knowledge-core";
+import { readBoundedHookInput } from "./claude-hook.js";
 import { runCli } from "./index.js";
 
 // Default knowledge location (bundled/CLI + app share the same store).
@@ -18,6 +19,9 @@ runCli(process.argv.slice(2), {
   // Live progress only when stderr is a TTY (don't spew bar frames into pipes/logs).
   progress: process.stderr.isTTY ? (chunk) => process.stderr.write(chunk) : undefined,
   storeExists: () => existsSync(DB_PATH),
+  readStdin: process.argv[2] === "hook"
+    ? async () => (await readBoundedHookInput(process.stdin)) ?? ""
+    : undefined,
   notesDir: NOTES_DIR,
   // Machine-parseable progress lines on stderr (stdout stays the --json report).
   // The Rust bridge reads "PENGUIN_PROGRESS {json}" lines → Tauri events.

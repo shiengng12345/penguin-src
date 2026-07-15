@@ -123,10 +123,10 @@ function painter(color: boolean): (sgr: string, s: string) => string {
   return color ? (sgr, s) => `\x1b[${sgr}m${s}\x1b[0m` : (_sgr, s) => s;
 }
 
-function bar(done: number, total: number, width: number, c: (sgr: string, s: string) => string): string {
+function bar(done: number, total: number, width: number, c: (sgr: string, s: string) => string, color = "36"): string {
   const frac = total > 0 ? Math.min(1, done / total) : 1;
   const filled = Math.round(frac * width);
-  return c("36", "█".repeat(filled)) + c("2", "░".repeat(width - filled));
+  return c(color, "█".repeat(filled)) + c("2", "░".repeat(width - filled));
 }
 
 function truncPath(p: string, max: number): string {
@@ -144,6 +144,11 @@ const LANG_LABEL: Record<string, string> = {
 function langLabel(lang: string): string {
   return LANG_LABEL[lang] ?? lang.charAt(0).toUpperCase() + lang.slice(1);
 }
+
+const LANG_COLOR: Record<string, string> = {
+  TypeScript: "34", JavaScript: "33", Rust: "91", Go: "36", Java: "35",
+  PHP: "35", Python: "32", JSON: "33", Proto: "35", Other: "36",
+};
 
 // Group per-language counts by display label (ts+tsx merge), largest first.
 // More than 5 groups: keep the top 4 and fold the tail into "Other".
@@ -194,7 +199,7 @@ export function renderRegionLines(state: RenderState, width: number, color: bool
           lines.push(`  ${spin} ${name} ${tail}`);
           for (const g of groups) {
             const count = `${g.done}/${g.total}`;
-            lines.push(`      ${c("2", g.label.padEnd(12))} [${bar(g.done, g.total, 14, c)}] ${count.padStart(9)}`);
+            lines.push(`      ${c("2", g.label.padEnd(12))} [${bar(g.done, g.total, 14, c, LANG_COLOR[g.label] ?? "36")}] ${count.padStart(9)}`);
           }
         } else {
           lines.push(`  ${spin} ${name} [${bar(state.done, state.total, 20, c)}] ${tail}`);

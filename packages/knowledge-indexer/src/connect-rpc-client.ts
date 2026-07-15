@@ -1,5 +1,5 @@
-import { Parser, type Node } from "web-tree-sitter";
-import { loadLanguage } from "./parser.js";
+import { type Node } from "web-tree-sitter";
+import { withParsedTree } from "./parser.js";
 import type { Lang } from "./registry.js";
 
 // Zero-config frontend→backend linking for the `@connectrpc/connect` calling
@@ -192,8 +192,16 @@ export function extractConnectRpcCalls(root: Node, verifiedGetters: Set<string>)
     const fn = n.childForFieldName("function");
     if (fn?.type !== "member_expression") return;
     const methodName = fn.childForFieldName("property")?.text;
-    const obj = fn.childForFieldName("object");
+    let obj = fn.childForFieldName("object");
     if (!methodName || !obj) return;
+
+    // TypeScript commonly casts generated clients to reach newly-added RPCs:
+    // `(client as any).method()`. Preserve the underlying verified binding
+    // through transparent expression wrappers instead of dropping the call.
+    while (obj && ["parenthesized_expression", "as_expression", "type_assertion", "non_null_expression"].includes(obj.type)) {
+      obj = obj.childForFieldName("expression") ?? obj.namedChild(0);
+    }
+    if (!obj) return;
 
     if (obj.type === "call_expression") {
       const innerFn = obj.childForFieldName("function");
@@ -219,11 +227,7 @@ export function extractConnectRpcCalls(root: Node, verifiedGetters: Set<string>)
 // Test-only helpers: parse then extract, mirroring frontend-grpc-client.ts's
 // *FromSource helpers.
 export async function verifiedConnectRpcGettersFromSource(lang: Lang, source: string): Promise<Set<string>> {
-  const language = await loadLanguage(lang);
-  const parser = new Parser();
-  parser.setLanguage(language);
-  const tree = parser.parse(source);
-  return tree ? verifiedConnectRpcGetters(tree.rootNode) : new Set();
+  return withParsedTree(lang, source, verifiedConnectRpcGetters, new Set());
 }
 
 export async function extractConnectRpcCallsFromSource(
@@ -231,9 +235,5 @@ export async function extractConnectRpcCallsFromSource(
   source: string,
   verifiedGetters: Set<string>,
 ): Promise<ConnectRpcCall[]> {
-  const language = await loadLanguage(lang);
-  const parser = new Parser();
-  parser.setLanguage(language);
-  const tree = parser.parse(source);
-  return tree ? extractConnectRpcCalls(tree.rootNode, verifiedGetters) : [];
+  return withParsedTree(lang, source, (root) => extractConnectRpcCalls(root, verifiedGetters), []);
 }

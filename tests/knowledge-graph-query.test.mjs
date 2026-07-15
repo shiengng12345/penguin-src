@@ -11,6 +11,9 @@ import {
   repoGraph,
   exploreGraph,
   branchFreshness,
+  buildContextPack,
+  buildFlow,
+  indexStatus,
 } from "../packages/knowledge-core/dist/index.js";
 
 // Seed a small but realistic graph:
@@ -115,6 +118,24 @@ test("repoGraph limit keeps the highest-degree hubs", () => {
   store.close();
 });
 
+test("repoGraph excludes generic utility hubs from the ranked view", () => {
+  const { store, repoId, branchId, caller, login, helper } = seed();
+  const utility = store.upsertNode({
+    nodeType: "symbol",
+    identityKey: `${repoId}::Repository.findOne`,
+    title: "findOne",
+    repoId,
+  });
+  store.replaceFileEdges({ branchId, filePath: "utility.ts", edges: [caller, login, helper].map((dst) => ({
+    src: utility, dst, edgeType: "calls", origin: "parser", method: "INFERRED", confidence: 0.2,
+  })) });
+
+  const g = repoGraph(store, repoId, branchId, { limit: 3 });
+  assert.ok(!g.nodes.some((node) => node.nodeId === utility), "generic utility must not consume a repoGraph slot");
+  assert.deepEqual(g.nodes.map((node) => node.nodeId).sort(), [caller, login, helper].sort());
+  store.close();
+});
+
 test("repoGraph: a node whose edges all lose the edge cap still shows its in-set edges", () => {
   const { store, repoId, branchId, caller } = seed();
   // A file node whose ONLY edge is a low-priority `imports` to an in-set node.
@@ -134,10 +155,10 @@ test("repoGraph: a node whose edges all lose the edge cap still shows its in-set
   store.close();
 });
 
-test("exploreGraph branch-scope: multi-branch repo does not mix branches (Phase 1)", () => {
+test("exploreGraph branch-scope: default uses the live branch and never mixes snapshots", () => {
   const { store, repoId, branchId, login, caller } = seed();
   // second branch of the SAME repo with a different caller of `login`.
-  const featBranch = store.registerBranch({ repoId, name: "feature", status: "live" });
+  const featBranch = store.registerBranch({ repoId, name: "feature", status: "snapshot" });
   const featCaller = store.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::featCaller`, title: "featCaller", repoId });
   store.upsertSymbolVersion({ nodeId: featCaller, branchId: featBranch, commitSha: "c1", filePath: "f.ts", lang: "ts", kind: "function", contentHash: "h_f", status: "fresh" });
   store.replaceFileEdges({ branchId: featBranch, filePath: "f.ts", edges: [
@@ -150,7 +171,33 @@ test("exploreGraph branch-scope: multi-branch repo does not mix branches (Phase 
 
   assert.ok(onMain.includes(caller) && !onMain.includes(featCaller), "main branch → only main's caller");
   assert.ok(onFeat.includes(featCaller) && !onFeat.includes(caller), "feature branch → only feature's caller");
-  assert.ok(noBranch.includes(caller) && noBranch.includes(featCaller), "no branch filter → both (legacy)");
+  assert.ok(noBranch.includes(caller) && !noBranch.includes(featCaller), "default → only live branch");
+  store.close();
+});
+
+test("context, flow, and index status expose one persisted trust envelope", () => {
+  const { store, branchId, login } = seed();
+  store.recordBranchIndexed({
+    branchId,
+    commit: null,
+    worktreeState: "dirty",
+    worktreeFingerprint: "fingerprint-1",
+    dirtyFiles: ["a.ts"],
+    parserVersion: "parser-1",
+    schemaVersion: 6,
+    staleReason: "worktree_dirty",
+  });
+
+  const context = buildContextPack(store, login);
+  const flow = buildFlow(store, login);
+  const status = indexStatus(store);
+  assert.equal(context.trust.branchId, branchId);
+  assert.equal(flow.trust.branchId, branchId);
+  assert.equal(context.trust.worktreeState, "dirty");
+  assert.deepEqual(context.trust.dirtyFiles, ["a.ts"]);
+  assert.equal(context.trust.staleReason, "worktree_dirty");
+  assert.deepEqual(flow.trust, context.trust);
+  assert.equal(status.repos[0].branches[0].trust.worktreeFingerprint, "fingerprint-1");
   store.close();
 });
 
@@ -168,5 +215,40 @@ test("branchFreshness: fresh when HEAD matches indexed, stale when it advanced (
 test("repoGraph on unknown repo is empty", () => {
   const { store, branchId } = seed();
   assert.deepEqual(repoGraph(store, "repo_nope", branchId), { focus: null, nodes: [], edges: [] });
+  store.close();
+});
+
+test("who_injects: NestJS constructor-parameter DI dependencies are discoverable, resolved to the CLASS not the constructor method", () => {
+  // Real gap reported from actual MCP usage: `who_calls CpmsRedisService` came
+  // back empty because it's DI-injected, never directly "called". The
+  // underlying data already existed — a constructor parameter's type
+  // annotation was already extracted as a `references` edge from
+  // `<Class>.constructor` to the injected class — `who_calls` just never
+  // looked at that edge type. who_injects does, and resolves the constructor
+  // symbol back to its enclosing class so the result reads "AppleLoginProcessor
+  // depends on CpmsRedisService", not "...constructor depends on...".
+  const dir = mkdtempSync(join(tmpdir(), "pk-di-"));
+  const store = KnowledgeStore.open({ dbPath: join(dir, "k.db"), ledgerPath: join(dir, "l.jsonl") });
+  const repoId = store.registerRepo({ name: "auth", rootPath: "/auth" });
+  const branchId = store.registerBranch({ repoId, name: "main", status: "live" });
+
+  const cpmsRedis = store.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::CpmsRedisService`, title: "CpmsRedisService", repoId });
+  const processorClass = store.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::AppleLoginProcessor`, title: "AppleLoginProcessor", repoId });
+  const processorCtor = store.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::AppleLoginProcessor.constructor`, title: "constructor", repoId });
+  // A plain (non-DI) type reference elsewhere must NOT be mistaken for injection.
+  const randomFn = store.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::randomFn`, title: "randomFn", repoId });
+
+  for (const [id, name] of [[cpmsRedis, "CpmsRedisService"], [processorClass, "AppleLoginProcessor"], [processorCtor, "constructor"], [randomFn, "randomFn"]]) {
+    store.upsertSymbolVersion({ nodeId: id, branchId, commitSha: "c0", filePath: "x.ts", lang: "ts", kind: "class", contentHash: `h_${name}`, status: "fresh" });
+  }
+  store.replaceFileEdges({ branchId, filePath: "x.ts", edges: [
+    { src: processorCtor, dst: cpmsRedis, edgeType: "references", origin: "parser", method: "EXTRACTED" },
+    { src: randomFn, dst: cpmsRedis, edgeType: "references", origin: "parser", method: "EXTRACTED" },
+  ] });
+
+  const nodes = exploreGraph(store, "who_injects", cpmsRedis, {}).nodes;
+  assert.equal(nodes.length, 1, "only the constructor-shaped reference counts as injection, not the stray one from randomFn");
+  assert.equal(nodes[0].nodeId, processorClass, "resolved to the CLASS, not AppleLoginProcessor.constructor");
+  assert.equal(nodes[0].title, "AppleLoginProcessor");
   store.close();
 });

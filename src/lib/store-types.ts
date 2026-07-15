@@ -380,6 +380,10 @@ export interface AppState {
   // the installer toggle and the app-level background poller.
   installerAutoRefresh: boolean;
   setInstallerAutoRefresh: (value: boolean) => void;
+  // Wiki "Indexed repositories" auto-refresh preference — see
+  // APP_VALUE_KEYS.wikiAutoRefresh.
+  wikiAutoRefresh: boolean;
+  setWikiAutoRefresh: (value: boolean) => void;
   installLog: string[];
   addInstallLog: (line: string) => void;
   clearInstallLog: () => void;

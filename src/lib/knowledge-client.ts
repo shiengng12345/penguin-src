@@ -64,6 +64,23 @@ export async function knowledgeAgentGuidanceSetup(): Promise<GuidanceSetupResult
   return invoke<GuidanceSetupResult>("knowledge_agent_guidance_setup");
 }
 
+export interface HookSetupResult {
+  supported: boolean;
+  written: boolean;
+  settings_path: string;
+  enabled: Array<"SessionStart" | "UserPromptSubmit">;
+}
+
+export async function knowledgeAgentHookSetup(
+  sessionStart: boolean,
+  userPromptSubmit: boolean,
+): Promise<HookSetupResult> {
+  return invoke<HookSetupResult>("knowledge_agent_hook_setup", {
+    sessionStart,
+    userPromptSubmit,
+  });
+}
+
 export interface KnowledgeDbStatus {
   db_path: string;
   exists: boolean;
@@ -339,10 +356,12 @@ export function knowledgeTags(): Promise<string[]> {
 }
 
 export interface IndexProgress {
-  phase: "scan" | "index";
-  done: number;
-  total: number;
+  phase: "scan" | "index" | "complete";
+  done?: number;
+  total?: number;
   file?: string;
+  rootPath?: string;
+  report?: KnowledgeIndexReport;
 }
 
 // Subscribe to live index progress (emitted by the Rust bridge while

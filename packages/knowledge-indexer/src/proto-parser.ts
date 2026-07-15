@@ -32,12 +32,23 @@ export function parseProtoEndpoints(source: string, relPath: string): ProtoEndpo
 
   const endpoints: ProtoEndpoint[] = [];
 
-  // Match `service ServiceName { ... }` — the `{` may be on the same or next line.
-  const serviceRe = /service\s+(\w+)\s*\{([^}]*(?:\{[^}]*\}[^}]*)*)\}/g;
+  // Locate each service header, then scan balanced braces. RPC declarations may
+  // have their own `{ ... }` option blocks, so a regex body capture stops after
+  // the first method and silently drops the rest of the service.
+  const serviceRe = /\bservice\s+(\w+)\s*\{/g;
   let svcMatch;
   while ((svcMatch = serviceRe.exec(noComments)) !== null) {
     const serviceName = svcMatch[1];
-    const body = svcMatch[2];
+    const openBrace = svcMatch.index + svcMatch[0].length - 1;
+    let depth = 1;
+    let cursor = openBrace + 1;
+    while (depth > 0 && cursor < noComments.length) {
+      if (noComments[cursor] === "{") depth += 1;
+      else if (noComments[cursor] === "}") depth -= 1;
+      cursor += 1;
+    }
+    const body = noComments.slice(openBrace + 1, depth === 0 ? cursor - 1 : noComments.length);
+    serviceRe.lastIndex = cursor;
 
     // Match `rpc MethodName(RequestType) returns (ResponseType);` or multiline variants
     const rpcRe = /rpc\s+(\w+)\s*\(/g;
