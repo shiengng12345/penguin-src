@@ -11,9 +11,9 @@
     "knowledge:benchmark": "node scripts/knowledge-quality-benchmark.mjs",
     "knowledge:benchmark:real": "node scripts/knowledge-real-repo-benchmark.mjs",
     "preview": "vite preview",
-    "test": "node --test --test-reporter=dot tests/",
-    "test:verbose": "node --test --test-reporter=spec tests/",
-    "test:coverage": "node --test --test-reporter=dot --experimental-test-coverage tests/",
+    "test": "node --test --test-reporter=dot tests/*.test.mjs",
+    "test:verbose": "node --test --test-reporter=spec tests/*.test.mjs",
+    "test:coverage": "node --test --test-reporter=dot --experimental-test-coverage tests/*.test.mjs",
     "typecheck": "pnpm -F @penguin/core build && pnpm -F @penguin/knowledge-core build && pnpm -F @penguin/knowledge-indexer build && pnpm -F @penguin/knowledge-cli build && pnpm -F @penguin/mcp build && tsc -b",
     "tauri": "tauri",
     "set-version": "node scripts/set-version.mjs"

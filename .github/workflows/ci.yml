@@ -57,7 +57,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Build Tauri resource dependencies
-        run: pnpm typecheck
+        run: pnpm typecheck && pnpm knowledge:bundle
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
