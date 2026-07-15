@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
+import { dirname, resolve } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
 // Source-assertion tests for the native child-webview feature now
 // driven by the In-App Browser module (Sprint 11 — re-architected
 // after the Vault-embedded version's layout-race chase). Vault no
 // longer mounts a webview itself; it forwards a deeplink to Browser.
 
-const ROOT = "/Users/shieng/Desktop/Pengvi";
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 test("Rust inline_webview module exposes the 12 commands + reuse path + 1px clamp", async () => {
   const src = await readFile(`${ROOT}/src-tauri/src/inline_webview.rs`, "utf8");
