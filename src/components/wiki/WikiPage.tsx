@@ -383,6 +383,7 @@ function KnowledgeHomePanel({
   // Nothing selected → a repo datatable IS the home content. Repo row expands
   // to its branches; a branch row opens that branch's graph.
   const [indexRows, setIndexRows] = useState<KnowledgeIndexStatus | null>(null);
+  const [statusLoading, setStatusLoading] = useState(true);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [collapsed, setCollapsed] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -414,9 +415,11 @@ function KnowledgeHomePanel({
       .catch(() => {});
   }, []);
   const reload = useCallback(() => {
+    setStatusLoading(true);
     knowledgeIndexStatus()
       .then((s) => { setIndexRows(s); syncWatchStatus(s.repos); })
-      .catch(() => setIndexRows(null));
+      .catch(() => setIndexRows(null))
+      .finally(() => setStatusLoading(false));
   }, [syncWatchStatus]);
   useEffect(reload, [reload]);
   const toggleWatch = useCallback(async (repo: KnowledgeIndexStatus["repos"][number]) => {
@@ -468,13 +471,13 @@ function KnowledgeHomePanel({
   const manualRefresh = useCallback(async () => {
     setRefreshing(true);
     try {
-      await knowledgeIndexStatus().then(setIndexRows);
+      await knowledgeIndexStatus().then((s) => { setIndexRows(s); syncWatchStatus(s.repos); });
     } catch {
       setIndexRows(null);
     } finally {
       setRefreshing(false);
     }
-  }, []);
+  }, [syncWatchStatus]);
   const removeRepo = useCallback(async (name: string) => {
     if (!window.confirm(`从索引中删除 ${name}?\n(只删索引数据,不动仓库文件;重新 index 即可恢复)`)) return;
     try {
@@ -510,6 +513,14 @@ function KnowledgeHomePanel({
     iso ? new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-auto bg-[radial-gradient(circle_at_20%_0%,rgba(34,211,238,0.08),transparent_34%),linear-gradient(180deg,#070c13_0%,#0a0f17_100%)] p-6">
+      {statusLoading && !indexRows && (
+        <section className="flex min-h-[220px] flex-1 items-center justify-center rounded-2xl border border-slate-800 bg-[#0d1420]/85">
+          <div className="flex items-center gap-2 text-sm text-slate-400">
+            <Loader2 className="h-4 w-4 animate-spin text-cyan-300" />
+            Loading Knowledge status…
+          </div>
+        </section>
+      )}
       {indexRows && indexRows.repos.length > 0 && (
         <>
         <section className={cn("flex flex-col overflow-hidden rounded-2xl border border-slate-800 bg-[#0d1420]/85", collapsed ? "shrink-0" : "min-h-0 flex-1")}>

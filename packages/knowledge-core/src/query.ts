@@ -494,6 +494,87 @@ export function trustEnvelopeForBranch(
   };
 }
 
+// Bulk variant for list/status surfaces. The single-branch helper remains the
+// canonical path for focused queries, while Wiki/CLI status must not perform
+// one stale/trust/deployment query per branch.
+function trustEnvelopesForBranches(store: KnowledgeStore, branchIds: string[]): Map<string, TrustEnvelope> {
+  const out = new Map<string, TrustEnvelope>();
+  if (branchIds.length === 0) return out;
+  const marks = branchIds.map(() => "?").join(",");
+  type BranchTrustRow = {
+    repoId: string; repoName: string; branchId: string; branchName: string;
+    headCommit: string | null; indexedCommit: string | null; indexedAt: string | null;
+    worktreeState: TrustEnvelope["worktreeState"]; worktreeFingerprint: string | null;
+    dirtyFiles: string; parserVersion: string | null; schemaVersion: number | null; staleReason: string | null;
+  };
+  type SnapshotTrustRow = {
+    branchId: string; snapshotId: string; baseSnapshotId: string | null; mergeBaseCommit: string | null;
+    cacheState: "ready" | "cold"; changedFiles: number; totalFiles: number; baseCommit: string | null;
+  };
+  const branches = store.db.prepare(
+    `SELECT r.id AS repoId, r.name AS repoName,
+            b.id AS branchId, b.name AS branchName, b.head_commit AS headCommit,
+            b.last_indexed_commit AS indexedCommit, b.last_indexed_at AS indexedAt,
+            b.indexed_worktree_state AS worktreeState,
+            b.indexed_worktree_fingerprint AS worktreeFingerprint,
+            b.indexed_dirty_files AS dirtyFiles, b.parser_version AS parserVersion,
+            b.indexed_schema_version AS schemaVersion, b.stale_reason AS staleReason
+       FROM branches b JOIN repos r ON r.id=b.repo_id
+      WHERE b.id IN (${marks})`,
+  ).all(...branchIds) as BranchTrustRow[];
+  const snapshots = store.db.prepare(
+    `SELECT b.id AS branchId, s.id AS snapshotId, s.base_snapshot_id AS baseSnapshotId,
+            s.merge_base_sha AS mergeBaseCommit, s.state AS cacheState,
+            (SELECT COUNT(*) FROM snapshot_overlays o WHERE o.snapshot_id=s.id AND o.operation IN ('add','modify')) AS changedFiles,
+            (SELECT COUNT(*) FROM effective_snapshot_files e WHERE e.snapshot_id=s.id) AS totalFiles,
+            base.commit_sha AS baseCommit
+       FROM branches b JOIN revision_snapshots s ON s.id=b.current_snapshot_id
+       LEFT JOIN revision_snapshots base ON base.id=s.base_snapshot_id
+      WHERE b.id IN (${marks})`,
+  ).all(...branchIds) as SnapshotTrustRow[];
+  const snapshotByBranch = new Map(snapshots.map((row) => [row.branchId, row]));
+  const snapshotIds = snapshots.map((row) => row.snapshotId);
+  const deploymentBySnapshot = new Map<string, string[]>();
+  if (snapshotIds.length > 0) {
+    const snapshotMarks = snapshotIds.map(() => "?").join(",");
+    for (const row of store.db.prepare(
+      `SELECT DISTINCT s.id AS snapshotId, d.target_id AS targetId
+         FROM revision_snapshots s
+         JOIN deployment_revisions d ON d.repo_id=s.repo_id AND d.commit_sha=s.commit_sha
+        WHERE s.id IN (${snapshotMarks})`,
+    ).all(...snapshotIds) as Array<{ snapshotId: string; targetId: string }>) {
+      const list = deploymentBySnapshot.get(row.snapshotId) ?? [];
+      if (!list.includes(row.targetId)) list.push(row.targetId);
+      deploymentBySnapshot.set(row.snapshotId, list);
+    }
+  }
+  for (const row of branches) {
+    let dirtyFiles: string[] = [];
+    try {
+      const parsed = JSON.parse(row.dirtyFiles);
+      dirtyFiles = Array.isArray(parsed) ? parsed.filter((file): file is string => typeof file === "string") : [];
+    } catch { /* malformed legacy metadata is treated as empty */ }
+    const snapshot = snapshotByBranch.get(row.branchId);
+    const coverageGaps = row.worktreeState === "unknown" ? ["git_status_unavailable"] : [];
+    out.set(row.branchId, {
+      ...row,
+      dirtyFiles,
+      stale: row.staleReason != null,
+      ...(snapshot ? {
+        snapshotId: snapshot.snapshotId,
+        baseCommit: snapshot.baseCommit,
+        mergeBaseCommit: snapshot.mergeBaseCommit,
+        cacheState: snapshot.cacheState,
+        changedFiles: snapshot.changedFiles,
+        reusePercent: snapshot.totalFiles ? Math.max(0, 100 - (snapshot.changedFiles / snapshot.totalFiles * 100)) : 100,
+        deploymentTargets: deploymentBySnapshot.get(snapshot.snapshotId) ?? [],
+      } : { cacheState: "legacy" as const }),
+      coverageGaps,
+    });
+  }
+  return out;
+}
+
 // "Which branch am I answering for, and is it current?" — compares the live git
 // HEAD (passed by the caller, which can read .git) against what was indexed.
 // Every Context Pack / answer should carry this so an AI never trusts a stale
@@ -1147,18 +1228,30 @@ function collectGraph(
 // index_status: repos/branches + staleness (answers list_repos/list_branches, §8.1).
 export function indexStatus(store: KnowledgeStore): IndexStatus {
   const repos = store.db.prepare("SELECT id, name, root_path AS rootPath FROM repos ORDER BY name").all() as Array<{ id: string; name: string; rootPath: string }>;
+  const branches = repos.length === 0 ? [] : store.db.prepare(
+    `SELECT id, repo_id AS repoId, name, status, last_indexed_at AS lastIndexedAt,
+            pinned, default_branch AS defaultBranch, base_branch_name AS baseBranchName
+       FROM branches WHERE repo_id IN (${repos.map(() => "?").join(",")}) ORDER BY name`,
+  ).all(...repos.map((repo) => repo.id)) as Array<{ id: string; repoId: string; name: string; status: string; lastIndexedAt: string | null; pinned: number; defaultBranch: number; baseBranchName: string | null }>;
+  const staleCounts = new Map<string, number>();
+  if (branches.length > 0) {
+    for (const row of store.db.prepare(
+      `SELECT branch_id AS branchId, COUNT(*) AS n FROM symbol_versions
+        WHERE status='stale' AND branch_id IN (${branches.map(() => "?").join(",")}) GROUP BY branch_id`,
+    ).all(...branches.map((branch) => branch.id)) as Array<{ branchId: string; n: number }>) staleCounts.set(row.branchId, row.n);
+  }
+  const trusts = trustEnvelopesForBranches(store, branches.map((branch) => branch.id));
   return {
     repos: repos.map((repo) => {
-      const branches = store.db.prepare("SELECT id, name, status, last_indexed_at AS lastIndexedAt, pinned, default_branch AS defaultBranch, base_branch_name AS baseBranchName FROM branches WHERE repo_id=? ORDER BY name").all(repo.id) as Array<{ id: string; name: string; status: string; lastIndexedAt: string | null; pinned: number; defaultBranch: number; baseBranchName: string | null }>;
+      const repoBranches = branches.filter((branch) => branch.repoId === repo.id);
       return {
         repoId: repo.id, name: repo.name, rootPath: repo.rootPath,
-        defaultBranch: branches.find((b) => b.defaultBranch === 1)?.name ?? null,
-        branches: branches.map((b) => {
-          const stale = store.db.prepare("SELECT COUNT(*) AS n FROM symbol_versions WHERE branch_id=? AND status='stale'").get(b.id) as { n: number };
+        defaultBranch: repoBranches.find((b) => b.defaultBranch === 1)?.name ?? null,
+        branches: repoBranches.map((b) => {
           return {
             branchId: b.id, name: b.name, status: b.status,
-            lastIndexedAt: b.lastIndexedAt, staleSymbols: stale.n,
-            pinned: !!b.pinned, defaultBranch: b.defaultBranch === 1, baseBranchName: b.baseBranchName, trust: trustEnvelopeForBranch(store, b.id),
+            lastIndexedAt: b.lastIndexedAt, staleSymbols: staleCounts.get(b.id) ?? 0,
+            pinned: !!b.pinned, defaultBranch: b.defaultBranch === 1, baseBranchName: b.baseBranchName, trust: trusts.get(b.id) ?? null,
           };
         }),
       };
