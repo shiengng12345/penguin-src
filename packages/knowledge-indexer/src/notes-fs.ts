@@ -1,7 +1,8 @@
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import type { KnowledgeStore } from "@penguin/knowledge-core";
 import { indexNote, parseNote } from "./notes.js";
+import { randomUUID } from "node:crypto";
 
 // File-backed knowledge notes (§7, C9). Notes are plain Markdown files under a
 // notes directory — the file on disk is the source of truth (rebuildable: the
@@ -32,7 +33,7 @@ function indexFile(store: KnowledgeStore, notesDir: string, fileName: string): s
 // Typed-note kinds (Phase 3 why-layer): the "why" behind code, each with a
 // status/owner lifecycle and links to code via [[wikilinks]] (fusion resolves).
 export type NoteType =
-  | "note" | "decision" | "incident" | "compliance" | "bug" | "requirement" | "architecture" | "migration";
+  | "note" | "decision" | "incident" | "compliance" | "bug" | "requirement" | "architecture" | "migration" | "evidence";
 
 export function createNote(input: {
   store: KnowledgeStore;
@@ -155,4 +156,99 @@ export function reindexNotesDir(input: { store: KnowledgeStore; notesDir: string
   // too, or it lives on DB-only until a wipe loses it permanently (audit F-3).
   const pruned = input.store.pruneMissingNotes(new Set(files));
   return { indexed: files.length, pruned };
+}
+
+export type EvidenceLifecycle = "draft" | "reviewed" | "verified" | "resolved" | "archived";
+const EVIDENCE_TRANSITIONS: Record<EvidenceLifecycle, EvidenceLifecycle[]> = {
+  draft: ["reviewed"], reviewed: ["verified"], verified: ["resolved"], resolved: ["archived"], archived: [],
+};
+
+export interface EvidenceFileSummary {
+  slug: string;
+  path: string;
+  nodeId?: string;
+  title: string;
+  targetId: string;
+  environment: string;
+  region: string;
+  project: string;
+  logstore: string;
+  status: EvidenceLifecycle;
+  firstSeen?: string;
+  lastSeen?: string;
+  observationCount: number;
+  topicHash?: string;
+  evidenceHash?: string;
+  sensitive: boolean;
+  mcpAccess: string;
+  indexed: boolean;
+}
+
+function evidenceFiles(notesDir: string): string[] {
+  return listNotes(notesDir).filter((file) => {
+    try { return parseNote({ path: file, source: readFileSync(join(notesDir, file), "utf8") }).frontmatter.type === "evidence"; } catch { return false; }
+  });
+}
+
+export function listEvidenceNotes(input: { store: KnowledgeStore; notesDir: string; targetId?: string; status?: EvidenceLifecycle; limit?: number }): EvidenceFileSummary[] {
+  const limit = Math.min(Math.max(input.limit ?? 100, 1), 100);
+  return evidenceFiles(input.notesDir).map((file) => {
+    const source = readFileSync(join(input.notesDir, file), "utf8");
+    const parsed = parseNote({ path: file, source });
+    const f = parsed.frontmatter;
+    const node = input.store.db.prepare("SELECT id FROM nodes WHERE node_type='note' AND identity_key=? LIMIT 1").get(String(f.id ?? file)) as { id: string } | undefined;
+    return { slug: file.replace(/\.md$/, ""), path: join(input.notesDir, file), ...(node ? { nodeId: node.id } : {}), title: parsed.title, targetId: String(f.target_id ?? ""), environment: String(f.environment ?? ""), region: String(f.region ?? ""), project: String(f.project ?? ""), logstore: String(f.logstore ?? ""), status: (String(f.status ?? "draft") as EvidenceLifecycle), ...(f.first_seen ? { firstSeen: String(f.first_seen) } : {}), ...(f.last_seen ? { lastSeen: String(f.last_seen) } : {}), observationCount: Number(f.observation_count ?? 0) || 0, ...(f.topic_hash ? { topicHash: String(f.topic_hash) } : {}), ...(f.evidence_hash ? { evidenceHash: String(f.evidence_hash) } : {}), sensitive: f.sensitive === true, mcpAccess: String(f.mcp_access ?? "allowed"), indexed: Boolean(node) };
+  }).filter((item) => (!input.targetId || item.targetId === input.targetId) && (!input.status || item.status === input.status)).slice(0, limit);
+}
+
+export function setEvidenceStatus(input: { store: KnowledgeStore; notesDir: string; slug: string; from?: EvidenceLifecycle; to: EvidenceLifecycle; actor?: string }): EvidenceFileSummary {
+  const file = `${input.slug}.md`;
+  const full = join(input.notesDir, file);
+  if (!existsSync(full)) throw new Error(`evidence note not found: ${input.slug}`);
+  const source = readFileSync(full, "utf8");
+  const parsed = parseNote({ path: file, source });
+  if (parsed.frontmatter.type !== "evidence") throw new Error(`${input.slug} is not an evidence note`);
+  const current = String(parsed.frontmatter.status ?? "draft") as EvidenceLifecycle;
+  if (input.from && current !== input.from) throw new Error(`status conflict: expected ${input.from}, found ${current}`);
+  if (!EVIDENCE_TRANSITIONS[current]?.includes(input.to)) throw new Error(`invalid evidence status transition ${current} -> ${input.to}`);
+  const end = source.indexOf("\n---", 3);
+  if (end < 0) throw new Error("evidence frontmatter is malformed");
+  const block = source.slice(0, end).replace(/^status:\s*[^\n]+$/m, `status: ${input.to}`);
+  const temp = `${full}.${process.pid}.${randomUUID()}.tmp`;
+  writeFileSync(temp, `${block}${source.slice(end)}`);
+  renameSync(temp, full);
+  indexFile(input.store, input.notesDir, file);
+  const row = listEvidenceNotes({ store: input.store, notesDir: input.notesDir }).find((item) => item.slug === input.slug);
+  if (!row) throw new Error("evidence status update was not indexed");
+  return row;
+}
+
+export interface EvidenceDoctorReport { files: number; indexed: number; missingIndex: string[]; orphanIndex: string[]; malformed: string[]; staleLocks: string[] }
+export function evidenceDoctor(input: { store: KnowledgeStore; notesDir: string }): EvidenceDoctorReport {
+  const files = listNotes(input.notesDir);
+  const evidence = files.filter((file) => file.startsWith("evidence-") && file.endsWith(".md"));
+  const missingIndex: string[] = [], malformed: string[] = [];
+  for (const file of evidence) {
+    try {
+      const parsed = parseNote({ path: file, source: readFileSync(join(input.notesDir, file), "utf8") });
+      if (parsed.frontmatter.type !== "evidence" || !parsed.frontmatter.target_id || !parsed.frontmatter.topic_hash) malformed.push(file);
+      const id = String(parsed.frontmatter.id ?? file);
+      const row = input.store.db.prepare("SELECT 1 FROM nodes WHERE identity_key=? LIMIT 1").get(id);
+      if (!row) missingIndex.push(file);
+    } catch { malformed.push(file); }
+  }
+  const indexedPaths = new Set((input.store.db.prepare("SELECT path FROM notes_index").all() as Array<{ path: string }>).map((row) => row.path));
+  const orphanIndex = [...indexedPaths].filter((path) => path.startsWith("evidence-") && !existsSync(join(input.notesDir, path)));
+  // listNotes intentionally returns only Markdown; lock discovery must inspect
+  // the directory itself or repair cannot recover an interrupted atomic write.
+  const staleLocks = readdirSync(input.notesDir, { withFileTypes: true }).filter((entry) => entry.isFile() && entry.name.endsWith(".lock") && (() => { try { return Date.now() - statSync(join(input.notesDir, entry.name)).mtimeMs > 5 * 60_000; } catch { return false; } })()).map((entry) => entry.name);
+  return { files: evidence.length, indexed: evidence.length - missingIndex.length, missingIndex, orphanIndex, malformed, staleLocks };
+}
+
+export function repairEvidence(input: { store: KnowledgeStore; notesDir: string }): EvidenceDoctorReport & { reindexed: number; removedLocks: number } {
+  const before = evidenceDoctor(input);
+  const reindexed = reindexNotesDir(input).indexed;
+  let removedLocks = 0;
+  for (const lock of before.staleLocks) { try { unlinkSync(join(input.notesDir, lock)); removedLocks += 1; } catch { /* concurrent repair */ } }
+  return { ...evidenceDoctor(input), reindexed, removedLocks };
 }

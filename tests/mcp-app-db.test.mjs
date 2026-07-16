@@ -95,6 +95,20 @@ test("SQLite query failures are reported instead of looking like empty desktop s
   assert.match(status.error, /SQLite read failed/);
 });
 
+test("large SQLite JSON output does not fail at the child-process buffer boundary", async (t) => {
+  const { execFileSync } = await import("node:child_process");
+  const { mkdtemp, rm } = await import("node:fs/promises");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const { readAppValues } = await loadMcpAppDbModule();
+  const dir = await mkdtemp(join(tmpdir(), "penguin-large-app-db-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const db = join(dir, "penguin.sqlite3");
+  execFileSync("sqlite3", [db, `CREATE TABLE app_kv (key TEXT PRIMARY KEY, value TEXT NOT NULL); INSERT INTO app_kv VALUES ('large', printf('%.*c', 2000000, 'x'));`]);
+  const values = readAppValues(db);
+  assert.equal(values.large.length, 2000000);
+});
+
 test("MCP exposes SQLite-backed desktop state tools", async () => {
   const source = await readFile(new URL("../packages/mcp/src/index.ts", import.meta.url), "utf8");
 

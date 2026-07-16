@@ -5,13 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import ts from "typescript";
+import { build } from "esbuild";
 import { KnowledgeStore } from "../packages/knowledge-core/dist/index.js";
 
 // knowledge-tools.ts is bundled into the MCP server (esbuild → single file), so
 // it isn't separately importable. Transpile it to a temp .mjs and import (same
 // pattern as registry-search-core.test.mjs); its only import is
 // @penguin/knowledge-core, resolvable from the repo root.
-async function loadModule(relTsPath, tag) {
+async function loadModule(relTsPath, tag, replacements = {}) {
   const source = await readFileP(new URL(relTsPath, import.meta.url), "utf8");
   const { outputText } = ts.transpileModule(source, {
     compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
@@ -20,24 +21,24 @@ async function loadModule(relTsPath, tag) {
   const defsUrl = new URL(`./.tmp-ktdefs-${process.pid}.mjs`, import.meta.url).href;
   const rewritten = outputText
     .replaceAll("@penguin/knowledge-core", coreUrl)
-    .replaceAll("./knowledge-tool-defs.js", defsUrl);
+    .replaceAll("./knowledge-tool-defs.js", defsUrl)
+    .replaceAll("./repository-analysis.js", replacements.repositoryAnalysis ?? "./repository-analysis.js");
   const tmpUrl = new URL(`./.tmp-${tag}-${process.pid}.mjs`, import.meta.url);
   await writeFileP(tmpUrl, rewritten);
   return tmpUrl;
 }
 
 async function loadTools() {
-  // defs first (handler imports it as ./knowledge-tool-defs.js → rewritten to this)
-  const defsTmp = await loadModule("../packages/mcp/src/knowledge-tool-defs.ts", "ktdefs");
-  const handlerTmp = await loadModule("../packages/mcp/src/knowledge-tools.ts", "kt");
-  try {
-    const defs = await import(defsTmp.href);
-    const handler = await import(handlerTmp.href);
-    return { ...defs, ...handler };
-  } finally {
-    await unlinkP(defsTmp);
-    await unlinkP(handlerTmp);
-  }
+  // Bundle local MCP imports so this test exercises the same module graph as
+  // the release server; a transpiled temp file cannot resolve sibling .ts
+  // modules such as config, SLS planner, and tool definitions.
+  const root = mkdtempSync(join(tmpdir(), `penguin-mcp-tools-${process.pid}-`));
+  const handler = join(root, "handler.mjs");
+  const defs = join(root, "defs.mjs");
+  const coreDist = new URL("../packages/knowledge-core/dist/index.js", import.meta.url).pathname;
+  await build({ entryPoints: [new URL("../packages/mcp/src/knowledge-tools.ts", import.meta.url).pathname], bundle: true, format: "esm", platform: "node", outfile: handler, alias: { "@penguin/knowledge-core": coreDist } });
+  await build({ entryPoints: [new URL("../packages/mcp/src/knowledge-tool-defs.ts", import.meta.url).pathname], bundle: true, format: "esm", platform: "node", outfile: defs });
+  return { ...(await import(`file://${defs}`)), ...(await import(`file://${handler}`)) };
 }
 const { KNOWLEDGE_TOOL_DEFS, isKnowledgeTool, handleKnowledgeTool } = await loadTools();
 
@@ -55,12 +56,12 @@ function seed() {
   return { store, repoId, login, caller };
 }
 
-test("knowledge tools registered (6-pack + suggestion flow + architecture/communities/deadcode)", () => {
+test("knowledge tools registered (dependency analysis is MCP-reachable)", () => {
   const names = KNOWLEDGE_TOOL_DEFS.map((t) => t.name).sort();
   assert.deepEqual(names, [
-    "accept_suggestion", "compare_branches", "explore_graph", "find_communities",
+    "accept_suggestion", "analyze_repository", "api_doc_diff", "api_doc_generate", "api_doc_list", "api_doc_show", "compare_branches", "dependency_path", "explore_graph", "find_communities",
     "find_dead_code", "get_architecture", "get_node", "index_status",
-    "knowledge_explore", "knowledge_search", "list_suggestions", "reject_suggestion",
+    "knowledge_explore", "knowledge_search", "list_suggestions", "package_dependencies", "reject_suggestion", "set_master_branch",
     "suggest_links", "write_note",
   ]);
   assert.ok(isKnowledgeTool("knowledge_search"));
@@ -69,7 +70,81 @@ test("knowledge tools registered (6-pack + suggestion flow + architecture/commun
   assert.ok(isKnowledgeTool("get_architecture"));
   assert.ok(isKnowledgeTool("find_communities"));
   assert.ok(isKnowledgeTool("find_dead_code"));
+  assert.ok(isKnowledgeTool("package_dependencies"));
+  assert.ok(isKnowledgeTool("dependency_path"));
+  assert.ok(isKnowledgeTool("analyze_repository"));
   assert.ok(!isKnowledgeTool("mcp_health"));
+});
+
+test("MCP set_master_branch explicitly replaces the canonical branch", () => {
+  const { store, repoId } = seed();
+  const feature = store.registerBranch({ repoId, name: "feature/x", status: "snapshot" });
+  store.registerBranch({ repoId, name: "(detached)", status: "snapshot" });
+  const result = handleKnowledgeTool("set_master_branch", { repo: "r", branch: "feature/x" }, store);
+  assert.equal(result.ok, true);
+  assert.equal(result.branch, "feature/x");
+  assert.equal(result.previousBranchId, null);
+  assert.equal(store.getDefaultBranch(repoId).id, feature);
+  const rejected = handleKnowledgeTool("set_master_branch", { repo: "r", branch: "(detached)" }, store);
+  assert.match(rejected.error, /detached|canonical/i);
+  store.close();
+});
+
+test("dependency tools expose bounded graph evidence and analysis keeps external SLS unverified", () => {
+  const { store, repoId, branch } = seed();
+  const packages = new Map();
+  for (const name of ["auth", "nestjs-logger", "console-override", "pino"]) {
+    packages.set(name, store.upsertNode({
+      nodeType: "service",
+      identityKey: `npm-package::${name}`,
+      title: name,
+      repoId: name === "auth" ? repoId : null,
+    }));
+  }
+  store.replaceFileEdges({
+    repoId,
+    branchId: branch,
+    filePath: "package.json",
+    edges: [
+      { src: packages.get("auth"), dst: packages.get("nestjs-logger"), edgeType: "depends_on", origin: "parser", method: "EXTRACTED", provenance: { source: "pnpm-lock.yaml", resolvedVersion: "2.1.0" } },
+      { src: packages.get("nestjs-logger"), dst: packages.get("console-override"), edgeType: "depends_on", origin: "parser", method: "EXTRACTED", provenance: { source: "pnpm-lock.yaml", resolvedVersion: "2.1.4" } },
+      { src: packages.get("console-override"), dst: packages.get("pino"), edgeType: "depends_on", origin: "parser", method: "EXTRACTED", provenance: { source: "pnpm-lock.yaml", resolvedVersion: "9.14.0" } },
+    ],
+  });
+
+  const deps = handleKnowledgeTool("package_dependencies", {
+    subject: "auth", direction: "dependencies", transitive: true, max_depth: 5, limit: 10,
+  }, store);
+  assert.deepEqual(deps.nodes.map((node) => node.title), ["nestjs-logger", "console-override", "pino"]);
+  assert.equal(deps.nodes[0].evidence.resolvedVersion, "2.1.0");
+
+  const path = handleKnowledgeTool("dependency_path", { from: "auth", to: "pino", max_depth: 5 }, store);
+  assert.equal(path.status, "found");
+  assert.deepEqual(path.path.map((node) => node.title), ["auth", "nestjs-logger", "console-override", "pino"]);
+
+  const analysis = handleKnowledgeTool("analyze_repository", { query: "auth logs into SLS", focus: "auto", limit: 10 }, store);
+  assert.equal(analysis.focus, "logging");
+  assert.ok(analysis.gaps.some((gap) => /stdout.*Logtail.*SLS/i.test(gap)));
+  assert.ok(!analysis.verifiedFacts.some((fact) => /stdout.*Logtail.*SLS/i.test(fact)));
+  store.close();
+});
+
+test("knowledge_search includes sensitive notes by default and redacts them only when disabled", () => {
+  const { store } = seed();
+  const note = store.upsertNode({ nodeType: "note", identityKey: "secret.md", title: "Secret token note" });
+  store.indexNoteText({ nodeId: note, path: "secret.md", title: "Secret token note", body: "turnstile token", sensitive: true, mcpAccess: "allowed", contentHash: "secret" });
+  const included = handleKnowledgeTool("knowledge_search", { query: "turnstile" }, store);
+  assert.ok(included.results.some((hit) => hit.nodeId === note));
+  const excluded = handleKnowledgeTool("knowledge_search", { query: "turnstile", include_sensitive: false }, store);
+  assert.ok(!excluded.results.some((hit) => hit.nodeId === note));
+  store.close();
+});
+
+test("knowledge_search rejects an empty query instead of enumerating the index", () => {
+  const { store } = seed();
+  const result = handleKnowledgeTool("knowledge_search", { query: "" }, store);
+  assert.match(result.error, /requires a non-empty/i);
+  store.close();
 });
 
 test("knowledge_explore is the documented hero entry and empty graphs require diagnostics", () => {

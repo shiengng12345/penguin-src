@@ -10,7 +10,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 // Only the pure tool DEFS are imported statically (no knowledge-core / native
 // deps). The handler is dynamically imported on first knowledge-tool call so
 // the release-bundled server initializes without those deps present.
-import { KNOWLEDGE_TOOL_DEFS, isKnowledgeTool } from "./knowledge-tool-defs.js";
+import { KNOWLEDGE_TOOL_DEFS, LOG_INVESTIGATION_TOOL_DEFS, isKnowledgeTool } from "./knowledge-tool-defs.js";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -53,6 +53,11 @@ import {
   readSavedRequests,
   type DesktopProtocol,
 } from "./app-db.js";
+import {
+  serviceCallability,
+  serviceNameMatches,
+  validateCompareEnvironmentNames,
+} from "./mcp-input-validation.js";
 
 const PROTOCOLS: readonly Protocol[] = ["grpc-web", "grpc", "sdk"] as const;
 const DESKTOP_PROTOCOLS: readonly DesktopProtocol[] = ["grpc-web", "grpc", "sdk", "rest"] as const;
@@ -79,9 +84,7 @@ function findService(protocol: Protocol, packageName: string, serviceName: strin
   const services = parseServicesForPackage(protocol, packageName);
   // Match by short name OR fullName so callers can pass either "Auth" or
   // "pengvi.auth.Auth".
-  const service = services.find(
-    (s) => s.name === serviceName || s.fullName === serviceName,
-  );
+  const service = services.find((s) => serviceNameMatches(s, serviceName));
   if (!service) {
     throw new Error(
       `Service ${serviceName} not found in ${packageName} (have: ${services
@@ -342,6 +345,7 @@ const server = new Server(
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     ...KNOWLEDGE_TOOL_DEFS,
+    ...LOG_INVESTIGATION_TOOL_DEFS,
     {
       name: "mcp_health",
       description:
@@ -389,7 +393,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "describe_method",
       description:
-        "Return one RPC method's full schema — request/response type names plus the nested FieldInfo trees (name, type, repeated, optional, enumValues). Use this before call_method to construct a valid body without guessing field names. Note: SDK packages currently expose method names only (no field schema yet).",
+        "Return one RPC method's full schema — request/response type names plus nested FieldInfo trees (name, type, repeated, optional, enumValues). SDK packages may be unavailable in Node when they require browser APIs or a missing dist/module directory; errors are explicit.",
       inputSchema: {
         type: "object",
         required: ["protocol", "packageName", "serviceName", "methodName"],
@@ -440,7 +444,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "install_package",
       description:
-        "Install an @snsoft npm package into ~/.penguin/<protocol>/. Runs `npm install --save <packageSpec>` in the protocol's package dir. Penguin desktop's filesystem watcher will pick up the change and refresh the UI automatically.",
+        "Install a versioned @snsoft npm package into ~/.penguin/<protocol>/. Runs `npm install --save <packageSpec>` in the protocol's package dir; use list_packages to discover an installed version or provide an explicit registry version. Penguin desktop's filesystem watcher will pick up the change and refresh the UI automatically.",
       inputSchema: {
         type: "object",
         required: ["protocol", "packageSpec"],
@@ -449,7 +453,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           packageSpec: {
             type: "string",
             description:
-              "npm spec, e.g. '@snsoft/auth-grpc-web' or '@snsoft/auth-grpc-web@1.2.3'",
+              "Versioned npm spec, e.g. '@snsoft/auth-grpc-web@1.2.3'. Use list_packages for installed versions.",
           },
         },
       },
@@ -556,7 +560,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "call_method",
       description:
-        "Invoke an RPC method on the live backend. Recommended routing: pass `packageName` + `serviceName` + `methodName` — MCP will resolve the protocol-specific routing fields. Legacy: grpc-web/grpc accept `servicePath` directly. URL is the env target (use resolve_environment to fetch it).",
+        "Invoke an RPC method on the live backend. Recommended routing: pass `packageName` + `serviceName` + `methodName` — MCP will resolve the protocol-specific routing fields. Legacy `servicePath` works directly for native grpc; grpc-web still requires `packageName` to load the generated client module. URL is the env target (use resolve_environment to fetch it).",
       inputSchema: {
         type: "object",
         required: ["protocol", "url", "body"],
@@ -588,7 +592,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       // Lazy import keeps knowledge-core (native better-sqlite3) out of the
       // server's top-level load — only paid when a knowledge tool is called.
       const { runKnowledgeTool } = await import("./knowledge-tools.js");
-      return jsonResult(runKnowledgeTool(name, a));
+      return jsonResult(await runKnowledgeTool(name, a));
     }
     if (name === "mcp_health") {
       const cfg = readConfig();
@@ -646,6 +650,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         name: svc.name,
         fullName: svc.fullName,
         methods: svc.methods.map((m) => m.name),
+        callability: serviceCallability(svc.fullName),
       }));
       return jsonResult(summary);
     }
@@ -678,6 +683,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }));
       return jsonResult({
         service: service.fullName,
+        callability: serviceCallability(service.fullName),
         methodCount: methods.length,
         methods,
       });
@@ -816,6 +822,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     if (name === "compare_environments") {
       const protocol = a.protocol as Protocol;
       const envNames = (a.environmentNames as string[]) ?? [];
+      validateCompareEnvironmentNames(envNames);
       const body = (a.body as string) ?? "{}";
       preflightJsonBody(body);
       const headers = a.headers as Record<string, string> | undefined;

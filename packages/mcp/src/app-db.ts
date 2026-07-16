@@ -40,6 +40,7 @@ function isSensitiveAppValueKey(key: string): boolean {
 
 const REQUEST_BODY_LIMIT = 4000;
 const MAX_LIST_LIMIT = 100;
+const SQLITE_MAX_BUFFER = 16 * 1024 * 1024;
 const SQLITE_CANDIDATES = ["/usr/bin/sqlite3", "/opt/homebrew/bin/sqlite3", "sqlite3"];
 
 function sqliteBinary(): string {
@@ -69,6 +70,7 @@ function readSqliteRows(dbPath: string, sql: string): Record<string, unknown>[] 
   try {
     const raw = execFileSync(sqliteBinary(), ["-json", dbPath, sql], {
       encoding: "utf8",
+      maxBuffer: SQLITE_MAX_BUFFER,
       stdio: ["ignore", "pipe", "ignore"],
     }).trim();
     if (!raw) return [];

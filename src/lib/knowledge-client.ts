@@ -165,7 +165,8 @@ export interface KnowledgeIndexStatus {
     repoId: string;
     name: string;
     rootPath: string;
-    branches: Array<{ branchId: string; name: string; status: string; lastIndexedAt: string | null; staleSymbols: number; pinned: boolean }>;
+    defaultBranch: string | null;
+    branches: Array<{ branchId: string; name: string; status: string; lastIndexedAt: string | null; defaultBranch: boolean; baseBranchName: string | null; staleSymbols: number; pinned: boolean; trust?: { snapshotId?: string | null; baseCommit?: string | null; headCommit?: string | null; mergeBaseCommit?: string | null; changedFiles?: number; reusePercent?: number | null; cacheState?: string; deploymentTargets?: string[] } | null }>;
   }>;
 }
 
@@ -215,6 +216,25 @@ export function knowledgeIndexStatus(): Promise<KnowledgeIndexStatus> {
   return query<KnowledgeIndexStatus>(["status"]);
 }
 
+export interface KnowledgeEvidenceNote {
+  slug: string; path: string; nodeId?: string; title: string; targetId: string;
+  environment: string; region: string; project: string; logstore: string;
+  status: "draft" | "reviewed" | "verified" | "resolved" | "archived";
+  firstSeen?: string; lastSeen?: string; observationCount: number;
+  topicHash?: string; evidenceHash?: string; sensitive: boolean; mcpAccess: string; indexed: boolean;
+}
+export function knowledgeEvidenceList(filters?: { target?: string; status?: string; limit?: number }): Promise<KnowledgeEvidenceNote[]> {
+  const args = ["evidence", "list"];
+  if (filters?.target) args.push("--target", filters.target);
+  if (filters?.status) args.push("--status", filters.status);
+  if (filters?.limit) args.push("--limit", String(filters.limit));
+  args.push("--json");
+  return query<KnowledgeEvidenceNote[]>(args);
+}
+export function knowledgeEvidenceSetStatus(slug: string, status: KnowledgeEvidenceNote["status"]): Promise<KnowledgeEvidenceNote> {
+  return query<KnowledgeEvidenceNote>(["evidence", "status", slug, status, "--json"]);
+}
+
 // Remove a repo (by name or root path) from the index — parser data only,
 // rebuildable by re-indexing. Backs the Explorer/table delete buttons.
 export function knowledgeRemoveRepo(nameOrPath: string): Promise<{ ok: boolean; name: string }> {
@@ -229,6 +249,11 @@ export function knowledgeRemoveBranch(repo: string, branch: string): Promise<{ o
 // Toggle a branch's pin: pinned branches are exempt from auto-retention.
 export function knowledgePinBranch(repo: string, branch: string): Promise<{ ok: boolean; pinned: boolean }> {
   return query<{ ok: boolean; pinned: boolean }>(["pin", repo, branch]);
+}
+
+// Select the canonical master branch without checking out Git or indexing.
+export function knowledgeSetMaster(repo: string, branch: string): Promise<{ ok: boolean; branch: string; previousBranchId: string | null }> {
+  return query<{ ok: boolean; branch: string; previousBranchId: string | null }>(["master", repo, branch]);
 }
 
 // The files captured for a repo/branch (tree leaf level, lazy-loaded).

@@ -3,7 +3,69 @@
 // native better-sqlite3). The MCP server imports ONLY this at top level so the
 // release-bundled server initializes without the knowledge deps present; the
 // actual handler (knowledge-tools.ts) is dynamically imported on first call.
+import { isLogInvestigationTool } from "./log-investigation-tool-defs.js";
 export const KNOWLEDGE_TOOL_DEFS = [
+  {
+    name: "api_doc_generate",
+    description: "Generate an immutable API documentation preview from indexed Knowledge/Wiki facts. Read-only: does not call SLS, PROD, or Lark.",
+    inputSchema: { type: "object", required: ["request"], properties: { request: { type: "object" } } },
+  },
+  {
+    name: "api_doc_list",
+    description: "List locally generated API documentation previews by document key or subject text.",
+    inputSchema: { type: "object", properties: { document_key: { type: "string" }, query: { type: "string" } } },
+  },
+  {
+    name: "api_doc_show",
+    description: "Read one immutable generated API documentation preview as JSON, Markdown, or Lark XML.",
+    inputSchema: { type: "object", required: ["preview_id"], properties: { preview_id: { type: "string" }, format: { type: "string", enum: ["json", "markdown", "xml"] } } },
+  },
+  {
+    name: "api_doc_diff",
+    description: "Compare two generated API documentation previews without publishing or mutating Lark.",
+    inputSchema: { type: "object", required: ["left_preview_id", "right_preview_id"], properties: { left_preview_id: { type: "string" }, right_preview_id: { type: "string" } } },
+  },
+  {
+    name: "package_dependencies",
+    description:
+      "Read dependency edges derived from package.json and pnpm-lock.yaml. Supports direct/transitive dependencies, dependents, depth and limit bounds. Read-only: never installs packages; incomplete lockfile evidence is reported by the result.",
+    inputSchema: {
+      type: "object",
+      required: ["subject"],
+      properties: {
+        subject: { type: "string" },
+        direction: { type: "string", enum: ["dependencies", "dependents", "both"] },
+        transitive: { type: "boolean" },
+        max_depth: { type: "number" },
+        limit: { type: "number" },
+      },
+    },
+  },
+  {
+    name: "dependency_path",
+    description:
+      "Find a bounded dependency path between two indexed packages. Distinguishes missing subjects from a valid graph with no path; never installs packages or calls a backend.",
+    inputSchema: {
+      type: "object",
+      required: ["from", "to"],
+      properties: { from: { type: "string" }, to: { type: "string" }, max_depth: { type: "number" } },
+    },
+  },
+  {
+    name: "analyze_repository",
+    description:
+      "Deterministic read-only repository analysis for dependency, logging, calls, or architecture questions. Separates verified facts, inferences, evidence gaps, and next tools. Does not install packages, replay requests, call PROD, or invoke live RPCs.",
+    inputSchema: {
+      type: "object",
+      required: ["query"],
+      properties: {
+        query: { type: "string" },
+        repo: { type: "string" },
+        focus: { type: "string", enum: ["auto", "dependency", "logging", "calls", "architecture"] },
+        limit: { type: "number" },
+      },
+    },
+  },
   {
     name: "knowledge_search",
     description:
@@ -27,6 +89,9 @@ export const KNOWLEDGE_TOOL_DEFS = [
         },
         include_sensitive: { type: "boolean" },
         limit: { type: "number" },
+        branch: { type: "string" },
+        commit_sha: { type: "string" },
+        snapshot_id: { type: "string" },
       },
     },
   },
@@ -36,7 +101,7 @@ export const KNOWLEDGE_TOOL_DEFS = [
       "Node detail by id or identity/friendly name: symbol versions (per branch) or note body (respects mcp_access) + alias history.",
     inputSchema: {
       type: "object",
-      properties: { id: { type: "string" }, identity_key: { type: "string" } },
+      properties: { id: { type: "string" }, identity_key: { type: "string" }, repo: { type: "string" }, branch: { type: "string" }, commit_sha: { type: "string" }, snapshot_id: { type: "string" } },
     },
   },
   {
@@ -59,6 +124,10 @@ export const KNOWLEDGE_TOOL_DEFS = [
         depth: { type: "number" },
         limit: { type: "number" },
         to: { type: "string" },
+        repo: { type: "string" },
+        branch: { type: "string" },
+        commit_sha: { type: "string" },
+        snapshot_id: { type: "string" },
       },
     },
   },
@@ -74,6 +143,9 @@ export const KNOWLEDGE_TOOL_DEFS = [
       properties: {
         target: { type: "string" },
         branch: { type: "string" },
+        repo: { type: "string" },
+        commit_sha: { type: "string" },
+        snapshot_id: { type: "string" },
         depth: { type: "number" },
         limit: { type: "number" },
       },
@@ -85,7 +157,7 @@ export const KNOWLEDGE_TOOL_DEFS = [
     inputSchema: {
       type: "object",
       required: ["symbol", "branch_a", "branch_b"],
-      properties: { symbol: { type: "string" }, branch_a: { type: "string" }, branch_b: { type: "string" } },
+      properties: { symbol: { type: "string" }, branch_a: { type: "string" }, branch_b: { type: "string" }, repo: { type: "string" }, commit_sha: { type: "string" }, snapshot_id: { type: "string" } },
     },
   },
   {
@@ -120,6 +192,15 @@ export const KNOWLEDGE_TOOL_DEFS = [
           description: "compact returns one bounded freshness row per repo; default is detailed.",
         },
       },
+    },
+  },
+  {
+    name: "set_master_branch",
+    description: "Explicitly select one indexed Git branch as the repository canonical master. Metadata-only: never checks out Git or starts indexing.",
+    inputSchema: {
+      type: "object",
+      required: ["repo", "branch"],
+      properties: { repo: { type: "string" }, branch: { type: "string" } },
     },
   },
   {
@@ -172,7 +253,11 @@ export const KNOWLEDGE_TOOL_DEFS = [
   },
 ] as const;
 
-const NAMES = new Set(KNOWLEDGE_TOOL_DEFS.map((t) => t.name));
+// Kept as a separate pure module for release-bundle startup, but accepted by
+// the same lazy knowledge dispatcher.
+export { LOG_INVESTIGATION_TOOL_DEFS, isLogInvestigationTool } from "./log-investigation-tool-defs.js";
+
+const NAMES = new Set<string>(KNOWLEDGE_TOOL_DEFS.map((t) => t.name));
 export function isKnowledgeTool(name: string): boolean {
-  return NAMES.has(name);
+  return NAMES.has(name) || isLogInvestigationTool(name);
 }

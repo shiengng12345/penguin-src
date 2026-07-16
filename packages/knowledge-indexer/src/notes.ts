@@ -54,7 +54,7 @@ export function extractEntities(text: string): ParsedNote["entities"] {
     { type: "proposal_id", re: /\bproposal[_-]?id[=:\s]+([\w-]+)/gi },
     { type: "req_id", re: /\b(?:reqid|request[_-]?id)[=:\s]+([\w-]+)/gi },
     { type: "trace_id", re: /\btrace[_-]?id[=:\s]+([0-9a-f]{8,})/gi },
-    { type: "env", re: /\b(production|prod|staging|uat|sandbox)\b/gi },
+    { type: "env", re: /\b(production|prod|staging|qat|uat|sandbox)\b/gi },
   ];
   const seen = new Set<string>();
   const out: ParsedNote["entities"] = [];

@@ -6,11 +6,13 @@ import { fileURLToPath } from "node:url";
 import { KnowledgeStore } from "@penguin/knowledge-core";
 import { readBoundedHookInput } from "./claude-hook.js";
 import { runCli } from "./index.js";
+import { createLarkProcessRunner } from "./lark-document-client.js";
 
 // Default knowledge location (bundled/CLI + app share the same store).
 const DB_PATH = process.env.PENGUIN_KNOWLEDGE_DB ?? join(homedir(), ".penguin", "knowledge", "knowledge.db");
 const LEDGER_PATH = process.env.PENGUIN_KNOWLEDGE_LEDGER ?? join(homedir(), ".penguin", "knowledge", "ledger.jsonl");
 const NOTES_DIR = process.env.PENGUIN_KNOWLEDGE_NOTES ?? join(homedir(), ".penguin", "knowledge", "notes");
+const API_DOC_PREVIEWS = process.env.PENGUIN_API_DOC_PREVIEWS ?? join(homedir(), ".penguin", "knowledge", "api-docs", "previews");
 
 runCli(process.argv.slice(2), {
   cwd: process.cwd(),
@@ -23,6 +25,8 @@ runCli(process.argv.slice(2), {
     ? async () => (await readBoundedHookInput(process.stdin)) ?? ""
     : undefined,
   notesDir: NOTES_DIR,
+  apiDocPreviewRoot: API_DOC_PREVIEWS,
+  larkProcessRunner: createLarkProcessRunner(),
   // Machine-parseable progress lines on stderr (stdout stays the --json report).
   // The Rust bridge reads "PENGUIN_PROGRESS {json}" lines → Tauri events.
   progressEvent: (payload) => process.stderr.write(`PENGUIN_PROGRESS ${JSON.stringify(payload)}\n`),

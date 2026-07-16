@@ -21,7 +21,8 @@
   "dependencies": {
     "@inquirer/checkbox": "^2.5.0",
     "@penguin/knowledge-core": "workspace:*",
-    "@penguin/knowledge-indexer": "workspace:*"
+    "@penguin/knowledge-indexer": "workspace:*",
+    "@penguin/api-doc-generator": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.10.0"

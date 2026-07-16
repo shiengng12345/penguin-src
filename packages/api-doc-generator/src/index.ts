@@ -1,0 +1,16 @@
+export * from "./types.js";
+export { canonicalJson, validateDocumentationRequest, createDocumentKey, createRevisionSetHash, createScenarioId } from "./identity.js";
+export { collectDocumentationFacts } from "./collector.js";
+export { analyzeRequestClasses } from "./request-analyzer.js";
+export { analyzeResponseClasses } from "./response-analyzer.js";
+export { validateEvidenceReferences, selectSafeExample } from "./evidence.js";
+export { deriveCoverage, aggregateDocumentCoverage, coverageHeadings } from "./coverage.js";
+export { buildApiDocumentation } from "./generator.js";
+export type { EvidenceValidation } from "./evidence.js";
+export type { DocumentationCollectionResult, DocumentationSourceAdapter, RequestClassAnalysis, ResponseClassAnalysis } from "./types.js";
+export { renderApiDocumentation } from "./markdown-renderer.js";
+export { parseManagedSections } from "./managed-sections.js";
+export { ApiDocPreviewStore } from "./preview-store.js";
+export { syncManagedDocument, repairManagedDocument, type LarkSectionClient, type LarkDocumentSnapshot, type ApiDocBinding, type ApiDocSyncResult, type ApiDocSyncJournal } from "./lark-sync.js";
+export { ApiDocBindingStore } from "./binding-store.js";
+export type { RenderedDocument, ManagedSection, ManagedBlockInput, ManagedSectionParseResult, ApiDocPreview, ApiDocPreviewManifest, ApiDocPreviewDiff } from "./types.js";

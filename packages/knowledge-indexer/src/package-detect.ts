@@ -1,5 +1,10 @@
-import { readFileSync, existsSync, readdirSync, statSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
+import {
+  readPackageDependencies,
+  type DependencySpec,
+  type PackageDependencyEdge,
+} from "./package-dependencies.js";
 
 /**
  * Package-level dependency detection for the cross-repo service graph.
@@ -15,32 +20,12 @@ export interface PackageInfo {
   name: string;
   /** Repo id that publishes this package */
   repoId: string;
-  /** @snsoft-scoped packages this repo/package depends on */
-  dependencies: string[];
+  /** Manifest dependencies for this repo/package. */
+  dependencies: DependencySpec[];
+  /** Direct and lockfile-resolved transitive dependency edges. */
+  dependencyEdges: PackageDependencyEdge[];
   /** Sub-package paths (for monorepos) */
   subPackages?: PackageInfo[];
-}
-
-/**
- * Read and parse a package.json file. Returns null if not found or unreadable.
- */
-function readPackageJson(dir: string): Record<string, unknown> | null {
-  const p = join(dir, "package.json");
-  try {
-    return JSON.parse(readFileSync(p, "utf8")) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Extract @snsoft-scoped dependency names from a package.json.
- */
-function snsoftDeps(pkg: Record<string, unknown>): string[] {
-  const deps: Record<string, string> = (pkg.dependencies as Record<string, string>) ?? {};
-  const dev: Record<string, string> = (pkg.devDependencies as Record<string, string>) ?? {};
-  const all = { ...dev, ...deps }; // include devDeps — they still indicate a dependency
-  return Object.keys(all).filter((k) => k.startsWith("@snsoft/"));
 }
 
 /**
@@ -54,11 +39,8 @@ export function detectPackages(
   rootPath: string,
   repoId: string,
 ): PackageInfo | null {
-  const root = readPackageJson(rootPath);
+  const root = readPackageDependencies(rootPath);
   if (!root) return null;
-
-  const pkgName = (root.name as string) ?? "";
-  const deps = snsoftDeps(root);
 
   // Monorepo: scan packages/*/ sub-packages
   const packagesDir = join(rootPath, "packages");
@@ -68,15 +50,24 @@ export function detectPackages(
     for (const name of names) {
       const subDir = join(packagesDir, name);
       if (!statSync(subDir).isDirectory()) continue;
-      const sub = readPackageJson(subDir);
+      const sub = readPackageDependencies(subDir);
       if (!sub) continue;
-      const subName = (sub.name as string) ?? "";
-      const subDeps = snsoftDeps(sub);
-      subs.push({ name: subName, repoId, dependencies: subDeps });
+      subs.push({
+        name: sub.packageName,
+        repoId,
+        dependencies: sub.dependencies,
+        dependencyEdges: sub.edges,
+      });
     }
   }
 
-  return { name: pkgName, repoId, dependencies: deps, subPackages: subs.length > 0 ? subs : undefined };
+  return {
+    name: root.packageName,
+    repoId,
+    dependencies: root.dependencies,
+    dependencyEdges: root.edges,
+    subPackages: subs.length > 0 ? subs : undefined,
+  };
 }
 
 // Every proto module is codegen'd into FOUR published package variants

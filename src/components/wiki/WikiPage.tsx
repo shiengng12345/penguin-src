@@ -24,6 +24,7 @@ import { TabBtn } from "@/components/wiki/WikiUIKit";
 import { WikiGraph, type GraphLayout } from "@/components/wiki/WikiGraph";
 import { WikiGraph3D } from "@/components/wiki/WikiGraph3D";
 import { WikiContextPane } from "@/components/wiki/WikiContextPane";
+import { EvidenceInbox } from "@/components/wiki/EvidenceInbox";
 import {
   filterGraphView,
   formatKnowledgeError,
@@ -34,6 +35,7 @@ import {
   knowledgeCliStatus,
   knowledgeReindex,
   knowledgePinBranch,
+  knowledgeSetMaster,
   knowledgeRemoveBranch,
   knowledgeRemoveRepo,
   knowledgeWatchToggle,
@@ -496,11 +498,20 @@ function KnowledgeHomePanel({
       reload();
     }
   }, [reload]);
+  const setMaster = useCallback(async (repoName: string, branch: string) => {
+    if (!window.confirm(`将 ${repoName}/${branch} 设为 canonical master?\n只修改索引 metadata，不会 checkout 或重新 index。`)) return;
+    try {
+      await knowledgeSetMaster(repoName, branch);
+    } finally {
+      reload();
+    }
+  }, [reload]);
   const fmtWhen = (iso: string | null) =>
     iso ? new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-auto bg-[radial-gradient(circle_at_20%_0%,rgba(34,211,238,0.08),transparent_34%),linear-gradient(180deg,#070c13_0%,#0a0f17_100%)] p-6">
       {indexRows && indexRows.repos.length > 0 && (
+        <>
         <section className={cn("flex flex-col overflow-hidden rounded-2xl border border-slate-800 bg-[#0d1420]/85", collapsed ? "shrink-0" : "min-h-0 flex-1")}>
           <div className="flex shrink-0 items-center gap-2 border-b border-slate-800 px-4 py-3">
             <Boxes className="h-4 w-4 text-cyan-300" />
@@ -583,6 +594,7 @@ function KnowledgeHomePanel({
                         <span className="flex items-center gap-2">
                           {open ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-slate-500" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-slate-500" />}
                           {repo.name}
+                          {repo.defaultBranch && <span className="rounded bg-cyan-500/10 px-1.5 py-0.5 text-[9px] text-cyan-300">master: {repo.defaultBranch}</span>}
                         </span>
                       </td>
                       <td className="px-3 py-3 text-slate-400">{repo.branches.length}</td>
@@ -624,7 +636,7 @@ function KnowledgeHomePanel({
                             <td className="py-2.5 pl-12 pr-4 font-mono text-xs text-slate-300">
                               <span className="flex items-center gap-2">
                                 <GitBranch className="h-3 w-3 shrink-0 text-slate-600" />
-                                {br.name}
+                                {br.name}{br.defaultBranch && <span className="rounded bg-cyan-500/10 px-1 py-0.5 text-[9px] text-cyan-300">master</span>}
                               </span>
                             </td>
                             <td className="px-3 py-2.5" />
@@ -637,9 +649,23 @@ function KnowledgeHomePanel({
                                 <span className="rounded bg-slate-700/40 px-1.5 py-0.5 text-[10px] font-bold text-slate-400">{br.status}</span>
                               )}
                             </td>
-                            <td className="px-3 py-2.5 text-xs text-slate-500">{fmtWhen(br.lastIndexedAt)}</td>
+                            <td className="px-3 py-2.5 text-xs text-slate-500">
+                              <div>{fmtWhen(br.lastIndexedAt)}</div>
+                              {br.trust?.snapshotId && <div className="mt-0.5 text-[10px] text-cyan-300/70">snapshot {br.trust.snapshotId.slice(0, 12)} · {br.trust.cacheState ?? "legacy"}</div>}
+                              {br.trust?.reusePercent != null && <div className="text-[10px] text-slate-600">base {br.trust.baseCommit?.slice(0, 8) ?? "—"} · head {br.trust.headCommit?.slice(0, 8) ?? "—"} · {Math.round(br.trust.reusePercent)}% reused</div>}
+                            </td>
                             <td className="px-3 py-2.5">
                               <div className="flex items-center justify-end gap-1.5">
+                                {!br.defaultBranch && br.name !== "(detached)" && br.name !== "(workdir)" && (
+                                  <button
+                                    type="button"
+                                    title="设为 canonical master"
+                                    onClick={(e) => { e.stopPropagation(); void setMaster(repo.name, br.name); }}
+                                    className="rounded p-1 text-slate-600 hover:text-cyan-200"
+                                  >
+                                    master
+                                  </button>
+                                )}
                                 <button
                                   type="button"
                                   title={br.pinned ? "取消固定" : "固定(不被自动清理)"}
@@ -670,6 +696,8 @@ function KnowledgeHomePanel({
           </div>
           )}
         </section>
+        <EvidenceInbox />
+        </>
       )}
     </div>
   );

@@ -18,10 +18,23 @@ export interface ProtocolSection {
   packages?: string[];
 }
 
+export interface SlsTargetConfig {
+  targetId: string;
+  environment: string;
+  aliases?: string[];
+  regionId: string;
+  project: string;
+  logstore: string;
+  services?: string[];
+  enabled?: boolean;
+  source?: "config" | "verified_discovery" | "user_supplied";
+}
+
 export interface PenguinConfig {
   grpc?: ProtocolSection;
   "grpc-web"?: ProtocolSection;
   sdk?: ProtocolSection;
+  sls?: { targets?: SlsTargetConfig[] };
 }
 
 export function configPath(): string | null {
