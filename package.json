@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "pnpm -F @penguin/core build && pnpm -F @penguin/knowledge-core build && pnpm -F @penguin/knowledge-indexer build && pnpm -F @penguin/knowledge-cli build && pnpm -F @penguin/mcp build && pnpm knowledge:bundle && tsc -b && vite build",
+    "build": "pnpm -F @penguin/core build && pnpm -F @penguin/knowledge-core build && pnpm -F @penguin/knowledge-indexer build && pnpm -F @penguin/api-doc-generator build && pnpm -F @penguin/knowledge-cli build && pnpm -F @penguin/mcp build && pnpm knowledge:bundle && tsc -b && vite build",
     "knowledge:bundle": "node scripts/bundle-knowledge-cli.mjs && node scripts/vendor-knowledge-runtime.mjs",
     "knowledge:doctor": "node scripts/check-knowledge-runtime.mjs",
     "knowledge:benchmark": "node scripts/knowledge-quality-benchmark.mjs",
@@ -14,7 +14,7 @@
     "test": "node --test --test-reporter=dot tests/*.test.mjs",
     "test:verbose": "node --test --test-reporter=spec tests/*.test.mjs",
     "test:coverage": "node --test --test-reporter=dot --experimental-test-coverage tests/*.test.mjs",
-    "typecheck": "pnpm -F @penguin/core build && pnpm -F @penguin/knowledge-core build && pnpm -F @penguin/knowledge-indexer build && pnpm -F @penguin/knowledge-cli build && pnpm -F @penguin/mcp build && tsc -b",
+    "typecheck": "pnpm -F @penguin/core build && pnpm -F @penguin/knowledge-core build && pnpm -F @penguin/knowledge-indexer build && pnpm -F @penguin/api-doc-generator build && pnpm -F @penguin/knowledge-cli build && pnpm -F @penguin/mcp build && tsc -b",
     "tauri": "tauri",
     "set-version": "node scripts/set-version.mjs"
   },
