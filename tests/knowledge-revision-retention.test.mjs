@@ -1,0 +1,36 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { KnowledgeStore, planRevisionCollection, applyRevisionCollection, DEFAULT_REVISION_RETENTION } from "../packages/knowledge-core/dist/index.js";
+
+test("retention keeps protected snapshots, catalogued branches, and bounds hot feature views", () => {
+  const dir = mkdtempSync(join(tmpdir(), "penguin-retention-"));
+  const store = KnowledgeStore.open({ dbPath: join(dir, "knowledge.db"), ledgerPath: join(dir, "ledger.jsonl") });
+  const repoId = store.registerRepo({ name: "retention", rootPath: join(dir, "repo") });
+  const now = new Date();
+  const snapshot = (id, ageDays, state = "ready", base = null) => store.db.prepare("INSERT INTO revision_snapshots (id,snapshot_key,repo_id,commit_sha,parser_version,resolver_version,schema_version,base_snapshot_id,state,created_at,last_accessed_at,pinned) VALUES (?,?,?,?,?,?,?,?,?,?,?,0)").run(id, id, repoId, id, "p1", "r1", 9, base, state, new Date(now - ageDays * 86400000).toISOString(), new Date(now - ageDays * 86400000).toISOString());
+  for (let i = 0; i < 30; i++) snapshot(`feature-${i}`, i < 5 ? 1 : 20);
+  snapshot("default", 100); snapshot("deployed", 100); snapshot("pinned", 100); snapshot("base", 100);
+  store.db.prepare("UPDATE revision_snapshots SET pinned=1 WHERE id='pinned'").run();
+  store.db.prepare("UPDATE revision_snapshots SET base_snapshot_id='base' WHERE id='feature-0'").run();
+  const main = store.registerBranch({ repoId, name: "main", status: "live" });
+  store.db.prepare("UPDATE branches SET default_branch=1,current_snapshot_id='default' WHERE id=?").run(main);
+  const pinned = store.registerBranch({ repoId, name: "pinned", status: "snapshot" });
+  store.db.prepare("UPDATE branches SET pinned=1,current_snapshot_id='pinned' WHERE id=?").run(pinned);
+  for (let i = 0; i < 498; i++) store.registerBranch({ repoId, name: `catalog-${i}`, status: "gone" });
+  store.db.prepare("INSERT INTO deployment_revisions (target_id,repo_id,commit_sha,deployed_from,source) VALUES ('prod',?,?,?,?)").run(repoId, "deployed", "2026-01-01", "fixture");
+  const plan = planRevisionCollection(store, repoId);
+  assert.equal(plan.policy.maxHotFeatureViews, DEFAULT_REVISION_RETENTION.maxHotFeatureViews);
+  assert.equal(plan.policy.coldAfterDays, 14);
+  assert.equal(plan.policy.deletedBranchRecoveryDays, 30);
+  assert.ok(plan.keep.some((item) => item.snapshotId === "default" && item.reasons.includes("default")));
+  assert.ok(plan.keep.some((item) => item.snapshotId === "deployed" && item.reasons.includes("deployed")));
+  assert.ok(plan.keep.some((item) => item.snapshotId === "base" && item.reasons.includes("overlay_base")));
+  assert.equal(plan.keep.filter((item) => item.reasons.includes("hot_feature_limit")).length, 20);
+  applyRevisionCollection(store, plan);
+  assert.equal(store.db.prepare("SELECT count(*) AS n FROM branches WHERE repo_id=?").get(repoId).n, 500);
+  assert.equal(store.db.prepare("SELECT count(*) AS n FROM revision_snapshots WHERE repo_id=? AND state='ready' AND pinned=0").get(repoId).n >= 4, true);
+  store.close();
+});

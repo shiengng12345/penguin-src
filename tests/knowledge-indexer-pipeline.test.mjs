@@ -172,6 +172,33 @@ test("indexRepo: full index then incremental skip; rename detection", async () =
   store.close();
 });
 
+test("indexRepo: a new branch reuses the master manifest and stores only changed overlays", async () => {
+  const root = tempRepo();
+  writeGit(root, "ref: refs/heads/main\n", { main: "c0", feature: "c1" });
+  mkdirSync(join(root, "src"), { recursive: true });
+  writeFileSync(join(root, "src", "shared.ts"), "export const shared = 1;\n");
+  writeFileSync(join(root, "src", "main-only.ts"), "export const mainOnly = 1;\n");
+  const store = openStore();
+  const main = await indexRepo({ store, rootPath: root, mode: "incremental" });
+  const mainSnapshot = store.getBranch(main.repoId, "main").current_snapshot_id;
+
+  writeGit(root, "ref: refs/heads/feature\n", { main: "c0", feature: "c1" });
+  rmSync(join(root, "src", "main-only.ts"));
+  writeFileSync(join(root, "src", "feature-only.ts"), "export const featureOnly = 1;\n");
+  const feature = await indexRepo({ store, rootPath: root, mode: "incremental" });
+  const featureSnapshot = store.getBranch(feature.repoId, "feature").current_snapshot_id;
+  assert.equal(store.db.prepare("SELECT base_snapshot_id FROM revision_snapshots WHERE id=?").get(featureSnapshot).base_snapshot_id, mainSnapshot);
+  assert.deepEqual(
+    store.db.prepare("SELECT file_path AS filePath, operation FROM snapshot_overlays WHERE snapshot_id=? ORDER BY file_path").all(featureSnapshot),
+    [
+      { filePath: "src/feature-only.ts", operation: "add" },
+      { filePath: "src/main-only.ts", operation: "delete" },
+    ],
+  );
+  assert.equal(store.db.prepare("SELECT 1 FROM snapshot_overlays WHERE snapshot_id=? AND file_path='src/shared.ts'").get(featureSnapshot), undefined);
+  store.close();
+});
+
 test("indexRepo: log literal is a searchable log_site linked to its enclosing method", async () => {
   const root = tempRepo();
   writeGit(root, "ref: refs/heads/main\n", { main: "c0" });

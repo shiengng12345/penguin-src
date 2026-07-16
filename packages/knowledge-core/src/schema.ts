@@ -47,8 +47,69 @@ CREATE TABLE IF NOT EXISTS branches (
   parser_version TEXT,
   indexed_schema_version INTEGER,
   stale_reason TEXT,
+  pinned INTEGER NOT NULL DEFAULT 0,
+  default_branch INTEGER NOT NULL DEFAULT 0,
+  base_branch_name TEXT,
+  merge_base_commit TEXT,
+  current_snapshot_id TEXT,
+  last_accessed_at TEXT,
+  deleted_at TEXT,
+  recover_until TEXT,
   UNIQUE (repo_id, name)
 );
+
+CREATE TABLE IF NOT EXISTS git_commits (
+  repo_id TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  tree_hash TEXT,
+  parent_shas TEXT NOT NULL DEFAULT '[]',
+  committed_at TEXT,
+  history_state TEXT NOT NULL DEFAULT 'complete',
+  PRIMARY KEY (repo_id, commit_sha)
+);
+
+CREATE TABLE IF NOT EXISTS revision_snapshots (
+  id TEXT PRIMARY KEY,
+  snapshot_key TEXT NOT NULL UNIQUE,
+  repo_id TEXT NOT NULL,
+  commit_sha TEXT,
+  worktree_fingerprint TEXT,
+  parser_version TEXT NOT NULL,
+  resolver_version TEXT NOT NULL,
+  schema_version INTEGER NOT NULL,
+  base_snapshot_id TEXT,
+  merge_base_sha TEXT,
+  state TEXT NOT NULL CHECK (state IN ('building','ready','failed','cold')),
+  failure_reason TEXT,
+  created_at TEXT NOT NULL,
+  published_at TEXT,
+  last_accessed_at TEXT NOT NULL,
+  pinned INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_revision_snapshots_repo_commit
+  ON revision_snapshots(repo_id, commit_sha);
+
+CREATE TABLE IF NOT EXISTS deployment_revisions (
+  target_id TEXT NOT NULL,
+  repo_id TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  deployed_from TEXT NOT NULL,
+  deployed_to TEXT,
+  source TEXT NOT NULL,
+  PRIMARY KEY (target_id, repo_id, deployed_from)
+);
+
+CREATE TABLE IF NOT EXISTS revision_references (
+  ref_type TEXT NOT NULL,
+  ref_key TEXT NOT NULL,
+  repo_id TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  snapshot_id TEXT,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (ref_type, ref_key, repo_id, commit_sha)
+);
+CREATE INDEX IF NOT EXISTS idx_revision_references_snapshot
+  ON revision_references(snapshot_id);
 
 CREATE TABLE IF NOT EXISTS nodes (
   id TEXT PRIMARY KEY,
@@ -250,9 +311,96 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts_symbols USING fts5(
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_identifiers USING fts5(
   name, repo_id UNINDEXED, file_path UNINDEXED, start_line UNINDEXED, kind UNINDEXED
 );
+
+CREATE TABLE IF NOT EXISTS file_facts (
+  id TEXT PRIMARY KEY,
+  repo_id TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  language TEXT NOT NULL,
+  parser_version TEXT NOT NULL,
+  facts_json TEXT NOT NULL,
+  exports_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE (repo_id, file_path, content_hash, language, parser_version)
+);
+CREATE TABLE IF NOT EXISTS file_fact_symbols (
+  file_fact_id TEXT NOT NULL,
+  identity_key TEXT NOT NULL,
+  title TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  signature TEXT,
+  start_line INTEGER,
+  end_line INTEGER,
+  content_hash TEXT NOT NULL,
+  PRIMARY KEY (file_fact_id, identity_key)
+);
+CREATE TABLE IF NOT EXISTS snapshot_overlays (
+  snapshot_id TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  operation TEXT NOT NULL CHECK (operation IN ('add','modify','delete')),
+  file_fact_id TEXT,
+  renamed_from TEXT,
+  PRIMARY KEY (snapshot_id, file_path),
+  CHECK ((operation = 'delete' AND file_fact_id IS NULL) OR
+         (operation IN ('add','modify') AND file_fact_id IS NOT NULL))
+);
+CREATE TABLE IF NOT EXISTS effective_snapshot_files (
+  snapshot_id TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  file_fact_id TEXT NOT NULL,
+  PRIMARY KEY (snapshot_id, file_path)
+);
+CREATE TABLE IF NOT EXISTS snapshot_rename_events (
+  snapshot_id TEXT NOT NULL,
+  from_path TEXT NOT NULL,
+  to_path TEXT NOT NULL,
+  file_fact_id TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  PRIMARY KEY (snapshot_id, from_path, to_path)
+);
+
+CREATE TABLE IF NOT EXISTS resolution_sets (
+  id TEXT PRIMARY KEY,
+  file_fact_id TEXT NOT NULL,
+  context_fingerprint TEXT NOT NULL,
+  resolver_version TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE (file_fact_id, context_fingerprint, resolver_version)
+);
+CREATE TABLE IF NOT EXISTS resolved_edges (
+  id TEXT PRIMARY KEY,
+  resolution_set_id TEXT NOT NULL,
+  src_identity_key TEXT NOT NULL,
+  dst_identity_key TEXT,
+  raw_target TEXT,
+  edge_type TEXT NOT NULL,
+  method TEXT NOT NULL,
+  confidence REAL NOT NULL,
+  provenance TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_resolved_edges_set ON resolved_edges(resolution_set_id);
+CREATE TABLE IF NOT EXISTS snapshot_resolution_refs (
+  snapshot_id TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  resolution_set_id TEXT NOT NULL,
+  PRIMARY KEY (snapshot_id, file_path)
+);
+CREATE TABLE IF NOT EXISTS global_resolved_edges (
+  id TEXT PRIMARY KEY,
+  producer_key TEXT NOT NULL,
+  src_identity_key TEXT NOT NULL,
+  dst_identity_key TEXT,
+  raw_target TEXT,
+  edge_type TEXT NOT NULL,
+  method TEXT NOT NULL,
+  confidence REAL NOT NULL,
+  provenance TEXT NOT NULL DEFAULT '{}',
+  UNIQUE (producer_key, src_identity_key, dst_identity_key, edge_type)
+);
 `;
 
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 9;
 
 // Idempotent additive migrations for schemas that predate SCHEMA_VERSION.
 // Each step guards on actual schema state (column presence) rather than the
@@ -296,6 +444,34 @@ function migrate(db: Database.Database, _from: number): void {
   if (!branchCols.includes("stale_reason")) {
     db.exec("ALTER TABLE branches ADD COLUMN stale_reason TEXT");
   }
+  for (const [column, definition] of [
+    ["default_branch", "INTEGER NOT NULL DEFAULT 0"],
+    ["base_branch_name", "TEXT"],
+    ["merge_base_commit", "TEXT"],
+    ["current_snapshot_id", "TEXT"],
+    ["last_accessed_at", "TEXT"],
+    ["deleted_at", "TEXT"],
+    ["recover_until", "TEXT"],
+  ] as const) {
+    if (!branchCols.includes(column)) db.exec(`ALTER TABLE branches ADD COLUMN ${column} ${definition}`);
+  }
+  ensureOneDefaultBranchIndex(db);
+}
+
+function ensureOneDefaultBranchIndex(db: Database.Database): void {
+  const defaults = db.prepare(
+    `SELECT id, repo_id AS repoId
+       FROM branches
+      WHERE default_branch=1
+        AND name NOT IN ('(detached)', '(workdir)')
+      ORDER BY repo_id, last_indexed_at DESC, name ASC`,
+  ).all() as Array<{ id: string; repoId: string }>;
+  const keep = new Set<string>();
+  for (const row of defaults) {
+    if (keep.has(row.repoId)) db.prepare("UPDATE branches SET default_branch=0 WHERE id=?").run(row.id);
+    else keep.add(row.repoId);
+  }
+  db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_branches_one_default_per_repo ON branches(repo_id) WHERE default_branch=1");
 }
 
 // Object names DDL creates (tables/indexes/triggers/views), parsed from the
@@ -332,8 +508,17 @@ function isSchemaCurrent(db: Database.Database): boolean {
     "parser_version",
     "indexed_schema_version",
     "stale_reason",
+    "pinned",
+    "default_branch",
+    "base_branch_name",
+    "merge_base_commit",
+    "current_snapshot_id",
+    "last_accessed_at",
+    "deleted_at",
+    "recover_until",
   ];
   if (!requiredBranchColumns.every((column) => branchCols.includes(column))) return false;
+  if (!have.has("idx_branches_one_default_per_repo")) return false;
   return db.prepare("SELECT 1 FROM ledger_state WHERE id='main'").get() != null;
 }
 

@@ -37,6 +37,8 @@ export interface ParsedEdge {
   // Frontend-origin provenance tag (e.g. "frontend_web" / "frontend_mobile")
   // for cross-service invokes edges parsed out of client code.
   sourceType?: string;
+  // Additional parser evidence, such as dependency specifier and resolved version.
+  provenance?: Record<string, unknown>;
 }
 
 export interface NodeRow {
@@ -89,7 +91,18 @@ export interface BranchRow {
   last_indexed_at: string | null;
   checkout_path: string | null;
   status: string;
+  default_branch?: number;
+  base_branch_name?: string | null;
   parser_version: string | null;
+  current_snapshot_id?: string | null;
+}
+
+export interface MasterBranchSelection {
+  repoId: string;
+  branchId: string;
+  branch: string;
+  previousBranchId: string | null;
+  changed: boolean;
 }
 
 export type FileStatus = "indexed" | "deleted" | "error" | "skipped";
@@ -313,6 +326,32 @@ export class KnowledgeStore {
 
   setBranchStatus(branchId: string, status: BranchStatus): void {
     this.db.prepare("UPDATE branches SET status = ? WHERE id = ?").run(status, branchId);
+  }
+
+  /** Select the repository's canonical base branch for COW/revision defaults. */
+  getDefaultBranch(repoId: string): BranchRow | null {
+    return (this.db.prepare("SELECT * FROM branches WHERE repo_id=? AND default_branch=1 LIMIT 1").get(repoId) as BranchRow | undefined) ?? null;
+  }
+
+  setDefaultBranch(repoId: string, branchId: string): MasterBranchSelection {
+    const tx = this.db.transaction(() => {
+      const selected = this.db
+        .prepare("SELECT * FROM branches WHERE id=? AND repo_id=?")
+        .get(branchId, repoId) as BranchRow | undefined;
+      if (!selected) throw new Error("branch does not belong to repository");
+      if (selected.name === "(detached)" || selected.name === "(workdir)") throw new Error("detached or non-Git worktrees cannot become canonical master");
+      const previous = this.getDefaultBranch(repoId);
+      this.db.prepare("UPDATE branches SET default_branch=0, base_branch_name=? WHERE repo_id=?").run(selected.name, repoId);
+      this.db.prepare("UPDATE branches SET default_branch=1, base_branch_name=NULL WHERE id=?").run(branchId);
+      return {
+        repoId,
+        branchId,
+        branch: selected.name,
+        previousBranchId: previous?.id ?? null,
+        changed: previous?.id !== branchId,
+      } satisfies MasterBranchSelection;
+    });
+    return tx();
   }
 
   recordBranchIndexed(p: {
@@ -762,7 +801,7 @@ export class KnowledgeStore {
           e.branchless ? null : p.branchId,
           e.method,
           e.confidence ?? 1.0,
-          JSON.stringify({ file: p.filePath, repo: p.repoId }),
+          JSON.stringify({ ...(e.provenance ?? {}), file: p.filePath, repo: p.repoId }),
           e.sourceType ?? null,
         );
       }

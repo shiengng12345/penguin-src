@@ -12,13 +12,56 @@ export {
   type LedgerTarget,
 } from "./ledger.js";
 export { SCHEMA_VERSION, openDatabase } from "./schema.js";
+export {
+  packageDependencies,
+  dependencyPath,
+  type DependencyDirection,
+  type PackageDependencyNode,
+  type PackageDependencyQueryResult,
+  type DependencyPathResult,
+} from "./package-query.js";
 export { materialize, LedgerGapError } from "./materializer.js";
 export {
   KnowledgeStore,
   type NodeRow,
   type ParsedEdge,
   type SearchHit,
+  type MasterBranchSelection,
 } from "./store.js";
+export {
+  resolveRevisionContext,
+  requireRevisionContext,
+  RevisionResolutionError,
+  type RevisionSelector,
+  type RevisionContext,
+  type RevisionResolution,
+} from "./revision.js";
+export { legacyRevisionScope, type RevisionReadScope } from "./revision-scope.js";
+export {
+  GitTopologyStore,
+  type GitCommitRecord,
+  type CreateSnapshotInput,
+  type RevisionSnapshot,
+  type DeploymentRevision,
+  type RevisionReference,
+} from "./git-topology-store.js";
+export {
+  FileFactStore,
+  fileFactId,
+  type FileFactSymbol,
+  type ParsedFileFact,
+  type ParsedImportFact,
+  type ParsedReferenceFact,
+  type ParsedEndpointFact,
+  type ParsedLogSiteFact,
+  type SnapshotOverlayEntry,
+  type SnapshotRenameEvent,
+} from "./file-fact-store.js";
+export { ResolutionStore, type ResolvedEdgeFact, type ResolutionSetRecord } from "./resolution-store.js";
+export { DEFAULT_REVISION_RETENTION, planRevisionCollection, applyRevisionCollection, type RevisionRetentionPolicy, type RevisionCollectionPlan, type RevisionCollectionApplyResult } from "./revision-retention.js";
+export { openRevisionView, type RevisionView, type RevisionFileRow, type RevisionSymbolRow, type RevisionEdgeFilter, type RevisionEdgeRow } from "./revision-view.js";
+export { CodeVersionResolver, type CodeVersionRequest, type CodeVersionResolution, type CodeVersionResolverDeps } from "./code-version-resolver.js";
+export { resolveBranchBase, type BranchBaseInput, type BranchBaseReason, type BranchBaseResolution } from "./branch-base.js";
 export {
   search,
   getNodeDetail,

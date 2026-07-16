@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { basename, dirname, relative, resolve as pathResolve } from "node:path";
-import { SCHEMA_VERSION, type KnowledgeStore, type ParsedEdge } from "@penguin/knowledge-core";
+import { SCHEMA_VERSION, GitTopologyStore, FileFactStore, resolveBranchBase, type KnowledgeStore, type ParsedFileFact, type ParsedEdge, type SnapshotOverlayEntry } from "@penguin/knowledge-core";
 import { extractSymbols, type ExtractedSymbol } from "./extract.js";
 import { grpcEndpointKey } from "./grpc-client.js";
 import { allForwardingMethods, extractFunctionNameCalls } from "./frontend-grpc-client.js";
@@ -217,6 +217,7 @@ async function indexFileWithSource(
     mtimeMs: number;
     sizeBytes: number;
     recordRenames?: boolean;
+    snapshotId?: string;
   },
 ): Promise<{
   error: string | null;
@@ -227,6 +228,7 @@ async function indexFileWithSource(
   // Bare names that resolved to ZERO candidates (forward references) — the
   // caller retries this file in a second pass once the symbol table is full.
   retryNames: string[];
+  fileFactId?: string;
 }> {
   const lang = langForExtension(p.relPath);
   // Skip non-source files AND minified/generated bundles that slipped past the
@@ -252,6 +254,13 @@ async function indexFileWithSource(
     });
     return { error: extracted.parseError, renamed: 0, endpoints: [], retryNames: [] };
   }
+  const fileFactId = new FileFactStore(store).upsertFileFact({
+    repoId: p.repoId, filePath: p.relPath, contentHash: p.contentHash,
+    language: lang, parserVersion: "parser-v1",
+    exportsHash: createHash("sha256").update(extracted.symbols.map((symbol) => symbol.qualifiedName).sort().join("\n")).digest("hex"),
+    symbols: extracted.symbols.map((symbol) => ({ identityKey: symbolIdentityKey(p.repoId, p.relPath, symbol.qualifiedName), title: symbol.name, kind: symbol.kind, ...(symbol.signature ? { signature: symbol.signature } : {}), startLine: symbol.startLine, endLine: symbol.endLine, contentHash: symbol.contentHash })),
+    imports: [], unresolvedReferences: [], endpoints: [], logSites: [],
+  });
   // Hoisted out of the write-transaction closure below so the return can see it.
   let retryNames: string[] = [];
 
@@ -546,6 +555,7 @@ async function indexFileWithSource(
     renamed,
     endpoints: extracted.endpoints.map((e) => ({ key: e.key, protocol: e.protocol })),
     retryNames,
+    fileFactId,
   };
 }
 
@@ -603,6 +613,37 @@ export async function indexRepo(input: {
   // Cross-process guard (app calls spawn a fresh CLI process each time, so the
   // in-process lock above cannot see them): a DB marker removeBranch checks.
   store.acquireIndexMarker(branchId);
+  const topology = new GitTopologyStore(store);
+  const canonical = store.getDefaultBranch(repoId);
+  const baseResolution = resolveBranchBase({
+    repoId,
+    targetBranch: git.isGit && !["(detached)", "(workdir)"].includes(git.branch) ? git.branch : null,
+    canonicalMaster: canonical?.name ?? null,
+    priorSnapshotId: prior?.current_snapshot_id ?? null,
+    priorCommitSha: prior?.last_indexed_commit ?? null,
+    mergeBaseSha: null,
+    mergeBaseSnapshotId: null,
+    canonicalSnapshotId: canonical?.current_snapshot_id ?? null,
+    canonicalCommitSha: canonical?.last_indexed_commit ?? null,
+    historyState: git.isGit ? "missing" : "not_git",
+  });
+  const baseSnapshotId = baseResolution.baseSnapshotId ?? undefined;
+  const snapshot = topology.createBuildingSnapshot({
+    snapshotKey: `${repoId}:${git.commit ?? git.worktreeFingerprint}:${KNOWLEDGE_PARSER_VERSION}:resolver-v1:${SCHEMA_VERSION}`,
+    repoId,
+    ...(git.commit ? { commitSha: git.commit } : {}),
+    worktreeFingerprint: git.worktreeFingerprint,
+    parserVersion: KNOWLEDGE_PARSER_VERSION,
+    resolverVersion: "resolver-v1",
+    schemaVersion: SCHEMA_VERSION,
+    ...(baseSnapshotId ? { baseSnapshotId } : {}),
+  });
+  let snapshotAlreadyReady = snapshot.state === "ready";
+  if (snapshot.state === "failed" || snapshot.state === "cold") {
+    store.db.prepare("UPDATE revision_snapshots SET state='building', failure_reason=NULL, last_accessed_at=? WHERE id=?").run(new Date().toISOString(), snapshot.id);
+    snapshotAlreadyReady = false;
+  }
+  let snapshotPublished = false;
 
   const report: IndexReport = {
     repoId, branchId, branchName: git.branch, commit: git.commit,
@@ -689,6 +730,9 @@ export async function indexRepo(input: {
     // replayPendingFrontendEdges() would insert a second, duplicate edge
     // (it has no (src,dst) existence check — see idempotency).
     const reprocessedFiles = new Set<string>();
+    const factStore = new FileFactStore(store);
+    const baseManifest = baseSnapshotId ? factStore.effectiveManifest(baseSnapshotId) : new Map<string, string>();
+    const targetManifest = new Map(baseManifest);
     // Files whose refs had zero-candidate (forward-reference) misses in the
     // first pass — retried below once the full symbol table exists.
     const retryByFile = new Map<string, { file: (typeof files)[number]; names: string[] }>();
@@ -706,6 +750,10 @@ export async function indexRepo(input: {
         effectiveMode === "incremental" && prev && prev.status !== "error" &&
         prev.mtime_ms === file.mtimeMs && prev.size_bytes === file.sizeBytes
       ) {
+        const fact = store.db.prepare(
+          "SELECT id FROM file_facts WHERE repo_id=? AND file_path=? AND content_hash=? AND language=? AND parser_version=? LIMIT 1",
+        ).get(repoId, file.relPath, prev.content_hash, langOf(file.relPath), KNOWLEDGE_PARSER_VERSION) as { id: string } | undefined;
+        if (fact) targetManifest.set(file.relPath, fact.id);
         report.skipped += 1;
         continue;
       }
@@ -733,11 +781,13 @@ export async function indexRepo(input: {
         absPath: file.absPath, rootPath: scanRoot,
         source, contentHash, mtimeMs: file.mtimeMs, sizeBytes: file.sizeBytes,
         recordRenames: effectiveMode !== "rebuild",
+        snapshotId: snapshot.id,
       });
       if (r.error) report.errors += 1;
       else report.parsed += 1;
       report.renamed += r.renamed;
       if (r.retryNames.length > 0) retryByFile.set(file.relPath, { file, names: r.retryNames });
+      if (r.fileFactId) targetManifest.set(file.relPath, r.fileFactId);
       for (const ep of r.endpoints) {
         endpointsFound += 1;
         emit?.({ phase: "discovery", kind: "endpoint", title: ep.key, file: file.relPath });
@@ -768,8 +818,10 @@ export async function indexRepo(input: {
           absPath: file.absPath, rootPath: scanRoot,
           source, contentHash: sha256(source), mtimeMs: file.mtimeMs, sizeBytes: file.sizeBytes,
           recordRenames: effectiveMode !== "rebuild",
+          snapshotId: snapshot.id,
         });
         if (!r2.error) reResolved += 1;
+        if (!r2.error && r2.fileFactId) targetManifest.set(file.relPath, r2.fileFactId);
       }
     }
     stageDone(
@@ -794,6 +846,23 @@ export async function indexRepo(input: {
         )
         .run(branchId, cp.file_path);
       report.deleted += 1;
+    }
+    for (const path of [...targetManifest.keys()]) {
+      if (!seen.has(path)) targetManifest.delete(path);
+    }
+    const cowOverlayEntries: SnapshotOverlayEntry[] = [];
+    for (const [path, fileFactId] of targetManifest) {
+      const baseFactId = baseManifest.get(path);
+      if (!baseFactId) cowOverlayEntries.push({ op: "add", path, fileFactId });
+      else if (baseFactId !== fileFactId) cowOverlayEntries.push({ op: "modify", path, fileFactId });
+    }
+    for (const path of baseManifest.keys()) {
+      if (!targetManifest.has(path)) cowOverlayEntries.push({ op: "delete", path, fileFactId: null });
+    }
+    if (!snapshotAlreadyReady) {
+      factStore.replaceOverlay(snapshot.id, cowOverlayEntries);
+      factStore.materializeManifest(snapshot.id);
+      factStore.assertManifestMatches(snapshot.id, targetManifest);
     }
     stageDone("deletes", report.deleted > 0 ? `${report.deleted} removed` : undefined);
     stageStart("proto");
@@ -1003,8 +1072,8 @@ export async function indexRepo(input: {
     stageStart("packages");
 
     // ── Package dependency detection: npm package ↔ repo mapping for the
-    // cross-repo service graph. Creates service nodes for published packages
-    // and depends_on edges for @snsoft-scoped dependencies.
+    // cross-repo service graph. Package metadata comes from committed manifest
+    // and optional lockfile files; it never requires target-repo node_modules.
     const pkg = detectPackages(scanRoot, repoId);
     if (pkg) {
       const extraMappings: Array<{ name: string; repoId: string }> = [];
@@ -1023,40 +1092,56 @@ export async function indexRepo(input: {
         if (!allPkgs.some((a) => a.name === e.name)) allPkgs.push(e);
       }
 
-      if (allPkgs.length > 0 || pkg.dependencies.length > 0) {
-        const tx = store.db.transaction(() => {
-          const consumerName = pkg.name || repoId;
-          const consumerId = store.upsertNode({
-            nodeType: "service",
-            identityKey: `npm-package::${consumerName}`,
-            repoId,
-            title: consumerName,
-            meta: { package: consumerName },
-          });
+      const publishedRepoIds = new Map(allPkgs.map((item) => [item.name, item.repoId]));
+      const dependencyEdges = [
+        ...pkg.dependencyEdges,
+        ...(pkg.subPackages ?? []).flatMap((sub) => sub.dependencyEdges),
+      ];
 
-          for (const api of allPkgs) {
+      if (allPkgs.length > 0 || dependencyEdges.length > 0) {
+        const tx = store.db.transaction(() => {
+          const packageNodes = new Map<string, string>();
+          const ensurePackageNode = (name: string): string => {
+            const existing = packageNodes.get(name);
+            if (existing) return existing;
             store.upsertNode({
               nodeType: "service",
-              identityKey: `npm-package::${api.name}`,
-              repoId: api.repoId,
-              title: api.name,
-              meta: { package: api.name },
+              identityKey: `npm-package::${name}`,
+              repoId: publishedRepoIds.get(name) ?? null,
+              title: name,
+              meta: { package: name },
             });
+            const node = store.db.prepare(
+              "SELECT id FROM nodes WHERE identity_key = ? LIMIT 1",
+            ).get(`npm-package::${name}`) as { id: string };
+            packageNodes.set(name, node.id);
+            return node.id;
+          };
+
+          for (const api of allPkgs) ensurePackageNode(api.name);
+
+          const uniqueEdges = new Map<string, (typeof dependencyEdges)[number]>();
+          for (const edge of dependencyEdges) {
+            uniqueEdges.set(
+              `${edge.from}\0${edge.to}\0${edge.resolvedVersion ?? ""}`,
+              edge,
+            );
           }
 
           const dt: ParsedEdge[] = [];
-          for (const dep of pkg.dependencies) {
-            const depId = store.upsertNode({
-              nodeType: "service",
-              identityKey: `npm-package::${dep}`,
-              repoId: null,
-              title: dep,
-              meta: { package: dep },
-            });
+          for (const edge of uniqueEdges.values()) {
+            const srcId = ensurePackageNode(edge.from);
+            const dstId = ensurePackageNode(edge.to);
             dt.push({
-              src: consumerId, dst: depId,
+              src: srcId, dst: dstId,
               edgeType: "depends_on",
               origin: "parser", method: "EXTRACTED",
+              provenance: {
+                source: edge.source,
+                scope: edge.scope,
+                specifier: edge.specifier,
+                resolvedVersion: edge.resolvedVersion ?? null,
+              },
             });
           }
           if (dt.length > 0) {
@@ -1089,11 +1174,22 @@ export async function indexRepo(input: {
       schemaVersion: report.schemaVersion,
       staleReason: report.staleReason,
     });
+    if (!snapshotAlreadyReady) topology.markSnapshotReady(snapshot.id);
+    topology.publishSnapshot({ branchId, snapshotId: snapshot.id, headCommit: git.commit });
+    snapshotPublished = true;
     // Success: NOW the branch is trustworthy — promote it to live and flip the
     // previously-indexed branch of THIS checkout to snapshot (design review
     // Q5 + validation V1: neither may happen on a failed run).
     store.setBranchStatus(branchId, "live");
     store.demoteSiblingBranches({ repoId, keepBranchId: branchId, checkoutPath: git.checkoutPath });
+    if (git.isGit && git.branch !== "(detached)" && !store.getDefaultBranch(repoId)) {
+      try { store.setDefaultBranch(repoId, branchId); } catch (error) {
+        // Another successful first index may have elected the master between
+        // the check and this transaction. The unique index makes that race
+        // safe; preserve the already-published branch rather than failing it.
+        if (!String((error as Error).message ?? error).match(/UNIQUE|constraint|busy/i)) throw error;
+      }
+    }
     if (rebuildTransactionOpen) {
       store.db.exec("COMMIT");
       rebuildTransactionOpen = false;
@@ -1103,6 +1199,9 @@ export async function indexRepo(input: {
     if (rebuildTransactionOpen && store.db.inTransaction) {
       store.db.exec("ROLLBACK");
       rebuildTransactionOpen = false;
+    }
+    if (!snapshotPublished) {
+      try { topology.markSnapshotFailed(snapshot.id, String((error as Error).message ?? error)); } catch { /* preserve original indexing error */ }
     }
     throw error;
   } finally {

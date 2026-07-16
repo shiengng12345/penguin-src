@@ -23,17 +23,25 @@ import {
   listSuggestions,
   listTags,
   repoGraph,
+  planRevisionCollection,
+  applyRevisionCollection,
   search,
   resolveSymbolMatches,
   renderAmbiguousSymbols,
+  requireRevisionContext,
+  RevisionResolutionError,
   type GraphMode,
   type KnowledgeStore,
 } from "@penguin/knowledge-core";
-import { indexRepo, startWatcher, createNote, createIncident, appendNote, writeNoteBody, readNote, listNotes, reindexNotesDir } from "@penguin/knowledge-indexer";
+import { indexRepo, indexRevision, RevisionIndexCoordinator, startWatcher, createNote, createIncident, appendNote, writeNoteBody, readNote, listNotes, reindexNotesDir, listEvidenceNotes, setEvidenceStatus, evidenceDoctor, repairEvidence, readGitContext, type EvidenceLifecycle } from "@penguin/knowledge-indexer";
 import { resolveProvider, aiComplete } from "./ai.js";
 import { runClaudeHook } from "./claude-hook.js";
 import { createIndexRenderer } from "./render-progress.js";
 import { discoverSubRepos, isGitRepo, type RepoCandidate } from "./multi-repo.js";
+import { runApiDocCommand } from "./api-doc-command.js";
+import { createKnowledgeApiDocAdapter } from "./api-doc-knowledge-adapter.js";
+import { createLarkProcessRunner, LarkCliDocumentClient, type LarkProcessRunner } from "./lark-document-client.js";
+export { LarkDocumentBindingStore, type LarkDocumentBinding, type ExplicitBindingInput, type LarkBindingCandidate } from "./api-doc-binding-store.js";
 
 export interface CliDeps {
   cwd: string;
@@ -65,6 +73,11 @@ export interface CliDeps {
   // Hook input is supplied only by the executable entrypoint and is bounded
   // there before parsing. Tests inject it directly; normal CLI verbs ignore it.
   readStdin?: () => Promise<string>;
+  apiDocPreviewRoot?: string;
+  apiDocSourceAdapter?: import("@penguin/api-doc-generator").DocumentationSourceAdapter;
+  apiDocBindingPath?: string;
+  apiDocLarkClient?: import("@penguin/api-doc-generator").LarkSectionClient;
+  larkProcessRunner?: LarkProcessRunner;
 }
 
 const READ_VERBS = new Set([
@@ -74,7 +87,8 @@ const READ_VERBS = new Set([
 ]);
 
 // repo/branch args accept an id OR a name (humans pass names; the Wiki passes
-// ids from `status`). Branch omitted → the repo's single/first branch.
+// ids from `status`). Branch omitted → the repo's sole live branch. Ambiguity
+// is an error; silently choosing alphabetical history is unsafe.
 function resolveRepoId(store: KnowledgeStore, s: string | undefined): string | null {
   if (!s) return null;
   const row = store.db
@@ -84,15 +98,35 @@ function resolveRepoId(store: KnowledgeStore, s: string | undefined): string | n
 }
 function resolveBranchId(store: KnowledgeStore, repoId: string, s: string | undefined): string | null {
   if (!s) {
-    const row = store.db
-      .prepare("SELECT id FROM branches WHERE repo_id=? ORDER BY name LIMIT 1")
-      .get(repoId) as { id: string } | undefined;
-    return row?.id ?? null;
+    return requireRevisionContext(store, { repoId }).branchId ?? null;
   }
   const row = store.db
     .prepare("SELECT id FROM branches WHERE repo_id=? AND (id=? OR name=?) LIMIT 1")
     .get(repoId, s, s) as { id: string } | undefined;
   return row?.id ?? null;
+}
+
+function reportRevisionResolutionError(deps: CliDeps, error: unknown): void {
+  if (!(error instanceof RevisionResolutionError)) throw error;
+  const candidates = error.candidates.slice(0, 20).map((candidate) =>
+    `${candidate.branch ?? "(unnamed)"} commit=${candidate.commitSha} --branch ${candidate.branch ?? ""}`,
+  );
+  deps.err([
+    error.message,
+    candidates.length > 0 ? `Candidates:\n${candidates.join("\n")}` : "",
+    "Specify --branch, --commit, or --snapshot to select a revision.",
+  ].filter(Boolean).join("\n"));
+}
+
+function resolveCliRevision(store: KnowledgeStore, target: string, selector: { repo?: string; branch?: string; commitSha?: string; snapshotId?: string }): import("@penguin/knowledge-core").RevisionContext | undefined {
+  if (!selector.repo && !selector.branch && !selector.commitSha && !selector.snapshotId) return undefined;
+  let repoId = selector.repo ? resolveRepoId(store, selector.repo) : undefined;
+  if (!repoId) {
+    const match = resolveSymbolMatches(store, target);
+    if (match.kind === "unique") repoId = store.getNode(match.nodeId)?.repo_id ?? undefined;
+  }
+  if (!repoId) throw new Error("--repo is required when selecting --branch, --commit, or --snapshot");
+  return requireRevisionContext(store, { repoId, branch: selector.branch, commitSha: selector.commitSha, snapshotId: selector.snapshotId });
 }
 const GRAPH_VERB_MODE: Record<string, GraphMode> = {
   callers: "who_calls", calls: "calls_of", impact: "impact",
@@ -108,9 +142,11 @@ const HELP = `penguin — Penguin Knowledge CLI
   penguin init [path]           register + first-index a repo (folder of repos → interactive picker)
   penguin index [path]          one-shot incremental index
   penguin rebuild [path]        full re-index (parser-derived data)
+  penguin materialize <repo> (--branch <name> | --commit <sha>) on-demand immutable revision
   penguin watch [path]          long-running auto-index (debounced, stays running until killed)
   penguin remove <repo> [br]    remove a repo (or one branch) from the index
   penguin pin <repo> <branch>   toggle pin (pinned branches are never auto-pruned)
+  penguin master [repo] [branch] set the current/selected branch as canonical master
   penguin status                repos / branches / staleness
   penguin search <query>        unified search
   penguin node <id|name>        node detail + versions + aliases
@@ -147,6 +183,13 @@ const HELP = `penguin — Penguin Knowledge CLI
   penguin note append <id> <txt> append text to a note (re-indexes)
   penguin note list             list note files
   penguin note reindex          re-scan the notes dir into the index
+  penguin evidence list         list captured SLS evidence notes (--target/--status/--json)
+  penguin evidence status <slug> <reviewed|verified|resolved|archived>
+  penguin evidence doctor       inspect evidence/index integrity
+  penguin evidence repair       reindex valid evidence and remove dead locks
+  penguin api-doc generate      generate a revision-aware local API documentation preview
+  penguin api-doc list|show|diff
+  penguin api-doc bind|unbind|draft|sync|repair  explicit Lark lifecycle actions
   penguin link <src> <dst> [t]  manually link two nodes (Ledger)
   penguin snapshots             list snapshot manifests
   penguin doctor                DB / ledger health check
@@ -161,7 +204,7 @@ Global: --json (machine-readable), --branch <b>`;
 export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
   const verb = argv[0];
   const flags = argv.filter((a) => a.startsWith("--"));
-  const valueFlags = new Set(["--branch", "--depth", "--limit", "--repo"]);
+  const valueFlags = new Set(["--branch", "--commit", "--snapshot", "--depth", "--limit", "--repo", "--target", "--status", "--from", "--request", "--document-key", "--query", "--format", "--against"]);
   const pos: string[] = [];
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i];
@@ -185,6 +228,11 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
   };
   const json = flags.includes("--json");
+
+  if (verb === "api-doc") {
+    const apiStore = !deps.apiDocSourceAdapter && deps.storeExists() ? deps.openStore() : null;
+    try { return await runApiDocCommand(argv.slice(1), { cwd: deps.cwd, out: deps.out, err: deps.err, json, previewRoot: deps.apiDocPreviewRoot ?? `${deps.cwd}/.penguin/api-docs/previews`, sourceAdapter: deps.apiDocSourceAdapter ?? (apiStore ? createKnowledgeApiDocAdapter(apiStore) : undefined), readStdin: deps.readStdin, bindingPath: deps.apiDocBindingPath, larkClient: deps.apiDocLarkClient ?? (deps.larkProcessRunner ? new LarkCliDocumentClient(deps.larkProcessRunner) : undefined) }); } finally { apiStore?.close(); }
+  }
 
   if (!verb || verb === "help") {
     deps.out(HELP);
@@ -421,6 +469,32 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     }
   }
 
+  if (verb === "master") {
+    if (!deps.storeExists()) { deps.err("no knowledge database"); return 3; }
+    const store = deps.openStore();
+    try {
+      const target = pos[0] ?? readGitContext(deps.cwd).checkoutPath;
+      const norm = target.replace(/\/+$/, "");
+      const row = store.db
+        .prepare("SELECT id, name, root_path AS rootPath FROM repos WHERE name = ? OR root_path = ?")
+        .get(norm, norm) as { id: string; name: string; rootPath: string } | undefined;
+      if (!row) { deps.err(`no indexed repo matches "${target}" — see \`penguin status\` for names`); return 1; }
+      const requested = pos[1];
+      const current = readGitContext(pos[0] ? row.rootPath : deps.cwd);
+      const branchName = requested ?? current.branch;
+      const branch = store.getBranch(row.id, branchName);
+      if (!branch) {
+        deps.err(`no branch "${branchName}" in ${row.name}; checkout the branch first or pass it explicitly`);
+        return 1;
+      }
+      const selected = store.setDefaultBranch(row.id, branch.id);
+      emit(deps, json, `${row.name}/${selected.branch} is now the canonical master branch`, {
+        ok: true, repoId: row.id, branchId: selected.branchId, branch: selected.branch, previousBranchId: selected.previousBranchId, defaultBranch: true,
+      });
+      return 0;
+    } finally { store.close(); }
+  }
+
   // file-backed knowledge notes (C9): new/append/list/reindex under notesDir.
   if (verb === "note") {
     const sub = pos[0];
@@ -504,6 +578,144 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     } finally {
       store.close();
     }
+  }
+
+  if (verb === "evidence") {
+    const sub = pos[0];
+    const notesDir = deps.notesDir;
+    if (!notesDir) { deps.err("notes dir not configured"); return 1; }
+    if (!deps.storeExists()) { deps.err("no knowledge database — run `penguin init` or open Penguin app first"); return 3; }
+    const store = deps.openStore();
+    try {
+      if (sub === "list") {
+        const rows = listEvidenceNotes({ store, notesDir, targetId: optionValue("target"), status: optionValue("status") as EvidenceLifecycle | undefined, limit: numberOption("limit") });
+        emit(deps, json, rows.map((row) => `${row.slug}\t${row.status}\t${row.targetId}\t${row.environment}\t${row.project}/${row.logstore}\t${row.observationCount}`).join("\n") || "(no evidence notes)", rows);
+        return 0;
+      }
+      if (sub === "status") {
+        const slug = pos[1];
+        const to = pos[2] as EvidenceLifecycle | undefined;
+        if (!slug || !to || !["reviewed", "verified", "resolved", "archived"].includes(to)) { deps.err("usage: penguin evidence status <slug> <reviewed|verified|resolved|archived>"); return 2; }
+        const row = setEvidenceStatus({ store, notesDir, slug, to, from: optionValue("from") as EvidenceLifecycle | undefined });
+        emit(deps, json, `${row.slug}: ${row.status}`, row);
+        return 0;
+      }
+      if (sub === "doctor") {
+        const report = evidenceDoctor({ store, notesDir });
+        emit(deps, json, `evidence files ${report.files} · indexed ${report.indexed} · missing index ${report.missingIndex.length} · orphan index ${report.orphanIndex.length} · malformed ${report.malformed.length}`, report);
+        return report.missingIndex.length || report.orphanIndex.length || report.malformed.length ? 1 : 0;
+      }
+      if (sub === "repair") {
+        const report = repairEvidence({ store, notesDir });
+        emit(deps, json, `reindexed ${report.reindexed} evidence files · removed ${report.removedLocks} stale locks`, report);
+        return 0;
+      }
+      deps.err("usage: penguin evidence <list|status|doctor|repair> …");
+      return 2;
+    } finally { store.close(); }
+  }
+
+  if (verb === "revisions") {
+    const sub = pos[0];
+    if (sub === "migrate") {
+      if (!deps.storeExists()) { deps.err("no knowledge database"); return 3; }
+      const store = deps.openStore();
+      try {
+        const requested = optionValue("repo");
+        const repos = (store.db.prepare(requested ? "SELECT id,name,root_path AS rootPath FROM repos WHERE id=? OR name=?" : "SELECT id,name,root_path AS rootPath FROM repos").all(...(requested ? [requested, requested] : [])) as Array<{ id: string; name: string; rootPath: string }>);
+        const integrity = (repoId: string) => {
+          const count = (sql: string, ...args: unknown[]) => Number((store.db.prepare(sql).get(...args) as { n?: number } | undefined)?.n ?? 0);
+          return {
+            orphanBranchPointers: count("SELECT COUNT(*) AS n FROM branches b LEFT JOIN revision_snapshots s ON s.id=b.current_snapshot_id WHERE b.repo_id=? AND b.current_snapshot_id IS NOT NULL AND s.id IS NULL", repoId),
+            orphanSnapshotBases: count("SELECT COUNT(*) AS n FROM revision_snapshots s LEFT JOIN revision_snapshots b ON b.id=s.base_snapshot_id WHERE s.repo_id=? AND s.base_snapshot_id IS NOT NULL AND b.id IS NULL", repoId),
+            orphanOverlays: count("SELECT COUNT(*) AS n FROM snapshot_overlays o LEFT JOIN revision_snapshots s ON s.id=o.snapshot_id LEFT JOIN file_facts f ON f.id=o.file_fact_id WHERE s.repo_id=? AND (s.id IS NULL OR (o.file_fact_id IS NOT NULL AND f.id IS NULL))", repoId),
+            orphanResolutionRefs: count("SELECT COUNT(*) AS n FROM snapshot_resolution_refs r LEFT JOIN revision_snapshots s ON s.id=r.snapshot_id LEFT JOIN resolution_sets x ON x.id=r.resolution_set_id WHERE s.repo_id=? AND (s.id IS NULL OR x.id IS NULL)", repoId),
+            orphanResolutionEdges: count("SELECT COUNT(*) AS n FROM resolution_sets x LEFT JOIN file_facts f ON f.id=x.file_fact_id WHERE f.repo_id=? AND f.id IS NULL", repoId),
+            orphanFileFactSymbols: count("SELECT COUNT(*) AS n FROM file_fact_symbols s LEFT JOIN file_facts f ON f.id=s.file_fact_id WHERE f.repo_id=? AND f.id IS NULL", repoId),
+            orphanDeploymentCommits: count("SELECT COUNT(*) AS n FROM deployment_revisions d LEFT JOIN repos r ON r.id=d.repo_id WHERE d.repo_id=? AND r.id IS NULL", repoId),
+            orphanNotes: count("SELECT COUNT(*) AS n FROM notes_index ni LEFT JOIN nodes n ON n.id=ni.node_id WHERE n.repo_id=? AND n.id IS NULL", repoId),
+          };
+        };
+        const report = repos.map((repo) => {
+          const masterCount = (store.db.prepare("SELECT COUNT(*) AS n FROM branches WHERE repo_id=? AND default_branch=1").get(repo.id) as { n: number }).n;
+          return {
+            repoId: repo.id,
+            repo: repo.name,
+            rootPath: repo.rootPath,
+            legacyFiles: (store.db.prepare("SELECT COUNT(*) AS n FROM files_index WHERE repo_id=?").get(repo.id) as { n: number }).n,
+            notes: (store.db.prepare("SELECT COUNT(*) AS n FROM notes_index ni JOIN nodes n ON n.id=ni.node_id WHERE n.repo_id=?").get(repo.id) as { n: number }).n,
+            masterMissing: masterCount === 0,
+            duplicateMasters: Math.max(0, masterCount - 1),
+            integrity: integrity(repo.id),
+            status: flags.includes("--apply") ? "rebuild_required" : "would_rebuild",
+          };
+        });
+        if (!flags.includes("--apply")) { emit(deps, json, `migration dry-run: ${report.length} repo(s)`, { mode: "dry-run", repositories: report, notesAndLedgerPreserved: true, legacyRowsRetained: true }); return 0; }
+        const results = []; let failed = false;
+        for (const repo of repos) {
+          const pointers = store.db.prepare("SELECT id,current_snapshot_id,head_commit,last_indexed_commit,last_indexed_at FROM branches WHERE repo_id=?").all(repo.id) as Array<{ id: string; current_snapshot_id: string | null; head_commit: string | null; last_indexed_commit: string | null; last_indexed_at: string | null }>;
+          try {
+            const rebuilt = await indexRepo({ store, rootPath: repo.rootPath, mode: "rebuild" });
+            const checks = integrity(repo.id); const orphanCount = Object.values(checks).reduce((sum, value) => sum + value, 0);
+            if (orphanCount) throw new Error(`integrity check failed: ${JSON.stringify(checks)}`);
+            results.push({ repo: repo.name, report: rebuilt, integrity: checks, status: "migrated" });
+          } catch (error) {
+            failed = true;
+            const restore = store.db.transaction(() => { for (const pointer of pointers) store.db.prepare("UPDATE branches SET current_snapshot_id=?,head_commit=?,last_indexed_commit=?,last_indexed_at=? WHERE id=?").run(pointer.current_snapshot_id, pointer.head_commit, pointer.last_indexed_commit, pointer.last_indexed_at, pointer.id); });
+            restore();
+            results.push({ repo: repo.name, status: "rolled_back", error: String((error as Error).message ?? error), integrity: integrity(repo.id) });
+          }
+        }
+        emit(deps, json, `${failed ? "migration failed" : "migrated"} ${repos.length} repo(s); notes and ledger preserved`, { mode: "apply", repositories: results, notesAndLedgerPreserved: true, legacyRowsRetained: true });
+        return failed ? 1 : 0;
+      } finally { store.close(); }
+    }
+    if (sub !== "gc") { deps.err("usage: penguin revisions gc <repo> [--dry-run|--apply] | migrate [--dry-run|--apply]"); return 2; }
+    const repoName = pos[1] ?? optionValue("repo");
+    if (!repoName || !deps.storeExists()) { deps.err("usage: penguin revisions gc <repo> [--dry-run|--apply]"); return 2; }
+    const store = deps.openStore();
+    try {
+      const repoId = resolveRepoId(store, repoName);
+      if (!repoId) { deps.err(`repo not found: ${repoName}`); return 1; }
+      const plan = planRevisionCollection(store, repoId);
+      if (flags.includes("--apply")) {
+        const result = applyRevisionCollection(store, plan);
+        emit(deps, json, `collected ${result.collectedSnapshotIds.length} snapshots; cooled ${result.cooledSnapshotIds.length}`, result);
+      } else {
+        emit(deps, json, `keep ${plan.keep.length}; cool ${plan.cool.length}; collect ${plan.collect.length}`, plan);
+      }
+      return 0;
+    } finally { store.close(); }
+  }
+
+  if (verb === "materialize") {
+    const repoName = pos[0] ?? optionValue("repo");
+    const branch = optionValue("branch");
+    const commitSha = optionValue("commit");
+    if (!repoName || Boolean(branch) === Boolean(commitSha) || !deps.storeExists()) {
+      deps.err("usage: penguin materialize <repo> (--branch <name> | --commit <sha>)");
+      return 2;
+    }
+    const store = deps.openStore();
+    try {
+      const repoId = resolveRepoId(store, repoName);
+      if (!repoId) { deps.err(`repo not found: ${repoName}`); return 1; }
+      const repo = store.db.prepare("SELECT root_path AS rootPath FROM repos WHERE id=?").get(repoId) as { rootPath: string };
+      const result = await indexRevision({
+        store,
+        rootPath: repo.rootPath,
+        repoId,
+        revision: branch ? { branch } : { commitSha },
+        parserVersion: "tree-sitter-wasm-v5-single-pass-log-sites",
+        resolverVersion: "resolver-v1",
+        coordinator: new RevisionIndexCoordinator(),
+      });
+      emit(deps, json, `materialized ${repoName}@${result.context.commitSha}`, result);
+      return 0;
+    } catch (error) {
+      deps.err(`materialize failed: ${String((error as Error).message ?? error)}`);
+      return 1;
+    } finally { store.close(); }
   }
 
   // AI explain (optional BYOK layer): plain-English "what does this do", grounded
@@ -626,7 +838,11 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
         }
         case "context": {
           // AI Context Pack: --json → structured; default → Markdown for an agent.
-          const pack = buildContextPack(store, pos.join(" "));
+          const target = pos.join(" ");
+          let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
+          try { revision = resolveCliRevision(store, target, { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot") }); }
+          catch (error) { reportRevisionResolutionError(deps, error); return 2; }
+          const pack = buildContextPack(store, target, { revision });
           if (!pack.focus) {
             emit(deps, json, renderContextPackMarkdown(pack), pack);
             return 1;
@@ -638,6 +854,9 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
         case "explore": {
           const target = pos.join(" ");
           const requestedBranch = optionValue("branch");
+          let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
+          try { revision = resolveCliRevision(store, target, { repo: optionValue("repo"), branch: requestedBranch, commitSha: optionValue("commit"), snapshotId: optionValue("snapshot") }); }
+          catch (error) { reportRevisionResolutionError(deps, error); return 2; }
           let branchId: string | undefined;
           if (requestedBranch) {
             const exact = store.db.prepare("SELECT id FROM branches WHERE id=?").get(requestedBranch) as { id: string } | undefined;
@@ -654,6 +873,7 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
           }
           const pack = buildExplorePack(store, target, {
             branchId,
+            revision,
             depth: numberOption("depth"),
             limit: numberOption("limit"),
           });
@@ -662,7 +882,11 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
         }
         case "flow": {
           // Flow Explorer: linear execution chain from an endpoint/symbol.
-          const flow = buildFlow(store, pos.join(" "));
+          const target = pos.join(" ");
+          let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
+          try { revision = resolveCliRevision(store, target, { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot") }); }
+          catch (error) { reportRevisionResolutionError(deps, error); return 2; }
+          const flow = buildFlow(store, target, { revision });
           if (!flow.root) {
             emit(deps, json, renderFlowMarkdown(flow), flow);
             return 1;
@@ -673,7 +897,10 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
         }
         case "affected": {
           // Blast radius of changed files (pass paths, or a git diff piped in).
-          const a = affectedByFiles(store, pos);
+          let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
+          try { revision = resolveCliRevision(store, "", { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot") }); }
+          catch (error) { reportRevisionResolutionError(deps, error); return 2; }
+          const a = affectedByFiles(store, pos, { revision });
           const txt = pos.length === 0 ? "usage: penguin affected <file>…"
             : `changed ${a.changed.length} · impacted ${a.impacted.length} · tests ${a.tests.length} · routes ${a.routes.length}\n`
               + a.routes.map((r) => `  route: ${r}`).join("\n");
@@ -706,7 +933,7 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
           return 0;
         }
         case "timeline": {
-          const t = timeline(store, { limit: pos[0] ? Number(pos[0]) || 50 : 50 });
+          const t = timeline(store, { limit: pos[0] ? Number(pos[0]) || 50 : 50, repoId: optionValue("repo"), revision: (() => { try { return resolveCliRevision(store, "", { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot") }); } catch { return undefined; } })() });
           const txt = t.entries.map((e) => `${(e.date ?? "").slice(0, 10)}  ${e.repo ?? "?"}  ${e.merge ? "⑃ " : ""}${e.subject}${e.tags.length ? ` [${e.tags.join(",")}]` : ""}`).join("\n") || "(no commits indexed)";
           emit(deps, json, txt, t);
           return 0;
@@ -723,12 +950,29 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
           return 0;
         }
         case "compare": {
-          const diff = compareBranches(store, pos[0] ?? "", pos[1] ?? "", pos[2] ?? "");
+          let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
+          try { revision = resolveCliRevision(store, pos[0] ?? "", { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot") }); }
+          catch (error) { reportRevisionResolutionError(deps, error); return 2; }
+          const diff = compareBranches(store, pos[0] ?? "", pos[1] ?? "", pos[2] ?? "", { revision });
           if (!diff) { deps.err("symbol not found"); return 1; }
           emit(deps, json, diff.identical ? "identical (no diff)" : "differs", diff);
           return 0;
         }
         case "status": {
+          if (flags.includes("--revisions")) {
+            const rows = store.db.prepare(
+              `SELECT r.name AS repo, b.name AS branch, b.status, b.current_snapshot_id AS snapshotId,
+                      s.base_snapshot_id AS baseSnapshotId, s.commit_sha AS headCommit, s.merge_base_sha AS mergeBaseCommit,
+                      s.state AS cacheState, s.last_accessed_at AS lastAccessedAt,
+                      (SELECT COUNT(*) FROM snapshot_overlays o WHERE o.snapshot_id=s.id AND o.operation IN ('add','modify')) AS changedFiles,
+                      (SELECT COUNT(*) FROM effective_snapshot_files e WHERE e.snapshot_id=s.id) AS totalFiles
+                 FROM branches b JOIN repos r ON r.id=b.repo_id
+                 LEFT JOIN revision_snapshots s ON s.id=b.current_snapshot_id ORDER BY r.name,b.name`,
+            ).all() as Array<Record<string, unknown>>;
+            const data: Array<Record<string, unknown>> = rows.map((row) => ({ ...row, baseCommit: row.baseSnapshotId ? (store.db.prepare("SELECT commit_sha AS commitSha FROM revision_snapshots WHERE id=?").get(row.baseSnapshotId) as { commitSha: string | null } | undefined)?.commitSha ?? null : null, reusePercent: row.totalFiles ? 100 - (Number(row.changedFiles) / Number(row.totalFiles) * 100) : null, pinned: Boolean(store.db.prepare("SELECT pinned FROM branches WHERE name=? AND current_snapshot_id=?").get(row.branch, row.snapshotId)) }));
+            emit(deps, json, data.map((row) => `${row.repo}/${row.branch} ${row.cacheState ?? "legacy"} ${row.headCommit ?? "(none)"} reused=${row.reusePercent == null ? "—" : `${Math.round(Number(row.reusePercent))}%`}`).join("\n") || "(no revisions)", data);
+            return 0;
+          }
           const compact = flags.includes("--compact");
           const st = compact ? compactIndexStatus(store) : indexStatus(store);
           if (compact) {
@@ -750,7 +994,10 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
           return 0;
         }
         case "path": {
-          const res = exploreGraph(store, "path", pos[0] ?? "", { to: pos[1] });
+          let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
+          try { revision = resolveCliRevision(store, pos[0] ?? "", { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot") }); }
+          catch (error) { reportRevisionResolutionError(deps, error); return 2; }
+          const res = exploreGraph(store, "path", pos[0] ?? "", { to: pos[1], revision });
           emit(deps, json, res.nodes.map((n) => n.title).join(" → ") || "(no path)", res);
           return 0;
         }
@@ -784,9 +1031,18 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
         case "files": {
           const repoId = resolveRepoId(store, pos[0]);
           if (!repoId) { deps.err("repo not found (pass a repo id or name — see `penguin status`)"); return 1; }
-          const branchId = resolveBranchId(store, repoId, pos[1]);
+          let branchId: string | null;
+          try {
+            branchId = resolveBranchId(store, repoId, pos[1]);
+          } catch (error) {
+            reportRevisionResolutionError(deps, error);
+            return 2;
+          }
           if (!branchId) { deps.err("branch not found for that repo"); return 1; }
-          const files = listIndexedFiles(store, repoId, branchId);
+          let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
+          try { revision = resolveCliRevision(store, pos[0] ?? "", { repo: pos[0], branch: optionValue("branch") ?? pos[1], commitSha: optionValue("commit"), snapshotId: optionValue("snapshot") }); }
+          catch (error) { reportRevisionResolutionError(deps, error); return 2; }
+          const files = listIndexedFiles(store, repoId, revision ? { revision } : branchId);
           emit(deps, json,
             files.map((f) => `${f.status === "indexed" ? " " : "·"} ${f.filePath}${f.lang ? `  [${f.lang}]` : ""}`).join("\n") || "(no files)",
             files);
@@ -808,7 +1064,13 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
         case "repograph": {
           const repoId = resolveRepoId(store, pos[0]);
           if (!repoId) { deps.err("repo not found (pass a repo id or name — see `penguin status`)"); return 1; }
-          const branchId = resolveBranchId(store, repoId, pos[1]);
+          let branchId: string | null;
+          try {
+            branchId = resolveBranchId(store, repoId, pos[1]);
+          } catch (error) {
+            reportRevisionResolutionError(deps, error);
+            return 2;
+          }
           if (!branchId) { deps.err("branch not found for that repo"); return 1; }
           const g = repoGraph(store, repoId, branchId);
           emit(deps, json, `${g.nodes.length} nodes, ${g.edges.length} edges`, g);

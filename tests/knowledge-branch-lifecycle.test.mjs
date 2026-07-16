@@ -65,6 +65,28 @@ test("failed index run does NOT demote the previous live branch", async () => {
   store.close();
 });
 
+test("first successful named Git branch becomes canonical master", async () => {
+  const root = tempRepo();
+  writeGit(root, "ref: refs/heads/feature-first\n", { "feature-first": "c1" });
+  mkdirSync(join(root, "src"), { recursive: true });
+  writeFileSync(join(root, "src", "first.ts"), "export function first() { return 1; }");
+  const { store } = openStore();
+  const report = await indexRepo({ store, rootPath: root, mode: "incremental" });
+  assert.equal(store.getDefaultBranch(report.repoId).name, "feature-first");
+  store.close();
+});
+
+test("first non-Git workdir remains master-unresolved", async () => {
+  const root = tempRepo();
+  mkdirSync(join(root, "src"), { recursive: true });
+  writeFileSync(join(root, "src", "workdir.ts"), "export function workdir() { return 1; }");
+  const { store } = openStore();
+  const report = await indexRepo({ store, rootPath: root, mode: "incremental" });
+  assert.equal(report.branchName, "(workdir)");
+  assert.equal(store.getDefaultBranch(report.repoId), null);
+  store.close();
+});
+
 async function twoBranchStore() {
   const root = tempRepo();
   writeGit(root, "ref: refs/heads/main\n", { main: "c0" });
