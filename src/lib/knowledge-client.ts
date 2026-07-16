@@ -155,6 +155,8 @@ export function knowledgeExplore(verb: KnowledgeGraphVerb, node: string): Promis
 
 export async function knowledgeReindex(path?: string): Promise<KnowledgeIndexReport> {
   const raw = await invoke<string>("knowledge_reindex", { path: path ?? null });
+  serviceGraphCache = null;
+  evidenceCache.clear();
   return JSON.parse(raw) as KnowledgeIndexReport;
 }
 
@@ -223,13 +225,26 @@ export interface KnowledgeEvidenceNote {
   firstSeen?: string; lastSeen?: string; observationCount: number;
   topicHash?: string; evidenceHash?: string; sensitive: boolean; mcpAccess: string; indexed: boolean;
 }
+const CACHE_TTL_MS = 15_000;
+let serviceGraphCache: { expiresAt: number; promise: Promise<KnowledgeGraphView> } | null = null;
+const evidenceCache = new Map<string, { expiresAt: number; promise: Promise<KnowledgeEvidenceNote[]> }>();
+
 export function knowledgeEvidenceList(filters?: { target?: string; status?: string; limit?: number }): Promise<KnowledgeEvidenceNote[]> {
   const args = ["evidence", "list"];
   if (filters?.target) args.push("--target", filters.target);
   if (filters?.status) args.push("--status", filters.status);
   if (filters?.limit) args.push("--limit", String(filters.limit));
   args.push("--json");
-  return query<KnowledgeEvidenceNote[]>(args);
+  const key = args.join("\u0000");
+  const now = Date.now();
+  const cached = evidenceCache.get(key);
+  if (cached && cached.expiresAt > now) return cached.promise;
+  const promise = query<KnowledgeEvidenceNote[]>(args).catch((error) => {
+    evidenceCache.delete(key);
+    throw error;
+  });
+  evidenceCache.set(key, { expiresAt: now + CACHE_TTL_MS, promise });
+  return promise;
 }
 export function knowledgeEvidenceSetStatus(slug: string, status: KnowledgeEvidenceNote["status"]): Promise<KnowledgeEvidenceNote> {
   return query<KnowledgeEvidenceNote>(["evidence", "status", slug, status, "--json"]);
@@ -312,7 +327,14 @@ export function knowledgeRepoGraph(repoId: string, branchId: string): Promise<Kn
 
 // System-level microservice map: services + cross-service gRPC links.
 export function knowledgeServiceGraph(): Promise<KnowledgeGraphView> {
-  return query<KnowledgeGraphView>(["services"]);
+  const now = Date.now();
+  if (serviceGraphCache && serviceGraphCache.expiresAt > now) return serviceGraphCache.promise;
+  const promise = query<KnowledgeGraphView>(["services"]).catch((error) => {
+    serviceGraphCache = null;
+    throw error;
+  });
+  serviceGraphCache = { expiresAt: now + CACHE_TTL_MS, promise };
+  return promise;
 }
 
 // Module/community clusters (label propagation), each with its god node first.

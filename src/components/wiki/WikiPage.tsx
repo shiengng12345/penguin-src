@@ -44,6 +44,7 @@ import {
   mcpInstallToLocalClients,
   onIndexProgress,
   knowledgeDbStatus,
+  knowledgeEvidenceList,
   knowledgeGraph,
   knowledgeIndexStatus,
   type KnowledgeIndexStatus,
@@ -1001,6 +1002,18 @@ export function WikiPage({ onClose }: WikiPageProps) {
     const t = setInterval(refreshStatus, 5000);
     return () => clearInterval(t);
   }, [fresh, refreshStatus]);
+  // Warm the two expensive top-level tabs after the first paint. Both queries
+  // share the client cache, so opening a tab while this is running reuses the
+  // same promise instead of spawning another CLI/SQLite process.
+  useEffect(() => {
+    if (fresh) return;
+    const timer = window.setTimeout(() => {
+      void import("force-graph").catch(() => undefined);
+      void knowledgeServiceGraph().catch(() => undefined);
+      void knowledgeEvidenceList({ limit: 100 }).catch(() => undefined);
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [fresh]);
   if (fresh) {
     return <WikiOnboarding onRefresh={refreshStatus} onClose={onClose} />;
   }
