@@ -10,7 +10,7 @@ export type {
 } from "./types.js";
 
 export { logger, setLoggerSink, type LoggerSink } from "./logger.js";
-export { parseProtoContent, generateDefaultJson, generateMethodPath } from "./proto-parser.js";
+export { parseProtoContent, generateDefaultJson, generateMethodPath, methodSchemaCompleteness } from "./proto-parser.js";
 export { computeServicePath } from "./service-path.js";
 export { parseSdkDts } from "./sdk-parser.js";
 export { discoverServices } from "./discover-services.js";

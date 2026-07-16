@@ -131,12 +131,37 @@ test("wraps invalid proto enum strings with a readable request body error", asyn
   );
 });
 
+test("does not silently discard unknown proto request fields", async () => {
+  const { normalizeGrpcJsonBody } = await loadGrpcJsonModule();
+  let receivedOptions;
+  const requestType = {
+    fromJson(value, options) {
+      receivedOptions = options;
+      if (options?.ignoreUnknownFields === false && "bogusField" in value) {
+        throw new Error("unknown field bogusField");
+      }
+      return value;
+    },
+  };
+
+  assert.throws(
+    () => normalizeGrpcJsonBody({ bogusField: true }, requestType),
+    /unknown field bogusField/,
+  );
+  assert.deepEqual(receivedOptions, { ignoreUnknownFields: false });
+});
+
 test("gRPC-Web client sends the normalized proto JSON body", async () => {
   const source = await readFile(new URL("../packages/core/src/grpc-web-client.ts", import.meta.url), "utf8");
 
   assert.match(source, /normalizeGrpcJsonBody\(parsedBody, serviceDef\.methods\[resolvedMethodName\]\.I\)/);
   assert.match(source, /await clientMethod\(requestData\)/);
   assert.doesNotMatch(source, /await clientMethod\(parsedBody\)/);
+});
+
+test("gRPC-Web preserves the actual HTTP status on transport errors", async () => {
+  const source = await readFile(new URL("../packages/core/src/grpc-web-client.ts", import.meta.url), "utf8");
+  assert.match(source, /statusCode: inspection\?\.status \?\? 200/);
 });
 
 test("gRPC-Web ConnectError responses are marked as errors", async () => {

@@ -15,6 +15,8 @@ export interface ProtoMethod {
   responseType: string;
   requestFields: FieldInfo[];
   responseFields: FieldInfo[];
+  schemaSource?: "raw_proto" | "generated_dts" | "sdk_dts";
+  schemaGaps?: SchemaGap[];
 }
 
 export interface FieldInfo {
@@ -22,8 +24,23 @@ export interface FieldInfo {
   type: string;
   repeated: boolean;
   optional: boolean;
+  presence?: "required" | "optional" | "implicit";
   fields?: FieldInfo[];
   enumValues?: string[];
+  enumNumbers?: Record<string, number>;
+  map?: { keyType: string; valueType: string; valueFields?: FieldInfo[]; valueEnumValues?: string[] };
+  oneof?: string;
+  defaultValue?: string | number | boolean;
+  fieldNumber?: number;
+  jsonName?: string;
+  schemaSource?: "raw_proto" | "generated_dts" | "sdk_dts";
+  schemaGaps?: string[];
+}
+
+export interface SchemaGap {
+  code: "request_schema_empty" | "response_schema_empty" | "enum_values_missing" | "map_value_type_missing" | "oneof_metadata_missing" | "presence_unknown" | "dependency_artifact_unavailable";
+  fieldPath: string;
+  schemaSource: "raw_proto" | "generated_dts" | "sdk_dts";
 }
 
 export interface MetadataEntry {

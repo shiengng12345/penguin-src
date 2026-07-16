@@ -271,7 +271,9 @@ export async function callGrpcWeb(
       };
       return {
         status: `gRPC ${ce.code}`,
-        statusCode: 200,
+        // Connect wraps non-2xx HTTP responses as an error, but the actual
+        // HTTP status remains the most useful machine-readable signal.
+        statusCode: inspection?.status ?? 200,
         body: JSON.stringify(
           { code: ce.code, message: ce.rawMessage },
           null,

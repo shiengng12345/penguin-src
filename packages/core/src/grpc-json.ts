@@ -12,7 +12,11 @@ export function normalizeGrpcJsonBody(
   }
 
   try {
-    return requestType.fromJson(parsedBody, { ignoreUnknownFields: true });
+    // Unknown fields are almost always a typo in an MCP-authored request.
+    // Silently dropping them can turn a semantically wrong request into a
+    // successful call with default values, so keep the generated protobuf
+    // decoder strict at this boundary.
+    return requestType.fromJson(parsedBody, { ignoreUnknownFields: false });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     const typeName = requestType.typeName ? ` for ${requestType.typeName}` : "";

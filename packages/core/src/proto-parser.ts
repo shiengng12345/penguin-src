@@ -1,6 +1,6 @@
 import protobuf from "protobufjs";
 import { logger } from "./logger.js";
-import type { ProtoService, ProtoMethod, FieldInfo } from "./types.js";
+import type { ProtoService, ProtoMethod, FieldInfo, SchemaGap } from "./types.js";
 
 export function parseProtoContent(
   files: { name: string; content: string }[]
@@ -66,6 +66,7 @@ function parseRawProtos(
             responseType: method.responseType,
             requestFields,
             responseFields,
+            schemaSource: "raw_proto",
           });
         }
 
@@ -97,26 +98,64 @@ function extractProtoFields(
   nextSeen.add(type.fullName);
 
   return type.fieldsArray.map((field) => {
+    const resolved = (() => { try { return field.resolve(); } catch { return null; } })();
+    const resolvedType = resolved?.resolvedType;
+    const explicitOptional = (field.options as Record<string, unknown> | undefined)?.proto3_optional === true;
+    const presence: FieldInfo["presence"] = field.required
+      ? "required"
+      : explicitOptional || resolvedType instanceof protobuf.Type || field.partOf
+        ? "optional"
+        : "implicit";
     const info: FieldInfo = {
       name: field.name,
       type: field.type,
       repeated: field.repeated,
-      optional: field.optional,
+      optional: presence === "optional",
+      presence,
+      fieldNumber: field.id,
+      jsonName: (field as unknown as { jsonName?: string }).jsonName ?? field.name.replace(/_([a-z])/g, (_, letter: string) => letter.toUpperCase()),
+      ...((field.options as Record<string, unknown> | undefined)?.default !== undefined ? { defaultValue: (field.options as Record<string, unknown>).default as string | number | boolean } : {}),
+      ...(field.partOf ? { oneof: field.partOf.name } : {}),
+      schemaSource: "raw_proto",
     };
 
-    try {
-      const resolved = field.resolve();
-      if (resolved.resolvedType instanceof protobuf.Type) {
-        info.fields = extractProtoFields(resolved.resolvedType, nextSeen);
-      } else if (resolved.resolvedType instanceof protobuf.Enum) {
-        info.enumValues = Object.keys(resolved.resolvedType.values);
+    if (field.map) {
+      const mapValue = resolvedType;
+      info.type = "map";
+      info.map = { keyType: (field as unknown as { keyType?: string }).keyType ?? "unknown", valueType: field.type || (resolvedType as { name?: string } | null)?.name || "unknown" };
+      if (mapValue instanceof protobuf.Type) info.map.valueFields = extractProtoFields(mapValue, nextSeen);
+      else if (mapValue instanceof protobuf.Enum) {
+        info.map.valueEnumValues = Object.keys(mapValue.values);
+      } else {
+        info.schemaGaps = ["map_value_type_missing"];
       }
-    } catch {
-      // Unresolved type
+    } else if (resolvedType instanceof protobuf.Type) {
+      info.fields = extractProtoFields(resolvedType, nextSeen);
+    } else if (resolvedType instanceof protobuf.Enum) {
+      info.enumValues = Object.keys(resolvedType.values);
+      info.enumNumbers = { ...resolvedType.values };
     }
 
     return info;
   });
+}
+
+export function methodSchemaCompleteness(method: ProtoMethod): { complete: boolean; gaps: SchemaGap[] } {
+  const gaps: SchemaGap[] = [];
+  const check = (fields: FieldInfo[], side: "request" | "response") => {
+    if (fields.length === 0) gaps.push({ code: side === "request" ? "request_schema_empty" : "response_schema_empty", fieldPath: side, schemaSource: method.schemaSource ?? "generated_dts" });
+    const visit = (items: FieldInfo[], prefix: string) => items.forEach((field) => {
+      const path = `${prefix}.${field.name}`;
+      if (field.schemaGaps?.includes("map_value_type_missing")) gaps.push({ code: "map_value_type_missing", fieldPath: path, schemaSource: field.schemaSource ?? method.schemaSource ?? "generated_dts" });
+      if (field.type === "map" && !field.map?.valueType) gaps.push({ code: "map_value_type_missing", fieldPath: path, schemaSource: field.schemaSource ?? method.schemaSource ?? "generated_dts" });
+      if (field.type !== "map" && field.enumValues === undefined && /enum/i.test(field.type)) gaps.push({ code: "enum_values_missing", fieldPath: path, schemaSource: field.schemaSource ?? method.schemaSource ?? "generated_dts" });
+      if (field.presence === undefined) gaps.push({ code: "presence_unknown", fieldPath: path, schemaSource: field.schemaSource ?? method.schemaSource ?? "generated_dts" });
+      if (field.fields) visit(field.fields, path);
+    });
+    visit(fields, side);
+  };
+  check(method.requestFields, "request"); check(method.responseFields, "response");
+  return { complete: gaps.length === 0, gaps };
 }
 
 // ---- ConnectRPC _connect.d.ts +_pb.d.ts parsing ----
@@ -126,6 +165,8 @@ interface ParsedField {
   protoType: string;
   repeated: boolean;
   optional: boolean;
+  enumValues?: string[];
+  map?: { keyType: string; valueType: string };
 }
 
 interface ParsedMessage {
@@ -207,6 +248,10 @@ function resolveFields(
       type: mapProtoType(f.protoType),
       repeated: f.repeated,
       optional: f.optional,
+      presence: f.optional ? "optional" : "implicit",
+      schemaSource: "generated_dts",
+      ...(f.enumValues ? { enumValues: f.enumValues } : {}),
+      ...(f.map ? { map: f.map, ...(f.map.valueType ? {} : { schemaGaps: ["map_value_type_missing"] }) } : {}),
     };
 
     const nestedClassName = findMessageClassName(f.protoType, messageMap);
@@ -245,6 +290,10 @@ function parsePbDtsFiles(
   const map = new Map<string, ParsedMessage>();
 
   for (const file of pbFiles) {
+    const enumMap = new Map<string, string[]>();
+    for (const enumMatch of file.content.matchAll(/export declare enum (\w+)\s*\{([\s\S]*?)\n\}/g)) {
+      enumMap.set(enumMatch[1], [...enumMatch[2].matchAll(/^\s*(\w+)\s*=/gm)].map((match) => match[1]));
+    }
     const lines = file.content.split("\n");
     let currentClass: string | null = null;
     let fields: ParsedField[] = [];
@@ -280,11 +329,13 @@ function parsePbDtsFiles(
         );
         const protoType = fullMatch ? fullMatch[1].trim() : "string";
 
+        const mapMatch = protoType.match(/^map<\s*([^,>]+)\s*,\s*([^>]+)>$/);
         pendingFieldComment = {
           name: fieldName,
           protoType,
           repeated: isRepeated,
           optional: isOptional,
+          ...(mapMatch ? { map: { keyType: mapMatch[1].trim(), valueType: mapMatch[2].trim() } } : {}),
         };
         continue;
       }
@@ -292,7 +343,8 @@ function parsePbDtsFiles(
       if (pendingFieldComment) {
         const propMatch = line.match(/^\s*(\w+)[\?]?\s*:/);
         if (propMatch) {
-          fields.push({ ...pendingFieldComment });
+          const enumName = pendingFieldComment.protoType.split(".").pop() ?? pendingFieldComment.protoType;
+          fields.push({ ...pendingFieldComment, ...(enumMap.has(enumName) ? { enumValues: enumMap.get(enumName) } : {}) });
           pendingFieldComment = null;
         }
       }
@@ -346,6 +398,7 @@ export function generateDefaultJson(
   const obj: Record<string, unknown> = {};
 
   for (const field of fields) {
+    if (field.optional) continue;
     if (field.repeated) {
       obj[field.name] = field.fields
         ? [generateDefaultJson(field.fields)]

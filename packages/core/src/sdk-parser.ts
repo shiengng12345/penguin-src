@@ -26,7 +26,7 @@ interface ParsedInterface {
 // Map a TS-style type token to the closest FieldInfo.type bucket used by the
 // shared schema. We intentionally collapse JS numeric types onto "double" since
 // the SDK is JSON-over-the-wire and the distinction is lossy anyway.
-function mapTsType(raw: string): { type: string; repeated: boolean } {
+function mapTsType(raw: string): { type: string; repeated: boolean; map?: { keyType: string; valueType: string } } {
   let t = raw.trim();
   let repeated = false;
   if (t.endsWith("[]")) {
@@ -49,7 +49,11 @@ function mapTsType(raw: string): { type: string; repeated: boolean } {
     case "any":
     case "unknown": return { type: "any", repeated };
   }
-  if (t.startsWith("{") || t.startsWith("Record<")) return { type: "map", repeated };
+  if (t.startsWith("Record<") && t.endsWith(">")) {
+    const inner = t.slice("Record<".length, -1).split(",").map((part) => part.trim());
+    return { type: "map", repeated, ...(inner.length === 2 ? { map: { keyType: inner[0], valueType: inner[1] } } : {}) };
+  }
+  if (t.startsWith("{")) return { type: "map", repeated };
   return { type: t, repeated };
 }
 
@@ -79,8 +83,8 @@ function parseInterfaceBody(body: string): FieldInfo[] {
       continue;
     }
     const [, name, opt, typeRaw] = match;
-    const { type, repeated } = mapTsType(typeRaw);
-    fields.push({ name, type, repeated, optional: opt === "?" });
+    const { type, repeated, map } = mapTsType(typeRaw);
+    fields.push({ name, type, repeated, optional: opt === "?", presence: opt === "?" ? "optional" : "implicit", schemaSource: "sdk_dts", ...(map ? { map } : {}) });
     depth += opens - closes;
   }
   return fields;
@@ -160,6 +164,8 @@ function parseMethodsInClassBody(
       responseType,
       requestFields: resolvedFields,
       responseFields: [],
+      schemaSource: "sdk_dts",
+      schemaGaps: [{ code: "response_schema_empty", fieldPath: "response", schemaSource: "sdk_dts" }],
     });
   };
 
