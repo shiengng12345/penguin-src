@@ -146,7 +146,7 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function npmInstallScript(packageSpec: string): string {
+function npmInstallScript(packageSpec: string, cacheDir: string): string {
   const args = [
     "npm",
     "install",
@@ -159,6 +159,8 @@ function npmInstallScript(packageSpec: string): string {
     // spinner.
     "--fetch-timeout=30000",
     "--fetch-retries=1",
+    "--cache",
+    JSON.stringify(cacheDir),
     // --prefer-online (NOT --prefer-offline): @snsoft versions are
     // timestamp-tagged and installed minutes after publish. A packument
     // cached from before the publish makes npm resolve against stale metadata
@@ -172,10 +174,12 @@ function npmInstallScript(packageSpec: string): string {
   return args.join(" ");
 }
 
-export async function installPackage(
+const installLocks = new Map<string, Promise<boolean>>();
+
+async function installPackageOnce(
   protocol: ProtocolTab,
   packageSpec: string,
-  onLog: (line: string) => void
+  onLog: (line: string) => void,
 ): Promise<boolean> {
   if (!isAllowedSnsoftPackageSpec(packageSpec)) {
     onLog(`Invalid package spec: ${packageSpec}`);
@@ -187,8 +191,9 @@ export async function installPackage(
   onLog(`Protocol: ${protocol.toUpperCase()}`);
   onLog(`Target: ${dir}`);
 
+  const cacheDir = `${dir}/.npm-cache`;
   let result = await runLoggedCommand(
-    npmInstallScript(packageSpec),
+    npmInstallScript(packageSpec, cacheDir),
     dir,
     onLog,
     "Installation timed out (5 min). Killing process..."
@@ -210,7 +215,7 @@ export async function installPackage(
     );
     await delay(waitMs);
     result = await runLoggedCommand(
-      npmInstallScript(packageSpec),
+      npmInstallScript(packageSpec, cacheDir),
       dir,
       onLog,
       "Retry timed out (5 min). Killing process..."
@@ -230,6 +235,24 @@ export async function installPackage(
   onLog("  • Auth expired — update token in Settings → Package Registry");
   onLog("  • Registry URL wrong — verify scope (@snsoft) points to correct URL");
   return false;
+}
+
+export async function installPackage(
+  protocol: ProtocolTab,
+  packageSpec: string,
+  onLog: (line: string) => void,
+): Promise<boolean> {
+  const key = `${protocol}:${packageSpec}`;
+  const existing = installLocks.get(key);
+  if (existing) return existing;
+
+  const current = installPackageOnce(protocol, packageSpec, onLog);
+  installLocks.set(key, current);
+  try {
+    return await current;
+  } finally {
+    if (installLocks.get(key) === current) installLocks.delete(key);
+  }
 }
 
 export async function uninstallPackage(
