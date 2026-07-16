@@ -5,6 +5,7 @@ import {
   Boxes,
   ChevronRight,
   ChevronDown,
+  ClipboardList,
   Database,
   FolderOpen,
   GitBranch,
@@ -57,7 +58,7 @@ import {
 
 interface WikiPageProps { onClose: () => void }
 
-type CenterTab = "context" | "graph";
+type CenterTab = "context" | "graph" | "evidence";
 // "home" = the repo/branch datatable (focusId null) — the implicit place
 // every FIRST symbol view was reached from (a graph node click, or nothing
 // yet). Without recording it, the very first symbol opened in a session had
@@ -707,7 +708,6 @@ function KnowledgeHomePanel({
           </div>
           )}
         </section>
-        <EvidenceInbox />
         </>
       )}
     </div>
@@ -1015,6 +1015,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
           <div className="flex h-12 shrink-0 items-center gap-1 border-b border-slate-800 bg-[#0d1420] px-3">
             <TabBtn on={tab === "context"} onClick={() => setTab("context")} icon={<Sparkles className="h-3.5 w-3.5" />}>Context</TabBtn>
             <TabBtn on={tab === "graph"} onClick={() => setTab("graph")} icon={<Network className="h-3.5 w-3.5" />}>Graph</TabBtn>
+            <TabBtn on={tab === "evidence"} onClick={() => setTab("evidence")} icon={<ClipboardList className="h-3.5 w-3.5" />}>SLS Evidence</TabBtn>
             <div className="ml-auto flex items-center gap-2">
               {tab === "graph" && graphData && (
                 <div className="flex shrink-0 items-center gap-1 rounded-md border border-slate-800 bg-slate-950/40 p-0.5 text-xs">
@@ -1040,7 +1041,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
                 onOpenRepoGraph={(r, b) => void openRepoGraph(r, b)}
               />
             )
-          ) : (
+          ) : tab === "graph" ? (
             <div className="relative flex min-h-0 flex-1">
               {graphBusy ? <div className="flex flex-1 items-center justify-center gap-2 text-sm text-slate-500"><Loader2 className="h-4 w-4 animate-spin" /> 加载图谱…</div>
                 : graphData && graphData.nodes.length > 0
@@ -1070,6 +1071,10 @@ export function WikiPage({ onClose }: WikiPageProps) {
                       );
                     })()
                   : <GraphEmptyState onOpenServiceGraph={() => void openServiceGraph()} />}
+            </div>
+          ) : (
+            <div className="min-h-0 flex-1 overflow-auto p-6">
+              <EvidenceInbox />
             </div>
           )}
         </section>

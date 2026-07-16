@@ -7,7 +7,7 @@ export function EvidenceInbox() {
   const [target, setTarget] = useState("");
   useEffect(() => { void knowledgeEvidenceList({ status: status || undefined, target: target || undefined, limit: 100 }).then(setRows).catch(() => setRows([])); }, [status, target]);
   return (
-    <section className="mt-4 rounded-xl border border-slate-800 bg-slate-950/40 p-4" aria-label="Evidence Inbox">
+    <section className="rounded-xl border border-slate-800 bg-slate-950/40 p-4" aria-label="Evidence Inbox">
       <div className="mb-3 flex items-center gap-3">
         <div className="min-w-0 flex-1"><div className="text-sm font-semibold text-slate-200">SLS Evidence Inbox</div><div className="text-xs text-slate-500">target、environment、project、logstore、lifecycle 和索引状态</div></div>
         <input value={target} onChange={(e) => setTarget(e.target.value)} placeholder="target" className="w-32 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300" />
