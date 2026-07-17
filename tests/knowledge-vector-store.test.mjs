@@ -33,9 +33,12 @@ test("sqlite fallback vector store keys models and ranks vectors", () => {
   vectors.put(provider.modelHash, "chunk-a", new Float32Array([1, 0]));
   vectors.put(provider.modelHash, "chunk-b", new Float32Array([0, 1]));
   assert.equal(vectors.search(provider.modelHash, new Float32Array([1, 0]), 1)[0].chunkId, "chunk-a");
-  assert.equal(vectors.health(provider.modelHash).backend, "sqlite-fallback");
-  assert.equal(vectors.doctor(provider.modelHash).degraded, true);
-  assert.throws(() => vectors.doctor(provider.modelHash, { semanticRequired: true }), /SEMANTIC_EXTENSION_REQUIRED/);
+  const health = vectors.health(provider.modelHash);
+  assert.ok(["sqlite-fallback", "sqlite-vec"].includes(health.backend));
+  const doctor = vectors.doctor(provider.modelHash, { sampleQuery: new Float32Array([1, 0]) });
+  assert.equal(doctor.degraded, health.backend !== "sqlite-vec");
+  if (health.backend === "sqlite-vec") assert.equal(vectors.doctor(provider.modelHash, { semanticRequired: true, sampleQuery: new Float32Array([1, 0]) }).ok, true);
+  else assert.throws(() => vectors.doctor(provider.modelHash, { semanticRequired: true }), /SEMANTIC_EXTENSION_REQUIRED/);
   store.close();
 });
 

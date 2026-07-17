@@ -28,7 +28,9 @@ type Candidate = { key: string; snapshotId: string; repoId: string; rootPath: st
 function readAtRevision(candidate: Candidate): Buffer | null {
   if (candidate.commitSha) {
     try {
-      return execFileSync("git", ["-C", candidate.rootPath, "show", `${candidate.commitSha}:${candidate.filePath}`]);
+      return execFileSync("git", ["-C", candidate.rootPath, "show", `${candidate.commitSha}:${candidate.filePath}`], {
+        stdio: ["ignore", "pipe", "ignore"],
+      });
     } catch { /* fall through to current checkout */ }
   }
   const path = join(candidate.rootPath, candidate.filePath);

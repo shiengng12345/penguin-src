@@ -49,6 +49,7 @@ import {
   importKnowledgeArtifact,
   inspectKnowledgeArtifact,
   restoreKnowledgeArtifact,
+  backfillSourceCorpus,
   SavedQueryStore,
   reflectSearchFeedback,
   ExternalSourceStore,
@@ -297,7 +298,7 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
   const verb = argv[0];
   const flags = argv.filter((a) => a.startsWith("--"));
   EVENT_OUTPUT.set(deps, flags.includes("--events-jsonl"));
-  const valueFlags = new Set(["--branch", "--commit", "--snapshot", "--depth", "--limit", "--repo", "--workspace", "--path", "--language", "--kind", "--target", "--status", "--from", "--request", "--document-key", "--query", "--name", "--format", "--against", "--mode", "--semantic", "--regex-flags", "--max-scanned-bytes", "--cursor", "--out", "--input", "--into", "--base", "--line", "--end-line", "--start-byte", "--context-lines", "--class", "--capability-hash", "--type", "--location", "--allow-hosts", "--persona", "--id", "--results", "--confirm", "--passphrase-env", "--passphrase-fd"]);
+  const valueFlags = new Set(["--branch", "--commit", "--snapshot", "--depth", "--limit", "--repo", "--workspace", "--path", "--language", "--kind", "--target", "--status", "--from", "--request", "--document-key", "--query", "--name", "--format", "--against", "--mode", "--semantic", "--regex-flags", "--max-scanned-bytes", "--cursor", "--out", "--input", "--into", "--base", "--line", "--end-line", "--start-byte", "--context-lines", "--class", "--capability-hash", "--type", "--location", "--allow-hosts", "--persona", "--id", "--results", "--confirm", "--passphrase-env", "--passphrase-fd", "--batch", "--resume-after"]);
   const pos: string[] = [];
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i];
@@ -452,7 +453,15 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
         emit(deps, json, `synced ${source.id}`, result);
         return 0;
       }
-      deps.err("usage: penguin source register|list|sync|remove"); return 2;
+      if (pos[0] === "backfill") {
+        const selector = optionValue("repo") ?? pos[1];
+        const repoId = selector ? store.resolveRepoIds(selector)[0] : undefined;
+        if (selector && !repoId) { emit(deps, json, "repository not found", { error: "REPOSITORY_NOT_FOUND", selector }); return 2; }
+        const report = await backfillSourceCorpus({ store, ...(repoId ? { repoId } : {}), batchSize: Math.max(1, Number(optionValue("batch") ?? 256)), dryRun: flags.includes("--dry-run"), ...(optionValue("resume-after") ? { resumeAfter: optionValue("resume-after") } : {}) });
+        emit(deps, json, `${report.dryRun ? "backfill dry-run" : "backfilled"}: ${report.processed}/${report.candidates} files`, report);
+        return report.unavailable > 0 ? 1 : 0;
+      }
+      deps.err("usage: penguin source register|list|sync|backfill|remove"); return 2;
     } finally { store.close(); }
   }
 

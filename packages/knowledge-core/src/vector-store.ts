@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import type { KnowledgeStore } from "./store.js";
 import type { EmbeddingProvider } from "./embedding-provider.js";
 
@@ -11,15 +12,43 @@ function cosine(a: Float32Array, b: Float32Array): number {
   return aa && bb ? dot / Math.sqrt(aa * bb) : 0;
 }
 
+const require = createRequire(import.meta.url);
+const extensionState = new WeakMap<object, { available: boolean; reason?: string }>();
+
+function loadVectorExtension(store: KnowledgeStore): { available: boolean; reason?: string } {
+  const cached = extensionState.get(store.db);
+  if (cached) return cached;
+  try {
+    // Optional at runtime: the deterministic JSON fallback remains valid on
+    // unsupported platforms and in the dependency-free MCP bundle.
+    const extension = require("sqlite-vec") as { load: (db: { loadExtension(path: string, entrypoint?: string): void }) => void };
+    extension.load(store.db);
+    const result = { available: true } as { available: boolean; reason?: string };
+    extensionState.set(store.db, result);
+    return result;
+  } catch (error) {
+    const result = { available: false, reason: String((error as Error).message ?? error) };
+    extensionState.set(store.db, result);
+    return result;
+  }
+}
+
+function vectorTable(modelHash: string): string {
+  return `vec_${modelHash.slice(0, 16).toLowerCase()}`;
+}
+
 /** Local vector persistence with an explicit SQLite fallback. */
 export class VectorStore {
   constructor(private readonly store: KnowledgeStore) {}
   ensureModel(provider: EmbeddingProvider): void {
     if (!provider.modelHash || !/^[a-f0-9]{8,128}$/i.test(provider.modelHash)) throw new Error("SEMANTIC_MODEL_HASH_INVALID");
     if (!Number.isInteger(provider.dimensions) || provider.dimensions <= 0) throw new Error("SEMANTIC_DIMENSIONS_INVALID");
-    const tableName = `vec_${provider.modelHash.slice(0, 16).toLowerCase()}`;
+    const tableName = vectorTable(provider.modelHash);
     this.store.db.prepare("INSERT INTO embedding_models(model_hash,provider_id,model_id,dimensions,vec_table_name,installed_at) VALUES (?,?,?,?,?,?) ON CONFLICT(model_hash) DO UPDATE SET provider_id=excluded.provider_id,model_id=excluded.model_id,dimensions=excluded.dimensions,vec_table_name=excluded.vec_table_name")
       .run(provider.modelHash, provider.id, provider.modelId, provider.dimensions, tableName, new Date().toISOString());
+    if (loadVectorExtension(this.store).available) {
+      this.store.db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS ${tableName} USING vec0(embedding float[${provider.dimensions}])`);
+    }
   }
   put(modelHash: string, chunkId: string, vector: Float32Array): number {
     const model = this.store.db.prepare("SELECT dimensions FROM embedding_models WHERE model_hash=?").get(modelHash) as { dimensions: number } | undefined;
@@ -27,15 +56,39 @@ export class VectorStore {
     if (model.dimensions !== vector.length) throw new Error("SEMANTIC_DIMENSIONS_MISMATCH");
     const tx = this.store.db.transaction(() => {
       const old = this.store.db.prepare("SELECT vec_rowid FROM semantic_embedding_refs WHERE model_hash=? AND chunk_id=?").get(modelHash, chunkId) as { vec_rowid: number } | undefined;
-      if (old) this.store.db.prepare("DELETE FROM semantic_vector_values WHERE vec_rowid=?").run(old.vec_rowid);
-      const row = this.store.db.prepare("INSERT INTO semantic_vector_values(model_hash,dimensions,vector_json,created_at) VALUES (?,?,?,?)").run(modelHash, vector.length, JSON.stringify([...vector]), new Date().toISOString());
-      const vecRowId = Number(row.lastInsertRowid);
+      const backend = loadVectorExtension(this.store);
+      const tableName = vectorTable(modelHash);
+      if (old) {
+        this.store.db.prepare("DELETE FROM semantic_vector_values WHERE vec_rowid=?").run(old.vec_rowid);
+        if (backend.available) this.store.db.prepare(`DELETE FROM ${tableName} WHERE rowid=?`).run(old.vec_rowid);
+      }
+      const vecRowId = backend.available
+        ? Number(this.store.db.prepare(`INSERT INTO ${tableName}(embedding) VALUES (?)`).run(Buffer.from(vector.buffer, vector.byteOffset, vector.byteLength)).lastInsertRowid)
+        : Number(this.store.db.prepare("INSERT INTO semantic_vector_values(model_hash,dimensions,vector_json,created_at) VALUES (?,?,?,?)").run(modelHash, vector.length, JSON.stringify([...vector]), new Date().toISOString()).lastInsertRowid);
+      if (backend.available) this.store.db.prepare("INSERT INTO semantic_vector_values(vec_rowid,model_hash,dimensions,vector_json,created_at) VALUES (?,?,?,?,?)").run(vecRowId, modelHash, vector.length, JSON.stringify([...vector]), new Date().toISOString());
       this.store.db.prepare("INSERT INTO semantic_embedding_refs(model_hash,chunk_id,vec_rowid,status,error,embedded_at) VALUES (?,?,?,?,?,?) ON CONFLICT(model_hash,chunk_id) DO UPDATE SET vec_rowid=excluded.vec_rowid,status=excluded.status,error=NULL,embedded_at=excluded.embedded_at").run(modelHash, chunkId, vecRowId, "ready", null, new Date().toISOString());
       return vecRowId;
     });
     return tx() as number;
   }
   search(modelHash: string, query: Float32Array, limit = 50, options: { snapshotIds?: string[] } = {}): VectorHit[] {
+    const backend = loadVectorExtension(this.store);
+    const model = this.store.db.prepare("SELECT dimensions FROM embedding_models WHERE model_hash=?").get(modelHash) as { dimensions: number } | undefined;
+    if (backend.available && model) {
+      const tableName = vectorTable(modelHash);
+      const params: unknown[] = [Buffer.from(query.buffer, query.byteOffset, query.byteLength), Math.max(0, limit), modelHash];
+      let sql = `SELECT r.chunk_id AS chunkId,r.model_hash AS modelHash,r.vec_rowid AS vecRowId,v.distance AS distance,e.snapshot_id AS snapshotId,e.file_path AS filePath
+        FROM ${tableName} v JOIN semantic_embedding_refs r ON r.model_hash=? AND r.vec_rowid=v.rowid
+        LEFT JOIN semantic_chunks c ON c.id=r.chunk_id
+        LEFT JOIN effective_snapshot_sources e ON e.source_blob_id=c.source_blob_id
+        WHERE v.embedding MATCH ? AND v.k = ? AND r.status='ready'`;
+      // better-sqlite3 binds the MATCH vector before the model hash in the
+      // SQL above; keep the explicit params order obvious for future changes.
+      params.splice(0, params.length, modelHash, params[0], params[1]);
+      if (options.snapshotIds?.length) { sql += ` AND e.snapshot_id IN (${options.snapshotIds.map(() => "?").join(",")})`; params.push(...options.snapshotIds); }
+      const rows = this.store.db.prepare(sql).all(...params) as Array<{ chunkId: string; modelHash: string; vecRowId: number; distance: number; snapshotId?: string; filePath?: string }>;
+      return rows.map((row) => ({ chunkId: row.chunkId, modelHash: row.modelHash, vecRowId: row.vecRowId, similarity: 1 - row.distance, ...(row.snapshotId ? { snapshotId: row.snapshotId } : {}), ...(row.filePath ? { filePath: row.filePath } : {}) }));
+    }
     const params: unknown[] = [modelHash];
     let sql = `SELECT r.chunk_id AS chunkId,r.model_hash AS modelHash,r.vec_rowid AS vecRowId,v.vector_json AS vectorJson,e.snapshot_id AS snapshotId,e.file_path AS filePath
       FROM semantic_embedding_refs r JOIN semantic_vector_values v ON v.vec_rowid=r.vec_rowid
@@ -46,19 +99,30 @@ export class VectorStore {
     const rows = this.store.db.prepare(sql).all(...params) as Array<{ chunkId: string; modelHash: string; vecRowId: number; vectorJson: string; snapshotId?: string; filePath?: string }>;
     return rows.map((row) => ({ chunkId: row.chunkId, modelHash: row.modelHash, vecRowId: row.vecRowId, similarity: cosine(query, Float32Array.from(JSON.parse(row.vectorJson) as number[])), ...(row.snapshotId ? { snapshotId: row.snapshotId } : {}), ...(row.filePath ? { filePath: row.filePath } : {}) })).sort((a, b) => b.similarity - a.similarity || a.chunkId.localeCompare(b.chunkId) || (a.snapshotId ?? "").localeCompare(b.snapshotId ?? "")).slice(0, Math.max(0, limit));
   }
-  health(modelHash: string): { ok: boolean; reason?: string; dimensions?: number; backend: "sqlite-fallback" } {
+  health(modelHash: string): { ok: boolean; reason?: string; dimensions?: number; backend: "sqlite-fallback" | "sqlite-vec" } {
     const row = this.store.db.prepare("SELECT dimensions FROM embedding_models WHERE model_hash=?").get(modelHash) as { dimensions: number } | undefined;
-    return row ? { ok: true, dimensions: row.dimensions, backend: "sqlite-fallback" } : { ok: false, reason: "model not registered", backend: "sqlite-fallback" };
+    const backend = loadVectorExtension(this.store).available ? "sqlite-vec" : "sqlite-fallback";
+    return row ? { ok: true, dimensions: row.dimensions, backend } : { ok: false, reason: "model not registered", backend };
   }
   /**
    * Release/doctor gate for the optional local vector backend. The portable
    * SQLite implementation is deliberately observable as degraded; a release
    * that declares semantic retrieval required must reject it explicitly.
    */
-  doctor(modelHash: string, options: { semanticRequired?: boolean } = {}): VectorDoctorResult {
+  doctor(modelHash: string, options: { semanticRequired?: boolean; sampleQuery?: Float32Array } = {}): VectorDoctorResult {
     const health = this.health(modelHash);
     if (!health.ok) return { ok: false, backend: health.backend, degraded: true, modelHash, reason: health.reason };
-    if (options.semanticRequired) throw new Error("SEMANTIC_EXTENSION_REQUIRED");
-    return { ok: true, backend: health.backend, degraded: true, modelHash, dimensions: health.dimensions, reason: "sqlite-vec extension unavailable; using deterministic SQLite fallback" };
+    if (options.semanticRequired && health.backend !== "sqlite-vec") throw new Error("SEMANTIC_EXTENSION_REQUIRED");
+    if (health.backend === "sqlite-vec") {
+      const tableName = vectorTable(modelHash);
+      try {
+        this.store.db.prepare(`SELECT rowid FROM ${tableName} WHERE embedding MATCH ? AND k = ?`).all(
+          Buffer.from((options.sampleQuery ?? new Float32Array(health.dimensions!)).buffer), 1,
+        );
+      } catch (error) {
+        return { ok: false, backend: health.backend, degraded: true, modelHash, dimensions: health.dimensions, reason: `sqlite-vec sample query failed: ${String((error as Error).message ?? error)}` };
+      }
+    }
+    return { ok: true, backend: health.backend, degraded: health.backend !== "sqlite-vec", modelHash, dimensions: health.dimensions, ...(health.backend === "sqlite-vec" ? {} : { reason: "sqlite-vec extension unavailable; using deterministic SQLite fallback" }) };
   }
 }

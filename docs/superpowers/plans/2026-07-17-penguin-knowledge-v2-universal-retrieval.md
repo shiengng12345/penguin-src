@@ -3245,9 +3245,9 @@ vec_<first-16-hex-of-model-hash>(embedding float[dimensions])
 
 table name 只能由已验证的 lowercase hex model hash 派生，dimensions 必须是 provider health 返回的正整数；禁止把用户字符串拼进 identifier。<code>semantic_embedding_refs</code> 负责 chunk→vec row 映射。
 
-- [ ] 在 lockfile 固定 exact version，不用 floating range。
-- [ ] 为每个目标平台 vendor 对应 extension。
-- [ ] doctor 验证 extension load、dimensions、model hash、sample query。
+- [x] `sqlite-vec@0.1.9` 在 `package.json`/lockfile 固定 exact version，不用 floating range。
+- [x] `sqlite-vec` optional platform packages 固定对应 darwin-arm64/darwin-x64/linux-x64/linux-arm64/windows-x64 extension；不支持的平台明确 degraded。
+- [x] `VectorStore.doctor()` 验证 extension load、dimensions、model hash 和 vec0 sample query；extension 不可用时返回 degraded fallback。
 - [x] schema 保存 chunk ID、source/content hash、model hash、dimensions、embedding status，并有 SQLite fallback 回归测试。
 - [x] extension 不可用时 release 若声明 semantic capability 为 required 则失败；若产品配置为 optional，capability 显示 degraded，确定性 gate 不失败。
 - [x] vector result 最终 join effective revision mappings。
