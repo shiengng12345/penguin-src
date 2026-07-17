@@ -17,7 +17,7 @@ export function previewKnowledgeArtifact(store: KnowledgeStore, options: Pick<Ar
   return { estimatedBytes: pageCount * pageSize, included: { source: options.includeSource === true, notes: options.includeNotes === true, evidence: options.includeEvidence === true, embeddings: options.includeEmbeddings === true }, counts: { sourceBlobs: options.includeSource ? count("source_blobs") : 0, notes: options.includeNotes ? count("fts_notes") : 0, evidence: options.includeEvidence ? count("trust_evidence") : 0, embeddings: options.includeEmbeddings ? count("semantic_chunks") : 0 }, ...(options.repoIds?.length ? { repoIds: options.repoIds } : {}), ...(options.snapshotIds?.length ? { snapshotIds: options.snapshotIds } : {}), requiresConfirmation: true };
 }
 const DELTA_CHUNK_SIZE = 64 * 1024;
-function deltaFor(base: Uint8Array, current: Uint8Array): { delta: Uint8Array; manifest: { algorithm: "fixed-chunk-v1"; chunkSize: number; baseDatabaseBytes: number } } {
+function deltaFor(base: Uint8Array, current: Uint8Array, tombstoneCount: number): { delta: Uint8Array; manifest: { algorithm: "fixed-chunk-v1"; chunkSize: number; baseDatabaseBytes: number; tombstoneCount: number } } {
   const chunks: Array<{ offset: number; data: string }> = [];
   const size = Math.max(base.byteLength, current.byteLength);
   for (let offset = 0; offset < size; offset += DELTA_CHUNK_SIZE) {
@@ -25,7 +25,37 @@ function deltaFor(base: Uint8Array, current: Uint8Array): { delta: Uint8Array; m
     const previous = base.slice(offset, Math.min(offset + DELTA_CHUNK_SIZE, base.byteLength));
     if (!Buffer.from(next).equals(Buffer.from(previous))) chunks.push({ offset, data: Buffer.from(next).toString("base64") });
   }
-  return { delta: strToU8(JSON.stringify({ algorithm: "fixed-chunk-v1", chunkSize: DELTA_CHUNK_SIZE, size: current.byteLength, chunks })), manifest: { algorithm: "fixed-chunk-v1", chunkSize: DELTA_CHUNK_SIZE, baseDatabaseBytes: base.byteLength } };
+  return { delta: strToU8(JSON.stringify({ algorithm: "fixed-chunk-v1", chunkSize: DELTA_CHUNK_SIZE, size: current.byteLength, chunks })), manifest: { algorithm: "fixed-chunk-v1", chunkSize: DELTA_CHUNK_SIZE, baseDatabaseBytes: base.byteLength, tombstoneCount } };
+}
+
+const TOMBSTONE_SPECS = [
+  ["repo", "SELECT id FROM repos"],
+  ["snapshot", "SELECT id FROM revision_snapshots"],
+  ["note", "SELECT path FROM notes_index"],
+  ["source_fact", "SELECT id FROM source_facts"],
+  ["semantic_chunk", "SELECT id FROM semantic_chunks"],
+] as const;
+
+function addArtifactTombstones(currentDb: KnowledgeStore["db"], baseBytes: Uint8Array, DatabaseConstructor: new (path: string) => KnowledgeStore["db"], rootDir: string, baseHash: string): number {
+  const basePath = join(rootDir, "base.sqlite");
+  writeFileSync(basePath, Buffer.from(baseBytes), { flag: "wx", mode: 0o600 });
+  const baseDb = new DatabaseConstructor(basePath);
+  const pending: Array<[string, string]> = [];
+  try {
+    for (const [entityType, sql] of TOMBSTONE_SPECS) {
+      let before: Array<{ key: string }>;
+      let after: Array<{ key: string }>;
+      try { before = (baseDb.prepare(sql.replace(/SELECT (id|path)/, "SELECT $1 AS key")).all() as Array<{ key: string }>); } catch { before = []; }
+      try { after = (currentDb.prepare(sql.replace(/SELECT (id|path)/, "SELECT $1 AS key")).all() as Array<{ key: string }>); } catch { after = []; }
+      const present = new Set(after.map((row) => String(row.key)));
+      for (const row of before) if (!present.has(String(row.key))) pending.push([entityType, String(row.key)]);
+    }
+  } finally { baseDb.close(); }
+  if (pending.length === 0) return 0;
+  currentDb.exec("CREATE TABLE IF NOT EXISTS artifact_tombstones (entity_type TEXT NOT NULL, entity_key TEXT NOT NULL, base_artifact_hash TEXT NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY(entity_type, entity_key))");
+  const insert = currentDb.prepare("INSERT OR IGNORE INTO artifact_tombstones(entity_type,entity_key,base_artifact_hash,created_at) VALUES (?,?,?,?)");
+  for (const [entityType, entityKey] of pending) insert.run(entityType, entityKey, baseHash, new Date().toISOString());
+  return pending.length;
 }
 export function exportKnowledgeArtifact(store: KnowledgeStore, options: ArtifactExportOptions = {}): { bytes: Uint8Array; manifest: KnowledgeArtifactManifest } {
   // Serialize through SQLite's backup/serialize path only after checkpointing;
@@ -51,6 +81,7 @@ export function exportKnowledgeArtifact(store: KnowledgeStore, options: Artifact
   // for the MCP bundle's lazy knowledge loading.
   const DatabaseConstructor = store.db.constructor as unknown as new (path: string) => typeof store.db;
   const artifactDb = new DatabaseConstructor(clonePath);
+  let tombstoneCount = 0;
   try {
     artifactDb.pragma("foreign_keys = OFF");
     // A portable artifact must not leak the exporting machine's filesystem
@@ -89,6 +120,7 @@ export function exportKnowledgeArtifact(store: KnowledgeStore, options: Artifact
     if (options.includeEmbeddings !== true) {
       for (const table of ["semantic_embedding_refs", "semantic_vector_values", "embedding_models", "semantic_chunks"]) artifactDb.prepare(`DELETE FROM ${table}`).run();
     }
+    if (options.baseDatabase) tombstoneCount = addArtifactTombstones(artifactDb, options.baseDatabase, DatabaseConstructor, cloneDir, sha(options.baseDatabase));
   } finally {
     artifactDb.close();
   }
@@ -103,7 +135,7 @@ export function exportKnowledgeArtifact(store: KnowledgeStore, options: Artifact
       .map((row) => ({ snapshotId: row.id, ...(row.commit_sha ? { commitSha: row.commit_sha } : {}) })) }));
   const manifest: KnowledgeArtifactManifest = { formatVersion: 1, createdAt: new Date().toISOString(), buildId: options.buildId ?? "local", capabilityHash: capabilityHash(CAPABILITIES), contractVersion: "2", schemaVersion: Number((store.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get() as {value:string}).value), repositories: repos, contentPolicy: { includesSource: options.includeSource === true, includesNotes: options.includeNotes === true, includesEvidence: options.includeEvidence === true, includesEmbeddings: options.includeEmbeddings === true, secretPolicyHash: "default" } };
   if (options.baseDatabase) { manifest.baseArtifactHash = sha(options.baseDatabase); }
-  const computedDelta = options.baseDatabase ? deltaFor(options.baseDatabase, db) : undefined;
+  const computedDelta = options.baseDatabase ? deltaFor(options.baseDatabase, db, tombstoneCount) : undefined;
   if (computedDelta) manifest.delta = computedDelta.manifest;
   if (options.encryptionKey) manifest.encryption = { algorithm: "aes-256-gcm", envelope: "PKA2" };
   if (options.signingPrivateKey) {

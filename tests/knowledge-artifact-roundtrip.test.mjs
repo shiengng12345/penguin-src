@@ -162,3 +162,21 @@ test("artifact delta export reconstructs the target database from a verified bas
   assert.throws(() => importKnowledgeArtifact(exported.bytes, { baseDatabase: new Uint8Array([1, 2, 3]) }), /BASE_MISMATCH|SIGNATURE_KEY_REQUIRED/);
   store.close();
 });
+
+test("artifact delta records deletions in an explicit tombstone table", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pk-artifact-tombstone-"));
+  const store = KnowledgeStore.open({ dbPath: join(dir, "knowledge.db"), ledgerPath: join(dir, "ledger.jsonl") });
+  const removedRepo = store.registerRepo({ name: "to-remove", rootPath: "/to-remove" });
+  const baseDatabase = importKnowledgeArtifact(exportKnowledgeArtifact(store).bytes).database;
+  store.removeRepo(removedRepo);
+  const exported = exportKnowledgeArtifact(store, { baseDatabase });
+  assert.ok(exported.manifest.delta.tombstoneCount >= 1);
+  const imported = importKnowledgeArtifact(exported.bytes, { baseDatabase });
+  const dbPath = join(dir, "delta.sqlite");
+  writeFileSync(dbPath, imported.database);
+  const restored = KnowledgeStore.open({ dbPath, ledgerPath: join(dir, "delta-ledger.jsonl") });
+  assert.equal(restored.db.prepare("SELECT COUNT(*) AS n FROM repos WHERE name='to-remove'").get().n, 0);
+  assert.ok(restored.db.prepare("SELECT 1 FROM artifact_tombstones WHERE entity_type='repo'").get());
+  restored.close();
+  store.close();
+});

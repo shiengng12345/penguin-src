@@ -3671,10 +3671,10 @@ rtk penguin artifact export \
 ### M15.6 Delta
 
 - [x] delta artifact 引用 base artifact hash；`knowledge-artifact-roundtrip.test.mjs` 验证 base mismatch 被拒绝。
-- [ ] 只含新增 blob/fact/snapshot/note revision。
+- [ ] delta 目前为固定 chunk 增量并附带 tombstone；尚未把 payload 进一步拆成只含新增 blob/fact/snapshot/note revision 的逻辑 delta。
 - [x] import 缺 base 时拒绝；delta import 必须显式提供 `baseDatabase`。
 - [x] base + delta 结果与 full export normalization 相等；delta round-trip 测试逐字节验证。
-- [ ] 删除通过 tombstone 表达，不靠“没出现”推断。
+- [x] `artifact_tombstones(entity_type, entity_key, base_artifact_hash, created_at)` 显式表达 repo/snapshot/note/source fact/semantic chunk 删除；round-trip 测试验证。
 
 ### M15 验收
 

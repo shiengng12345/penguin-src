@@ -60,3 +60,17 @@ test("source backfill dry-run reports bytes without mutating source corpus", asy
   assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM source_backfill_checkpoints").get().n, 0);
   store.close();
 });
+
+test("source backfill is available through the CLI dry-run route", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pk-source-backfill-cli-"));
+  const dbPath = join(root, "knowledge.db");
+  const ledgerPath = join(root, "ledger.jsonl");
+  const store = KnowledgeStore.open({ dbPath, ledgerPath });
+  store.registerRepo({ name: "cli-backfill", rootPath: root });
+  store.close();
+  const { runCli } = await import("../packages/knowledge-cli/dist/index.js");
+  const output = [];
+  const deps = { cwd: root, out: (line) => output.push(line), err: (line) => output.push(line), storeExists: () => true, openStore: () => KnowledgeStore.open({ dbPath, ledgerPath }) };
+  assert.equal(await runCli(["source", "backfill", "--dry-run", "--json"], deps), 0);
+  assert.equal(JSON.parse(output.at(-1)).dryRun, true);
+});
