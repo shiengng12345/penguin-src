@@ -57,7 +57,7 @@
             "-l",
             "-c",
             {
-              "validator": "^export NVM_DIR=\"\\$HOME/\\.nvm\"; \\[ -s \"\\$NVM_DIR/nvm\\.sh\" \\] && \\. \"\\$NVM_DIR/nvm\\.sh\"; command -v nvm >/dev/null 2>&1 && \\(nvm use default >/dev/null 2>&1 \\|\\| nvm use node >/dev/null 2>&1\\) \\|\\| true; export VOLTA_HOME=\"\\$HOME/\\.volta\"; export PATH=\"\\$VOLTA_HOME/bin:\\$HOME/\\.fnm:/opt/homebrew/bin:/usr/local/bin:\\$PATH\"; command -v fnm >/dev/null 2>&1 && eval \"\\$\\(fnm env 2>/dev/null\\)\"; command -v npm >/dev/null 2>&1 && export PATH=\"\\$\\(npm prefix -g\\)/bin:\\$PATH\" \\|\\| true; cd \"[^\"\\n]+\" && npm (install --save --no-audit --no-fund --fetch-timeout=30000 --fetch-retries=1 (--prefer-(offline|online) )?\"@snsoft/[^\"\\n]+\"|uninstall --no-audit --no-fund \"@snsoft/[^\"\\n]+\")$",
+              "validator": "^export NVM_DIR=\"\\$HOME/\\.nvm\"; \\[ -s \"\\$NVM_DIR/nvm\\.sh\" \\] && \\. \"\\$NVM_DIR/nvm\\.sh\"; command -v nvm >/dev/null 2>&1 && \\(nvm use default >/dev/null 2>&1 \\|\\| nvm use node >/dev/null 2>&1\\) \\|\\| true; export VOLTA_HOME=\"\\$HOME/\\.volta\"; export PATH=\"\\$VOLTA_HOME/bin:\\$HOME/\\.fnm:/opt/homebrew/bin:/usr/local/bin:\\$PATH\"; command -v fnm >/dev/null 2>&1 && eval \"\\$\\(fnm env 2>/dev/null\\)\"; command -v npm >/dev/null 2>&1 && export PATH=\"\\$\\(npm prefix -g\\)/bin:\\$PATH\" \\|\\| true; cd \"[^\"\\n]+\" && npm (install --save --no-audit --no-fund --fetch-timeout=30000 --fetch-retries=1 --cache \"[^\"\\n]+/\\.npm-cache\" (--prefer-(offline|online) )?\"@snsoft/[^\"\\n]+\"|uninstall --no-audit --no-fund \"@snsoft/[^\"\\n]+\")$",
               "raw": true
             }
           ]
@@ -133,7 +133,7 @@
             "-l",
             "-c",
             {
-              "validator": "^export NVM_DIR=\"\\$HOME/\\.nvm\"; \\[ -s \"\\$NVM_DIR/nvm\\.sh\" \\] && \\. \"\\$NVM_DIR/nvm\\.sh\"; command -v nvm >/dev/null 2>&1 && \\(nvm use default >/dev/null 2>&1 \\|\\| nvm use node >/dev/null 2>&1\\) \\|\\| true; export VOLTA_HOME=\"\\$HOME/\\.volta\"; export PATH=\"\\$VOLTA_HOME/bin:\\$HOME/\\.fnm:/opt/homebrew/bin:/usr/local/bin:\\$PATH\"; command -v fnm >/dev/null 2>&1 && eval \"\\$\\(fnm env 2>/dev/null\\)\"; command -v npm >/dev/null 2>&1 && export PATH=\"\\$\\(npm prefix -g\\)/bin:\\$PATH\" \\|\\| true; cd \"[^\"\\n]+\" && npm (install --save --no-audit --no-fund --fetch-timeout=30000 --fetch-retries=1 (--prefer-(offline|online) )?\"@snsoft/[^\"\\n]+\"|uninstall --no-audit --no-fund \"@snsoft/[^\"\\n]+\")$",
+              "validator": "^export NVM_DIR=\"\\$HOME/\\.nvm\"; \\[ -s \"\\$NVM_DIR/nvm\\.sh\" \\] && \\. \"\\$NVM_DIR/nvm\\.sh\"; command -v nvm >/dev/null 2>&1 && \\(nvm use default >/dev/null 2>&1 \\|\\| nvm use node >/dev/null 2>&1\\) \\|\\| true; export VOLTA_HOME=\"\\$HOME/\\.volta\"; export PATH=\"\\$VOLTA_HOME/bin:\\$HOME/\\.fnm:/opt/homebrew/bin:/usr/local/bin:\\$PATH\"; command -v fnm >/dev/null 2>&1 && eval \"\\$\\(fnm env 2>/dev/null\\)\"; command -v npm >/dev/null 2>&1 && export PATH=\"\\$\\(npm prefix -g\\)/bin:\\$PATH\" \\|\\| true; cd \"[^\"\\n]+\" && npm (install --save --no-audit --no-fund --fetch-timeout=30000 --fetch-retries=1 --cache \"[^\"\\n]+/\\.npm-cache\" (--prefer-(offline|online) )?\"@snsoft/[^\"\\n]+\"|uninstall --no-audit --no-fund \"@snsoft/[^\"\\n]+\")$",
               "raw": true
             }
           ]
