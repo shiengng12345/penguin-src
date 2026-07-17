@@ -4077,13 +4077,13 @@ unverifiable
 
 ### M17.5 RC1
 
-- [ ] 从 clean branch build。
-- [ ] 运行 M16 全 gate。
+- [x] 从 clean branch build。`f49d8b8` 后 worktree clean，`rtk npm run build` 与 Rust tests 通过。
+- [x] 运行 M16 全 gate。RC1 full audit 的 release gate exit 0，包含 10,000 needles、surface parity、package smoke、110 real questions 和 differential。
 - [ ] 真实 workspace backfill。
 - [ ] 连续使用至少一个完整工作周期，覆盖 CLI/MCP/Wiki。
 - [ ] crash/corruption/false verified hit = 0。
-- [ ] 发布报告记录所有 degraded optional capability。
-- [ ] 执行 rollback 演练并恢复同一查询结果。
+- [x] 发布报告记录所有 degraded optional capability；RC1 报告 `degradedOptional=[]`。
+- [x] 执行 rollback 演练并恢复同一查询结果；`tests/knowledge-rollback.test.mjs` 通过。
 
 ### M17.6 RC2
 
