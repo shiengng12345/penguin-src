@@ -3655,7 +3655,7 @@ rtk penguin artifact export \
 - [x] 每个 entry 有 SHA-256；import 在读取数据库前验证 `checksums.sha256`。
 - [x] 可选 Ed25519 signature；import 可配置 trusted public keys；HMAC 兼容路径保留。
 - [x] 可选 AES-256-GCM whole-artifact encryption，key 用 Node <code>scrypt</code> 从 passphrase 派生；salt/params 在外层 header。
-- [ ] passphrase 不进 argv，交互 stdin 或 environment file descriptor。
+- [x] CLI 只接受 `--passphrase-env <ENV>` 或 `--passphrase-fd <fd>`，argv 不包含口令本身；core 仍支持直接传入受控 API secret。
 - [x] checksum/signature 失败在解压/打开 DB 前拒绝；tamper、错误 HMAC、Ed25519 错误 key 已有测试。
 
 ### M15.5 Import

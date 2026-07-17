@@ -297,7 +297,7 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
   const verb = argv[0];
   const flags = argv.filter((a) => a.startsWith("--"));
   EVENT_OUTPUT.set(deps, flags.includes("--events-jsonl"));
-  const valueFlags = new Set(["--branch", "--commit", "--snapshot", "--depth", "--limit", "--repo", "--workspace", "--path", "--language", "--kind", "--target", "--status", "--from", "--request", "--document-key", "--query", "--name", "--format", "--against", "--mode", "--semantic", "--regex-flags", "--max-scanned-bytes", "--cursor", "--out", "--input", "--into", "--base", "--line", "--end-line", "--start-byte", "--context-lines", "--class", "--capability-hash", "--type", "--location", "--allow-hosts", "--persona", "--id", "--results", "--confirm"]);
+  const valueFlags = new Set(["--branch", "--commit", "--snapshot", "--depth", "--limit", "--repo", "--workspace", "--path", "--language", "--kind", "--target", "--status", "--from", "--request", "--document-key", "--query", "--name", "--format", "--against", "--mode", "--semantic", "--regex-flags", "--max-scanned-bytes", "--cursor", "--out", "--input", "--into", "--base", "--line", "--end-line", "--start-byte", "--context-lines", "--class", "--capability-hash", "--type", "--location", "--allow-hosts", "--persona", "--id", "--results", "--confirm", "--passphrase-env", "--passphrase-fd"]);
   const pos: string[] = [];
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i];
@@ -330,6 +330,25 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
   };
   const json = flags.includes("--json");
+  // Secret material must never be placed in argv. CI/automation can pass the
+  // name of an environment variable or an already-open file descriptor.
+  const artifactPassphrase = (): string | undefined => {
+    const envName = optionValue("passphrase-env");
+    if (envName) {
+      const value = process.env[envName];
+      if (!value) throw new Error("ARTIFACT_PASSPHRASE_ENV_EMPTY");
+      return value;
+    }
+    const fdValue = optionValue("passphrase-fd");
+    if (fdValue !== undefined) {
+      const fd = Number(fdValue);
+      if (!Number.isInteger(fd) || fd < 0) throw new Error("ARTIFACT_PASSPHRASE_FD_INVALID");
+      const value = readFileSync(fd, "utf8").replace(/[\r\n]+$/u, "");
+      if (!value) throw new Error("ARTIFACT_PASSPHRASE_FD_EMPTY");
+      return value;
+    }
+    return undefined;
+  };
 
   if (verb === "api-doc") {
     const apiStore = !deps.apiDocSourceAdapter && deps.storeExists() ? deps.openStore() : null;
@@ -351,6 +370,8 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     const store = deps.openStore();
     try {
       if (action === "export") {
+        let encryptionKey: string | undefined;
+        try { encryptionKey = artifactPassphrase(); } catch (error) { deps.err(String((error as Error).message ?? error)); return 2; }
         const basePath = optionValue("base");
         const repoOption = optionValue("repo");
         const snapshotOption = optionValue("snapshot");
@@ -368,6 +389,7 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
           ...(scopedRepoId ? { repoIds: [scopedRepoId] } : {}),
           ...(snapshotOption ? { snapshotIds: [snapshotOption] } : {}),
           ...(basePath ? { baseDatabase: readFileSync(basePath) } : {}),
+          ...(encryptionKey ? { encryptionKey } : {}),
         });
         const output = optionValue("out");
         if (!output) { deps.err("usage: penguin artifact export --out <artifact.pka>"); return 2; }
@@ -376,14 +398,17 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
         return 0;
       }
       if (action === "import") {
+        let encryptionKey: string | undefined;
+        try { encryptionKey = artifactPassphrase(); } catch (error) { deps.err(String((error as Error).message ?? error)); return 2; }
         const input = optionValue("input") ?? pos[1];
         if (!input) { deps.err("usage: penguin artifact import --input <artifact.pka> [--capability-hash <hash>]"); return 2; }
         const destination = optionValue("into");
         if (destination) {
           if (flags.includes("--dry-run")) {
             const artifactBytes = readFileSync(input);
-            const preview = importKnowledgeArtifact(artifactBytes, optionValue("capability-hash"));
-            const conflicts = inspectKnowledgeArtifact(artifactBytes, destination, optionValue("capability-hash"));
+            const importOptions = { expectedCapabilityHash: optionValue("capability-hash"), ...(encryptionKey ? { encryptionKey } : {}) };
+            const preview = importKnowledgeArtifact(artifactBytes, importOptions);
+            const conflicts = inspectKnowledgeArtifact(artifactBytes, destination, importOptions);
             emit(deps, json, `dry-run restore ${input} into ${destination}`, { mode: "dry-run", operation: "artifact.import", input, destination, manifest: preview.manifest, databaseBytes: preview.database.byteLength, conflicts, mutated: false });
             return 0;
           }
@@ -391,12 +416,12 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
           if (!confirmationAccepted(argv, token)) { deps.err(`artifact restore is guarded; repeat with --confirm=<operation-token> (token: ${token})`); return 2; }
           if (confirmationValue(argv) !== token && confirmationValue(argv) !== "legacy-confirm") { deps.err("confirmation token does not match the requested artifact restore scope"); return 2; }
           const basePath = optionValue("base");
-          const restored = restoreKnowledgeArtifact(readFileSync(input), destination, { expectedCapabilityHash: optionValue("capability-hash"), ...(basePath ? { baseDatabase: readFileSync(basePath) } : {}), confirmed: true });
+          const restored = restoreKnowledgeArtifact(readFileSync(input), destination, { expectedCapabilityHash: optionValue("capability-hash"), ...(basePath ? { baseDatabase: readFileSync(basePath) } : {}), ...(encryptionKey ? { encryptionKey } : {}), confirmed: true });
           emit(deps, json, `restored ${input} into ${destination}`, { path: input, destination, ...restored });
           return 0;
         }
         const basePath = optionValue("base");
-        const imported = importKnowledgeArtifact(readFileSync(input), basePath ? { expectedCapabilityHash: optionValue("capability-hash"), baseDatabase: readFileSync(basePath) } : optionValue("capability-hash"));
+        const imported = importKnowledgeArtifact(readFileSync(input), basePath ? { expectedCapabilityHash: optionValue("capability-hash"), baseDatabase: readFileSync(basePath), ...(encryptionKey ? { encryptionKey } : {}) } : { expectedCapabilityHash: optionValue("capability-hash"), ...(encryptionKey ? { encryptionKey } : {}) });
         emit(deps, json, `validated ${input}`, { path: input, manifest: imported.manifest, databaseBytes: imported.database.byteLength, imported: false, note: "validation completed; use --into <knowledge.db> --confirm for restore" });
         return 0;
       }
