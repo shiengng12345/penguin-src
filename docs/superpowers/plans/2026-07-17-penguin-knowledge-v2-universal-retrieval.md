@@ -4089,12 +4089,12 @@ unverifiable
 
 RC2 必须是 RC1 后的独立构建，不是重跑同 artifact：
 
-- [ ] 再跑全部 gate。
-- [ ] 再跑 clean install。
-- [ ] 再跑 100+ real questions。
-- [ ] external-only correct blocking cases = 0。
-- [ ] capability drift = 0。
-- [ ] rollback 再演练一次。
+- [x] 再跑全部 gate。RC2 full audit release gate exit 0。
+- [x] 再跑 clean install。RC2 gate package smoke exit 0，CLI/Core/MCP artifacts 存在且 parity 通过。
+- [x] 再跑 100+ real questions。RC2 gate real-question audit 110/110 reviewed/baselined。
+- [x] external-only correct blocking cases = 0。RC2 differential 110/110 baseline captures，honest gaps 为空。
+- [x] capability drift = 0。RC2 surface parity 97/97 CLI、117 MCP，mismatch 0。
+- [x] rollback 再演练一次。RC2 后重新运行 `tests/knowledge-rollback.test.mjs`，通过。
 
 ### M17.7 外部工具移除批准点
 
