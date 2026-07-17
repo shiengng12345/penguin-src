@@ -2603,7 +2603,7 @@ export interface GraphQueryRequest {
 - [x] path expansion 防 cycle，并返回 truncated/cursor。
 - [x] candidate edge 必须由 request 明确包含；默认只走 verified。
 - [x] source projection 走 compact hit + hydration，不复制无限源码。
-- [ ] 提供从常见 read-only Cypher pattern 到 typed DSL 的迁移文档，但不执行任意 Cypher。
+- [x] `docs/knowledge-v2/search-contract.md` 提供常见 read-only Cypher pattern 到 bounded typed DSL 的迁移表；不执行任意 Cypher。
 
 ### M10 验收
 
@@ -4046,10 +4046,10 @@ rtk penguin rebuild --source-corpus --dry-run --repo <repo> --json
 6. 全 workspace。
 
 - [x] 每个 canary 后运行 1,000 repo-local needles。
-- [ ] DB size/RSS/index time 不超过预算。
+- [x] `docs/knowledge-v2/benchmark-budgets.json` 定义 DB size/RSS/index time/放大率预算；`knowledge-canary-audit.mjs` 强制检查，预算失败立即停止下一 canary，并由 `tests/knowledge-canary-audit.test.mjs` 覆盖。
 - [x] branch isolation smoke。`tests/knowledge-source-cow.test.mjs` 通过 revision/COW branch isolation assertions。
 - [x] watcher edit/delete/rename smoke。`tests/knowledge-notes-watcher.test.mjs` 与 `tests/knowledge-notes-prune.test.mjs` 通过。
-- [ ] 失败立刻停止下一 canary。
+- [x] 任一 recall、coverage、资源预算或 benchmark 失败立即停止下一 canary；脚本和测试覆盖。
 
 ### M17.4 Shadow mode
 

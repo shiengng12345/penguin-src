@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "description": "Default upper bounds for repository canaries on the release machine.",
+  "indexMs": 60000,
+  "databaseBytes": 262144000,
+  "peakRssBytes": 1073741824,
+  "databaseAmplificationRatio": 20
+}
