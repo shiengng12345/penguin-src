@@ -1,0 +1,58 @@
+[
+  {
+    "id": "ts-call-expression",
+    "mode": "exact",
+    "query": "playerAdditionalDetailRepository.findAllByCpf",
+    "path": "src/call-site.ts",
+    "line": 8,
+    "classification": "source"
+  },
+  {
+    "id": "chinese-comment",
+    "mode": "phrase",
+    "query": "入口日志只记 platformId",
+    "path": "src/call-site.ts",
+    "line": 7,
+    "classification": "source"
+  },
+  {
+    "id": "yaml-content",
+    "mode": "exact",
+    "query": "uniqueYamlNeedle",
+    "path": "config/service.yml",
+    "line": 2,
+    "classification": "config"
+  },
+  {
+    "id": "sql-content",
+    "mode": "exact",
+    "query": "uniqueSqlNeedle",
+    "path": "schema.sql",
+    "line": 3,
+    "classification": "config"
+  },
+  {
+    "id": "proto-content",
+    "mode": "exact",
+    "query": "UniqueProtoNeedle",
+    "path": "protocol.proto",
+    "line": 4,
+    "classification": "source"
+  },
+  {
+    "id": "markdown-content",
+    "mode": "exact",
+    "query": "uniqueMarkdownNeedle",
+    "path": "docs/README.md",
+    "line": 9,
+    "classification": "documentation"
+  },
+  {
+    "id": "plain-text-content",
+    "mode": "exact",
+    "query": "uniquePlainTextNeedle",
+    "path": "plain-text",
+    "line": 1,
+    "classification": "documentation"
+  }
+]

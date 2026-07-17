@@ -6,7 +6,7 @@
 //    (post-wipe ledger aliases all do) — getNodeDetail dereferences it with `!`.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, renameSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { KnowledgeStore } from "../packages/knowledge-core/dist/index.js";
@@ -43,6 +43,19 @@ test("reindexNotesDir purges notes whose markdown file was deleted", () => {
     store.db.prepare("SELECT COUNT(*) c FROM notes_index WHERE node_id=?").get(a.nodeId).c,
     1, "surviving note untouched",
   );
+  store.close();
+});
+
+test("renaming a Markdown note updates the derived index without rewriting source links", () => {
+  const { store, dir } = openStore();
+  const notesDir = join(dir, "notes");
+  const note = createNote({ store, notesDir, title: "Old Note", body: "[[Old Note]]" });
+  const renamed = join(notesDir, "new-note.md");
+  renameSync(note.path, renamed);
+  const report = reindexNotesDir({ store, notesDir });
+  assert.equal(report.indexed, 1);
+  assert.equal(store.db.prepare("SELECT path FROM notes_index WHERE node_id=?").get(note.nodeId).path, "new-note.md");
+  assert.equal(readFileSync(renamed, "utf8").includes("[[Old Note]]"), true);
   store.close();
 });
 

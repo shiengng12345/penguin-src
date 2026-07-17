@@ -1,0 +1,13 @@
+syntax = "proto3";
+
+service UniversalRetrievalFixture {
+  rpc UniqueProtoNeedle(UniqueProtoRequest) returns (UniqueProtoResponse);
+}
+
+message UniqueProtoRequest {
+  string uniqueProtoField = 1;
+}
+
+message UniqueProtoResponse {
+  string value = 1;
+}

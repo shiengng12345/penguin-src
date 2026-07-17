@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { basename, dirname, relative, resolve as pathResolve } from "node:path";
-import { SCHEMA_VERSION, GitTopologyStore, FileFactStore, resolveBranchBase, type KnowledgeStore, type ParsedFileFact, type ParsedEdge, type SnapshotOverlayEntry } from "@penguin/knowledge-core";
+import { SCHEMA_VERSION, GitTopologyStore, FileFactStore, SourceStore, SourceSnapshotStore, resolveBranchBase, type KnowledgeStore, type ParsedFileFact, type ParsedEdge, type SnapshotOverlayEntry, type SourceSnapshotOverlayEntry } from "@penguin/knowledge-core";
 import { extractSymbols, type ExtractedSymbol } from "./extract.js";
+import { extractFieldAccesses } from "./field-access.js";
 import { grpcEndpointKey } from "./grpc-client.js";
 import { allForwardingMethods, extractFunctionNameCalls } from "./frontend-grpc-client.js";
 import { verifiedConnectRpcGetters, extractConnectRpcCalls } from "./connect-rpc-client.js";
@@ -12,10 +13,14 @@ import { indexGitObjects } from "./gitgraph.js";
 import { langForExtension } from "./registry.js";
 import { detectRenames } from "./rename.js";
 import { resolveRefs, type SymbolIndex } from "./resolve.js";
-import { walkRepoFiles, isLikelyMinified } from "./walk.js";
+import { isLikelyMinified } from "./walk.js";
 import { parseProtoEndpoints } from "./proto-parser.js";
 import { extractFpmsGrpcCalls } from "./grpc-js-client.js";
 import { detectPackages, flyoverPackageNames } from "./package-detect.js";
+import { discoverRepoCoverage } from "./walk.js";
+import { summarizeCoverage, type CoverageSummary, type CoverageWarning } from "./coverage.js";
+import { ingestSourceFile } from "./source-ingest.js";
+import { hashFileStream } from "./encoding.js";
 
 export interface IndexReport {
   repoId: string;
@@ -32,6 +37,8 @@ export interface IndexReport {
   schemaVersion: number;
   staleReason: "worktree_dirty" | "git_status_unavailable" | null;
   coverageGaps: string[];
+  coverage: CoverageSummary;
+  coverageWarnings: CoverageWarning[];
   scanned: number;
   parsed: number;
   skipped: number;
@@ -500,6 +507,23 @@ async function indexFileWithSource(
       if (!src || !dst) continue;
       structural.push({ src, dst, edgeType: "emits_log", origin: "parser", method: "EXTRACTED" });
     }
+    // Conservative field graph: static property access is AST-adjacent exact
+    // evidence; computed access remains an inferred candidate and is excluded
+    // from verified impact traversal by the core query layer.
+    for (const access of extractFieldAccesses(p.source)) {
+      const owner = extracted.symbols
+        .filter((symbol) => symbol.startLine <= access.startLine && symbol.endLine >= access.startLine)
+        .sort((a, b) => (a.endLine - a.startLine) - (b.endLine - b.startLine))[0];
+      const src = (owner ? fileSymbolIds.get(owner.qualifiedName) : undefined) ?? fileNodeId;
+      const fieldId = store.upsertNode({
+        nodeType: "field",
+        identityKey: `${p.repoId}::field::${p.relPath}::${access.object}::${access.field}`,
+        repoId: p.repoId,
+        title: access.field,
+        meta: { filePath: p.relPath, object: access.object, field: access.field, startLine: access.startLine },
+      });
+      structural.push({ src, dst: fieldId, edgeType: access.kind, origin: "parser", method: access.method, confidence: access.method === "EXTRACTED" ? 1 : 0.45 });
+    }
     store.replaceFileEdges({
       repoId: p.repoId, branchId: p.branchId, filePath: p.relPath,
       edges: [...resolved.edges, ...structural],
@@ -628,8 +652,11 @@ export async function indexRepo(input: {
     historyState: git.isGit ? "missing" : "not_git",
   });
   const baseSnapshotId = baseResolution.baseSnapshotId ?? undefined;
+  const snapshotRevisionKey = git.worktreeState === "clean"
+    ? (git.commit ?? git.worktreeFingerprint)
+    : `${git.commit ?? "worktree"}:${git.worktreeFingerprint}`;
   const snapshot = topology.createBuildingSnapshot({
-    snapshotKey: `${repoId}:${git.commit ?? git.worktreeFingerprint}:${KNOWLEDGE_PARSER_VERSION}:resolver-v1:${SCHEMA_VERSION}`,
+    snapshotKey: `${repoId}:${snapshotRevisionKey}:${KNOWLEDGE_PARSER_VERSION}:resolver-v1:${SCHEMA_VERSION}`,
     repoId,
     ...(git.commit ? { commitSha: git.commit } : {}),
     worktreeFingerprint: git.worktreeFingerprint,
@@ -661,6 +688,8 @@ export async function indexRepo(input: {
         ? "git_status_unavailable"
         : null,
     coverageGaps: git.worktreeState === "unknown" ? ["git_status_unavailable"] : [],
+    coverage: { discovered: 0, admitted: 0, excluded: 0, failed: 0, stale: 0, byReason: {} },
+    coverageWarnings: [],
     scanned: 0, parsed: 0, skipped: 0, deleted: 0, errors: 0, renamed: 0,
     commits: 0, tags: 0,
   };
@@ -706,7 +735,30 @@ export async function indexRepo(input: {
 
     // Collect the file list first so progress has a total for a % bar.
     stageStart("scan");
-    const files = [...walkRepoFiles(scanRoot)];
+    const discovery = discoverRepoCoverage(scanRoot);
+    const coverageUpsert = store.db.prepare(`INSERT INTO coverage_records(repo_id,file_path,git_state,coverage_status,reason_code,classification,byte_size,reason,parser_status,parser_language,parser_version,parser_error,updated_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repo_id,file_path) DO UPDATE SET git_state=excluded.git_state,coverage_status=excluded.coverage_status,reason_code=excluded.reason_code,classification=excluded.classification,byte_size=excluded.byte_size,reason=excluded.reason,parser_status=excluded.parser_status,parser_language=excluded.parser_language,parser_version=excluded.parser_version,parser_error=excluded.parser_error,updated_at=excluded.updated_at`);
+    for (const file of discovery.files) {
+      const language = langForExtension(file.relativePath);
+      const parserStatus = file.coverageStatus === "admitted" && language ? "not_applicable" : file.coverageStatus === "admitted" ? "unsupported" : "not_applicable";
+      coverageUpsert.run(repoId, file.relativePath, file.gitState, file.coverageStatus, file.reasonCode, file.classification, file.byteSize, file.reason, parserStatus, language, null, null, new Date().toISOString());
+    }
+    report.coverage = summarizeCoverage(discovery.files);
+    report.coverageWarnings = discovery.warnings;
+    for (const warning of discovery.warnings) report.coverageGaps.push(warning.code);
+    for (const [reasonCode, count] of Object.entries(report.coverage.byReason)) {
+      if (reasonCode !== "text_searchable" && count > 0) report.coverageGaps.push(`${reasonCode}:${count}`);
+    }
+    const admittedDiscovery = discovery.files
+      .filter((file) => file.coverageStatus === "admitted" && !file.isSymlink)
+    const files = admittedDiscovery
+      .map((file) => ({
+        absPath: file.absolutePath,
+        relPath: file.relativePath,
+        discovered: file,
+        mtimeMs: (() => { try { return statSync(file.absolutePath).mtimeMs; } catch { return 0; } })(),
+        sizeBytes: file.byteSize,
+      }));
     // Per-language totals so UIs can render one bar per language ("other" =
     // walked but non-source: json/md/config — still checkpointed, so counted).
     const langOf = (relPath: string) => langForExtension(relPath) ?? "other";
@@ -731,8 +783,12 @@ export async function indexRepo(input: {
     // (it has no (src,dst) existence check — see idempotency).
     const reprocessedFiles = new Set<string>();
     const factStore = new FileFactStore(store);
+    const sourceStore = new SourceStore(store);
+    const sourceCow = new SourceSnapshotStore(store);
     const baseManifest = baseSnapshotId ? factStore.effectiveManifest(baseSnapshotId) : new Map<string, string>();
     const targetManifest = new Map(baseManifest);
+    const baseSourceManifest = baseSnapshotId ? sourceCow.effectiveManifest(baseSnapshotId) : new Map<string, string>();
+    const targetSourceManifest = new Map(baseSourceManifest);
     // Files whose refs had zero-candidate (forward-reference) misses in the
     // first pass — retried below once the full symbol table exists.
     const retryByFile = new Map<string, { file: (typeof files)[number]; names: string[] }>();
@@ -745,6 +801,16 @@ export async function indexRepo(input: {
       input.onProgress?.({ phase: "index", done, total: files.length, file: file.relPath, lang: langOf(file.relPath) });
       const prev = store.getFileCheckpoint(repoId, branchId, file.relPath);
 
+      // Source ingestion is independent of parser support. Every admitted
+      // file, including unsupported/config/documentation files, is available
+      // through the revision-aware source corpus.
+      const rawHash = (await hashFileStream(file.absPath)).contentHash;
+      const existingSource = store.db.prepare(
+        "SELECT id FROM source_facts WHERE repo_id=? AND file_path=? AND content_hash=? ORDER BY source_fact_rowid DESC LIMIT 1",
+      ).get(repoId, file.relPath, rawHash) as { id: string } | undefined;
+      const sourceFactId = existingSource?.id ?? ingestSourceFile(store, repoId, file.discovered).sourceFactId;
+      targetSourceManifest.set(file.relPath, sourceFactId);
+
       // quick filter: mtime+size unchanged (and not previously errored) → skip
       if (
         effectiveMode === "incremental" && prev && prev.status !== "error" &&
@@ -754,6 +820,7 @@ export async function indexRepo(input: {
           "SELECT id FROM file_facts WHERE repo_id=? AND file_path=? AND content_hash=? AND language=? AND parser_version=? LIMIT 1",
         ).get(repoId, file.relPath, prev.content_hash, langOf(file.relPath), KNOWLEDGE_PARSER_VERSION) as { id: string } | undefined;
         if (fact) targetManifest.set(file.relPath, fact.id);
+        store.db.prepare("UPDATE coverage_records SET parser_status='parsed',parser_language=?,parser_version=?,parser_error=NULL,updated_at=? WHERE repo_id=? AND file_path=?").run(langOf(file.relPath), KNOWLEDGE_PARSER_VERSION, new Date().toISOString(), repoId, file.relPath);
         report.skipped += 1;
         continue;
       }
@@ -771,6 +838,7 @@ export async function indexRepo(input: {
           mtimeMs: file.mtimeMs, sizeBytes: file.sizeBytes, contentHash,
           status: prev.status as "indexed" | "deleted" | "error" | "skipped",
         });
+        store.db.prepare("UPDATE coverage_records SET parser_status='parsed',parser_language=?,parser_version=?,parser_error=NULL,updated_at=? WHERE repo_id=? AND file_path=?").run(langOf(file.relPath), KNOWLEDGE_PARSER_VERSION, new Date().toISOString(), repoId, file.relPath);
         report.skipped += 1;
         continue;
       }
@@ -783,6 +851,13 @@ export async function indexRepo(input: {
         recordRenames: effectiveMode !== "rebuild",
         snapshotId: snapshot.id,
       });
+      store.db.prepare("UPDATE coverage_records SET parser_status=?,parser_language=?,parser_version=?,parser_error=?,updated_at=? WHERE repo_id=? AND file_path=?").run(
+        r.error ? "failed" : langOf(file.relPath) === "other" ? "unsupported" : "parsed",
+        langForExtension(file.relPath),
+        r.error || langOf(file.relPath) !== "other" ? KNOWLEDGE_PARSER_VERSION : null,
+        r.error ?? null,
+        new Date().toISOString(), repoId, file.relPath,
+      );
       if (r.error) report.errors += 1;
       else report.parsed += 1;
       report.renamed += r.renamed;
@@ -850,6 +925,9 @@ export async function indexRepo(input: {
     for (const path of [...targetManifest.keys()]) {
       if (!seen.has(path)) targetManifest.delete(path);
     }
+    for (const path of [...targetSourceManifest.keys()]) {
+      if (!seen.has(path)) targetSourceManifest.delete(path);
+    }
     const cowOverlayEntries: SnapshotOverlayEntry[] = [];
     for (const [path, fileFactId] of targetManifest) {
       const baseFactId = baseManifest.get(path);
@@ -863,6 +941,18 @@ export async function indexRepo(input: {
       factStore.replaceOverlay(snapshot.id, cowOverlayEntries);
       factStore.materializeManifest(snapshot.id);
       factStore.assertManifestMatches(snapshot.id, targetManifest);
+      const sourceOverlayEntries: SourceSnapshotOverlayEntry[] = [];
+      for (const [path, sourceFactId] of targetSourceManifest) {
+        const baseFactId = baseSourceManifest.get(path);
+        if (!baseFactId) sourceOverlayEntries.push({ op: "add", path, sourceFactId });
+        else if (baseFactId !== sourceFactId) sourceOverlayEntries.push({ op: "modify", path, sourceFactId });
+      }
+      for (const path of baseSourceManifest.keys()) {
+        if (!targetSourceManifest.has(path)) sourceOverlayEntries.push({ op: "delete", path, sourceFactId: null });
+      }
+      sourceCow.replaceOverlay(snapshot.id, sourceOverlayEntries);
+      sourceCow.materializeManifest(snapshot.id);
+      sourceCow.assertManifestMatches(snapshot.id, targetSourceManifest);
     }
     stageDone("deletes", report.deleted > 0 ? `${report.deleted} removed` : undefined);
     stageStart("proto");
@@ -872,8 +962,9 @@ export async function indexRepo(input: {
     // service graph for repos that have proto definitions (e.g. flyover proto monorepo,
     // FPMS's @snsoft/*-grpc packages in node_modules).
     const protoModules = new Set<string>();
-    for (const file of walkRepoFiles(scanRoot)) {
-      if (!file.relPath.endsWith(".proto")) continue;
+    for (const admittedFile of files) {
+      if (!admittedFile.relPath.endsWith(".proto")) continue;
+      const file = { relPath: admittedFile.relPath, absPath: admittedFile.absPath };
       let protoSource: string;
       try {
         protoSource = readFileSync(file.absPath, "utf8");
@@ -941,7 +1032,7 @@ export async function indexRepo(input: {
     //
     // Cheap substring pre-filters (`this._net` / `functionName`) keep tree-
     // sitter parsing bounded to files that could possibly match.
-    const tsxFiles = [...walkRepoFiles(scanRoot)].filter((f) => {
+    const tsxFiles = files.map((file) => ({ relPath: file.relPath, absPath: file.absPath })).filter((f) => {
       const l = langForExtension(f.relPath);
       return l === "ts" || l === "tsx";
     });

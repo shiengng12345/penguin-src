@@ -20,6 +20,7 @@
     "dev": "tsc -p tsconfig.json --watch"
   },
   "dependencies": {
+    "@penguin/knowledge-contracts": "workspace:*",
     "@penguin/knowledge-core": "workspace:*",
     "chokidar": "^4.0.0",
     "tree-sitter-wasms": "^0.1.13",

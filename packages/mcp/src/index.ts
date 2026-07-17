@@ -11,6 +11,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 // deps). The handler is dynamically imported on first knowledge-tool call so
 // the release-bundled server initializes without those deps present.
 import { KNOWLEDGE_TOOL_DEFS, LOG_INVESTIGATION_TOOL_DEFS, isKnowledgeTool } from "./knowledge-tool-defs.js";
+import { CAPABILITIES, capabilityHash } from "@penguin/knowledge-contracts";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -224,9 +225,18 @@ function packageNameFromSpec(spec: string): string | null {
 }
 
 function jsonResult(value: unknown, isError = false) {
+  const enriched = value && typeof value === "object" && !Array.isArray(value)
+    ? { ...(value as Record<string, unknown>), ...("hits" in (value as Record<string, unknown>) ? { stats: { rawBytesEstimate: Buffer.byteLength(JSON.stringify(value), "utf8"), sentBytes: Buffer.byteLength(JSON.stringify(value), "utf8"), compactRatio: 1, timingsMs: {} } } : {}) }
+    : value;
+  const searchSummary = enriched && typeof enriched === "object" && !Array.isArray(enriched) && Array.isArray((enriched as Record<string, unknown>).hits)
+    ? `${((enriched as Record<string, unknown>).hits as unknown[]).length} hits${((enriched as Record<string, unknown>).diagnostics as { searchedLanes?: string[] } | undefined)?.searchedLanes ? ` · lanes ${((enriched as Record<string, unknown>).diagnostics as { searchedLanes: string[] }).searchedLanes.join(",")}` : ""}`
+    : null;
+  const text = searchSummary ?? JSON.stringify(enriched, null, 2);
+  const structuredContent = Array.isArray(enriched) ? { items: enriched } : (enriched && typeof enriched === "object" ? enriched : { result: enriched });
   return {
     isError: isError || undefined,
-    content: [{ type: "text", text: JSON.stringify(value, null, 2) }],
+    content: [{ type: "text", text }],
+    structuredContent,
   };
 }
 
@@ -338,8 +348,14 @@ function searchAllMethods(
 }
 
 const server = new Server(
-  { name: "penguin-mcp", version: "0.0.1" },
-  { capabilities: { tools: {} } },
+  { name: "penguin-mcp", version: `0.0.1+knowledge-${capabilityHash(CAPABILITIES).slice(0, 12)}` },
+  {
+    capabilities: { tools: {} },
+    // MCP initialize has no portable custom metadata field. Keep the
+    // negotiation tuple in instructions so clients can inspect it before
+    // calling a tool; knowledge_capabilities returns the same structured data.
+    instructions: JSON.stringify({ contractVersion: "2", schemaVersion: 13, capabilityHash: capabilityHash(CAPABILITIES) }),
+  },
 );
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -580,7 +596,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         },
       },
     },
-  ],
+  ].sort((a, b) => a.name.localeCompare(b.name)),
 }));
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {

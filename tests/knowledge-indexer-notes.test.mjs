@@ -35,7 +35,10 @@ test("parseNote: wikilinks (plain + namespaced), tags, headings", () => {
   });
   assert.deepEqual(
     p.wikilinks,
-    [{ rawTarget: "GetLoginURL", namespace: null }, { rawTarget: "Svc.M", namespace: "api" }],
+    [
+      { rawTarget: "GetLoginURL", namespace: null, targetAnchor: null, displayText: null, embedded: false, sourceLine: 2 },
+      { rawTarget: "Svc.M", namespace: "api", targetAnchor: null, displayText: null, embedded: false, sourceLine: 2 },
+    ],
   );
   assert.ok(p.tags.includes("alpha"));
   assert.ok(p.tags.includes("a/b"));

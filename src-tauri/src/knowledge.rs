@@ -8,7 +8,11 @@
 // the Wiki UI (Plan 5) calls via `invoke`.
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::{mpsc, Arc};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
@@ -98,6 +102,213 @@ struct CliInvocation {
     node: PathBuf,
     cli: PathBuf,
     wasm_dir: Option<PathBuf>,
+}
+
+/// A resident JSONL query worker. The CLI remains the only implementation of
+/// query semantics; Tauri only owns the process and transports canonical
+/// requests. Serializing access is intentional: it keeps request/response
+/// correlation deterministic while allowing the UI command itself to run on a
+/// blocking worker thread.
+pub struct QueryRuntimeState {
+    worker: std::sync::Mutex<Option<Arc<ResidentQueryWorker>>>,
+    active: std::sync::Mutex<HashMap<String, Arc<ResidentQueryWorker>>>,
+    crashes: std::sync::Mutex<Vec<Instant>>,
+}
+
+impl Default for QueryRuntimeState {
+    fn default() -> Self { Self { worker: std::sync::Mutex::new(None), active: std::sync::Mutex::new(HashMap::new()), crashes: std::sync::Mutex::new(Vec::new()) } }
+}
+
+impl Drop for QueryRuntimeState {
+    fn drop(&mut self) {
+        // Dropping the last Arc invokes ResidentQueryWorker::drop, which kills
+        // and waits for the child. This is the app-exit orphan guarantee.
+        if let Ok(mut worker) = self.worker.lock() { worker.take(); }
+    }
+}
+
+struct ResidentQueryWorker {
+    child: std::sync::Mutex<Child>,
+    stdin: Arc<std::sync::Mutex<ChildStdin>>,
+    pending: Arc<std::sync::Mutex<HashMap<String, mpsc::Sender<Result<serde_json::Value, String>>>>>,
+    next_id: AtomicU64,
+}
+
+impl Drop for ResidentQueryWorker {
+    fn drop(&mut self) {
+        if let Ok(mut child) = self.child.lock() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+impl ResidentQueryWorker {
+    fn is_dead(&self) -> bool {
+        self.child.lock().map(|mut child| child.try_wait().ok().flatten().is_some()).unwrap_or(true)
+    }
+}
+
+fn note_runtime_crash(state: &QueryRuntimeState) -> Result<bool, String> {
+    let mut crashes = state.crashes.lock().map_err(|_| "query runtime crash state poisoned".to_string())?;
+    let cutoff = Instant::now() - Duration::from_secs(60);
+    crashes.retain(|at| *at >= cutoff);
+    crashes.push(Instant::now());
+    Ok(crashes.len() >= 3)
+}
+
+// Keep this value synchronized with @penguin/knowledge-contracts. The
+// handshake must reject a bundled CLI whose capability surface differs from
+// the Tauri build; accepting any non-empty hash would allow silent drift.
+const EXPECTED_CAPABILITY_HASH: &str = "9bd579294b91fbe6397df3eb5045457858221dbaa922627c5b108f6cf24f5a55";
+
+impl ResidentQueryWorker {
+    fn spawn<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<Arc<Self>, String> {
+        let inv = resolve_invocation(app)?;
+        let mut command = Command::new(&inv.node);
+        command.arg(&inv.cli).arg("__query-server")
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+        if let Some(wasm) = &inv.wasm_dir { command.env("PENGUIN_WASM_DIR", wasm); }
+        let mut child = command.spawn().map_err(|e| format!("query runtime launch failed: {e}"))?;
+        let stdin = match child.stdin.take() {
+            Some(stdin) => stdin,
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("query runtime stdin unavailable".to_string());
+            }
+        };
+        let stdout = match child.stdout.take() {
+            Some(stdout) => stdout,
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("query runtime stdout unavailable".to_string());
+            }
+        };
+        let mut hello_reader = BufReader::new(stdout);
+        let mut hello = String::new();
+        if let Err(error) = hello_reader.read_line(&mut hello) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("query runtime handshake read failed: {error}"));
+        }
+        let frame: serde_json::Value = match serde_json::from_str(hello.trim()) {
+            Ok(frame) => frame,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("query runtime handshake invalid: {error}"));
+            }
+        };
+        if frame.get("type").and_then(|v| v.as_str()) != Some("hello")
+            || frame.get("protocolVersion").and_then(|v| v.as_u64()) != Some(1)
+            || frame.get("schemaVersion").and_then(|v| v.as_u64()).is_none()
+            || frame.get("capabilityHash").and_then(|v| v.as_str()) != Some(EXPECTED_CAPABILITY_HASH) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("RUNTIME_CAPABILITY_MISMATCH: query runtime handshake mismatch".to_string());
+        }
+        let pending: Arc<std::sync::Mutex<HashMap<String, mpsc::Sender<Result<serde_json::Value, String>>>>> = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let pending_reader = Arc::clone(&pending);
+        std::thread::spawn(move || {
+            let mut reader = hello_reader;
+            loop {
+                let mut line = String::new();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let parsed = serde_json::from_str::<serde_json::Value>(line.trim());
+                        let Some(id) = parsed.as_ref().ok().and_then(|value| value.get("id")).and_then(|value| value.as_str()).map(str::to_owned) else { continue };
+                        let result = match parsed {
+                            Ok(value) if value.get("type").and_then(|v| v.as_str()) == Some("response") && value.get("ok").and_then(|v| v.as_bool()) == Some(true) => Ok(value.get("result").cloned().unwrap_or(serde_json::Value::Null)),
+                            Ok(value) => Err(value.get("error").and_then(|error| error.get("message")).and_then(|message| message.as_str()).unwrap_or("query runtime error").to_string()),
+                            Err(error) => Err(format!("query runtime response invalid: {error}")),
+                        };
+                        if let Ok(mut waiting) = pending_reader.lock() {
+                            if let Some(sender) = waiting.remove(&id) { let _ = sender.send(result); }
+                        }
+                    }
+                }
+            }
+            if let Ok(mut waiting) = pending_reader.lock() {
+                for (_, sender) in waiting.drain() { let _ = sender.send(Err("RUNTIME_RESTARTED".to_string())); }
+            }
+        });
+        Ok(Arc::new(Self {
+            child: std::sync::Mutex::new(child),
+            stdin: Arc::new(std::sync::Mutex::new(stdin)),
+            pending,
+            next_id: AtomicU64::new(1),
+        }))
+    }
+
+    fn write_frame(&self, frame: &serde_json::Value) -> Result<(), String> {
+        self.stdin.lock().map_err(|_| "query runtime stdin lock poisoned".to_string()).and_then(|mut stdin| {
+            writeln!(stdin, "{}", frame).map_err(|e| format!("query runtime write failed: {e}"))?;
+            stdin.flush().map_err(|e| format!("query runtime flush failed: {e}"))
+        })
+    }
+
+    fn cancel(&self, id: &str) -> Result<(), String> {
+        self.write_frame(&serde_json::json!({ "type": "cancel", "id": id }))
+    }
+
+    fn request(&self, capability_id: &str, input: serde_json::Value, request_id: Option<String>) -> Result<serde_json::Value, String> {
+        if self.is_dead() { return Err("RUNTIME_RESTARTED".to_string()); }
+        let id = request_id.unwrap_or_else(|| format!("tauri-{}", self.next_id.fetch_add(1, Ordering::Relaxed)));
+        let frame = serde_json::json!({ "type": "request", "id": id, "capabilityId": capability_id, "input": input });
+        let (sender, receiver) = mpsc::channel();
+        self.pending.lock().map_err(|_| "query runtime pending state poisoned".to_string())?.insert(id, sender);
+        let write_result = self.write_frame(&frame);
+        if let Err(error) = write_result {
+            if let Ok(mut pending) = self.pending.lock() { pending.retain(|_, _| false); }
+            return Err(error);
+        }
+        receiver.recv().map_err(|_| "RUNTIME_RESTARTED".to_string())?
+    }
+}
+
+fn resident_query<R: tauri::Runtime>(app: &tauri::AppHandle<R>, capability_id: &str, input: serde_json::Value, request_id: Option<String>) -> Result<serde_json::Value, String> {
+    let state = app.state::<QueryRuntimeState>();
+    let worker = {
+        let mut guard = state.worker.lock().map_err(|_| "query runtime lock poisoned".to_string())?;
+        let dead = guard.as_ref().map(|worker| worker.is_dead()).unwrap_or(true);
+        if dead {
+            if guard.is_some() && note_runtime_crash(&state)? { return Err("RUNTIME_CIRCUIT_OPEN".to_string()); }
+            *guard = Some(ResidentQueryWorker::spawn(app).map_err(|error| {
+            let _ = note_runtime_crash(&state);
+            error
+            })?);
+        }
+        guard.as_ref().expect("resident worker initialized").clone()
+    };
+    if let Some(id) = request_id.as_ref() {
+        state.active.lock().map_err(|_| "query runtime active state poisoned".to_string())?.insert(id.clone(), worker.clone());
+    }
+    let result = match worker.request(capability_id, input.clone(), request_id.clone()) {
+        Ok(result) => Ok(result),
+        Err(first) => {
+            let mut guard = state.worker.lock().map_err(|_| "query runtime lock poisoned".to_string())?;
+            if guard.as_ref().map(|current| Arc::ptr_eq(current, &worker)).unwrap_or(false) { *guard = None; }
+            drop(guard);
+            if note_runtime_crash(&state)? { return Err(format!("RUNTIME_CIRCUIT_OPEN: {first}")); }
+            let replacement = ResidentQueryWorker::spawn(app)?;
+            let result = replacement.request(capability_id, input, request_id.clone()).map_err(|second| format!("{first}; restart failed: {second}"))?;
+            let mut guard = state.worker.lock().map_err(|_| "query runtime lock poisoned".to_string())?;
+            *guard = Some(replacement);
+            Ok(result)
+        }
+    };
+    if let Some(id) = request_id { if let Ok(mut active) = state.active.lock() { active.remove(&id); } }
+    result
+}
+
+#[tauri::command]
+pub(crate) fn knowledge_query_cancel<R: tauri::Runtime>(app: tauri::AppHandle<R>, request_id: String) -> Result<bool, String> {
+    let state = app.state::<QueryRuntimeState>();
+    let worker = state.active.lock().map_err(|_| "query runtime active state poisoned".to_string())?.get(&request_id).cloned();
+    if let Some(worker) = worker { worker.cancel(&request_id)?; Ok(true) } else { Ok(false) }
 }
 
 // The packaged self-contained runtime dir (esbuild bundle + vendored node +
@@ -692,7 +903,7 @@ fn write_launcher_script(target: &std::path::Path, script: &str) -> std::io::Res
 mod tests {
     use super::{
         ensure_zshrc_path, reconcile_claude_hooks, reconcile_guidance_block,
-        write_launcher_script,
+        note_runtime_crash, write_launcher_script, QueryRuntimeState,
     };
     use std::path::PathBuf;
 
@@ -725,6 +936,14 @@ mod tests {
     }
 
     const RC_LINE: &str = "\n# Added by Penguin.app\nexport PATH=\"$HOME/.local/bin:$PATH\"\n";
+
+    #[test]
+    fn resident_runtime_circuit_opens_after_three_crashes() {
+        let state = QueryRuntimeState::default();
+        assert!(!note_runtime_crash(&state).unwrap());
+        assert!(!note_runtime_crash(&state).unwrap());
+        assert!(note_runtime_crash(&state).unwrap());
+    }
 
     #[test]
     fn rc_targets_follow_the_users_shell() {
@@ -1052,7 +1271,19 @@ fn run_cli<R: tauri::Runtime>(app: &tauri::AppHandle<R>, args: &[String]) -> Res
 // warm. Best-effort: failures (no DB yet, etc.) are ignored.
 pub(crate) fn prewarm<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
     std::thread::spawn(move || {
-        let _ = run_cli(&app, &["status".to_string(), "--json".to_string()]);
+        // Prewarm the same resident process used by Wiki queries. If the DB has
+        // not been initialized yet, leave startup side-effect free; the first
+        // real query will perform the lazy spawn instead.
+        if !knowledge_db_path().map(|path| path.exists()).unwrap_or(false) { return; }
+        let state = app.state::<QueryRuntimeState>();
+        let mut guard = match state.worker.lock() {
+            Ok(guard) => guard,
+            Err(_) => return,
+        };
+        if guard.as_ref().map(|worker| !worker.is_dead()).unwrap_or(false) { return; }
+        if let Ok(worker) = ResidentQueryWorker::spawn(&app) {
+            *guard = Some(worker);
+        }
     });
 }
 
@@ -1121,7 +1352,8 @@ pub(crate) async fn knowledge_query<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
     args: Vec<String>,
 ) -> Result<String, String> {
-    let mut full = args;
+    let request_id = args.iter().find_map(|arg| arg.strip_prefix("--request-id=").map(ToOwned::to_owned));
+    let mut full: Vec<String> = args.into_iter().filter(|arg| !arg.starts_with("--request-id=")).collect();
     if !full.iter().any(|a| a == "--json") {
         full.push("--json".to_string());
     }
@@ -1129,9 +1361,58 @@ pub(crate) async fn knowledge_query<R: tauri::Runtime>(
     // #[tauri::command] runs on the main thread, so that block froze the whole
     // webview for the query's duration (the "服务图 freezes the app" bug). Async
     // + spawn_blocking moves it to a worker thread; the UI stays responsive.
-    tauri::async_runtime::spawn_blocking(move || run_cli(&app, &full))
+    tauri::async_runtime::spawn_blocking(move || {
+        if full.first().map(String::as_str) == Some("search") && full.iter().any(|arg| arg == "--mode" || arg == "--compact") {
+            let query = full.get(1).cloned().unwrap_or_default();
+            let mode = full.windows(2).find(|pair| pair[0] == "--mode").map(|pair| pair[1].clone()).unwrap_or_else(|| "auto".to_string());
+            let input = serde_json::json!({ "query": query, "mode": mode, "options": { "compact": true }, "page": { "limit": 50 } });
+            return resident_query(&app, "knowledge.search", input, request_id.clone()).map(|result| result.to_string());
+        }
+        if full.first().map(String::as_str) == Some("get-hit") {
+            let file_path = full.get(1).cloned().unwrap_or_default();
+            let snapshot_id = full.windows(2).find(|pair| pair[0] == "--snapshot").map(|pair| pair[1].clone()).unwrap_or_default();
+            let start_line = full.windows(2).find(|pair| pair[0] == "--line").and_then(|pair| pair[1].parse::<u64>().ok());
+            let start_byte = full.windows(2).find(|pair| pair[0] == "--start-byte").and_then(|pair| pair[1].parse::<u64>().ok());
+            let input = serde_json::json!({ "filePath": file_path, "snapshotId": snapshot_id, "startLine": start_line, "startByte": start_byte });
+            return resident_query(&app, "knowledge.get_hit", input, request_id.clone()).map(|result| result.to_string());
+        }
+        resident_query(&app, "knowledge.cli", serde_json::json!({ "args": full }), request_id)
+            .map(|result| result.to_string())
+    })
         .await
         .map_err(|e| format!("knowledge query task failed: {e}"))?
+}
+
+/// Explicit one-shot diagnostic fallback. UI code never calls this command;
+/// it exists for runtime debugging when the resident process is unhealthy.
+#[tauri::command]
+pub(crate) async fn knowledge_query_once<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    args: Vec<String>,
+) -> Result<String, String> {
+    let mut full: Vec<String> = args.into_iter().filter(|arg| !arg.starts_with("--request-id=")).collect();
+    if !full.iter().any(|arg| arg == "--json") { full.push("--json".to_string()); }
+    tauri::async_runtime::spawn_blocking(move || run_cli(&app, &full))
+        .await
+        .map_err(|error| format!("knowledge one-shot task failed: {error}"))?
+}
+
+/// Canonical capability/input bridge used by the modern Wiki client. Unlike
+/// `knowledge_query`, this command never accepts CLI argv; the resident
+/// protocol receives the capability id and typed JSON input directly.
+#[tauri::command]
+pub(crate) async fn knowledge_query_canonical<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    capability_id: String,
+    input: serde_json::Value,
+    request_id: Option<String>,
+) -> Result<String, String> {
+    if !matches!(capability_id.as_str(), "knowledge.search" | "knowledge.get_hit") {
+        return Err("CANONICAL_CAPABILITY_NOT_ALLOWED".to_string());
+    }
+    tauri::async_runtime::spawn_blocking(move || resident_query(&app, &capability_id, input, request_id).map(|result| result.to_string()))
+        .await
+        .map_err(|error| format!("canonical knowledge query task failed: {error}"))?
 }
 
 // One-shot incremental index of a repo (headless), returns the JSON report.

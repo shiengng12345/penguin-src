@@ -7,6 +7,36 @@ import type { LedgerEvent, LedgerEventInput } from "./ledger.js";
 import { materialize, LedgerGapError } from "./materializer.js";
 import { openDatabase } from "./schema.js";
 
+function cjkBigrams(value: string): string[] {
+  const chars = [...value].filter((char) => /[\p{Script=Han}]/u.test(char));
+  const result: string[] = [];
+  for (let index = 0; index + 1 < chars.length; index += 1) result.push(chars.slice(index, index + 2).join(""));
+  return result;
+}
+
+function lexicalTerms(value: string): string[] {
+  const trimmed = value.trim();
+  const quoted = trimmed.match(/^"([\s\S]*)"$/);
+  if (quoted) return [quoted[1]];
+  return trimmed.split(/[^\p{L}\p{N}]+/u).filter(Boolean).flatMap((term) => {
+    const chars = [...term];
+    return chars.length > 1 && chars.every((char) => /[\p{Script=Han}]/u.test(char))
+      ? cjkBigrams(term)
+      : [term, ...cjkBigrams(term)];
+  });
+}
+
+function lexicalIdentifier(value: string): string {
+  const expanded = value
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/[ _\-./:]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  const grams = cjkBigrams(value);
+  const indexed = [value, expanded !== value ? expanded : "", ...grams].filter(Boolean).join(" ");
+  return indexed || value;
+}
+
 // signal 0 is a standard no-op liveness probe: it validates the pid without
 // actually sending a signal. ESRCH = no such process (dead); EPERM = exists
 // but owned by another user (still alive, just not signalable by us) — any
@@ -1002,7 +1032,10 @@ export class KnowledgeStore {
         .prepare(
           "INSERT INTO fts_symbols (node_id, name, signature) VALUES (?, ?, ?)",
         )
-        .run(p.nodeId, p.name, p.signature ?? "");
+        // Keep the displayed signature byte-for-byte intact.  Identifier
+        // expansion belongs in the searchable name column; putting it into
+        // signature leaks index-only tokens into API snippets.
+        .run(p.nodeId, lexicalIdentifier(p.name), p.signature ?? "");
     });
     tx();
   }
@@ -1021,7 +1054,7 @@ export class KnowledgeStore {
       const insert = this.db.prepare(
         "INSERT INTO fts_identifiers (name, repo_id, file_path, start_line, kind) VALUES (?, ?, ?, ?, ?)",
       );
-      for (const e of p.entries) insert.run(e.name, p.repoId, p.filePath, e.startLine, e.kind);
+      for (const e of p.entries) insert.run(lexicalIdentifier(e.name), p.repoId, p.filePath, e.startLine, e.kind);
     });
     tx();
   }
@@ -1044,7 +1077,7 @@ export class KnowledgeStore {
   // why the whole query must not be wrapped as one quoted phrase.
   searchIdentifiers(query: string, opts?: { limit?: number }): IdentifierHit[] {
     const limit = opts?.limit ?? 50;
-    const terms = query.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+    const terms = lexicalTerms(query);
     const match = terms.length > 0
       ? terms.map((t) => `"${t.replace(/"/g, '""')}"`).join(" ")
       : `"${query.replace(/"/g, '""')}"`;
@@ -1070,7 +1103,7 @@ export class KnowledgeStore {
     // results even though the terms genuinely exist in the document. Each
     // term is individually quoted so a single token can never be
     // interpreted as FTS5 query syntax (AND/OR/NOT/NEAR/column filters).
-    const terms = query.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+    const terms = lexicalTerms(query);
     const match = terms.length > 0
       ? terms.map((t) => `"${t.replace(/"/g, '""')}"`).join(" ")
       : `"${query.replace(/"/g, '""')}"`;
@@ -1334,14 +1367,19 @@ export class KnowledgeStore {
       .prepare("SELECT node_id, path FROM notes_index")
       .all() as Array<{ node_id: string; path: string }>;
     let pruned = 0;
-    for (const r of rows) {
-      if (existingPaths.has(r.path)) continue;
-      this.db.prepare("DELETE FROM notes_index WHERE node_id = ?").run(r.node_id);
-      this.db.prepare("DELETE FROM fts_notes WHERE node_id = ?").run(r.node_id);
-      this.db.prepare("DELETE FROM edges WHERE src = ? OR dst = ?").run(r.node_id, r.node_id);
-      this.db.prepare("DELETE FROM nodes WHERE id = ?").run(r.node_id);
-      pruned += 1;
-    }
+    const prune = this.db.transaction(() => {
+      for (const r of rows) {
+        if (existingPaths.has(r.path)) continue;
+        this.db.prepare("DELETE FROM note_properties WHERE note_node_id = ?").run(r.node_id);
+        this.db.prepare("DELETE FROM note_links WHERE source_node_id = ?").run(r.node_id);
+        this.db.prepare("DELETE FROM notes_index WHERE node_id = ?").run(r.node_id);
+        this.db.prepare("DELETE FROM fts_notes WHERE node_id = ?").run(r.node_id);
+        this.db.prepare("DELETE FROM edges WHERE src = ? OR dst = ?").run(r.node_id, r.node_id);
+        this.db.prepare("DELETE FROM nodes WHERE id = ?").run(r.node_id);
+        pruned += 1;
+      }
+    });
+    prune();
     return pruned;
   }
 

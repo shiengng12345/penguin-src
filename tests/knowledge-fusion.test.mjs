@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { KnowledgeStore } from "../packages/knowledge-core/dist/index.js";
-import { parseNote, indexNote, resolveNoteLinks } from "../packages/knowledge-indexer/dist/index.js";
+import { parseNote, indexNote, resolveNoteLinks, listDanglingNoteLinks } from "../packages/knowledge-indexer/dist/index.js";
 
 function openStore() {
   const dir = mkdtempSync(join(tmpdir(), "pk-fusion-"));
@@ -26,6 +26,15 @@ test("wikilink resolves to a note title (linked)", () => {
   assert.equal(a.stats.linked, 1);
   const edge = store.db.prepare("SELECT * FROM edges WHERE src=? AND edge_type='wikilink'").get(a.nodeId);
   assert.ok(edge.dst, "wikilink dst resolved");
+  store.close();
+});
+
+test("wikilink heading and block anchors retain locator metadata", () => {
+  const store = openStore();
+  addNote(store, "b.md", "---\nid: b\ntitle: Beta\n---\n## Guard\ncontent\n^guard-block\n");
+  const a = addNote(store, "a.md", "---\nid: a\ntitle: Alpha\n---\nsee [[Beta#Guard|guard]] and ![[Beta#^guard-block]]");
+  const links = store.db.prepare("SELECT target_anchor,display_text,embedded,resolution_status FROM note_links WHERE source_node_id=? ORDER BY source_line").all(a.nodeId);
+  assert.deepEqual(links.map((link) => [link.target_anchor, link.display_text, link.embedded, link.resolution_status]), [["Guard", "guard", 0, "resolved"], ["^guard-block", null, 1, "resolved"]]);
   store.close();
 });
 
@@ -61,6 +70,15 @@ test("ambiguous wikilink (two notes same title) does not guess", () => {
   assert.equal(a.stats.ambiguous, 1);
   const edge = store.db.prepare("SELECT * FROM edges WHERE src=? AND edge_type='wikilink'").get(a.nodeId);
   assert.equal(edge.dst, null, "ambiguous → not auto-picked");
+  store.close();
+});
+
+test("dangling wikilinks are explicitly searchable with raw target and status", () => {
+  const store = openStore();
+  const a = addNote(store, "a.md", "---\nid: a\ntitle: A\n---\nsee [[Missing#Section]]");
+  const dangling = listDanglingNoteLinks(store);
+  assert.equal(dangling.length, 1);
+  assert.deepEqual(dangling[0], { sourceNodeId: a.nodeId, sourcePath: "a.md", sourceLine: 1, rawTarget: "Missing", targetAnchor: "Section", resolutionStatus: "unresolved" });
   store.close();
 });
 

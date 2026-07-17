@@ -33,7 +33,7 @@ test("note new creates a Markdown file + indexes it (searchable)", async () => {
   assert.ok(existsSync(join(notesDir, "my-first-note.md")), "md file written");
 
   lines.length = 0;
-  await runCli(["search", "First", "--json"], deps);
+  await runCli(["search", "First", "--legacy-search", "--json"], deps);
   assert.ok(JSON.parse(lines[0]).some((h) => h.title === "My First Note" && h.nodeType === "note"), "note is searchable");
 });
 
@@ -43,7 +43,7 @@ test("note append updates the body (re-indexes same identity)", async () => {
   assert.equal(await runCli(["note", "append", "runbook", "zebrawombat escalation steps"], deps), 0);
 
   lines.length = 0;
-  await runCli(["search", "zebrawombat", "--json"], deps);
+  await runCli(["search", "zebrawombat", "--legacy-search", "--json"], deps);
   assert.ok(JSON.parse(lines[0]).length >= 1, "appended body is searchable");
 
   // still exactly one note node (append re-indexed the same identity, no dup)
@@ -74,10 +74,10 @@ test("note write overwrites the body (keeps frontmatter); note read returns sour
 
   // new body searchable, old gone
   lines.length = 0;
-  await runCli(["search", "qwertybody", "--json"], deps);
+  await runCli(["search", "qwertybody", "--legacy-search", "--json"], deps);
   assert.ok(JSON.parse(lines[0]).length >= 1);
   lines.length = 0;
-  await runCli(["search", "kryptonite", "--json"], deps);
+  await runCli(["search", "kryptonite", "--legacy-search", "--json"], deps);
   assert.equal(JSON.parse(lines[0]).length, 0, "old body no longer indexed");
 });
 
@@ -129,6 +129,6 @@ test("notes survive a DB wipe — reindex rebuilds them from the Markdown on dis
   assert.equal(JSON.parse(lines[0]).indexed, 1);
 
   lines.length = 0;
-  await runCli(["search", "Persistent", "--json"], deps);
+  await runCli(["search", "Persistent", "--legacy-search", "--json"], deps);
   assert.ok(JSON.parse(lines[0]).some((h) => h.title === "Persistent Note"), "note restored from disk");
 });

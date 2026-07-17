@@ -6,11 +6,13 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { KnowledgeStore } from "../packages/knowledge-core/dist/index.js";
 import { runCli } from "../packages/knowledge-cli/dist/index.js";
+import { CAPABILITIES } from "../packages/knowledge-contracts/dist/index.js";
 
 function harness() {
   const dir = mkdtempSync(join(tmpdir(), "pk-cli-"));
   const dbPath = join(dir, "knowledge.db");
   const ledgerPath = join(dir, "ledger.jsonl");
+  const notesDir = join(dir, "notes");
   const lines = [];
   const errs = [];
   const deps = {
@@ -19,6 +21,7 @@ function harness() {
     err: (l) => errs.push(l),
     storeExists: () => existsSync(dbPath),
     openStore: () => KnowledgeStore.open({ dbPath, ledgerPath }),
+    notesDir,
   };
   return { dir, deps, lines, errs };
 }
@@ -29,6 +32,60 @@ test("read verb without a DB refuses (exit 3) and does not create one", async ()
   assert.equal(code, 3);
   assert.match(errs.join("\n"), /penguin init/);
   assert.equal(deps.storeExists(), false);
+});
+
+test("non-interactive mutations require the exact operation token", async () => {
+  const { dir, deps, lines, errs } = harness();
+  deps.requireOperationConfirmation = true;
+  mkdirSync(join(dir, ".git", "refs", "heads"), { recursive: true });
+  writeFileSync(join(dir, ".git", "HEAD"), "ref: refs/heads/main\n");
+  writeFileSync(join(dir, ".git", "refs", "heads", "main"), "confirm-c0\n");
+  writeFileSync(join(dir, "confirm.ts"), "export const ConfirmNeedle = true;\n");
+
+  assert.equal(await runCli(["index", dir, "--dry-run", "--json"], deps), 0);
+  const preview = JSON.parse(lines.at(-1));
+  assert.equal(preview.mutated, false);
+  assert.match(preview.operationToken, /^[a-f0-9]{32}$/);
+
+  lines.length = 0;
+  assert.equal(await runCli(["index", dir], deps), 6);
+  assert.equal(deps.storeExists(), false, "missing token must not open or mutate the database");
+  assert.match(errs.at(-1), /--confirm=<operation-token>/);
+
+  assert.equal(await runCli(["index", dir, `--confirm=${preview.operationToken}`], deps), 0);
+  assert.equal(deps.storeExists(), true);
+});
+
+test("onboarding carries hashes and saves only after reviewing its exact token", async () => {
+  const { dir, deps, lines, errs } = harness();
+  mkdirSync(join(dir, ".git", "refs", "heads"), { recursive: true });
+  writeFileSync(join(dir, ".git", "HEAD"), "ref: refs/heads/main\n");
+  writeFileSync(join(dir, ".git", "refs", "heads", "main"), "onboarding-c0\n");
+  writeFileSync(join(dir, "onboarding.ts"), "export const OnboardingNeedle = true;\n");
+  assert.equal(await runCli(["init"], deps), 0);
+  lines.length = 0;
+  assert.equal(await runCli(["onboarding", "--dry-run", "--json"], deps), 0);
+  const preview = JSON.parse(lines.at(-1));
+  assert.match(preview.markdown, /revision-hash=[a-f0-9]{64}/);
+  assert.match(preview.markdown, /capability-hash=[a-f0-9]{64}/);
+  assert.equal(await runCli(["onboarding", "--save"], deps), 6);
+  assert.match(errs.at(-1), /onboarding save is guarded/);
+  assert.equal(await runCli(["onboarding", "--save", `--confirm=${preview.operationToken}`], deps), 0);
+  assert.equal((await readFile(join(dir, "notes", "penguin-onboarding.md"), "utf8")).includes("capability-hash="), true);
+});
+
+test("events-jsonl keeps stdout machine-readable and ends with a result event", async () => {
+  const { dir, deps, lines } = harness();
+  mkdirSync(join(dir, ".git", "refs", "heads"), { recursive: true });
+  writeFileSync(join(dir, ".git", "HEAD"), "ref: refs/heads/main\n");
+  writeFileSync(join(dir, ".git", "refs", "heads", "main"), "events-c0\n");
+  mkdirSync(join(dir, "src"), { recursive: true });
+  writeFileSync(join(dir, "src", "events.ts"), "export const EventsNeedle = true;\n");
+  assert.equal(await runCli(["init", "--events-jsonl"], deps), 0);
+  const events = lines.map((line) => JSON.parse(line));
+  assert.ok(events.some((event) => event.type === "progress"));
+  assert.equal(events.at(-1).type, "result");
+  assert.equal(events.at(-1).result.branchName, "main");
 });
 
 test("init indexes a repo, then status + search + callers work", async () => {
@@ -59,7 +116,26 @@ test("init indexes a repo, then status + search + callers work", async () => {
   lines.length = 0;
   assert.equal(await runCli(["search", "inner", "--json"], deps), 0);
   const hits = JSON.parse(lines[0]);
-  assert.ok(hits.some((h) => h.title === "inner"));
+  assert.ok(hits.hits.some((h) => h.title === "inner"));
+  assert.equal(hits.schemaVersion, "2");
+
+  lines.length = 0;
+  assert.equal(await runCli(["search", "inner"], deps), 0);
+  assert.match(lines[0], /^\d+ hits · coverage /);
+  assert.match(lines.join("\n"), /src\/a\.ts:\d+\tsymbol\t/);
+
+  lines.length = 0;
+  assert.equal(await runCli(["search", "inner", "--compact", "--json"], deps), 0);
+  const compactSearch = JSON.parse(lines[0]);
+  assert.equal(typeof compactSearch.hits[0].locator.filePath, "string");
+  assert.ok("coverage" in compactSearch.diagnostics);
+  assert.equal("nextCursor" in compactSearch.page || compactSearch.page.nextCursor === undefined, true);
+
+  lines.length = 0;
+  assert.equal(await runCli(["search", "inner", "--repo", dir.split("/").at(-1), "--repo", dir.split("/").at(-1), "--json"], deps), 0);
+  const repeatedRepoHits = JSON.parse(lines[0]);
+  assert.ok(repeatedRepoHits.hits.some((h) => h.title === "inner"), "repeated --repo must remain a valid live multi-repo selector");
+  assert.equal(await runCli(["search", "inner", "--repo", dir.split("/").at(-1), "--repo", dir.split("/").at(-1), "--branch", "main", "--json"], deps), 2);
 
   lines.length = 0;
   assert.equal(await runCli(["callers", "inner", "--json"], deps), 0);
@@ -173,6 +249,51 @@ test("help + unknown command exit codes", async () => {
   assert.match(lines.join("\n"), /penguin init/);
   assert.equal(await runCli(["frobnicate"], deps), 2);
   assert.match(errs.join("\n"), /unknown command/);
+});
+
+test("help exposes every canonical capability ID", async () => {
+  const { deps, lines } = harness();
+  assert.equal(await runCli(["help"], deps), 0);
+  const help = lines.join("\n");
+  for (const capability of CAPABILITIES) assert.match(help, new RegExp(capability.id.replaceAll(".", "\\.")));
+});
+
+test("v2 JSON revision failures use one typed error envelope and exit 3", async () => {
+  const { deps, lines } = harness();
+  const store = deps.openStore();
+  store.registerRepo({ name: "fixture", rootPath: deps.cwd });
+  store.close();
+  assert.equal(await runCli(["search", "needle", "--mode", "exact", "--repo", "fixture", "--snapshot", "missing", "--json"], deps), 3);
+  assert.equal(lines.length, 1);
+  const result = JSON.parse(lines[0]);
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, "REVISION_NOT_FOUND");
+});
+
+test("unscoped search outside an indexed repo reports its default workspace scope", async () => {
+  const { deps, lines } = harness();
+  const store = deps.openStore();
+  store.registerRepo({ name: "other", rootPath: "/outside/indexed-repo" });
+  store.close();
+  assert.equal(await runCli(["search", "needle", "--json"], deps), 0);
+  assert.ok(JSON.parse(lines.at(-1)).diagnostics.warnings.some((warning) => warning.code === "DEFAULT_WORKSPACE_SCOPE"));
+});
+
+test("graph-query CLI dispatches the bounded typed DSL to core", async () => {
+  const { dir, deps, lines } = harness();
+  const store = deps.openStore();
+  const repoId = store.registerRepo({ name: "graph-fixture", rootPath: dir });
+  const branchId = store.registerBranch({ repoId, name: "main", status: "live" });
+  const a = store.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::a`, title: "a", repoId });
+  const b = store.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::b`, title: "b", repoId });
+  store.replaceFileEdges({ repoId, branchId, filePath: "a.ts", edges: [{ src: a, dst: b, edgeType: "calls", origin: "parser", method: "EXTRACTED" }] });
+  store.close();
+  const requestPath = join(dir, "graph-request.json");
+  writeFileSync(requestPath, JSON.stringify({ start: { nodeIds: [a] }, traverse: [{ edgeTypes: ["calls"], direction: "out", minDepth: 1, maxDepth: 1, statuses: ["verified"] }], project: ["edges", "paths"], limit: 10 }));
+  assert.equal(await runCli(["graph-query", "--request", requestPath, "--json"], deps), 0);
+  const result = JSON.parse(lines.at(-1));
+  assert.equal(result.edges.length, 1);
+  assert.deepEqual(result.paths[0], [a, b]);
 });
 
 test("bin.ts sets process.exitCode (never process.exit) so piped --json can't truncate", async () => {

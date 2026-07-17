@@ -1,5 +1,9 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join, relative } from "node:path";
+import { execFileSync } from "node:child_process";
+import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { isAbsolute, join, relative } from "node:path";
+import { DEFAULT_COVERAGE_POLICY, classifyCoveragePath, type CoveragePolicy } from "./coverage-policy.js";
+import { classifyTextBuffer } from "./text-classifier.js";
+import type { DiscoveredFile, DiscoveryReport } from "./coverage.js";
 
 export interface WalkedFile {
   absPath: string;
@@ -94,4 +98,156 @@ export function* walkRepoFiles(
   }
 
   yield* walk(rootPath);
+}
+
+function gitPaths(rootPath: string, args: string[]): string[] {
+  try {
+    return execFileSync("git", ["-C", rootPath, ...args], { encoding: "buffer" })
+      .toString()
+      .split("\0")
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function gitlinkPaths(rootPath: string): Set<string> {
+  try {
+    const records = execFileSync("git", ["-C", rootPath, "ls-files", "--stage", "-z"], { encoding: "buffer" })
+      .toString()
+      .split("\0")
+      .filter(Boolean);
+    return new Set(records.flatMap((record) => {
+      const match = record.match(/^160000\s+\S+\s+\d+\t(.+)$/);
+      return match ? [match[1].replaceAll("\\", "/")] : [];
+    }));
+  } catch {
+    return new Set();
+  }
+}
+
+function safeRelativePath(rootPath: string, filePath: string): string | null {
+  const normalized = filePath.replaceAll("\\", "/");
+  if (isAbsolute(normalized) || normalized === ".." || normalized.startsWith("../") || normalized.includes("/../")) return null;
+  return normalized;
+}
+
+function failedFile(absolutePath: string, relativePath: string, gitState: DiscoveredFile["gitState"], reasonCode: "read_error" | "outside_workspace", reason: string): DiscoveredFile {
+  return { absolutePath, relativePath, gitState, byteSize: 0, classification: "unknown", coverageStatus: reasonCode === "outside_workspace" ? "excluded" : "failed", reasonCode, reason };
+}
+
+export function discoverRepoFiles(
+  rootPath: string,
+  options: Partial<CoveragePolicy> = {},
+): DiscoveredFile[] {
+  return discoverRepoCoverage(rootPath, options).files;
+}
+
+export function discoverRepoCoverage(
+  rootPath: string,
+  options: Partial<CoveragePolicy> = {},
+): DiscoveryReport {
+  const policy = { ...DEFAULT_COVERAGE_POLICY, ...options };
+  const tracked = new Set(gitPaths(rootPath, ["ls-files", "--cached", "-z"]));
+  const gitlinks = gitlinkPaths(rootPath);
+  const candidates = gitPaths(rootPath, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"]);
+  const ignoredAll = policy.includeIgnoredMetadata
+    ? gitPaths(rootPath, ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"])
+    : [];
+  const ignored = ignoredAll.slice(0, policy.ignoredMetadataMaxEntries);
+  const result: DiscoveredFile[] = [];
+
+  // Some callers index a plain workdir or a lightweight test fixture with a
+  // placeholder .git directory. There is no Git candidate truth in that
+  // mode, so preserve the existing filesystem walker as an explicit fallback.
+  // Real Git repositories always use the ls-files path above.
+  if (tracked.size === 0 && candidates.length === 0 && ignoredAll.length === 0) {
+    for (const file of walkRepoFiles(rootPath, { maxBytes: policy.hardFileSizeBytes })) {
+      let bytes: Buffer;
+      try { bytes = readFileSync(file.absPath); } catch {
+        result.push(failedFile(file.absPath, file.relPath, "untracked", "read_error", "file could not be read"));
+        continue;
+      }
+      const classification = classifyTextBuffer(bytes, file.relPath, policy);
+      result.push({
+        absolutePath: file.absPath,
+        relativePath: file.relPath,
+        gitState: "untracked",
+        byteSize: bytes.byteLength,
+        classification: classification.classification,
+        coverageStatus: classification.status,
+        reasonCode: classification.reasonCode,
+        reason: classification.reason,
+        ...(classification.encoding ? { encoding: classification.encoding } : {}),
+        ...(classification.lineCount !== undefined ? { lineCount: classification.lineCount } : {}),
+        ...(classification.text !== undefined ? { content: classification.text } : {}),
+      });
+    }
+    return { files: result.sort((a, b) => a.relativePath.localeCompare(b.relativePath)), warnings: [] };
+  }
+
+  const seen = new Set<string>();
+  const add = (filePath: string, gitState: DiscoveredFile["gitState"]): void => {
+    const relativePath = safeRelativePath(rootPath, filePath);
+    if (!relativePath || seen.has(relativePath)) return;
+    seen.add(relativePath);
+    const absolutePath = join(rootPath, relativePath);
+    if (gitState === "ignored") {
+      const classification = classifyCoveragePath(relativePath, policy);
+      result.push({ absolutePath, relativePath, gitState, byteSize: 0, classification: classification.classification, coverageStatus: "excluded", reasonCode: "ignored_by_git", reason: "path is git-ignored; metadata only" });
+      return;
+    }
+    if (gitlinks.has(relativePath)) {
+      result.push({ absolutePath, relativePath, gitState, byteSize: 0, classification: "unknown", coverageStatus: "excluded", reasonCode: "submodule", reason: "gitlink entry is a submodule boundary; index the submodule as its own repository" });
+      return;
+    }
+    let stats;
+    try { stats = lstatSync(absolutePath); } catch { result.push(failedFile(absolutePath, relativePath, gitState, "read_error", "file disappeared before discovery")); return; }
+    if (stats.isSymbolicLink()) {
+      try {
+        const target = realpathSync(absolutePath);
+        const workspace = realpathSync(rootPath);
+        if (target !== workspace && !target.startsWith(workspace + "/")) {
+          result.push(failedFile(absolutePath, relativePath, gitState, "outside_workspace", "symlink target is outside repository workspace"));
+          return;
+        }
+      } catch {
+        result.push(failedFile(absolutePath, relativePath, gitState, "read_error", "symlink target could not be resolved"));
+        return;
+      }
+      result.push({ absolutePath, relativePath, gitState, byteSize: stats.size, classification: "unknown", coverageStatus: "failed", reasonCode: "read_error", reason: "symlink recorded without following target", isSymlink: true });
+      return;
+    }
+    if (!stats.isFile()) {
+      result.push({ absolutePath, relativePath, gitState, byteSize: stats.size, classification: "unknown", coverageStatus: "admitted", reasonCode: "text_searchable", reason: "git entry recorded without file content" });
+      return;
+    }
+    let bytes: Buffer;
+    try { bytes = readFileSync(absolutePath); } catch { result.push(failedFile(absolutePath, relativePath, gitState, "read_error", "file could not be read")); return; }
+    const classification = classifyTextBuffer(bytes, relativePath, policy);
+    result.push({
+      absolutePath,
+      relativePath,
+      gitState,
+      byteSize: bytes.byteLength,
+      classification: classification.classification,
+      coverageStatus: classification.status,
+      reasonCode: classification.reasonCode,
+      reason: classification.reason,
+      ...(classification.encoding ? { encoding: classification.encoding } : {}),
+      ...(classification.lineCount !== undefined ? { lineCount: classification.lineCount } : {}),
+      ...(classification.text !== undefined ? { content: classification.text } : {}),
+    });
+  };
+  for (const filePath of candidates) {
+    const gitState = tracked.has(filePath) ? "tracked" : "untracked";
+    if (gitState === "tracked" || policy.includeUntracked) add(filePath, gitState);
+  }
+  for (const filePath of ignored) add(filePath, "ignored");
+  return {
+    files: result.sort((a, b) => a.relativePath.localeCompare(b.relativePath)),
+    warnings: ignoredAll.length > ignored.length
+      ? [{ code: "IGNORED_METADATA_TRUNCATED", message: "ignored metadata exceeded configured entry limit" }]
+      : [],
+  };
 }

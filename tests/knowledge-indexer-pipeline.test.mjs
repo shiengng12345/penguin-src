@@ -89,6 +89,41 @@ test("indexRepo: dirty overlay is not attributed to HEAD commit", async () => {
   rmSync(root, { recursive: true, force: true });
 });
 
+test("indexRepo: dirty tracked and untracked files enter only the worktree source overlay", async () => {
+  const root = tempRepo();
+  initRealGitRepo(root);
+  const store = openStore();
+  const cleanReport = await indexRepo({ store, rootPath: root, mode: "incremental" });
+  const cleanSnapshot = store.db.prepare("SELECT id FROM revision_snapshots WHERE repo_id=? AND state='ready' ORDER BY created_at DESC LIMIT 1").get(cleanReport.repoId).id;
+  writeFileSync(join(root, "src", "clean.ts"), "export function clean() { return 99; }\n");
+  writeFileSync(join(root, "src", "untracked.ts"), "export const worktreeOnly = true;\n");
+  const dirtyReport = await indexRepo({ store, rootPath: root, mode: "incremental" });
+  const dirtySnapshot = store.db.prepare("SELECT current_snapshot_id AS id FROM branches WHERE id=?").get(dirtyReport.branchId).id;
+  assert.ok(store.db.prepare("SELECT 1 FROM effective_snapshot_sources WHERE snapshot_id=? AND file_path='src/untracked.ts'").get(dirtySnapshot), JSON.stringify({ dirtySnapshot, sources: store.db.prepare("SELECT snapshot_id,file_path FROM effective_snapshot_sources ORDER BY snapshot_id,file_path").all(), coverage: store.db.prepare("SELECT file_path,coverage_status,reason_code FROM coverage_records WHERE repo_id=? ORDER BY file_path").all(dirtyReport.repoId) }));
+  assert.equal(store.db.prepare("SELECT 1 FROM effective_snapshot_sources WHERE snapshot_id=? AND file_path='src/untracked.ts'").get(cleanSnapshot), undefined);
+  assert.equal(store.db.prepare("SELECT decoded_content FROM source_blobs b JOIN effective_snapshot_sources e ON e.source_blob_id=b.id WHERE e.snapshot_id=? AND e.file_path='src/clean.ts'").get(cleanSnapshot).decoded_content.includes("return 1"), true);
+  assert.equal(store.db.prepare("SELECT decoded_content FROM source_blobs b JOIN effective_snapshot_sources e ON e.source_blob_id=b.id WHERE e.snapshot_id=? AND e.file_path='src/clean.ts'").get(dirtySnapshot).decoded_content.includes("return 99"), true);
+  store.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("indexRepo: coverage discovery admits unsupported and 1.5MB text for the source corpus", async () => {
+  const root = tempRepo();
+  initRealGitRepo(root);
+  writeFileSync(join(root, "config.yml"), "uniquePipelineYamlNeedle: true\n");
+  writeFileSync(join(root, "large.txt"), "uniquePipelineLargeNeedle\n".repeat(150000));
+  const store = openStore();
+  const report = await indexRepo({ store, rootPath: root, mode: "incremental" });
+  assert.ok(report.coverage.discovered >= 3);
+  assert.ok(report.coverage.admitted >= 3);
+  assert.equal(report.coverage.byReason.text_searchable >= 3, true);
+  assert.equal(report.coverage.byReason.hard_size_limit ?? 0, 0);
+  assert.equal(report.coverageWarnings.length, 0);
+  assert.ok(report.scanned >= 3);
+  store.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("readGitContext: branch, detached, and non-git degrade", () => {
   const a = tempRepo();
   writeGit(a, "ref: refs/heads/main\n", { main: "abc123def456" });

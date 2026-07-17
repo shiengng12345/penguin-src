@@ -1,8 +1,9 @@
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync, renameSync, statSync, unlinkSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync, watch, type FSWatcher } from "node:fs";
 import { join } from "node:path";
 import type { KnowledgeStore } from "@penguin/knowledge-core";
 import { indexNote, parseNote } from "./notes.js";
-import { randomUUID } from "node:crypto";
+import { canvasToSearchableMarkdown, parseCanvas } from "./canvas.js";
+import { createHash, randomUUID } from "node:crypto";
 
 // File-backed knowledge notes (§7, C9). Notes are plain Markdown files under a
 // notes directory — the file on disk is the source of truth (rebuildable: the
@@ -22,9 +23,31 @@ function ensureDir(notesDir: string): void {
   if (!existsSync(notesDir)) mkdirSync(notesDir, { recursive: true });
 }
 
+function contentHash(source: string): string { return createHash("sha256").update(source).digest("hex"); }
+
+function atomicWrite(path: string, source: string): void {
+  const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  const fd = openSync(temp, "w", 0o600);
+  try {
+    writeFileSync(fd, source, "utf8");
+    fsyncSync(fd);
+    closeSync(fd);
+    renameSync(temp, path);
+  } catch (error) {
+    try { closeSync(fd); } catch { /* already closed */ }
+    try { unlinkSync(temp); } catch { /* best effort cleanup */ }
+    throw error;
+  }
+}
+
 function indexFile(store: KnowledgeStore, notesDir: string, fileName: string): string {
   const source = readFileSync(join(notesDir, fileName), "utf8");
-  const parsed = parseNote({ path: fileName, source });
+  let noteSource = source;
+  if (fileName.toLowerCase().endsWith(".canvas")) {
+    try { noteSource = canvasToSearchableMarkdown(parseCanvas(source), fileName); }
+    catch { noteSource = `---\nid: canvas:${fileName}\ntitle: ${fileName}\ntype: canvas\n---\n\n${source}`; }
+  }
+  const parsed = parseNote({ path: fileName, source: noteSource });
   return indexNote({ store, repoRelPath: fileName, parsed }).nodeId;
 }
 
@@ -54,7 +77,7 @@ export function createNote(input: {
     .join("\n");
   const fm = `id: ${slug}\ntitle: ${input.title}${extra ? `\n${extra}` : ""}`;
   const content = `---\n${fm}\n---\n\n${input.body ?? ""}`;
-  writeFileSync(join(input.notesDir, fileName), content);
+  atomicWrite(join(input.notesDir, fileName), content);
   const nodeId = indexFile(input.store, input.notesDir, fileName);
   return { slug, path: join(input.notesDir, fileName), nodeId };
 }
@@ -107,7 +130,7 @@ export function appendNote(input: {
   const fileName = `${input.slug}.md`;
   const full = join(input.notesDir, fileName);
   if (!existsSync(full)) throw new Error(`note not found: ${input.slug}`);
-  appendFileSync(full, `\n${input.text}\n`);
+  atomicWrite(full, `${readFileSync(full, "utf8")}\n${input.text}\n`);
   const nodeId = indexFile(input.store, input.notesDir, fileName);
   return { path: full, nodeId };
 }
@@ -119,16 +142,18 @@ export function writeNoteBody(input: {
   notesDir: string;
   slug: string;
   body: string;
+  expectedContentHash?: string;
 }): { path: string; nodeId: string } {
   const full = join(input.notesDir, `${input.slug}.md`);
   if (!existsSync(full)) throw new Error(`note not found: ${input.slug}`);
   const src = readFileSync(full, "utf8");
+  if (input.expectedContentHash && contentHash(src) !== input.expectedContentHash) throw new Error("NOTE_CONTENT_HASH_MISMATCH");
   let frontmatter = "";
   if (src.startsWith("---")) {
     const end = src.indexOf("\n---", 3);
     if (end !== -1) frontmatter = `${src.slice(0, end + 4)}\n`; // through closing ---
   }
-  writeFileSync(full, `${frontmatter}\n${input.body.replace(/^\n+/, "")}`);
+  atomicWrite(full, `${frontmatter}\n${input.body.replace(/^\n+/, "")}`);
   const nodeId = indexFile(input.store, input.notesDir, `${input.slug}.md`);
   return { path: full, nodeId };
 }
@@ -141,9 +166,13 @@ export function readNote(notesDir: string, slug: string): string | null {
 
 export function listNotes(notesDir: string): string[] {
   if (!existsSync(notesDir)) return [];
-  return readdirSync(notesDir)
-    .filter((f) => f.endsWith(".md"))
-    .sort();
+  const walk = (dir: string, prefix = ""): string[] => readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+    const absolute = join(dir, entry.name);
+    if (entry.isDirectory()) return walk(absolute, relative);
+    return /\.(md|canvas)$/i.test(entry.name) ? [relative] : [];
+  });
+  return walk(notesDir).sort();
 }
 
 // Re-scan the whole notes dir into the index (rebuildability: notes survive a
@@ -156,6 +185,41 @@ export function reindexNotesDir(input: { store: KnowledgeStore; notesDir: string
   // too, or it lives on DB-only until a wipe loses it permanently (audit F-3).
   const pruned = input.store.pruneMissingNotes(new Set(files));
   return { indexed: files.length, pruned };
+}
+
+/** Watch an Obsidian vault and rebuild only the derived index after external
+ * Markdown/Canvas edits. Markdown remains the sole write authority. */
+export function startNotesWatcher(input: {
+  store: KnowledgeStore;
+  notesDir: string;
+  debounceMs?: number;
+  onReindexed?: (report: { indexed: number; pruned: number; file?: string }) => void;
+}): { close: () => void; status: () => { watching: boolean } } {
+  ensureDir(input.notesDir);
+  let timer: NodeJS.Timeout | undefined;
+  let closed = false;
+  let running = false;
+  let pendingFile: string | undefined;
+  const schedule = (file?: string) => {
+    pendingFile = file ?? pendingFile;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = undefined;
+      if (closed || running) return;
+      running = true;
+      try { input.onReindexed?.({ ...reindexNotesDir(input), ...(pendingFile ? { file: pendingFile } : {}) }); }
+      finally { pendingFile = undefined; running = false; }
+    }, input.debounceMs ?? 120);
+  };
+  const watcher: FSWatcher = watch(input.notesDir, { recursive: true }, (_event, filename) => {
+    const file = filename?.toString() ?? "";
+    if (!file || file.endsWith(".tmp") || !/\.(md|canvas)$/i.test(file)) return;
+    schedule(file);
+  });
+  return {
+    close: () => { closed = true; if (timer) clearTimeout(timer); watcher.close(); },
+    status: () => ({ watching: !closed }),
+  };
 }
 
 export type EvidenceLifecycle = "draft" | "reviewed" | "verified" | "resolved" | "archived";

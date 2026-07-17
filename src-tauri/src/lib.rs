@@ -144,6 +144,7 @@ pub fn run() {
         .manage(redis::RedisState::default())
         .manage(redis::RedisRegistry::default())
         .manage(knowledge::WatchRegistry::default())
+        .manage(knowledge::QueryRuntimeState::default())
         .setup(|app| {
             packages::start_package_watcher(app.handle().clone());
             // Warm the knowledge CLI (node resolution + cold-start + DB) in the
@@ -157,6 +158,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             knowledge::knowledge_query,
+            knowledge::knowledge_query_once,
+            knowledge::knowledge_query_canonical,
+            knowledge::knowledge_query_cancel,
             knowledge::knowledge_reindex,
             knowledge::knowledge_db_status,
             knowledge::knowledge_cli_status,

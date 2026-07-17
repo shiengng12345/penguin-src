@@ -1,0 +1,4380 @@
+{
+  "cli": {
+    "schemaVersion": "1",
+    "capabilityHash": "9bd579294b91fbe6397df3eb5045457858221dbaa922627c5b108f6cf24f5a55",
+    "capabilities": [
+      {
+        "id": "knowledge.repository.register",
+        "version": 2,
+        "title": "knowledge.repository.register",
+        "coreOperation": "knowledge.repository.register",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.repository.register.input.v2",
+        "outputSchemaId": "knowledge.repository.register.output.v2"
+      },
+      {
+        "id": "knowledge.search",
+        "version": 2,
+        "title": "knowledge.search",
+        "coreOperation": "knowledge.search",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.search.input.v2",
+        "outputSchemaId": "knowledge.search.output.v2"
+      },
+      {
+        "id": "knowledge.get_hit",
+        "version": 2,
+        "title": "knowledge.get_hit",
+        "coreOperation": "knowledge.get_hit",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.get_hit.input.v2",
+        "outputSchemaId": "knowledge.get_hit.output.v2"
+      },
+      {
+        "id": "knowledge.coverage",
+        "version": 2,
+        "title": "knowledge.coverage",
+        "coreOperation": "knowledge.coverage",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.coverage.input.v2",
+        "outputSchemaId": "knowledge.coverage.output.v2"
+      },
+      {
+        "id": "knowledge.capabilities",
+        "version": 2,
+        "title": "knowledge.capabilities",
+        "coreOperation": "knowledge.capabilities",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.capabilities.input.v2",
+        "outputSchemaId": "knowledge.capabilities.output.v2"
+      },
+      {
+        "id": "knowledge.index",
+        "version": 2,
+        "title": "knowledge.index",
+        "coreOperation": "knowledge.index",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.index.input.v2",
+        "outputSchemaId": "knowledge.index.output.v2"
+      },
+      {
+        "id": "knowledge.rebuild",
+        "version": 2,
+        "title": "knowledge.rebuild",
+        "coreOperation": "knowledge.rebuild",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.rebuild.input.v2",
+        "outputSchemaId": "knowledge.rebuild.output.v2"
+      },
+      {
+        "id": "knowledge.snapshot.materialize",
+        "version": 2,
+        "title": "knowledge.snapshot.materialize",
+        "coreOperation": "knowledge.snapshot.materialize",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.snapshot.materialize.input.v2",
+        "outputSchemaId": "knowledge.snapshot.materialize.output.v2"
+      },
+      {
+        "id": "knowledge.watch",
+        "version": 2,
+        "title": "knowledge.watch",
+        "coreOperation": "knowledge.watch",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.watch.input.v2",
+        "outputSchemaId": "knowledge.watch.output.v2"
+      },
+      {
+        "id": "knowledge.repository.remove",
+        "version": 2,
+        "title": "knowledge.repository.remove",
+        "coreOperation": "knowledge.repository.remove",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.repository.remove.input.v2",
+        "outputSchemaId": "knowledge.repository.remove.output.v2"
+      },
+      {
+        "id": "knowledge.branch.pin",
+        "version": 2,
+        "title": "knowledge.branch.pin",
+        "coreOperation": "knowledge.branch.pin",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.branch.pin.input.v2",
+        "outputSchemaId": "knowledge.branch.pin.output.v2"
+      },
+      {
+        "id": "knowledge.index_status",
+        "version": 2,
+        "title": "knowledge.index_status",
+        "coreOperation": "knowledge.index_status",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.index_status.input.v2",
+        "outputSchemaId": "knowledge.index_status.output.v2"
+      },
+      {
+        "id": "knowledge.set_master_branch",
+        "version": 2,
+        "title": "knowledge.set_master_branch",
+        "coreOperation": "knowledge.set_master_branch",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.set_master_branch.input.v2",
+        "outputSchemaId": "knowledge.set_master_branch.output.v2"
+      },
+      {
+        "id": "knowledge.snapshot.list",
+        "version": 2,
+        "title": "knowledge.snapshot.list",
+        "coreOperation": "knowledge.snapshot.list",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.snapshot.list.input.v2",
+        "outputSchemaId": "knowledge.snapshot.list.output.v2"
+      },
+      {
+        "id": "knowledge.get_node",
+        "version": 2,
+        "title": "knowledge.get_node",
+        "coreOperation": "knowledge.get_node",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.get_node.input.v2",
+        "outputSchemaId": "knowledge.get_node.output.v2"
+      },
+      {
+        "id": "knowledge.callers",
+        "version": 2,
+        "title": "knowledge.callers",
+        "coreOperation": "knowledge.callers",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.callers.input.v2",
+        "outputSchemaId": "knowledge.callers.output.v2"
+      },
+      {
+        "id": "knowledge.callees",
+        "version": 2,
+        "title": "knowledge.callees",
+        "coreOperation": "knowledge.callees",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.callees.input.v2",
+        "outputSchemaId": "knowledge.callees.output.v2"
+      },
+      {
+        "id": "knowledge.impact",
+        "version": 2,
+        "title": "knowledge.impact",
+        "coreOperation": "knowledge.impact",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.impact.input.v2",
+        "outputSchemaId": "knowledge.impact.output.v2"
+      },
+      {
+        "id": "knowledge.context",
+        "version": 2,
+        "title": "knowledge.context",
+        "coreOperation": "knowledge.context",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.context.input.v2",
+        "outputSchemaId": "knowledge.context.output.v2"
+      },
+      {
+        "id": "knowledge.explore",
+        "version": 2,
+        "title": "knowledge.explore",
+        "coreOperation": "knowledge.explore",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.explore.input.v2",
+        "outputSchemaId": "knowledge.explore.output.v2"
+      },
+      {
+        "id": "knowledge.locate",
+        "version": 2,
+        "title": "knowledge.locate",
+        "coreOperation": "knowledge.locate",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.locate.input.v2",
+        "outputSchemaId": "knowledge.locate.output.v2"
+      },
+      {
+        "id": "knowledge.explain",
+        "version": 2,
+        "title": "knowledge.explain",
+        "coreOperation": "knowledge.explain",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.explain.input.v2",
+        "outputSchemaId": "knowledge.explain.output.v2"
+      },
+      {
+        "id": "knowledge.flow",
+        "version": 2,
+        "title": "knowledge.flow",
+        "coreOperation": "knowledge.flow",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.flow.input.v2",
+        "outputSchemaId": "knowledge.flow.output.v2"
+      },
+      {
+        "id": "knowledge.affected",
+        "version": 2,
+        "title": "knowledge.affected",
+        "coreOperation": "knowledge.affected",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.affected.input.v2",
+        "outputSchemaId": "knowledge.affected.output.v2"
+      },
+      {
+        "id": "knowledge.path",
+        "version": 2,
+        "title": "knowledge.path",
+        "coreOperation": "knowledge.path",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.path.input.v2",
+        "outputSchemaId": "knowledge.path.output.v2"
+      },
+      {
+        "id": "knowledge.architecture",
+        "version": 2,
+        "title": "knowledge.architecture",
+        "coreOperation": "knowledge.architecture",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.architecture.input.v2",
+        "outputSchemaId": "knowledge.architecture.output.v2"
+      },
+      {
+        "id": "knowledge.service_graph",
+        "version": 2,
+        "title": "knowledge.service_graph",
+        "coreOperation": "knowledge.service_graph",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.service_graph.input.v2",
+        "outputSchemaId": "knowledge.service_graph.output.v2"
+      },
+      {
+        "id": "knowledge.local_graph",
+        "version": 2,
+        "title": "knowledge.local_graph",
+        "coreOperation": "knowledge.local_graph",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.local_graph.input.v2",
+        "outputSchemaId": "knowledge.local_graph.output.v2"
+      },
+      {
+        "id": "knowledge.graph.query",
+        "version": 2,
+        "title": "knowledge.graph.query",
+        "coreOperation": "knowledge.graph.query",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.graph.query.input.v2",
+        "outputSchemaId": "knowledge.graph.query.output.v2"
+      },
+      {
+        "id": "knowledge.repository_graph",
+        "version": 2,
+        "title": "knowledge.repository_graph",
+        "coreOperation": "knowledge.repository_graph",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.repository_graph.input.v2",
+        "outputSchemaId": "knowledge.repository_graph.output.v2"
+      },
+      {
+        "id": "knowledge.communities",
+        "version": 2,
+        "title": "knowledge.communities",
+        "coreOperation": "knowledge.communities",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.communities.input.v2",
+        "outputSchemaId": "knowledge.communities.output.v2"
+      },
+      {
+        "id": "knowledge.timeline",
+        "version": 2,
+        "title": "knowledge.timeline",
+        "coreOperation": "knowledge.timeline",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.timeline.input.v2",
+        "outputSchemaId": "knowledge.timeline.output.v2"
+      },
+      {
+        "id": "knowledge.recent",
+        "version": 2,
+        "title": "knowledge.recent",
+        "coreOperation": "knowledge.recent",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.recent.input.v2",
+        "outputSchemaId": "knowledge.recent.output.v2"
+      },
+      {
+        "id": "knowledge.compare_branches",
+        "version": 2,
+        "title": "knowledge.compare_branches",
+        "coreOperation": "knowledge.compare_branches",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.compare_branches.input.v2",
+        "outputSchemaId": "knowledge.compare_branches.output.v2"
+      },
+      {
+        "id": "knowledge.files",
+        "version": 2,
+        "title": "knowledge.files",
+        "coreOperation": "knowledge.files",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.files.input.v2",
+        "outputSchemaId": "knowledge.files.output.v2"
+      },
+      {
+        "id": "knowledge.file_symbols",
+        "version": 2,
+        "title": "knowledge.file_symbols",
+        "coreOperation": "knowledge.file_symbols",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.file_symbols.input.v2",
+        "outputSchemaId": "knowledge.file_symbols.output.v2"
+      },
+      {
+        "id": "knowledge.dead_code",
+        "version": 2,
+        "title": "knowledge.dead_code",
+        "coreOperation": "knowledge.dead_code",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.dead_code.input.v2",
+        "outputSchemaId": "knowledge.dead_code.output.v2"
+      },
+      {
+        "id": "knowledge.package_dependencies",
+        "version": 2,
+        "title": "knowledge.package_dependencies",
+        "coreOperation": "knowledge.package_dependencies",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.package_dependencies.input.v2",
+        "outputSchemaId": "knowledge.package_dependencies.output.v2"
+      },
+      {
+        "id": "knowledge.dependency_path",
+        "version": 2,
+        "title": "knowledge.dependency_path",
+        "coreOperation": "knowledge.dependency_path",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.dependency_path.input.v2",
+        "outputSchemaId": "knowledge.dependency_path.output.v2"
+      },
+      {
+        "id": "knowledge.analyze_repository",
+        "version": 2,
+        "title": "knowledge.analyze_repository",
+        "coreOperation": "knowledge.analyze_repository",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.analyze_repository.input.v2",
+        "outputSchemaId": "knowledge.analyze_repository.output.v2"
+      },
+      {
+        "id": "knowledge.response_sample.capture",
+        "version": 2,
+        "title": "knowledge.response_sample.capture",
+        "coreOperation": "knowledge.response_sample.capture",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.response_sample.capture.input.v2",
+        "outputSchemaId": "knowledge.response_sample.capture.output.v2"
+      },
+      {
+        "id": "knowledge.response_sample.list",
+        "version": 2,
+        "title": "knowledge.response_sample.list",
+        "coreOperation": "knowledge.response_sample.list",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.response_sample.list.input.v2",
+        "outputSchemaId": "knowledge.response_sample.list.output.v2"
+      },
+      {
+        "id": "knowledge.incident.create",
+        "version": 2,
+        "title": "knowledge.incident.create",
+        "coreOperation": "knowledge.incident.create",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.incident.create.input.v2",
+        "outputSchemaId": "knowledge.incident.create.output.v2"
+      },
+      {
+        "id": "knowledge.note.create",
+        "version": 2,
+        "title": "knowledge.note.create",
+        "coreOperation": "knowledge.note.create",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.note.create.input.v2",
+        "outputSchemaId": "knowledge.note.create.output.v2"
+      },
+      {
+        "id": "knowledge.note.append",
+        "version": 2,
+        "title": "knowledge.note.append",
+        "coreOperation": "knowledge.note.append",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.note.append.input.v2",
+        "outputSchemaId": "knowledge.note.append.output.v2"
+      },
+      {
+        "id": "knowledge.note.list",
+        "version": 2,
+        "title": "knowledge.note.list",
+        "coreOperation": "knowledge.note.list",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.note.list.input.v2",
+        "outputSchemaId": "knowledge.note.list.output.v2"
+      },
+      {
+        "id": "knowledge.note.reindex",
+        "version": 2,
+        "title": "knowledge.note.reindex",
+        "coreOperation": "knowledge.note.reindex",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.note.reindex.input.v2",
+        "outputSchemaId": "knowledge.note.reindex.output.v2"
+      },
+      {
+        "id": "knowledge.note.write",
+        "version": 2,
+        "title": "knowledge.note.write",
+        "coreOperation": "knowledge.note.write",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.note.write.input.v2",
+        "outputSchemaId": "knowledge.note.write.output.v2"
+      },
+      {
+        "id": "knowledge.note.backlinks",
+        "version": 2,
+        "title": "knowledge.note.backlinks",
+        "coreOperation": "knowledge.note.backlinks",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.note.backlinks.input.v2",
+        "outputSchemaId": "knowledge.note.backlinks.output.v2"
+      },
+      {
+        "id": "knowledge.tag.list",
+        "version": 2,
+        "title": "knowledge.tag.list",
+        "coreOperation": "knowledge.tag.list",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.tag.list.input.v2",
+        "outputSchemaId": "knowledge.tag.list.output.v2"
+      },
+      {
+        "id": "knowledge.link.create",
+        "version": 2,
+        "title": "knowledge.link.create",
+        "coreOperation": "knowledge.link.create",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.link.create.input.v2",
+        "outputSchemaId": "knowledge.link.create.output.v2"
+      },
+      {
+        "id": "knowledge.link.list",
+        "version": 2,
+        "title": "knowledge.link.list",
+        "coreOperation": "knowledge.link.list",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.link.list.input.v2",
+        "outputSchemaId": "knowledge.link.list.output.v2"
+      },
+      {
+        "id": "knowledge.link.delete",
+        "version": 2,
+        "title": "knowledge.link.delete",
+        "coreOperation": "knowledge.link.delete",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.link.delete.input.v2",
+        "outputSchemaId": "knowledge.link.delete.output.v2"
+      },
+      {
+        "id": "knowledge.source.register",
+        "version": 2,
+        "title": "knowledge.source.register",
+        "coreOperation": "knowledge.source.register",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.source.register.input.v2",
+        "outputSchemaId": "knowledge.source.register.output.v2"
+      },
+      {
+        "id": "knowledge.source.sync",
+        "version": 2,
+        "title": "knowledge.source.sync",
+        "coreOperation": "knowledge.source.sync",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.source.sync.input.v2",
+        "outputSchemaId": "knowledge.source.sync.output.v2"
+      },
+      {
+        "id": "knowledge.source.list",
+        "version": 2,
+        "title": "knowledge.source.list",
+        "coreOperation": "knowledge.source.list",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.source.list.input.v2",
+        "outputSchemaId": "knowledge.source.list.output.v2"
+      },
+      {
+        "id": "knowledge.source.remove",
+        "version": 2,
+        "title": "knowledge.source.remove",
+        "coreOperation": "knowledge.source.remove",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.source.remove.input.v2",
+        "outputSchemaId": "knowledge.source.remove.output.v2"
+      },
+      {
+        "id": "knowledge.memory.remember",
+        "version": 2,
+        "title": "knowledge.memory.remember",
+        "coreOperation": "knowledge.memory.remember",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.memory.remember.input.v2",
+        "outputSchemaId": "knowledge.memory.remember.output.v2"
+      },
+      {
+        "id": "knowledge.memory.recall",
+        "version": 2,
+        "title": "knowledge.memory.recall",
+        "coreOperation": "knowledge.memory.recall",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.memory.recall.input.v2",
+        "outputSchemaId": "knowledge.memory.recall.output.v2"
+      },
+      {
+        "id": "knowledge.memory.forget",
+        "version": 2,
+        "title": "knowledge.memory.forget",
+        "coreOperation": "knowledge.memory.forget",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.memory.forget.input.v2",
+        "outputSchemaId": "knowledge.memory.forget.output.v2"
+      },
+      {
+        "id": "knowledge.memory.improve",
+        "version": 2,
+        "title": "knowledge.memory.improve",
+        "coreOperation": "knowledge.memory.improve",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.memory.improve.input.v2",
+        "outputSchemaId": "knowledge.memory.improve.output.v2"
+      },
+      {
+        "id": "knowledge.ontology.list",
+        "version": 2,
+        "title": "knowledge.ontology.list",
+        "coreOperation": "knowledge.ontology.list",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.ontology.list.input.v2",
+        "outputSchemaId": "knowledge.ontology.list.output.v2"
+      },
+      {
+        "id": "knowledge.ontology.upsert",
+        "version": 2,
+        "title": "knowledge.ontology.upsert",
+        "coreOperation": "knowledge.ontology.upsert",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.ontology.upsert.input.v2",
+        "outputSchemaId": "knowledge.ontology.upsert.output.v2"
+      },
+      {
+        "id": "knowledge.ontology.link",
+        "version": 2,
+        "title": "knowledge.ontology.link",
+        "coreOperation": "knowledge.ontology.link",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.ontology.link.input.v2",
+        "outputSchemaId": "knowledge.ontology.link.output.v2"
+      },
+      {
+        "id": "knowledge.suggestion.list",
+        "version": 2,
+        "title": "knowledge.suggestion.list",
+        "coreOperation": "knowledge.suggestion.list",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.suggestion.list.input.v2",
+        "outputSchemaId": "knowledge.suggestion.list.output.v2"
+      },
+      {
+        "id": "knowledge.suggestion.accept",
+        "version": 2,
+        "title": "knowledge.suggestion.accept",
+        "coreOperation": "knowledge.suggestion.accept",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.suggestion.accept.input.v2",
+        "outputSchemaId": "knowledge.suggestion.accept.output.v2"
+      },
+      {
+        "id": "knowledge.suggestion.reject",
+        "version": 2,
+        "title": "knowledge.suggestion.reject",
+        "coreOperation": "knowledge.suggestion.reject",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.suggestion.reject.input.v2",
+        "outputSchemaId": "knowledge.suggestion.reject.output.v2"
+      },
+      {
+        "id": "knowledge.evidence.target.list",
+        "version": 2,
+        "title": "knowledge.evidence.target.list",
+        "coreOperation": "knowledge.evidence.target.list",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.evidence.target.list.input.v2",
+        "outputSchemaId": "knowledge.evidence.target.list.output.v2"
+      },
+      {
+        "id": "knowledge.evidence.investigation.plan",
+        "version": 2,
+        "title": "knowledge.evidence.investigation.plan",
+        "coreOperation": "knowledge.evidence.investigation.plan",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.evidence.investigation.plan.input.v2",
+        "outputSchemaId": "knowledge.evidence.investigation.plan.output.v2"
+      },
+      {
+        "id": "knowledge.evidence.investigation.capture",
+        "version": 2,
+        "title": "knowledge.evidence.investigation.capture",
+        "coreOperation": "knowledge.evidence.investigation.capture",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.evidence.investigation.capture.input.v2",
+        "outputSchemaId": "knowledge.evidence.investigation.capture.output.v2"
+      },
+      {
+        "id": "knowledge.evidence.note.get",
+        "version": 2,
+        "title": "knowledge.evidence.note.get",
+        "coreOperation": "knowledge.evidence.note.get",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.evidence.note.get.input.v2",
+        "outputSchemaId": "knowledge.evidence.note.get.output.v2"
+      },
+      {
+        "id": "knowledge.evidence.note.list",
+        "version": 2,
+        "title": "knowledge.evidence.note.list",
+        "coreOperation": "knowledge.evidence.note.list",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.evidence.note.list.input.v2",
+        "outputSchemaId": "knowledge.evidence.note.list.output.v2"
+      },
+      {
+        "id": "knowledge.evidence.status.set",
+        "version": 2,
+        "title": "knowledge.evidence.status.set",
+        "coreOperation": "knowledge.evidence.status.set",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.evidence.status.set.input.v2",
+        "outputSchemaId": "knowledge.evidence.status.set.output.v2"
+      },
+      {
+        "id": "knowledge.evidence.doctor",
+        "version": 2,
+        "title": "knowledge.evidence.doctor",
+        "coreOperation": "knowledge.evidence.doctor",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.evidence.doctor.input.v2",
+        "outputSchemaId": "knowledge.evidence.doctor.output.v2"
+      },
+      {
+        "id": "knowledge.evidence.repair",
+        "version": 2,
+        "title": "knowledge.evidence.repair",
+        "coreOperation": "knowledge.evidence.repair",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.evidence.repair.input.v2",
+        "outputSchemaId": "knowledge.evidence.repair.output.v2"
+      },
+      {
+        "id": "knowledge.evidence.validate",
+        "version": 2,
+        "title": "knowledge.evidence.validate",
+        "coreOperation": "knowledge.evidence.validate",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.evidence.validate.input.v2",
+        "outputSchemaId": "knowledge.evidence.validate.output.v2"
+      },
+      {
+        "id": "knowledge.api_doc.generate",
+        "version": 2,
+        "title": "knowledge.api_doc.generate",
+        "coreOperation": "knowledge.api_doc.generate",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.api_doc.generate.input.v2",
+        "outputSchemaId": "knowledge.api_doc.generate.output.v2"
+      },
+      {
+        "id": "knowledge.api_doc.list",
+        "version": 2,
+        "title": "knowledge.api_doc.list",
+        "coreOperation": "knowledge.api_doc.list",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.api_doc.list.input.v2",
+        "outputSchemaId": "knowledge.api_doc.list.output.v2"
+      },
+      {
+        "id": "knowledge.api_doc.show",
+        "version": 2,
+        "title": "knowledge.api_doc.show",
+        "coreOperation": "knowledge.api_doc.show",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.api_doc.show.input.v2",
+        "outputSchemaId": "knowledge.api_doc.show.output.v2"
+      },
+      {
+        "id": "knowledge.api_doc.diff",
+        "version": 2,
+        "title": "knowledge.api_doc.diff",
+        "coreOperation": "knowledge.api_doc.diff",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.api_doc.diff.input.v2",
+        "outputSchemaId": "knowledge.api_doc.diff.output.v2"
+      },
+      {
+        "id": "knowledge.api_doc.bind",
+        "version": 2,
+        "title": "knowledge.api_doc.bind",
+        "coreOperation": "knowledge.api_doc.bind",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.api_doc.bind.input.v2",
+        "outputSchemaId": "knowledge.api_doc.bind.output.v2"
+      },
+      {
+        "id": "knowledge.api_doc.unbind",
+        "version": 2,
+        "title": "knowledge.api_doc.unbind",
+        "coreOperation": "knowledge.api_doc.unbind",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.api_doc.unbind.input.v2",
+        "outputSchemaId": "knowledge.api_doc.unbind.output.v2"
+      },
+      {
+        "id": "knowledge.api_doc.draft",
+        "version": 2,
+        "title": "knowledge.api_doc.draft",
+        "coreOperation": "knowledge.api_doc.draft",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.api_doc.draft.input.v2",
+        "outputSchemaId": "knowledge.api_doc.draft.output.v2"
+      },
+      {
+        "id": "knowledge.api_doc.sync",
+        "version": 2,
+        "title": "knowledge.api_doc.sync",
+        "coreOperation": "knowledge.api_doc.sync",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.api_doc.sync.input.v2",
+        "outputSchemaId": "knowledge.api_doc.sync.output.v2"
+      },
+      {
+        "id": "knowledge.api_doc.repair",
+        "version": 2,
+        "title": "knowledge.api_doc.repair",
+        "coreOperation": "knowledge.api_doc.repair",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.api_doc.repair.input.v2",
+        "outputSchemaId": "knowledge.api_doc.repair.output.v2"
+      },
+      {
+        "id": "knowledge.api_doc.export",
+        "version": 2,
+        "title": "knowledge.api_doc.export",
+        "coreOperation": "knowledge.api_doc.export",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.api_doc.export.input.v2",
+        "outputSchemaId": "knowledge.api_doc.export.output.v2"
+      },
+      {
+        "id": "knowledge.saved_query.list",
+        "version": 2,
+        "title": "knowledge.saved_query.list",
+        "coreOperation": "knowledge.saved_query.list",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.saved_query.list.input.v2",
+        "outputSchemaId": "knowledge.saved_query.list.output.v2"
+      },
+      {
+        "id": "knowledge.saved_query.run",
+        "version": 2,
+        "title": "knowledge.saved_query.run",
+        "coreOperation": "knowledge.saved_query.run",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.saved_query.run.input.v2",
+        "outputSchemaId": "knowledge.saved_query.run.output.v2"
+      },
+      {
+        "id": "knowledge.saved_query.write",
+        "version": 2,
+        "title": "knowledge.saved_query.write",
+        "coreOperation": "knowledge.saved_query.write",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.saved_query.write.input.v2",
+        "outputSchemaId": "knowledge.saved_query.write.output.v2"
+      },
+      {
+        "id": "knowledge.why.get",
+        "version": 2,
+        "title": "knowledge.why.get",
+        "coreOperation": "knowledge.why.get",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.why.get.input.v2",
+        "outputSchemaId": "knowledge.why.get.output.v2"
+      },
+      {
+        "id": "knowledge.domain.explain",
+        "version": 2,
+        "title": "knowledge.domain.explain",
+        "coreOperation": "knowledge.domain.explain",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.domain.explain.input.v2",
+        "outputSchemaId": "knowledge.domain.explain.output.v2"
+      },
+      {
+        "id": "knowledge.onboarding.generate",
+        "version": 2,
+        "title": "knowledge.onboarding.generate",
+        "coreOperation": "knowledge.onboarding.generate",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.onboarding.generate.input.v2",
+        "outputSchemaId": "knowledge.onboarding.generate.output.v2"
+      },
+      {
+        "id": "knowledge.artifact.export",
+        "version": 2,
+        "title": "knowledge.artifact.export",
+        "coreOperation": "knowledge.artifact.export",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.artifact.export.input.v2",
+        "outputSchemaId": "knowledge.artifact.export.output.v2"
+      },
+      {
+        "id": "knowledge.artifact.import",
+        "version": 2,
+        "title": "knowledge.artifact.import",
+        "coreOperation": "knowledge.artifact.import",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.artifact.import.input.v2",
+        "outputSchemaId": "knowledge.artifact.import.output.v2"
+      },
+      {
+        "id": "knowledge.agent_hook.invoke",
+        "version": 2,
+        "title": "knowledge.agent_hook.invoke",
+        "coreOperation": "knowledge.agent_hook.invoke",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.agent_hook.invoke.input.v2",
+        "outputSchemaId": "knowledge.agent_hook.invoke.output.v2"
+      },
+      {
+        "id": "knowledge.cli.install",
+        "version": 2,
+        "title": "knowledge.cli.install",
+        "coreOperation": "knowledge.cli.install",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.cli.install.input.v2",
+        "outputSchemaId": "knowledge.cli.install.output.v2"
+      },
+      {
+        "id": "knowledge.doctor",
+        "version": 2,
+        "title": "knowledge.doctor",
+        "coreOperation": "knowledge.doctor",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.doctor.input.v2",
+        "outputSchemaId": "knowledge.doctor.output.v2"
+      }
+    ],
+    "registrations": [
+      {
+        "capabilityId": "knowledge.repository.register",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.repository.register.input.v2",
+        "outputSchemaId": "knowledge.repository.register.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.search",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.search.input.v2",
+        "outputSchemaId": "knowledge.search.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.get_hit",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.get_hit.input.v2",
+        "outputSchemaId": "knowledge.get_hit.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.coverage",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.coverage.input.v2",
+        "outputSchemaId": "knowledge.coverage.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.capabilities",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.capabilities.input.v2",
+        "outputSchemaId": "knowledge.capabilities.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.index",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.index.input.v2",
+        "outputSchemaId": "knowledge.index.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.rebuild",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.rebuild.input.v2",
+        "outputSchemaId": "knowledge.rebuild.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.snapshot.materialize",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.snapshot.materialize.input.v2",
+        "outputSchemaId": "knowledge.snapshot.materialize.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.watch",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.watch.input.v2",
+        "outputSchemaId": "knowledge.watch.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.repository.remove",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.repository.remove.input.v2",
+        "outputSchemaId": "knowledge.repository.remove.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.branch.pin",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.branch.pin.input.v2",
+        "outputSchemaId": "knowledge.branch.pin.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.index_status",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.index_status.input.v2",
+        "outputSchemaId": "knowledge.index_status.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.set_master_branch",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.set_master_branch.input.v2",
+        "outputSchemaId": "knowledge.set_master_branch.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.snapshot.list",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.snapshot.list.input.v2",
+        "outputSchemaId": "knowledge.snapshot.list.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.get_node",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.get_node.input.v2",
+        "outputSchemaId": "knowledge.get_node.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.callers",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.callers.input.v2",
+        "outputSchemaId": "knowledge.callers.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.callees",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.callees.input.v2",
+        "outputSchemaId": "knowledge.callees.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.impact",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.impact.input.v2",
+        "outputSchemaId": "knowledge.impact.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.context",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.context.input.v2",
+        "outputSchemaId": "knowledge.context.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.explore",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.explore.input.v2",
+        "outputSchemaId": "knowledge.explore.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.locate",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.locate.input.v2",
+        "outputSchemaId": "knowledge.locate.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.explain",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.explain.input.v2",
+        "outputSchemaId": "knowledge.explain.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.flow",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.flow.input.v2",
+        "outputSchemaId": "knowledge.flow.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.affected",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.affected.input.v2",
+        "outputSchemaId": "knowledge.affected.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.path",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.path.input.v2",
+        "outputSchemaId": "knowledge.path.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.architecture",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.architecture.input.v2",
+        "outputSchemaId": "knowledge.architecture.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.service_graph",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.service_graph.input.v2",
+        "outputSchemaId": "knowledge.service_graph.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.local_graph",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.local_graph.input.v2",
+        "outputSchemaId": "knowledge.local_graph.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.graph.query",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.graph.query.input.v2",
+        "outputSchemaId": "knowledge.graph.query.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.repository_graph",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.repository_graph.input.v2",
+        "outputSchemaId": "knowledge.repository_graph.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.communities",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.communities.input.v2",
+        "outputSchemaId": "knowledge.communities.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.timeline",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.timeline.input.v2",
+        "outputSchemaId": "knowledge.timeline.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.recent",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.recent.input.v2",
+        "outputSchemaId": "knowledge.recent.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.compare_branches",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.compare_branches.input.v2",
+        "outputSchemaId": "knowledge.compare_branches.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.files",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.files.input.v2",
+        "outputSchemaId": "knowledge.files.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.file_symbols",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.file_symbols.input.v2",
+        "outputSchemaId": "knowledge.file_symbols.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.dead_code",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.dead_code.input.v2",
+        "outputSchemaId": "knowledge.dead_code.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.package_dependencies",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.package_dependencies.input.v2",
+        "outputSchemaId": "knowledge.package_dependencies.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.dependency_path",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.dependency_path.input.v2",
+        "outputSchemaId": "knowledge.dependency_path.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.analyze_repository",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.analyze_repository.input.v2",
+        "outputSchemaId": "knowledge.analyze_repository.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.response_sample.capture",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.response_sample.capture.input.v2",
+        "outputSchemaId": "knowledge.response_sample.capture.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.response_sample.list",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.response_sample.list.input.v2",
+        "outputSchemaId": "knowledge.response_sample.list.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.incident.create",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.incident.create.input.v2",
+        "outputSchemaId": "knowledge.incident.create.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.note.create",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.note.create.input.v2",
+        "outputSchemaId": "knowledge.note.create.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.note.append",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.note.append.input.v2",
+        "outputSchemaId": "knowledge.note.append.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.note.list",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.note.list.input.v2",
+        "outputSchemaId": "knowledge.note.list.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.note.reindex",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.note.reindex.input.v2",
+        "outputSchemaId": "knowledge.note.reindex.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.note.write",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.note.write.input.v2",
+        "outputSchemaId": "knowledge.note.write.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.note.backlinks",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.note.backlinks.input.v2",
+        "outputSchemaId": "knowledge.note.backlinks.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.tag.list",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.tag.list.input.v2",
+        "outputSchemaId": "knowledge.tag.list.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.link.create",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.link.create.input.v2",
+        "outputSchemaId": "knowledge.link.create.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.link.list",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.link.list.input.v2",
+        "outputSchemaId": "knowledge.link.list.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.link.delete",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.link.delete.input.v2",
+        "outputSchemaId": "knowledge.link.delete.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.source.register",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.source.register.input.v2",
+        "outputSchemaId": "knowledge.source.register.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.source.sync",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.source.sync.input.v2",
+        "outputSchemaId": "knowledge.source.sync.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.source.list",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.source.list.input.v2",
+        "outputSchemaId": "knowledge.source.list.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.source.remove",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.source.remove.input.v2",
+        "outputSchemaId": "knowledge.source.remove.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.memory.remember",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.memory.remember.input.v2",
+        "outputSchemaId": "knowledge.memory.remember.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.memory.recall",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.memory.recall.input.v2",
+        "outputSchemaId": "knowledge.memory.recall.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.memory.forget",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.memory.forget.input.v2",
+        "outputSchemaId": "knowledge.memory.forget.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.memory.improve",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.memory.improve.input.v2",
+        "outputSchemaId": "knowledge.memory.improve.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.ontology.list",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.ontology.list.input.v2",
+        "outputSchemaId": "knowledge.ontology.list.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.ontology.upsert",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.ontology.upsert.input.v2",
+        "outputSchemaId": "knowledge.ontology.upsert.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.ontology.link",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.ontology.link.input.v2",
+        "outputSchemaId": "knowledge.ontology.link.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.suggestion.list",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.suggestion.list.input.v2",
+        "outputSchemaId": "knowledge.suggestion.list.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.suggestion.accept",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.suggestion.accept.input.v2",
+        "outputSchemaId": "knowledge.suggestion.accept.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.suggestion.reject",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.suggestion.reject.input.v2",
+        "outputSchemaId": "knowledge.suggestion.reject.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.evidence.target.list",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.evidence.target.list.input.v2",
+        "outputSchemaId": "knowledge.evidence.target.list.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.evidence.investigation.plan",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.evidence.investigation.plan.input.v2",
+        "outputSchemaId": "knowledge.evidence.investigation.plan.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.evidence.investigation.capture",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.evidence.investigation.capture.input.v2",
+        "outputSchemaId": "knowledge.evidence.investigation.capture.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.evidence.note.get",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.evidence.note.get.input.v2",
+        "outputSchemaId": "knowledge.evidence.note.get.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.evidence.note.list",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.evidence.note.list.input.v2",
+        "outputSchemaId": "knowledge.evidence.note.list.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.evidence.status.set",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.evidence.status.set.input.v2",
+        "outputSchemaId": "knowledge.evidence.status.set.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.evidence.doctor",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.evidence.doctor.input.v2",
+        "outputSchemaId": "knowledge.evidence.doctor.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.evidence.repair",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.evidence.repair.input.v2",
+        "outputSchemaId": "knowledge.evidence.repair.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.evidence.validate",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.evidence.validate.input.v2",
+        "outputSchemaId": "knowledge.evidence.validate.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.api_doc.generate",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.api_doc.generate.input.v2",
+        "outputSchemaId": "knowledge.api_doc.generate.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.api_doc.list",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.api_doc.list.input.v2",
+        "outputSchemaId": "knowledge.api_doc.list.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.api_doc.show",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.api_doc.show.input.v2",
+        "outputSchemaId": "knowledge.api_doc.show.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.api_doc.diff",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.api_doc.diff.input.v2",
+        "outputSchemaId": "knowledge.api_doc.diff.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.api_doc.bind",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.api_doc.bind.input.v2",
+        "outputSchemaId": "knowledge.api_doc.bind.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.api_doc.unbind",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.api_doc.unbind.input.v2",
+        "outputSchemaId": "knowledge.api_doc.unbind.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.api_doc.draft",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.api_doc.draft.input.v2",
+        "outputSchemaId": "knowledge.api_doc.draft.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.api_doc.sync",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.api_doc.sync.input.v2",
+        "outputSchemaId": "knowledge.api_doc.sync.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.api_doc.repair",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.api_doc.repair.input.v2",
+        "outputSchemaId": "knowledge.api_doc.repair.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.api_doc.export",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.api_doc.export.input.v2",
+        "outputSchemaId": "knowledge.api_doc.export.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.saved_query.list",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.saved_query.list.input.v2",
+        "outputSchemaId": "knowledge.saved_query.list.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.saved_query.run",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.saved_query.run.input.v2",
+        "outputSchemaId": "knowledge.saved_query.run.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.saved_query.write",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.saved_query.write.input.v2",
+        "outputSchemaId": "knowledge.saved_query.write.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.why.get",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.why.get.input.v2",
+        "outputSchemaId": "knowledge.why.get.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.domain.explain",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.domain.explain.input.v2",
+        "outputSchemaId": "knowledge.domain.explain.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.onboarding.generate",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.onboarding.generate.input.v2",
+        "outputSchemaId": "knowledge.onboarding.generate.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.artifact.export",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.artifact.export.input.v2",
+        "outputSchemaId": "knowledge.artifact.export.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.artifact.import",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.artifact.import.input.v2",
+        "outputSchemaId": "knowledge.artifact.import.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.agent_hook.invoke",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.agent_hook.invoke.input.v2",
+        "outputSchemaId": "knowledge.agent_hook.invoke.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.cli.install",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.cli.install.input.v2",
+        "outputSchemaId": "knowledge.cli.install.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.doctor",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.doctor.input.v2",
+        "outputSchemaId": "knowledge.doctor.output.v2"
+      }
+    ]
+  },
+  "mcp": {
+    "schemaVersion": "13",
+    "contractVersion": "2",
+    "buildId": "local",
+    "capabilityHash": "9bd579294b91fbe6397df3eb5045457858221dbaa922627c5b108f6cf24f5a55",
+    "capabilities": [
+      {
+        "id": "knowledge.repository.register",
+        "version": 2,
+        "title": "knowledge.repository.register",
+        "coreOperation": "knowledge.repository.register",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.repository.register.input.v2",
+        "outputSchemaId": "knowledge.repository.register.output.v2"
+      },
+      {
+        "id": "knowledge.search",
+        "version": 2,
+        "title": "knowledge.search",
+        "coreOperation": "knowledge.search",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.search.input.v2",
+        "outputSchemaId": "knowledge.search.output.v2"
+      },
+      {
+        "id": "knowledge.get_hit",
+        "version": 2,
+        "title": "knowledge.get_hit",
+        "coreOperation": "knowledge.get_hit",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.get_hit.input.v2",
+        "outputSchemaId": "knowledge.get_hit.output.v2"
+      },
+      {
+        "id": "knowledge.coverage",
+        "version": 2,
+        "title": "knowledge.coverage",
+        "coreOperation": "knowledge.coverage",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.coverage.input.v2",
+        "outputSchemaId": "knowledge.coverage.output.v2"
+      },
+      {
+        "id": "knowledge.capabilities",
+        "version": 2,
+        "title": "knowledge.capabilities",
+        "coreOperation": "knowledge.capabilities",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.capabilities.input.v2",
+        "outputSchemaId": "knowledge.capabilities.output.v2"
+      },
+      {
+        "id": "knowledge.index",
+        "version": 2,
+        "title": "knowledge.index",
+        "coreOperation": "knowledge.index",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.index.input.v2",
+        "outputSchemaId": "knowledge.index.output.v2"
+      },
+      {
+        "id": "knowledge.rebuild",
+        "version": 2,
+        "title": "knowledge.rebuild",
+        "coreOperation": "knowledge.rebuild",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.rebuild.input.v2",
+        "outputSchemaId": "knowledge.rebuild.output.v2"
+      },
+      {
+        "id": "knowledge.snapshot.materialize",
+        "version": 2,
+        "title": "knowledge.snapshot.materialize",
+        "coreOperation": "knowledge.snapshot.materialize",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.snapshot.materialize.input.v2",
+        "outputSchemaId": "knowledge.snapshot.materialize.output.v2"
+      },
+      {
+        "id": "knowledge.watch",
+        "version": 2,
+        "title": "knowledge.watch",
+        "coreOperation": "knowledge.watch",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.watch.input.v2",
+        "outputSchemaId": "knowledge.watch.output.v2"
+      },
+      {
+        "id": "knowledge.repository.remove",
+        "version": 2,
+        "title": "knowledge.repository.remove",
+        "coreOperation": "knowledge.repository.remove",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.repository.remove.input.v2",
+        "outputSchemaId": "knowledge.repository.remove.output.v2"
+      },
+      {
+        "id": "knowledge.branch.pin",
+        "version": 2,
+        "title": "knowledge.branch.pin",
+        "coreOperation": "knowledge.branch.pin",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.branch.pin.input.v2",
+        "outputSchemaId": "knowledge.branch.pin.output.v2"
+      },
+      {
+        "id": "knowledge.index_status",
+        "version": 2,
+        "title": "knowledge.index_status",
+        "coreOperation": "knowledge.index_status",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.index_status.input.v2",
+        "outputSchemaId": "knowledge.index_status.output.v2"
+      },
+      {
+        "id": "knowledge.set_master_branch",
+        "version": 2,
+        "title": "knowledge.set_master_branch",
+        "coreOperation": "knowledge.set_master_branch",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.set_master_branch.input.v2",
+        "outputSchemaId": "knowledge.set_master_branch.output.v2"
+      },
+      {
+        "id": "knowledge.snapshot.list",
+        "version": 2,
+        "title": "knowledge.snapshot.list",
+        "coreOperation": "knowledge.snapshot.list",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.snapshot.list.input.v2",
+        "outputSchemaId": "knowledge.snapshot.list.output.v2"
+      },
+      {
+        "id": "knowledge.get_node",
+        "version": 2,
+        "title": "knowledge.get_node",
+        "coreOperation": "knowledge.get_node",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.get_node.input.v2",
+        "outputSchemaId": "knowledge.get_node.output.v2"
+      },
+      {
+        "id": "knowledge.callers",
+        "version": 2,
+        "title": "knowledge.callers",
+        "coreOperation": "knowledge.callers",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.callers.input.v2",
+        "outputSchemaId": "knowledge.callers.output.v2"
+      },
+      {
+        "id": "knowledge.callees",
+        "version": 2,
+        "title": "knowledge.callees",
+        "coreOperation": "knowledge.callees",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.callees.input.v2",
+        "outputSchemaId": "knowledge.callees.output.v2"
+      },
+      {
+        "id": "knowledge.impact",
+        "version": 2,
+        "title": "knowledge.impact",
+        "coreOperation": "knowledge.impact",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.impact.input.v2",
+        "outputSchemaId": "knowledge.impact.output.v2"
+      },
+      {
+        "id": "knowledge.context",
+        "version": 2,
+        "title": "knowledge.context",
+        "coreOperation": "knowledge.context",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.context.input.v2",
+        "outputSchemaId": "knowledge.context.output.v2"
+      },
+      {
+        "id": "knowledge.explore",
+        "version": 2,
+        "title": "knowledge.explore",
+        "coreOperation": "knowledge.explore",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.explore.input.v2",
+        "outputSchemaId": "knowledge.explore.output.v2"
+      },
+      {
+        "id": "knowledge.locate",
+        "version": 2,
+        "title": "knowledge.locate",
+        "coreOperation": "knowledge.locate",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.locate.input.v2",
+        "outputSchemaId": "knowledge.locate.output.v2"
+      },
+      {
+        "id": "knowledge.explain",
+        "version": 2,
+        "title": "knowledge.explain",
+        "coreOperation": "knowledge.explain",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.explain.input.v2",
+        "outputSchemaId": "knowledge.explain.output.v2"
+      },
+      {
+        "id": "knowledge.flow",
+        "version": 2,
+        "title": "knowledge.flow",
+        "coreOperation": "knowledge.flow",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.flow.input.v2",
+        "outputSchemaId": "knowledge.flow.output.v2"
+      },
+      {
+        "id": "knowledge.affected",
+        "version": 2,
+        "title": "knowledge.affected",
+        "coreOperation": "knowledge.affected",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.affected.input.v2",
+        "outputSchemaId": "knowledge.affected.output.v2"
+      },
+      {
+        "id": "knowledge.path",
+        "version": 2,
+        "title": "knowledge.path",
+        "coreOperation": "knowledge.path",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.path.input.v2",
+        "outputSchemaId": "knowledge.path.output.v2"
+      },
+      {
+        "id": "knowledge.architecture",
+        "version": 2,
+        "title": "knowledge.architecture",
+        "coreOperation": "knowledge.architecture",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.architecture.input.v2",
+        "outputSchemaId": "knowledge.architecture.output.v2"
+      },
+      {
+        "id": "knowledge.service_graph",
+        "version": 2,
+        "title": "knowledge.service_graph",
+        "coreOperation": "knowledge.service_graph",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.service_graph.input.v2",
+        "outputSchemaId": "knowledge.service_graph.output.v2"
+      },
+      {
+        "id": "knowledge.local_graph",
+        "version": 2,
+        "title": "knowledge.local_graph",
+        "coreOperation": "knowledge.local_graph",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.local_graph.input.v2",
+        "outputSchemaId": "knowledge.local_graph.output.v2"
+      },
+      {
+        "id": "knowledge.graph.query",
+        "version": 2,
+        "title": "knowledge.graph.query",
+        "coreOperation": "knowledge.graph.query",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.graph.query.input.v2",
+        "outputSchemaId": "knowledge.graph.query.output.v2"
+      },
+      {
+        "id": "knowledge.repository_graph",
+        "version": 2,
+        "title": "knowledge.repository_graph",
+        "coreOperation": "knowledge.repository_graph",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.repository_graph.input.v2",
+        "outputSchemaId": "knowledge.repository_graph.output.v2"
+      },
+      {
+        "id": "knowledge.communities",
+        "version": 2,
+        "title": "knowledge.communities",
+        "coreOperation": "knowledge.communities",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.communities.input.v2",
+        "outputSchemaId": "knowledge.communities.output.v2"
+      },
+      {
+        "id": "knowledge.timeline",
+        "version": 2,
+        "title": "knowledge.timeline",
+        "coreOperation": "knowledge.timeline",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.timeline.input.v2",
+        "outputSchemaId": "knowledge.timeline.output.v2"
+      },
+      {
+        "id": "knowledge.recent",
+        "version": 2,
+        "title": "knowledge.recent",
+        "coreOperation": "knowledge.recent",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.recent.input.v2",
+        "outputSchemaId": "knowledge.recent.output.v2"
+      },
+      {
+        "id": "knowledge.compare_branches",
+        "version": 2,
+        "title": "knowledge.compare_branches",
+        "coreOperation": "knowledge.compare_branches",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.compare_branches.input.v2",
+        "outputSchemaId": "knowledge.compare_branches.output.v2"
+      },
+      {
+        "id": "knowledge.files",
+        "version": 2,
+        "title": "knowledge.files",
+        "coreOperation": "knowledge.files",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.files.input.v2",
+        "outputSchemaId": "knowledge.files.output.v2"
+      },
+      {
+        "id": "knowledge.file_symbols",
+        "version": 2,
+        "title": "knowledge.file_symbols",
+        "coreOperation": "knowledge.file_symbols",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.file_symbols.input.v2",
+        "outputSchemaId": "knowledge.file_symbols.output.v2"
+      },
+      {
+        "id": "knowledge.dead_code",
+        "version": 2,
+        "title": "knowledge.dead_code",
+        "coreOperation": "knowledge.dead_code",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.dead_code.input.v2",
+        "outputSchemaId": "knowledge.dead_code.output.v2"
+      },
+      {
+        "id": "knowledge.package_dependencies",
+        "version": 2,
+        "title": "knowledge.package_dependencies",
+        "coreOperation": "knowledge.package_dependencies",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.package_dependencies.input.v2",
+        "outputSchemaId": "knowledge.package_dependencies.output.v2"
+      },
+      {
+        "id": "knowledge.dependency_path",
+        "version": 2,
+        "title": "knowledge.dependency_path",
+        "coreOperation": "knowledge.dependency_path",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.dependency_path.input.v2",
+        "outputSchemaId": "knowledge.dependency_path.output.v2"
+      },
+      {
+        "id": "knowledge.analyze_repository",
+        "version": 2,
+        "title": "knowledge.analyze_repository",
+        "coreOperation": "knowledge.analyze_repository",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.analyze_repository.input.v2",
+        "outputSchemaId": "knowledge.analyze_repository.output.v2"
+      },
+      {
+        "id": "knowledge.response_sample.capture",
+        "version": 2,
+        "title": "knowledge.response_sample.capture",
+        "coreOperation": "knowledge.response_sample.capture",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.response_sample.capture.input.v2",
+        "outputSchemaId": "knowledge.response_sample.capture.output.v2"
+      },
+      {
+        "id": "knowledge.response_sample.list",
+        "version": 2,
+        "title": "knowledge.response_sample.list",
+        "coreOperation": "knowledge.response_sample.list",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.response_sample.list.input.v2",
+        "outputSchemaId": "knowledge.response_sample.list.output.v2"
+      },
+      {
+        "id": "knowledge.incident.create",
+        "version": 2,
+        "title": "knowledge.incident.create",
+        "coreOperation": "knowledge.incident.create",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.incident.create.input.v2",
+        "outputSchemaId": "knowledge.incident.create.output.v2"
+      },
+      {
+        "id": "knowledge.note.create",
+        "version": 2,
+        "title": "knowledge.note.create",
+        "coreOperation": "knowledge.note.create",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.note.create.input.v2",
+        "outputSchemaId": "knowledge.note.create.output.v2"
+      },
+      {
+        "id": "knowledge.note.append",
+        "version": 2,
+        "title": "knowledge.note.append",
+        "coreOperation": "knowledge.note.append",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.note.append.input.v2",
+        "outputSchemaId": "knowledge.note.append.output.v2"
+      },
+      {
+        "id": "knowledge.note.list",
+        "version": 2,
+        "title": "knowledge.note.list",
+        "coreOperation": "knowledge.note.list",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.note.list.input.v2",
+        "outputSchemaId": "knowledge.note.list.output.v2"
+      },
+      {
+        "id": "knowledge.note.reindex",
+        "version": 2,
+        "title": "knowledge.note.reindex",
+        "coreOperation": "knowledge.note.reindex",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.note.reindex.input.v2",
+        "outputSchemaId": "knowledge.note.reindex.output.v2"
+      },
+      {
+        "id": "knowledge.note.write",
+        "version": 2,
+        "title": "knowledge.note.write",
+        "coreOperation": "knowledge.note.write",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.note.write.input.v2",
+        "outputSchemaId": "knowledge.note.write.output.v2"
+      },
+      {
+        "id": "knowledge.note.backlinks",
+        "version": 2,
+        "title": "knowledge.note.backlinks",
+        "coreOperation": "knowledge.note.backlinks",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.note.backlinks.input.v2",
+        "outputSchemaId": "knowledge.note.backlinks.output.v2"
+      },
+      {
+        "id": "knowledge.tag.list",
+        "version": 2,
+        "title": "knowledge.tag.list",
+        "coreOperation": "knowledge.tag.list",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.tag.list.input.v2",
+        "outputSchemaId": "knowledge.tag.list.output.v2"
+      },
+      {
+        "id": "knowledge.link.create",
+        "version": 2,
+        "title": "knowledge.link.create",
+        "coreOperation": "knowledge.link.create",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.link.create.input.v2",
+        "outputSchemaId": "knowledge.link.create.output.v2"
+      },
+      {
+        "id": "knowledge.link.list",
+        "version": 2,
+        "title": "knowledge.link.list",
+        "coreOperation": "knowledge.link.list",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.link.list.input.v2",
+        "outputSchemaId": "knowledge.link.list.output.v2"
+      },
+      {
+        "id": "knowledge.link.delete",
+        "version": 2,
+        "title": "knowledge.link.delete",
+        "coreOperation": "knowledge.link.delete",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.link.delete.input.v2",
+        "outputSchemaId": "knowledge.link.delete.output.v2"
+      },
+      {
+        "id": "knowledge.source.register",
+        "version": 2,
+        "title": "knowledge.source.register",
+        "coreOperation": "knowledge.source.register",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.source.register.input.v2",
+        "outputSchemaId": "knowledge.source.register.output.v2"
+      },
+      {
+        "id": "knowledge.source.sync",
+        "version": 2,
+        "title": "knowledge.source.sync",
+        "coreOperation": "knowledge.source.sync",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.source.sync.input.v2",
+        "outputSchemaId": "knowledge.source.sync.output.v2"
+      },
+      {
+        "id": "knowledge.source.list",
+        "version": 2,
+        "title": "knowledge.source.list",
+        "coreOperation": "knowledge.source.list",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.source.list.input.v2",
+        "outputSchemaId": "knowledge.source.list.output.v2"
+      },
+      {
+        "id": "knowledge.source.remove",
+        "version": 2,
+        "title": "knowledge.source.remove",
+        "coreOperation": "knowledge.source.remove",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.source.remove.input.v2",
+        "outputSchemaId": "knowledge.source.remove.output.v2"
+      },
+      {
+        "id": "knowledge.memory.remember",
+        "version": 2,
+        "title": "knowledge.memory.remember",
+        "coreOperation": "knowledge.memory.remember",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.memory.remember.input.v2",
+        "outputSchemaId": "knowledge.memory.remember.output.v2"
+      },
+      {
+        "id": "knowledge.memory.recall",
+        "version": 2,
+        "title": "knowledge.memory.recall",
+        "coreOperation": "knowledge.memory.recall",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.memory.recall.input.v2",
+        "outputSchemaId": "knowledge.memory.recall.output.v2"
+      },
+      {
+        "id": "knowledge.memory.forget",
+        "version": 2,
+        "title": "knowledge.memory.forget",
+        "coreOperation": "knowledge.memory.forget",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.memory.forget.input.v2",
+        "outputSchemaId": "knowledge.memory.forget.output.v2"
+      },
+      {
+        "id": "knowledge.memory.improve",
+        "version": 2,
+        "title": "knowledge.memory.improve",
+        "coreOperation": "knowledge.memory.improve",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.memory.improve.input.v2",
+        "outputSchemaId": "knowledge.memory.improve.output.v2"
+      },
+      {
+        "id": "knowledge.ontology.list",
+        "version": 2,
+        "title": "knowledge.ontology.list",
+        "coreOperation": "knowledge.ontology.list",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.ontology.list.input.v2",
+        "outputSchemaId": "knowledge.ontology.list.output.v2"
+      },
+      {
+        "id": "knowledge.ontology.upsert",
+        "version": 2,
+        "title": "knowledge.ontology.upsert",
+        "coreOperation": "knowledge.ontology.upsert",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.ontology.upsert.input.v2",
+        "outputSchemaId": "knowledge.ontology.upsert.output.v2"
+      },
+      {
+        "id": "knowledge.ontology.link",
+        "version": 2,
+        "title": "knowledge.ontology.link",
+        "coreOperation": "knowledge.ontology.link",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.ontology.link.input.v2",
+        "outputSchemaId": "knowledge.ontology.link.output.v2"
+      },
+      {
+        "id": "knowledge.suggestion.list",
+        "version": 2,
+        "title": "knowledge.suggestion.list",
+        "coreOperation": "knowledge.suggestion.list",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.suggestion.list.input.v2",
+        "outputSchemaId": "knowledge.suggestion.list.output.v2"
+      },
+      {
+        "id": "knowledge.suggestion.accept",
+        "version": 2,
+        "title": "knowledge.suggestion.accept",
+        "coreOperation": "knowledge.suggestion.accept",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.suggestion.accept.input.v2",
+        "outputSchemaId": "knowledge.suggestion.accept.output.v2"
+      },
+      {
+        "id": "knowledge.suggestion.reject",
+        "version": 2,
+        "title": "knowledge.suggestion.reject",
+        "coreOperation": "knowledge.suggestion.reject",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.suggestion.reject.input.v2",
+        "outputSchemaId": "knowledge.suggestion.reject.output.v2"
+      },
+      {
+        "id": "knowledge.evidence.target.list",
+        "version": 2,
+        "title": "knowledge.evidence.target.list",
+        "coreOperation": "knowledge.evidence.target.list",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.evidence.target.list.input.v2",
+        "outputSchemaId": "knowledge.evidence.target.list.output.v2"
+      },
+      {
+        "id": "knowledge.evidence.investigation.plan",
+        "version": 2,
+        "title": "knowledge.evidence.investigation.plan",
+        "coreOperation": "knowledge.evidence.investigation.plan",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.evidence.investigation.plan.input.v2",
+        "outputSchemaId": "knowledge.evidence.investigation.plan.output.v2"
+      },
+      {
+        "id": "knowledge.evidence.investigation.capture",
+        "version": 2,
+        "title": "knowledge.evidence.investigation.capture",
+        "coreOperation": "knowledge.evidence.investigation.capture",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.evidence.investigation.capture.input.v2",
+        "outputSchemaId": "knowledge.evidence.investigation.capture.output.v2"
+      },
+      {
+        "id": "knowledge.evidence.note.get",
+        "version": 2,
+        "title": "knowledge.evidence.note.get",
+        "coreOperation": "knowledge.evidence.note.get",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.evidence.note.get.input.v2",
+        "outputSchemaId": "knowledge.evidence.note.get.output.v2"
+      },
+      {
+        "id": "knowledge.evidence.note.list",
+        "version": 2,
+        "title": "knowledge.evidence.note.list",
+        "coreOperation": "knowledge.evidence.note.list",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.evidence.note.list.input.v2",
+        "outputSchemaId": "knowledge.evidence.note.list.output.v2"
+      },
+      {
+        "id": "knowledge.evidence.status.set",
+        "version": 2,
+        "title": "knowledge.evidence.status.set",
+        "coreOperation": "knowledge.evidence.status.set",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.evidence.status.set.input.v2",
+        "outputSchemaId": "knowledge.evidence.status.set.output.v2"
+      },
+      {
+        "id": "knowledge.evidence.doctor",
+        "version": 2,
+        "title": "knowledge.evidence.doctor",
+        "coreOperation": "knowledge.evidence.doctor",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.evidence.doctor.input.v2",
+        "outputSchemaId": "knowledge.evidence.doctor.output.v2"
+      },
+      {
+        "id": "knowledge.evidence.repair",
+        "version": 2,
+        "title": "knowledge.evidence.repair",
+        "coreOperation": "knowledge.evidence.repair",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.evidence.repair.input.v2",
+        "outputSchemaId": "knowledge.evidence.repair.output.v2"
+      },
+      {
+        "id": "knowledge.evidence.validate",
+        "version": 2,
+        "title": "knowledge.evidence.validate",
+        "coreOperation": "knowledge.evidence.validate",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.evidence.validate.input.v2",
+        "outputSchemaId": "knowledge.evidence.validate.output.v2"
+      },
+      {
+        "id": "knowledge.api_doc.generate",
+        "version": 2,
+        "title": "knowledge.api_doc.generate",
+        "coreOperation": "knowledge.api_doc.generate",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.api_doc.generate.input.v2",
+        "outputSchemaId": "knowledge.api_doc.generate.output.v2"
+      },
+      {
+        "id": "knowledge.api_doc.list",
+        "version": 2,
+        "title": "knowledge.api_doc.list",
+        "coreOperation": "knowledge.api_doc.list",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.api_doc.list.input.v2",
+        "outputSchemaId": "knowledge.api_doc.list.output.v2"
+      },
+      {
+        "id": "knowledge.api_doc.show",
+        "version": 2,
+        "title": "knowledge.api_doc.show",
+        "coreOperation": "knowledge.api_doc.show",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.api_doc.show.input.v2",
+        "outputSchemaId": "knowledge.api_doc.show.output.v2"
+      },
+      {
+        "id": "knowledge.api_doc.diff",
+        "version": 2,
+        "title": "knowledge.api_doc.diff",
+        "coreOperation": "knowledge.api_doc.diff",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.api_doc.diff.input.v2",
+        "outputSchemaId": "knowledge.api_doc.diff.output.v2"
+      },
+      {
+        "id": "knowledge.api_doc.bind",
+        "version": 2,
+        "title": "knowledge.api_doc.bind",
+        "coreOperation": "knowledge.api_doc.bind",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.api_doc.bind.input.v2",
+        "outputSchemaId": "knowledge.api_doc.bind.output.v2"
+      },
+      {
+        "id": "knowledge.api_doc.unbind",
+        "version": 2,
+        "title": "knowledge.api_doc.unbind",
+        "coreOperation": "knowledge.api_doc.unbind",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.api_doc.unbind.input.v2",
+        "outputSchemaId": "knowledge.api_doc.unbind.output.v2"
+      },
+      {
+        "id": "knowledge.api_doc.draft",
+        "version": 2,
+        "title": "knowledge.api_doc.draft",
+        "coreOperation": "knowledge.api_doc.draft",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.api_doc.draft.input.v2",
+        "outputSchemaId": "knowledge.api_doc.draft.output.v2"
+      },
+      {
+        "id": "knowledge.api_doc.sync",
+        "version": 2,
+        "title": "knowledge.api_doc.sync",
+        "coreOperation": "knowledge.api_doc.sync",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.api_doc.sync.input.v2",
+        "outputSchemaId": "knowledge.api_doc.sync.output.v2"
+      },
+      {
+        "id": "knowledge.api_doc.repair",
+        "version": 2,
+        "title": "knowledge.api_doc.repair",
+        "coreOperation": "knowledge.api_doc.repair",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.api_doc.repair.input.v2",
+        "outputSchemaId": "knowledge.api_doc.repair.output.v2"
+      },
+      {
+        "id": "knowledge.api_doc.export",
+        "version": 2,
+        "title": "knowledge.api_doc.export",
+        "coreOperation": "knowledge.api_doc.export",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.api_doc.export.input.v2",
+        "outputSchemaId": "knowledge.api_doc.export.output.v2"
+      },
+      {
+        "id": "knowledge.saved_query.list",
+        "version": 2,
+        "title": "knowledge.saved_query.list",
+        "coreOperation": "knowledge.saved_query.list",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.saved_query.list.input.v2",
+        "outputSchemaId": "knowledge.saved_query.list.output.v2"
+      },
+      {
+        "id": "knowledge.saved_query.run",
+        "version": 2,
+        "title": "knowledge.saved_query.run",
+        "coreOperation": "knowledge.saved_query.run",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.saved_query.run.input.v2",
+        "outputSchemaId": "knowledge.saved_query.run.output.v2"
+      },
+      {
+        "id": "knowledge.saved_query.write",
+        "version": 2,
+        "title": "knowledge.saved_query.write",
+        "coreOperation": "knowledge.saved_query.write",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.saved_query.write.input.v2",
+        "outputSchemaId": "knowledge.saved_query.write.output.v2"
+      },
+      {
+        "id": "knowledge.why.get",
+        "version": 2,
+        "title": "knowledge.why.get",
+        "coreOperation": "knowledge.why.get",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.why.get.input.v2",
+        "outputSchemaId": "knowledge.why.get.output.v2"
+      },
+      {
+        "id": "knowledge.domain.explain",
+        "version": 2,
+        "title": "knowledge.domain.explain",
+        "coreOperation": "knowledge.domain.explain",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.domain.explain.input.v2",
+        "outputSchemaId": "knowledge.domain.explain.output.v2"
+      },
+      {
+        "id": "knowledge.onboarding.generate",
+        "version": 2,
+        "title": "knowledge.onboarding.generate",
+        "coreOperation": "knowledge.onboarding.generate",
+        "requiredOn": [
+          "cli",
+          "mcp",
+          "wiki"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.onboarding.generate.input.v2",
+        "outputSchemaId": "knowledge.onboarding.generate.output.v2"
+      },
+      {
+        "id": "knowledge.artifact.export",
+        "version": 2,
+        "title": "knowledge.artifact.export",
+        "coreOperation": "knowledge.artifact.export",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.artifact.export.input.v2",
+        "outputSchemaId": "knowledge.artifact.export.output.v2"
+      },
+      {
+        "id": "knowledge.artifact.import",
+        "version": 2,
+        "title": "knowledge.artifact.import",
+        "coreOperation": "knowledge.artifact.import",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.artifact.import.input.v2",
+        "outputSchemaId": "knowledge.artifact.import.output.v2"
+      },
+      {
+        "id": "knowledge.agent_hook.invoke",
+        "version": 2,
+        "title": "knowledge.agent_hook.invoke",
+        "coreOperation": "knowledge.agent_hook.invoke",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.agent_hook.invoke.input.v2",
+        "outputSchemaId": "knowledge.agent_hook.invoke.output.v2"
+      },
+      {
+        "id": "knowledge.cli.install",
+        "version": 2,
+        "title": "knowledge.cli.install",
+        "coreOperation": "knowledge.cli.install",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": false,
+        "supportsCursor": false,
+        "mutating": true,
+        "confirmation": "required",
+        "inputSchemaId": "knowledge.cli.install.input.v2",
+        "outputSchemaId": "knowledge.cli.install.output.v2"
+      },
+      {
+        "id": "knowledge.doctor",
+        "version": 2,
+        "title": "knowledge.doctor",
+        "coreOperation": "knowledge.doctor",
+        "requiredOn": [
+          "cli",
+          "mcp"
+        ],
+        "supportsCompact": true,
+        "supportsCursor": true,
+        "mutating": false,
+        "confirmation": "not_required",
+        "inputSchemaId": "knowledge.doctor.input.v2",
+        "outputSchemaId": "knowledge.doctor.output.v2"
+      }
+    ],
+    "registrations": [
+      {
+        "capabilityId": "knowledge.repository.register",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.repository.register.input.v2",
+        "outputSchemaId": "knowledge.repository.register.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.search",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.search.input.v2",
+        "outputSchemaId": "knowledge.search.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.get_hit",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.get_hit.input.v2",
+        "outputSchemaId": "knowledge.get_hit.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.coverage",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.coverage.input.v2",
+        "outputSchemaId": "knowledge.coverage.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.capabilities",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.capabilities.input.v2",
+        "outputSchemaId": "knowledge.capabilities.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.index",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.index.input.v2",
+        "outputSchemaId": "knowledge.index.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.rebuild",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.rebuild.input.v2",
+        "outputSchemaId": "knowledge.rebuild.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.snapshot.materialize",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.snapshot.materialize.input.v2",
+        "outputSchemaId": "knowledge.snapshot.materialize.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.watch",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.watch.input.v2",
+        "outputSchemaId": "knowledge.watch.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.repository.remove",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.repository.remove.input.v2",
+        "outputSchemaId": "knowledge.repository.remove.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.branch.pin",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.branch.pin.input.v2",
+        "outputSchemaId": "knowledge.branch.pin.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.index_status",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.index_status.input.v2",
+        "outputSchemaId": "knowledge.index_status.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.set_master_branch",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.set_master_branch.input.v2",
+        "outputSchemaId": "knowledge.set_master_branch.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.snapshot.list",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.snapshot.list.input.v2",
+        "outputSchemaId": "knowledge.snapshot.list.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.get_node",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.get_node.input.v2",
+        "outputSchemaId": "knowledge.get_node.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.callers",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.callers.input.v2",
+        "outputSchemaId": "knowledge.callers.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.callees",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.callees.input.v2",
+        "outputSchemaId": "knowledge.callees.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.impact",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.impact.input.v2",
+        "outputSchemaId": "knowledge.impact.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.context",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.context.input.v2",
+        "outputSchemaId": "knowledge.context.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.explore",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.explore.input.v2",
+        "outputSchemaId": "knowledge.explore.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.locate",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.locate.input.v2",
+        "outputSchemaId": "knowledge.locate.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.explain",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.explain.input.v2",
+        "outputSchemaId": "knowledge.explain.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.flow",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.flow.input.v2",
+        "outputSchemaId": "knowledge.flow.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.affected",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.affected.input.v2",
+        "outputSchemaId": "knowledge.affected.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.path",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.path.input.v2",
+        "outputSchemaId": "knowledge.path.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.architecture",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.architecture.input.v2",
+        "outputSchemaId": "knowledge.architecture.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.service_graph",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.service_graph.input.v2",
+        "outputSchemaId": "knowledge.service_graph.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.local_graph",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.local_graph.input.v2",
+        "outputSchemaId": "knowledge.local_graph.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.graph.query",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.graph.query.input.v2",
+        "outputSchemaId": "knowledge.graph.query.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.repository_graph",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.repository_graph.input.v2",
+        "outputSchemaId": "knowledge.repository_graph.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.communities",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.communities.input.v2",
+        "outputSchemaId": "knowledge.communities.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.timeline",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.timeline.input.v2",
+        "outputSchemaId": "knowledge.timeline.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.recent",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.recent.input.v2",
+        "outputSchemaId": "knowledge.recent.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.compare_branches",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.compare_branches.input.v2",
+        "outputSchemaId": "knowledge.compare_branches.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.files",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.files.input.v2",
+        "outputSchemaId": "knowledge.files.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.file_symbols",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.file_symbols.input.v2",
+        "outputSchemaId": "knowledge.file_symbols.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.dead_code",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.dead_code.input.v2",
+        "outputSchemaId": "knowledge.dead_code.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.package_dependencies",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.package_dependencies.input.v2",
+        "outputSchemaId": "knowledge.package_dependencies.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.dependency_path",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.dependency_path.input.v2",
+        "outputSchemaId": "knowledge.dependency_path.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.analyze_repository",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.analyze_repository.input.v2",
+        "outputSchemaId": "knowledge.analyze_repository.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.response_sample.capture",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.response_sample.capture.input.v2",
+        "outputSchemaId": "knowledge.response_sample.capture.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.response_sample.list",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.response_sample.list.input.v2",
+        "outputSchemaId": "knowledge.response_sample.list.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.incident.create",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.incident.create.input.v2",
+        "outputSchemaId": "knowledge.incident.create.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.note.create",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.note.create.input.v2",
+        "outputSchemaId": "knowledge.note.create.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.note.append",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.note.append.input.v2",
+        "outputSchemaId": "knowledge.note.append.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.note.list",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.note.list.input.v2",
+        "outputSchemaId": "knowledge.note.list.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.note.reindex",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.note.reindex.input.v2",
+        "outputSchemaId": "knowledge.note.reindex.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.note.write",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.note.write.input.v2",
+        "outputSchemaId": "knowledge.note.write.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.note.backlinks",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.note.backlinks.input.v2",
+        "outputSchemaId": "knowledge.note.backlinks.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.tag.list",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.tag.list.input.v2",
+        "outputSchemaId": "knowledge.tag.list.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.link.create",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.link.create.input.v2",
+        "outputSchemaId": "knowledge.link.create.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.link.list",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.link.list.input.v2",
+        "outputSchemaId": "knowledge.link.list.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.link.delete",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.link.delete.input.v2",
+        "outputSchemaId": "knowledge.link.delete.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.source.register",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.source.register.input.v2",
+        "outputSchemaId": "knowledge.source.register.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.source.sync",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.source.sync.input.v2",
+        "outputSchemaId": "knowledge.source.sync.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.source.list",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.source.list.input.v2",
+        "outputSchemaId": "knowledge.source.list.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.source.remove",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.source.remove.input.v2",
+        "outputSchemaId": "knowledge.source.remove.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.memory.remember",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.memory.remember.input.v2",
+        "outputSchemaId": "knowledge.memory.remember.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.memory.recall",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.memory.recall.input.v2",
+        "outputSchemaId": "knowledge.memory.recall.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.memory.forget",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.memory.forget.input.v2",
+        "outputSchemaId": "knowledge.memory.forget.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.memory.improve",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.memory.improve.input.v2",
+        "outputSchemaId": "knowledge.memory.improve.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.ontology.list",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.ontology.list.input.v2",
+        "outputSchemaId": "knowledge.ontology.list.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.ontology.upsert",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.ontology.upsert.input.v2",
+        "outputSchemaId": "knowledge.ontology.upsert.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.ontology.link",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.ontology.link.input.v2",
+        "outputSchemaId": "knowledge.ontology.link.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.suggestion.list",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.suggestion.list.input.v2",
+        "outputSchemaId": "knowledge.suggestion.list.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.suggestion.accept",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.suggestion.accept.input.v2",
+        "outputSchemaId": "knowledge.suggestion.accept.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.suggestion.reject",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.suggestion.reject.input.v2",
+        "outputSchemaId": "knowledge.suggestion.reject.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.evidence.target.list",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.evidence.target.list.input.v2",
+        "outputSchemaId": "knowledge.evidence.target.list.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.evidence.investigation.plan",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.evidence.investigation.plan.input.v2",
+        "outputSchemaId": "knowledge.evidence.investigation.plan.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.evidence.investigation.capture",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.evidence.investigation.capture.input.v2",
+        "outputSchemaId": "knowledge.evidence.investigation.capture.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.evidence.note.get",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.evidence.note.get.input.v2",
+        "outputSchemaId": "knowledge.evidence.note.get.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.evidence.note.list",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.evidence.note.list.input.v2",
+        "outputSchemaId": "knowledge.evidence.note.list.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.evidence.status.set",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.evidence.status.set.input.v2",
+        "outputSchemaId": "knowledge.evidence.status.set.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.evidence.doctor",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.evidence.doctor.input.v2",
+        "outputSchemaId": "knowledge.evidence.doctor.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.evidence.repair",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.evidence.repair.input.v2",
+        "outputSchemaId": "knowledge.evidence.repair.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.evidence.validate",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.evidence.validate.input.v2",
+        "outputSchemaId": "knowledge.evidence.validate.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.api_doc.generate",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.api_doc.generate.input.v2",
+        "outputSchemaId": "knowledge.api_doc.generate.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.api_doc.list",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.api_doc.list.input.v2",
+        "outputSchemaId": "knowledge.api_doc.list.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.api_doc.show",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.api_doc.show.input.v2",
+        "outputSchemaId": "knowledge.api_doc.show.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.api_doc.diff",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.api_doc.diff.input.v2",
+        "outputSchemaId": "knowledge.api_doc.diff.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.api_doc.bind",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.api_doc.bind.input.v2",
+        "outputSchemaId": "knowledge.api_doc.bind.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.api_doc.unbind",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.api_doc.unbind.input.v2",
+        "outputSchemaId": "knowledge.api_doc.unbind.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.api_doc.draft",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.api_doc.draft.input.v2",
+        "outputSchemaId": "knowledge.api_doc.draft.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.api_doc.sync",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.api_doc.sync.input.v2",
+        "outputSchemaId": "knowledge.api_doc.sync.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.api_doc.repair",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.api_doc.repair.input.v2",
+        "outputSchemaId": "knowledge.api_doc.repair.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.api_doc.export",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.api_doc.export.input.v2",
+        "outputSchemaId": "knowledge.api_doc.export.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.saved_query.list",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.saved_query.list.input.v2",
+        "outputSchemaId": "knowledge.saved_query.list.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.saved_query.run",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.saved_query.run.input.v2",
+        "outputSchemaId": "knowledge.saved_query.run.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.saved_query.write",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.saved_query.write.input.v2",
+        "outputSchemaId": "knowledge.saved_query.write.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.why.get",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.why.get.input.v2",
+        "outputSchemaId": "knowledge.why.get.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.domain.explain",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.domain.explain.input.v2",
+        "outputSchemaId": "knowledge.domain.explain.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.onboarding.generate",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.onboarding.generate.input.v2",
+        "outputSchemaId": "knowledge.onboarding.generate.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.artifact.export",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.artifact.export.input.v2",
+        "outputSchemaId": "knowledge.artifact.export.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.artifact.import",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.artifact.import.input.v2",
+        "outputSchemaId": "knowledge.artifact.import.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.agent_hook.invoke",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.agent_hook.invoke.input.v2",
+        "outputSchemaId": "knowledge.agent_hook.invoke.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.cli.install",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.cli.install.input.v2",
+        "outputSchemaId": "knowledge.cli.install.output.v2"
+      },
+      {
+        "capabilityId": "knowledge.doctor",
+        "status": "implemented",
+        "inputSchemaId": "knowledge.doctor.input.v2",
+        "outputSchemaId": "knowledge.doctor.output.v2"
+      }
+    ]
+  }
+}

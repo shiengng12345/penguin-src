@@ -1,3 +1,5 @@
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
 import {
   buildContextPack,
   buildExplorePack,
@@ -26,14 +28,40 @@ import {
   planRevisionCollection,
   applyRevisionCollection,
   search,
+  searchSource,
+  searchPath,
+  getSourceHit,
+  searchRegex,
+  searchKnowledge,
+  graphQuery,
+  packageDependencies,
+  dependencyPath,
+  OntologyStore,
+  buildDomainClaims,
+  buildDomainFlow,
+  filterHitsByPropertyPredicates,
+  filterHitsByMarkdownPredicates,
+  buildOnboardingDocument,
+  WhyCardStore,
+  MemoryStore,
+  exportKnowledgeArtifact,
+  previewKnowledgeArtifact,
+  importKnowledgeArtifact,
+  restoreKnowledgeArtifact,
+  SavedQueryStore,
+  reflectSearchFeedback,
+  ExternalSourceStore,
+  fingerprintMarkdownDirectory,
+  syncRemoteSource,
   resolveSymbolMatches,
   renderAmbiguousSymbols,
   requireRevisionContext,
   RevisionResolutionError,
+  compileKnowledgeDsl,
   type GraphMode,
   type KnowledgeStore,
 } from "@penguin/knowledge-core";
-import { indexRepo, indexRevision, RevisionIndexCoordinator, startWatcher, createNote, createIncident, appendNote, writeNoteBody, readNote, listNotes, reindexNotesDir, listEvidenceNotes, setEvidenceStatus, evidenceDoctor, repairEvidence, readGitContext, type EvidenceLifecycle } from "@penguin/knowledge-indexer";
+import { indexRepo, indexRevision, RevisionIndexCoordinator, startWatcher, createNote, createIncident, appendNote, writeNoteBody, readNote, listNotes, reindexNotesDir, listDanglingNoteLinks, listEvidenceNotes, setEvidenceStatus, evidenceDoctor, repairEvidence, readGitContext, type EvidenceLifecycle } from "@penguin/knowledge-indexer";
 import { resolveProvider, aiComplete } from "./ai.js";
 import { runClaudeHook } from "./claude-hook.js";
 import { createIndexRenderer } from "./render-progress.js";
@@ -41,6 +69,9 @@ import { discoverSubRepos, isGitRepo, type RepoCandidate } from "./multi-repo.js
 import { runApiDocCommand } from "./api-doc-command.js";
 import { createKnowledgeApiDocAdapter } from "./api-doc-knowledge-adapter.js";
 import { createLarkProcessRunner, LarkCliDocumentClient, type LarkProcessRunner } from "./lark-document-client.js";
+import { CAPABILITIES, capabilityHash, listCliRegistrations } from "@penguin/knowledge-contracts";
+import { runQueryServer } from "./query-server.js";
+export { listCliRegistrations } from "@penguin/knowledge-contracts";
 export { LarkDocumentBindingStore, type LarkDocumentBinding, type ExplicitBindingInput, type LarkBindingCandidate } from "./api-doc-binding-store.js";
 
 export interface CliDeps {
@@ -78,12 +109,16 @@ export interface CliDeps {
   apiDocBindingPath?: string;
   apiDocLarkClient?: import("@penguin/api-doc-generator").LarkSectionClient;
   larkProcessRunner?: LarkProcessRunner;
+  // The executable sets this for pipes/app bridges. Unit callers may leave it
+  // unset so existing in-process integrations remain source-compatible; the
+  // machine-facing binary never treats an omitted token as confirmation.
+  requireOperationConfirmation?: boolean;
 }
 
 const READ_VERBS = new Set([
-  "search", "node", "callers", "calls", "impact", "backlinks",
+  "capabilities", "search", "node", "callers", "calls", "impact", "backlinks",
   "path", "recent", "compare", "status", "suggestions", "snapshots", "doctor",
-  "files", "filesymbols", "graph", "repograph", "services", "tags", "context", "explore", "locate", "flow", "affected", "architecture", "communities", "timeline", "samples", "deadcode",
+  "files", "filesymbols", "hit", "get-hit", "graph-query", "graph", "repograph", "services", "tags", "context", "explore", "locate", "flow", "affected", "architecture", "communities", "timeline", "samples", "deadcode", "coverage", "why", "domain", "onboarding", "recall",
 ]);
 
 // repo/branch args accept an id OR a name (humans pass names; the Wiki passes
@@ -95,6 +130,15 @@ function resolveRepoId(store: KnowledgeStore, s: string | undefined): string | n
     .prepare("SELECT id FROM repos WHERE id=? OR name=? LIMIT 1")
     .get(s, s) as { id: string } | undefined;
   return row?.id ?? null;
+}
+
+function resolveRepoForCwd(store: KnowledgeStore, cwd: string): string | null {
+  const normalized = cwd.replace(/\/+$/, "");
+  const rows = store.db.prepare("SELECT id, root_path AS rootPath FROM repos ORDER BY length(root_path) DESC").all() as Array<{ id: string; rootPath: string }>;
+  return rows.find((row) => {
+    const root = row.rootPath.replace(/\/+$/, "");
+    return normalized === root || normalized.startsWith(`${root}/`);
+  })?.id ?? null;
 }
 function resolveBranchId(store: KnowledgeStore, repoId: string, s: string | undefined): string | null {
   if (!s) {
@@ -133,8 +177,48 @@ const GRAPH_VERB_MODE: Record<string, GraphMode> = {
   backlinks: "backlinks", recent: "recent_changes",
 };
 
+const EVENT_OUTPUT = new WeakMap<object, boolean>();
+
 function emit(deps: CliDeps, json: boolean, human: string, data: unknown): void {
+  if (EVENT_OUTPUT.get(deps)) {
+    deps.out(JSON.stringify({ type: "result", result: data }));
+    return;
+  }
   deps.out(json ? JSON.stringify(data) : human);
+}
+
+function emitProgress(deps: CliDeps, payload: unknown): void {
+  if (EVENT_OUTPUT.get(deps)) deps.out(JSON.stringify({ type: "progress", payload }));
+  deps.progressEvent?.(payload);
+}
+
+function operationToken(operation: string, scope: unknown): string {
+  return createHash("sha256").update(JSON.stringify({ operation, scope })).digest("hex").slice(0, 32);
+}
+
+function confirmationValue(argv: string[]): string | null {
+  const inline = argv.find((arg) => arg.startsWith("--confirm="));
+  if (inline) return inline.slice("--confirm=".length);
+  const index = argv.indexOf("--confirm");
+  if (index < 0) return null;
+  const next = argv[index + 1];
+  // Bare --confirm remains a compatibility alias for one release window; a
+  // preview always emits the scoped token and new automation should pass it.
+  return next && !next.startsWith("--") ? next : "legacy-confirm";
+}
+
+function confirmationAccepted(argv: string[], expected: string): boolean {
+  const value = confirmationValue(argv);
+  return value === expected || value === "legacy-confirm";
+}
+
+function requireOperationToken(deps: CliDeps, argv: string[], operation: string, scope: unknown): boolean {
+  if (!deps.requireOperationConfirmation) return true;
+  const expected = operationToken(operation, scope);
+  const value = confirmationValue(argv);
+  if (value === expected) return true;
+  deps.err(`${operation} is guarded; run --dry-run first, then repeat with --confirm=<operation-token> (token: ${expected})`);
+  return false;
 }
 
 const HELP = `penguin — Penguin Knowledge CLI
@@ -148,7 +232,9 @@ const HELP = `penguin — Penguin Knowledge CLI
   penguin pin <repo> <branch>   toggle pin (pinned branches are never auto-pruned)
   penguin master [repo] [branch] set the current/selected branch as canonical master
   penguin status                repos / branches / staleness
-  penguin search <query>        unified search
+  penguin capabilities          canonical capability manifest + registration status
+  penguin coverage [--repo r]   admitted/excluded/failed coverage summary
+  penguin search <query>        unified v2 search (--legacy-search only during deprecation window)
   penguin node <id|name>        node detail + versions + aliases
   penguin callers <symbol>      who calls it
   penguin calls <symbol>        what it calls
@@ -165,6 +251,9 @@ const HELP = `penguin — Penguin Knowledge CLI
   penguin sample <ep> <status> <json>  capture a real response for an endpoint
   penguin samples <endpoint>    captured runtime responses for an endpoint
   penguin deadcode              symbols nothing references (candidates; verify DI/reflection)
+  penguin why <card-id>         auditable WHY card
+  penguin domain <target>       evidence-backed domain claims
+  penguin onboarding [repo]     generated onboarding Markdown
   penguin incident new <title>  scaffold an error/incident memory note
   penguin note new <title> [--type=decision|incident|compliance|bug|requirement]
   penguin backlinks <node>      who links it
@@ -199,12 +288,15 @@ const HELP = `penguin — Penguin Knowledge CLI
 
 Global: --json (machine-readable), --branch <b>`;
 
+const CANONICAL_HELP = `${HELP}\nCanonical capability IDs (use \'penguin capabilities --json\' for schemas and status):\n${CAPABILITIES.map((capability) => `  ${capability.id}`).join("\n")}\n`;
+
 // The CLI is a thin shell: parse → call knowledge-core query layer / indexer →
 // format (§8.3). No independent search/index logic. Returns an exit code.
 export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
   const verb = argv[0];
   const flags = argv.filter((a) => a.startsWith("--"));
-  const valueFlags = new Set(["--branch", "--commit", "--snapshot", "--depth", "--limit", "--repo", "--target", "--status", "--from", "--request", "--document-key", "--query", "--format", "--against"]);
+  EVENT_OUTPUT.set(deps, flags.includes("--events-jsonl"));
+  const valueFlags = new Set(["--branch", "--commit", "--snapshot", "--depth", "--limit", "--repo", "--workspace", "--path", "--language", "--kind", "--target", "--status", "--from", "--request", "--document-key", "--query", "--name", "--format", "--against", "--mode", "--semantic", "--regex-flags", "--max-scanned-bytes", "--cursor", "--out", "--input", "--into", "--base", "--line", "--end-line", "--start-byte", "--context-lines", "--class", "--capability-hash", "--type", "--location", "--allow-hosts", "--persona", "--id", "--results", "--confirm"]);
   const pos: string[] = [];
   for (let i = 1; i < argv.length; i++) {
     const arg = argv[i];
@@ -221,6 +313,15 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     const index = argv.indexOf(key);
     return index >= 0 ? argv[index + 1] : undefined;
   };
+  const optionValues = (name: string): string[] => {
+    const key = `--${name}`;
+    const values: string[] = [];
+    for (let i = 0; i < argv.length; i += 1) {
+      if (argv[i].startsWith(`${key}=`)) values.push(argv[i].slice(key.length + 1));
+      else if (argv[i] === key && argv[i + 1] !== undefined) values.push(argv[i + 1]);
+    }
+    return values;
+  };
   const numberOption = (name: string): number | undefined => {
     const raw = optionValue(name);
     if (raw == null) return undefined;
@@ -235,7 +336,197 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
   }
 
   if (!verb || verb === "help") {
-    deps.out(HELP);
+    deps.out(CANONICAL_HELP);
+    return 0;
+  }
+
+  if (verb === "__query-server") {
+    return runQueryServer(deps);
+  }
+
+  if (verb === "artifact") {
+    if (!deps.storeExists()) { deps.err("no knowledge database — run `penguin init` first"); return 3; }
+    const action = pos[0] ?? "";
+    const store = deps.openStore();
+    try {
+      if (action === "export") {
+        const basePath = optionValue("base");
+        const repoOption = optionValue("repo");
+        const snapshotOption = optionValue("snapshot");
+        const scopedRepoId = repoOption ? resolveRepoId(store, repoOption) : undefined;
+        if (repoOption && !scopedRepoId) { deps.err(`unknown repo: ${repoOption}`); return 2; }
+        if (snapshotOption && !(store.db.prepare("SELECT 1 FROM revision_snapshots WHERE id=?").get(snapshotOption))) { deps.err(`unknown snapshot: ${snapshotOption}`); return 2; }
+        const previewOptions = { includeSource: flags.includes("--include-source"), includeNotes: flags.includes("--include-notes"), includeEvidence: flags.includes("--include-evidence"), ...(scopedRepoId ? { repoIds: [scopedRepoId] } : {}), ...(snapshotOption ? { snapshotIds: [snapshotOption] } : {}) };
+        const token = operationToken("artifact.export", previewOptions);
+        if (!confirmationAccepted(argv, token)) { emit(deps, json, "artifact export requires confirmation; rerun with --confirm=<operation-token> after reviewing this preview", { ...previewKnowledgeArtifact(store, previewOptions), operationToken: token }); return 6; }
+        if (confirmationValue(argv) && confirmationValue(argv) !== token && confirmationValue(argv) !== "legacy-confirm") { deps.err("confirmation token does not match the requested artifact export scope"); return 6; }
+        const artifact = exportKnowledgeArtifact(store, {
+          includeSource: flags.includes("--include-source"),
+          includeNotes: flags.includes("--include-notes"),
+          includeEvidence: flags.includes("--include-evidence"),
+          ...(scopedRepoId ? { repoIds: [scopedRepoId] } : {}),
+          ...(snapshotOption ? { snapshotIds: [snapshotOption] } : {}),
+          ...(basePath ? { baseDatabase: readFileSync(basePath) } : {}),
+        });
+        const output = optionValue("out");
+        if (!output) { deps.err("usage: penguin artifact export --out <artifact.pka>"); return 2; }
+        writeFileSync(output, artifact.bytes);
+        emit(deps, json, `exported ${output}`, { path: output, manifest: artifact.manifest, bytes: artifact.bytes.byteLength });
+        return 0;
+      }
+      if (action === "import") {
+        const input = optionValue("input") ?? pos[1];
+        if (!input) { deps.err("usage: penguin artifact import --input <artifact.pka> [--capability-hash <hash>]"); return 2; }
+        const destination = optionValue("into");
+        if (destination) {
+          if (flags.includes("--dry-run")) {
+            const preview = importKnowledgeArtifact(readFileSync(input), optionValue("capability-hash"));
+            emit(deps, json, `dry-run restore ${input} into ${destination}`, { mode: "dry-run", operation: "artifact.import", input, destination, manifest: preview.manifest, databaseBytes: preview.database.byteLength, mutated: false });
+            return 0;
+          }
+          const token = operationToken("artifact.import", { input, destination });
+          if (!confirmationAccepted(argv, token)) { deps.err(`artifact restore is guarded; repeat with --confirm=<operation-token> (token: ${token})`); return 2; }
+          if (confirmationValue(argv) !== token && confirmationValue(argv) !== "legacy-confirm") { deps.err("confirmation token does not match the requested artifact restore scope"); return 2; }
+          const basePath = optionValue("base");
+          const restored = restoreKnowledgeArtifact(readFileSync(input), destination, { expectedCapabilityHash: optionValue("capability-hash"), ...(basePath ? { baseDatabase: readFileSync(basePath) } : {}), confirmed: true });
+          emit(deps, json, `restored ${input} into ${destination}`, { path: input, destination, ...restored });
+          return 0;
+        }
+        const basePath = optionValue("base");
+        const imported = importKnowledgeArtifact(readFileSync(input), basePath ? { expectedCapabilityHash: optionValue("capability-hash"), baseDatabase: readFileSync(basePath) } : optionValue("capability-hash"));
+        emit(deps, json, `validated ${input}`, { path: input, manifest: imported.manifest, databaseBytes: imported.database.byteLength, imported: false, note: "validation completed; use --into <knowledge.db> --confirm for restore" });
+        return 0;
+      }
+      deps.err("usage: penguin artifact export|import"); return 2;
+    } finally { store.close(); }
+  }
+
+  if (verb === "source") {
+    if (!deps.storeExists()) { deps.err("no knowledge database — run `penguin init` first"); return 3; }
+    const store = deps.openStore();
+    try {
+      const sources = new ExternalSourceStore(store);
+      if (pos[0] === "list") { const result = sources.list(); emit(deps, json, result.map((source) => `${source.id}\t${source.type}\t${source.location}`).join("\n") || "(no external sources)", result); return 0; }
+      if (pos[0] === "register") { const type = optionValue("type") ?? pos[1]; const location = optionValue("location") ?? pos[2]; if (!type || !location) { deps.err("usage: penguin source register --type <markdown_directory|url|postgres_schema|openapi> --location <value>"); return 2; } const allowHosts = (optionValue("allow-hosts") ?? "").split(",").map((host) => host.trim()).filter(Boolean); const result = sources.register({ type: type as import("@penguin/knowledge-core").ExternalKnowledgeSourceType, location, config: {}, ...(allowHosts.length ? { allowHosts } : {}) }); emit(deps, json, `registered ${result.id}`, result); return 0; }
+      if (pos[0] === "remove") { const id = optionValue("id") ?? pos[1]; if (!id || !flags.includes("--confirm")) { deps.err("usage: penguin source remove <id> --confirm"); return 2; } sources.remove(id); emit(deps, json, `removed ${id}`, { ok: true, id }); return 0; }
+      if (pos[0] === "sync") {
+        const id = optionValue("id") ?? pos[1];
+        const source = id ? sources.list().find((candidate) => candidate.id === id) : undefined;
+        if (!source) { emit(deps, json, "external source not found", { error: "EXTERNAL_SOURCE_NOT_FOUND" }); return 2; }
+        if (source.type === "markdown_directory") {
+          const fingerprinted = fingerprintMarkdownDirectory(source.location);
+          const report = await indexRepo({ store, rootPath: source.location, mode: "incremental", onProgress: (payload) => emitProgress(deps, payload) });
+          const synced = sources.markSynced(source.id, { content: fingerprinted.fingerprint, licenseWarning: "external Markdown is untrusted; verify before relying on it" });
+          emit(deps, json, `synced ${source.id}`, { source: synced, files: fingerprinted.files.length, index: report });
+          return report.errors > 0 ? 1 : 0;
+        }
+        const result = await syncRemoteSource(store, source.id);
+        emit(deps, json, `synced ${source.id}`, result);
+        return 0;
+      }
+      deps.err("usage: penguin source register|list|sync|remove"); return 2;
+    } finally { store.close(); }
+  }
+
+  if (verb === "saved-query") {
+    if (!deps.storeExists()) { deps.err("no knowledge database — run `penguin init` first"); return 3; }
+    const store = deps.openStore();
+    try {
+      const action = pos[0] ?? "list";
+      const saved = new SavedQueryStore(store);
+      if (action === "list") { const result = saved.list(optionValue("query")); emit(deps, json, result.map((item) => `${item.name}\t${item.updatedAt}`).join("\n") || "(no saved queries)", result); return 0; }
+      if (action === "write") {
+        const name = pos[1] ?? optionValue("name");
+        const raw = optionValue("request") ?? pos.slice(2).join(" ");
+        if (!name || !raw) { deps.err("usage: penguin saved-query write <name> <request-json>"); return 2; }
+        let request: Record<string, unknown>;
+        try { request = JSON.parse(raw) as Record<string, unknown>; } catch { deps.err("saved query request must be valid JSON"); return 2; }
+        const result = saved.write({ name, request, scope: {} });
+        emit(deps, json, `saved ${result.name}`, result); return 0;
+      }
+      if (action === "run") {
+        const result = saved.get(pos[1] ?? optionValue("name") ?? "");
+        if (!result) { deps.err("saved query not found"); return 1; }
+        const response = await searchKnowledge(result.request as never, { store });
+        emit(deps, json, JSON.stringify(response), response); return 0;
+      }
+      deps.err("usage: penguin saved-query list|write|run"); return 2;
+    } finally { store.close(); }
+  }
+
+  if (verb === "memory" && pos[0] === "improve") {
+    if (!deps.storeExists()) { deps.err("no knowledge database — run `penguin init` first"); return 3; }
+    if (!flags.includes("--confirm")) { deps.err("memory improve is guarded; repeat with --confirm"); return 6; }
+    const store = deps.openStore();
+    try { const result = reflectSearchFeedback(store); emit(deps, json, JSON.stringify(result), result); return 0; }
+    finally { store.close(); }
+  }
+
+  if (verb === "package-dependencies" || verb === "dependency-path") {
+    if (!deps.storeExists()) { deps.err("no knowledge database — run `penguin init` first"); return 3; }
+    const store = deps.openStore();
+    try {
+      if (verb === "package-dependencies") {
+        const subject = pos[0] ?? optionValue("subject");
+        if (!subject) { deps.err("usage: penguin package-dependencies <package> [--direction dependencies|dependents|both]"); return 2; }
+        const result = packageDependencies(store, { subject, direction: (optionValue("direction") as "dependencies" | "dependents" | "both" | undefined) ?? "dependencies", transitive: !flags.includes("--direct"), maxDepth: numberOption("depth") ?? 5, limit: numberOption("limit") ?? 100 });
+        emit(deps, json, JSON.stringify(result), result); return 0;
+      }
+      const from = pos[0], to = pos[1];
+      if (!from || !to) { deps.err("usage: penguin dependency-path <from> <to>"); return 2; }
+      const result = dependencyPath(store, { from, to, maxDepth: numberOption("depth") ?? 8 });
+      emit(deps, json, JSON.stringify(result), result); return result.status === "found" ? 0 : 1;
+    } finally { store.close(); }
+  }
+
+  if (verb === "ontology") {
+    if (!deps.storeExists()) { deps.err("no knowledge database — run `penguin init` first"); return 3; }
+    const store = deps.openStore();
+    try {
+      const ontology = new OntologyStore(store);
+      if (pos[0] === "list" || !pos[0]) { const result = ontology.list(); emit(deps, json, result.map((term) => `${term.id}\t${term.canonicalName}\t${term.status}`).join("\n") || "(no ontology terms)", result); return 0; }
+      if (pos[0] === "upsert") {
+        if (!flags.includes("--confirm")) { deps.err("ontology upsert is guarded; repeat with --confirm"); return 6; }
+        const term = JSON.parse(pos.slice(1).join(" ")) as Parameters<OntologyStore["upsert"]>[0];
+        const result = ontology.upsert(term);
+        if (result.status === "ambiguous") { emit(deps, json, "ontology alias conflicts with existing candidates", { ok: false, code: "ONTOLOGY_ALIAS_AMBIGUOUS", candidates: result.candidates }); return 6; }
+        emit(deps, json, `upserted ${term.id}`, { ok: true, id: term.id, resolution: result }); return 0;
+      }
+      if (pos[0] === "link") {
+        if (!flags.includes("--confirm")) { deps.err("ontology link is guarded; repeat with --confirm"); return 6; }
+        ontology.link(pos[1] ?? "", pos[2] ?? "", pos[3] ?? "related_to"); emit(deps, json, "linked ontology terms", { ok: true }); return 0;
+      }
+      deps.err("usage: penguin ontology list|upsert|link"); return 2;
+    } finally { store.close(); }
+  }
+
+  if (verb === "analyze-repository") {
+    if (!deps.storeExists()) { deps.err("no knowledge database — run `penguin init` first"); return 3; }
+    const store = deps.openStore();
+    try {
+      const queryText = pos.join(" ").trim();
+      if (!queryText) { deps.err("usage: penguin analyze-repository <question>"); return 2; }
+      const matches = search(store, queryText, { includeSensitive: false, limit: numberOption("limit") ?? 50 });
+      const result = {
+        query: queryText,
+        focus: optionValue("focus") ?? "auto",
+        verifiedFacts: matches.map((hit) => ({ statement: `${hit.title} is indexed${hit.filePath ? ` at ${hit.filePath}` : ""}`, evidence: { nodeId: hit.nodeId, identityKey: hit.identityKey } })),
+        inferences: [],
+        gaps: matches.length ? [] : ["No deterministic Knowledge match was found; inspect source search and revision scope before concluding absence."],
+        nextTools: ["knowledge.search", "knowledge.context", "knowledge.graph.query"],
+      };
+      emit(deps, json, JSON.stringify(result), result); return 0;
+    } finally { store.close(); }
+  }
+
+  if (verb === "capabilities") {
+    const data = {
+      schemaVersion: "1",
+      capabilityHash: capabilityHash(CAPABILITIES),
+      capabilities: CAPABILITIES,
+      registrations: listCliRegistrations(),
+    };
+    emit(deps, json, `capabilities: ${CAPABILITIES.length} (hash ${data.capabilityHash})`, data);
     return 0;
   }
 
@@ -313,12 +604,18 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
         }
       }
     }
+    if (flags.includes("--dry-run")) {
+      const scope = { targets };
+      emit(deps, json, `dry-run ${verb}: ${targets.length} target(s)`, { mode: "dry-run", operation: verb, ...scope, operationToken: operationToken(verb, scope), mutated: false });
+      return 0;
+    }
+    if (!requireOperationToken(deps, argv, verb, { targets })) return 6;
     const store = deps.openStore();
     try {
       // --progress-events: emit structured progress (for the app/Rust bridge to
       // parse into Tauri events). Otherwise the live stage-tree renderer on
       // stderr (TTY only — bin.ts gates the sink on isTTY).
-      const emitEvents = flags.includes("--progress-events") && !!deps.progressEvent;
+      const emitEvents = flags.includes("--progress-events") || flags.includes("--events-jsonl");
       const mode = verb === "rebuild" ? "rebuild" : "incremental";
       for (const target of targets) {
         const renderer = !emitEvents && !json && deps.progress
@@ -329,17 +626,22 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
               width: process.stderr.columns,
             })
           : undefined;
-        const report = await indexRepo({
+          const report = await indexRepo({
           store, rootPath: target, mode,
-          onProgress: emitEvents
-            ? (p) => deps.progressEvent!({ ...p, rootPath: target })
+            onProgress: emitEvents
+            ? (p) => {
+                if (EVENT_OUTPUT.get(deps)) {
+                  deps.out(JSON.stringify({ type: "progress", payload: { ...p, rootPath: target } }));
+                }
+                if (deps.progressEvent) deps.progressEvent!({ ...p, rootPath: target });
+              }
             : renderer
             ? (p) => renderer.handle(p)
             : undefined,
         });
         renderer?.finish(report);
         if (emitEvents) {
-          deps.progressEvent!({ phase: "complete", rootPath: target, report });
+          emitProgress(deps, { phase: "complete", rootPath: target, report });
         }
         // Agent guidance (penguin usage tips for AI coding agents) is written
         // ONLY to the user's global CLAUDE.md/AGENTS.md (the "AI 集成" setup),
@@ -370,12 +672,12 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     if (!deps.storeExists()) { deps.err("no knowledge database — run `penguin init` first"); return 3; }
     const rootPath = pos[0] ?? deps.cwd;
     const store = deps.openStore();
-    const emitEvents = flags.includes("--progress-events") && !!deps.progressEvent;
+    const emitEvents = flags.includes("--progress-events") || flags.includes("--events-jsonl");
     const handle = startWatcher({
       store,
       rootPath,
       onRun: (report) => {
-        if (emitEvents) deps.progressEvent!({ phase: "watch-run", rootPath, report });
+        if (emitEvents) emitProgress(deps, { phase: "watch-run", rootPath, report });
         else deps.out(`watch: ${report.branchName} — ${report.parsed} parsed, ${report.errors} errors`);
       },
     });
@@ -386,7 +688,7 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     for (let i = 0; i < 200 && !handle.status().watching; i++) {
       await new Promise((r) => setTimeout(r, 25));
     }
-    if (emitEvents) deps.progressEvent!({ phase: "watch-started", rootPath });
+    if (emitEvents) emitProgress(deps, { phase: "watch-started", rootPath });
     return new Promise<number>((resolve) => {
       let stopping = false;
       const shutdown = () => {
@@ -436,6 +738,14 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
         return 1;
       }
       const branchName = pos[1];
+      if (flags.includes("--dry-run")) {
+        const branch = branchName ? store.getBranch(row.id, branchName) : undefined;
+        const scope = { repoId: row.id, ...(branch ? { branchId: branch.id } : {}) };
+        emit(deps, json, `dry-run ${verb}: ${row.name}${branchName ? `/${branchName}` : ""}`, { mode: "dry-run", operation: verb, ...scope, name: row.name, rootPath: row.root_path, operationToken: operationToken(verb, scope), mutated: false });
+        return 0;
+      }
+      const scope = { repoId: row.id, ...(branchName ? { branch: branchName } : {}) };
+      if (!requireOperationToken(deps, argv, verb, scope)) return 6;
       if (verb === "pin") {
         if (!branchName) { deps.err("usage: penguin pin <repo> <branch>"); return 2; }
         const br = store.getBranch(row.id, branchName);
@@ -548,7 +858,13 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
       }
       if (sub === "reindex") {
         const r = reindexNotesDir({ store, notesDir });
-        emit(deps, json, `reindexed ${r.indexed} notes`, r);
+        const dangling = listDanglingNoteLinks(store);
+        emit(deps, json, `reindexed ${r.indexed} notes · dangling links ${dangling.length}`, { ...r, danglingLinks: dangling });
+        return 0;
+      }
+      if (sub === "links") {
+        const dangling = listDanglingNoteLinks(store, numberOption("limit"));
+        emit(deps, json, dangling.map((link) => `${link.sourcePath ?? link.sourceNodeId}:${link.sourceLine}\t[[${link.rawTarget}${link.targetAnchor ? `#${link.targetAnchor}` : ""}]]\t${link.resolutionStatus}`).join("\n") || "(no dangling links)", dangling);
         return 0;
       }
       if (sub === "list" || sub === undefined) {
@@ -556,7 +872,7 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
         emit(deps, json, notes.join("\n") || "(no notes)", notes);
         return 0;
       }
-      deps.err("usage: penguin note <new|append|list|reindex> …");
+      deps.err("usage: penguin note <new|append|list|reindex|links> …");
       return 2;
     } finally {
       store.close();
@@ -587,10 +903,44 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     if (!deps.storeExists()) { deps.err("no knowledge database — run `penguin init` or open Penguin app first"); return 3; }
     const store = deps.openStore();
     try {
+      if (sub === "plan") {
+        const question = pos.slice(1).join(" ").trim();
+        if (!question) { deps.err("usage: penguin evidence plan <question> [--target <target-id>]"); return 2; }
+        const targetId = optionValue("target") ?? "knowledge-local";
+        const planId = `investigation:${createHash("sha256").update(`${targetId}\n${question}`).digest("hex").slice(0, 24)}`;
+        const plan = { planId, question, targetIds: [targetId], bounded: true, steps: ["knowledge.preflight", "evidence.collect", "human.review"], createdAt: new Date().toISOString() };
+        mkdirSync(notesDir, { recursive: true });
+        writeFileSync(`${notesDir}/.${planId.replaceAll(":", "-")}.json`, JSON.stringify(plan, null, 2));
+        emit(deps, json, `planned ${planId}`, plan); return 0;
+      }
+      if (sub === "capture") {
+        const planId = pos[1];
+        const rawResults = optionValue("results");
+        if (!planId || !rawResults) { deps.err("usage: penguin evidence capture <plan-id> --results <json>"); return 2; }
+        let results: unknown;
+        try { results = JSON.parse(readFileSync(rawResults, "utf8")); } catch { try { results = JSON.parse(rawResults); } catch { deps.err("results must be a JSON file or JSON value"); return 2; } }
+        const targetId = optionValue("target") ?? "knowledge-local";
+        const title = `Evidence ${planId}`;
+        const note = createNote({ store, notesDir, title, body: `## Captured results\n\n\`\`\`json\n${JSON.stringify(results, null, 2)}\n\`\`\``, frontmatter: { type: "evidence", status: "draft", target_id: targetId, topic_hash: createHash("sha256").update(planId).digest("hex") } });
+        emit(deps, json, `captured ${note.slug}`, { ok: true, planId, targetId, note }); return 0;
+      }
       if (sub === "list") {
         const rows = listEvidenceNotes({ store, notesDir, targetId: optionValue("target"), status: optionValue("status") as EvidenceLifecycle | undefined, limit: numberOption("limit") });
         emit(deps, json, rows.map((row) => `${row.slug}\t${row.status}\t${row.targetId}\t${row.environment}\t${row.project}/${row.logstore}\t${row.observationCount}`).join("\n") || "(no evidence notes)", rows);
         return 0;
+      }
+      if (sub === "get") {
+        const slug = pos[1];
+        if (!slug) { deps.err("usage: penguin evidence get <slug>"); return 2; }
+        const row = listEvidenceNotes({ store, notesDir, limit: 100 }).find((item) => item.slug === slug);
+        const source = row ? readNote(notesDir, slug) : null;
+        if (!row || source == null) { deps.err("evidence note not found"); return 1; }
+        emit(deps, json, source, { ...row, markdown: source }); return 0;
+      }
+      if (sub === "validate") {
+        const report = evidenceDoctor({ store, notesDir });
+        emit(deps, json, JSON.stringify(report), { ...report, status: "validated" });
+        return report.missingIndex.length || report.orphanIndex.length || report.malformed.length ? 1 : 0;
       }
       if (sub === "status") {
         const slug = pos[1];
@@ -612,6 +962,22 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
       }
       deps.err("usage: penguin evidence <list|status|doctor|repair> …");
       return 2;
+    } finally { store.close(); }
+  }
+
+  if (verb === "link" && (pos[0] === "list" || pos[0] === "delete")) {
+    if (!deps.storeExists()) { deps.err("no knowledge database — run `penguin init` first"); return 3; }
+    const store = deps.openStore();
+    try {
+      if (pos[0] === "list") {
+        const rows = store.db.prepare("SELECT id, src, dst, edge_type AS edgeType, status, provenance FROM edges WHERE status='active' ORDER BY id LIMIT ?").all(numberOption("limit") ?? 100);
+        emit(deps, json, (rows as Array<Record<string, unknown>>).map((row) => `${row.id}\t${row.src} → ${row.dst ?? "?"}\t${row.edgeType}`).join("\n") || "(no active links)", rows); return 0;
+      }
+      const id = pos[1];
+      if (!id) { deps.err("usage: penguin link delete <edge-id> --confirm"); return 2; }
+      if (!flags.includes("--confirm")) { deps.err("link delete is guarded; repeat with --confirm"); return 6; }
+      const event = store.recordKnowledge({ type: "manual_edge_deleted", origin: "user", method: "ASSERTED", actor: { type: "user", id: "cli" }, target: { node_id: id }, payload: { edge_id: id } });
+      emit(deps, json, `deleted link ${id}`, { ok: true, eventId: event.id, edgeId: id }); return 0;
     } finally { store.close(); }
   }
 
@@ -772,7 +1138,7 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
   }
 
   // ledger write verbs (may create the DB, §9)
-  if (verb === "accept" || verb === "reject" || verb === "link" || verb === "snapshot") {
+  if (verb === "accept" || verb === "reject" || verb === "link" || verb === "snapshot" || verb === "remember" || verb === "forget") {
     const store = deps.openStore();
     try {
       if (verb === "link") {
@@ -791,6 +1157,27 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
         if (!name) { deps.err("usage: penguin snapshot <name> <nodeId...>"); return 2; }
         const ev = store.createSnapshot({ name, nodeIds });
         emit(deps, json, `snapshot '${name}' (${nodeIds.length} nodes)`, { ok: true, eventId: ev.id });
+        return 0;
+      }
+      if (verb === "remember") {
+        const subject = pos[0];
+        const body = pos.slice(1).join(" ").trim();
+        if (!subject || !body) { deps.err("usage: penguin remember <subject> <body> [--repo <repo>|--workspace <id>|--global] [--class=decision|runbook|incident|preference|project|session]"); return 2; }
+        if (!optionValue("repo") && !optionValue("workspace") && !flags.includes("--global")) { deps.err("remember requires an explicit scope: --repo, --workspace, or --global"); return 2; }
+        const item = new MemoryStore(store).remember({
+          class: (optionValue("class") as import("@penguin/knowledge-core").MemoryClass | undefined) ?? "project",
+          scope: { ...(optionValue("repo") ? { repoId: resolveRepoId(store, optionValue("repo")!) ?? optionValue("repo") } : {}), ...(optionValue("workspace") ? { workspaceId: optionValue("workspace") } : {}), ...(flags.includes("--global") ? { workspaceId: "global" } : {}) },
+          subject, body, source: [{ type: "cli" }], confidence: 1, retention: "normal",
+        });
+        emit(deps, json, `remembered ${item.id}`, item);
+        return 0;
+      }
+      if (verb === "forget") {
+        const id = pos[0];
+        if (!id) { deps.err("usage: penguin forget <memory-id>"); return 2; }
+        if (!flags.includes("--confirm")) { deps.err("forget is guarded; repeat with --confirm after reviewing the memory id"); return 2; }
+        new MemoryStore(store).forget(id);
+        emit(deps, json, `forgotten ${id}`, { ok: true, id });
         return 0;
       }
       const id = pos[0];
@@ -813,13 +1200,170 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
     const store = deps.openStore();
     try {
       switch (verb) {
+        case "coverage": {
+          const repoId = resolveRepoId(store, optionValue("repo") ?? pos[0]);
+          const summary = (repoId ? store.db.prepare("SELECT COUNT(*) AS discovered, SUM(coverage_status='admitted') AS admitted, SUM(coverage_status<>'admitted') AS excluded, SUM(coverage_status='failed') AS failed FROM coverage_records WHERE repo_id=?").get(repoId) : store.db.prepare("SELECT COUNT(*) AS discovered, SUM(coverage_status='admitted') AS admitted, SUM(coverage_status<>'admitted') AS excluded, SUM(coverage_status='failed') AS failed FROM coverage_records").get()) as { discovered: number; admitted: number; excluded: number; failed: number };
+          const result = { discovered: summary.discovered ?? 0, admitted: summary.admitted ?? 0, excluded: summary.excluded ?? 0, failed: summary.failed ?? 0, stale: 0 };
+          emit(deps, json, `coverage: ${result.admitted} admitted · ${result.excluded} excluded · ${result.failed} failed`, result);
+          return 0;
+        }
+        case "onboarding": {
+          const repoId = resolveRepoId(store, optionValue("repo") ?? pos[0]) ?? undefined;
+          const document = buildOnboardingDocument(store, repoId);
+          const scope = { repoId: repoId ?? null, revisionHash: document.revisionHash, capabilityHash: document.capabilityHash };
+          const token = operationToken("onboarding.save", scope);
+          if (flags.includes("--dry-run")) {
+            emit(deps, json, `dry-run onboarding save (token: ${token})`, { mode: "dry-run", operation: "onboarding.save", ...scope, operationToken: token, markdown: document.markdown, mutated: false });
+            return 0;
+          }
+          if (flags.includes("--save")) {
+            if (confirmationValue(argv) !== token) { deps.err(`onboarding save is guarded; review the preview, then repeat with --confirm=${token}`); return 6; }
+            if (!deps.notesDir) { deps.err("notes dir not configured"); return 1; }
+            const note = createNote({ store, notesDir: deps.notesDir, title: repoId ? "Penguin Onboarding - Repository" : "Penguin Onboarding", body: document.markdown, frontmatter: { type: "architecture", status: "reviewed", revision_hash: document.revisionHash, capability_hash: document.capabilityHash } });
+            emit(deps, json, `saved onboarding → ${note.path}`, { ok: true, ...scope, note });
+            return 0;
+          }
+          emit(deps, json, document.markdown, { markdown: document.markdown, ...scope, saveOperationToken: token });
+          return 0;
+        }
+        case "domain": {
+          const repoId = resolveRepoId(store, optionValue("repo") ?? pos[0]);
+          const result = { target: pos.join(" "), claims: buildDomainClaims(store, { ...(repoId ? { repoId } : {}), ...(optionValue("persona") ? { persona: optionValue("persona") as "frontend" | "backend" | "qa" | "sre" | "pm/security" } : {}) }), flow: buildDomainFlow(store, { ...(repoId ? { repoId } : {}), ...(pos.join(" ") ? { target: pos.join(" ") } : {}) }), gaps: repoId ? [] : ["repo scope not specified"] };
+          emit(deps, json, JSON.stringify(result), result);
+          return 0;
+        }
+        case "why": {
+          const id = pos[0];
+          const card = id ? new WhyCardStore(store).get(id) : undefined;
+          emit(deps, json, card ? `${card.question}\n${card.answer}` : "(no WHY card)", card ?? { cards: [] });
+          return card ? 0 : 1;
+        }
+        case "recall": {
+          const memories = new MemoryStore(store).recall(optionValue("repo") ? { repoId: resolveRepoId(store, optionValue("repo")!) ?? optionValue("repo") } : undefined);
+          emit(deps, json, memories.map((item) => `${item.id}\t${item.subject}\t${item.body}`).join("\n") || "(no memories)", memories);
+          return 0;
+        }
         case "search": {
-          const hits = search(store, pos.join(" "), { includeSensitive: false });
+          let queryText = pos.join(" ");
+          let mode = optionValue("mode") ?? "auto";
+          let dslPaths: string[] = [];
+          let propertyPredicates: import("@penguin/knowledge-core").KnowledgeDslPredicate[] = [];
+          let markdownPredicates: import("@penguin/knowledge-core").KnowledgeDslPredicate[] = [];
+          if (flags.includes("--dsl")) {
+            try {
+              const compiled = compileKnowledgeDsl(queryText);
+              queryText = compiled.request.query;
+              mode = compiled.request.mode ?? "auto";
+              dslPaths = compiled.request.scope?.paths ?? [];
+              propertyPredicates = compiled.propertyPredicates;
+              markdownPredicates = compiled.markdownPredicates;
+            } catch (error) { deps.err(String((error as Error).message ?? error)); return 2; }
+          }
+          const revisionKinds = [optionValue("snapshot"), optionValue("commit"), flags.includes("--working-tree") ? "working-tree" : undefined].filter(Boolean);
+          if (revisionKinds.length > 1) { deps.err("--snapshot, --commit, and --working-tree are mutually exclusive"); return 2; }
+          const repoSelectors = optionValues("repo");
+          if (repoSelectors.length > 1 && (optionValue("branch") || revisionKinds.length > 0)) {
+            deps.err("repeated --repo supports live multi-repo search only; combine it with --branch, --commit, --snapshot, or --working-tree one repo at a time");
+            return 2;
+          }
+          const resolvedRepoIds = repoSelectors.map((selector) => resolveRepoId(store, selector));
+          if (resolvedRepoIds.some((repoId) => !repoId)) {
+            const missing = repoSelectors[resolvedRepoIds.findIndex((repoId) => !repoId)];
+            deps.err(`unknown repo: ${missing}`);
+            return 2;
+          }
+          const selectedRepoIds = resolvedRepoIds.filter((repoId): repoId is string => Boolean(repoId));
+          let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
+          try {
+            if (repoSelectors.length <= 1 && (optionValue("repo") || optionValue("branch") || optionValue("commit") || optionValue("snapshot"))) {
+              revision = resolveCliRevision(store, queryText, { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot") });
+            }
+          } catch (error) {
+            if (json && error instanceof RevisionResolutionError) {
+              deps.out(JSON.stringify({ ok: false, error: { code: "REVISION_NOT_FOUND", message: error.message, details: { candidates: error.candidates }, retryable: false } }));
+            } else {
+              reportRevisionResolutionError(deps, error);
+            }
+            return json ? 3 : 2;
+          }
+          const defaultRepoId = selectedRepoIds.length === 0 && !revision && revisionKinds.length === 0
+            ? resolveRepoForCwd(store, deps.cwd)
+            : null;
+          const repoId = selectedRepoIds[0] ?? revision?.repoId ?? defaultRepoId;
+          const sourceSnapshotId = revision && !revision.snapshotId.startsWith("legacy:")
+            ? revision.snapshotId
+            : (revision?.branchId
+              ? (store.db.prepare("SELECT current_snapshot_id FROM branches WHERE id=?").get(revision.branchId) as { current_snapshot_id: string | null } | undefined)?.current_snapshot_id ?? null
+              : (store.db.prepare(repoId
+                ? "SELECT current_snapshot_id FROM branches WHERE repo_id=? AND status='live' AND current_snapshot_id IS NOT NULL ORDER BY default_branch DESC, name LIMIT 1"
+                : "SELECT current_snapshot_id FROM branches WHERE status='live' AND current_snapshot_id IS NOT NULL ORDER BY default_branch DESC, name LIMIT 1")
+                .get(...(repoId ? [repoId] : [])) as { current_snapshot_id: string | null } | undefined)?.current_snapshot_id ?? null);
+          const useV2Search = !flags.includes("--legacy-search");
+          if (useV2Search || optionValue("mode") || flags.includes("--compact") || optionValue("cursor")) {
+            const revisions = sourceSnapshotId
+              ? [{ ...(repoId ? { repoId } : {}), ...(flags.includes("--working-tree") ? { workingTree: true } : { snapshotId: sourceSnapshotId }) }]
+              : selectedRepoIds.length > 0
+              ? selectedRepoIds.map((selected) => ({ repoId: selected }))
+              : undefined;
+            let response = await searchKnowledge({ query: queryText, mode: mode as never, scope: { ...(revisions ? { revisions } : {}), ...(optionValue("workspace") ? { workspaceId: optionValue("workspace") } : {}), ...((optionValues("path").length || dslPaths.length) ? { paths: [...optionValues("path"), ...dslPaths] } : {}), ...(optionValues("language").length ? { languages: optionValues("language") } : {}), ...(optionValues("kind").length ? { kinds: optionValues("kind") } : {}) }, options: { caseSensitive: flags.includes("--case-sensitive") || !flags.includes("--case-insensitive"), wholeWord: flags.includes("--whole-word"), includeGenerated: flags.includes("--include-generated"), includeVendor: flags.includes("--include-vendor"), includeExcludedMetadata: flags.includes("--include-excluded-metadata"), semantic: (optionValue("semantic") as "off" | "fallback" | "blend" | undefined) ?? "off", compact: flags.includes("--compact"), explain: flags.includes("--explain") }, page: { limit: numberOption("limit") ?? 50, ...(optionValue("cursor") ? { cursor: optionValue("cursor") } : {}) } }, { store, scopes: sourceSnapshotId ? [{ snapshotId: sourceSnapshotId, repoId }] : undefined });
+            if (!repoId && selectedRepoIds.length === 0 && !revision && revisionKinds.length === 0 && !optionValue("workspace")) {
+              response = { ...response, diagnostics: { ...response.diagnostics, warnings: [...response.diagnostics.warnings, { code: "DEFAULT_WORKSPACE_SCOPE", message: "cwd is outside an indexed repository; search used the configured workspace scope" }] } };
+            }
+            if (propertyPredicates.length) response = { ...response, hits: filterHitsByPropertyPredicates(store, response.hits, propertyPredicates), page: { ...response.page, totalIsExact: false }, diagnostics: { ...response.diagnostics, warnings: [...response.diagnostics.warnings, { code: "PROPERTY_FILTER_APPLIED", message: "typed Markdown property predicates were applied after indexed retrieval" }] } };
+            if (markdownPredicates.length) response = { ...response, hits: filterHitsByMarkdownPredicates(store, response.hits, markdownPredicates), page: { ...response.page, totalIsExact: false }, diagnostics: { ...response.diagnostics, warnings: [...response.diagnostics.warnings, { code: "MARKDOWN_LOCATOR_FILTER_APPLIED", message: "line/section/block/task predicates were applied with exact Markdown locators" }] } };
+            if (response.error) {
+              const envelope = { ok: false, error: response.error, response };
+              emit(deps, json, `${response.error.code}: ${response.error.message}`, envelope);
+              return 3;
+            }
+            const human = [
+              `${response.hits.length} hits · coverage ${response.diagnostics.coverage.admitted}/${response.diagnostics.coverage.discovered}`,
+              ...response.hits.map((hit) => `${hit.locator.filePath}${hit.locator.startLine ? `:${hit.locator.startLine}` : ""}\t${hit.lane}\t${hit.snippet ?? hit.title}`),
+              ...(response.diagnostics.warnings.length ? [`warnings: ${response.diagnostics.warnings.map((warning) => warning.code).join(", ")}`] : []),
+            ].join("\n");
+            emit(deps, json, human, response);
+            return 0;
+          }
+          const regexResult = sourceSnapshotId && mode === "regex"
+            ? searchRegex(store, { snapshotId: sourceSnapshotId, repoId }, queryText, { flags: optionValue("regex-flags") ?? "g", maxScannedBytes: numberOption("max-scanned-bytes"), allowPartial: flags.includes("--allow-partial") })
+            : null;
+          if (regexResult?.status === "error") { emit(deps, json, `${regexResult.code}: ${regexResult.message}`, regexResult); return 1; }
+          const sourceHits = sourceSnapshotId && ["auto", "exact", "phrase", "substring"].includes(mode)
+            ? searchSource(store, { snapshotId: sourceSnapshotId, repoId }, { query: queryText, mode: mode as "auto" | "exact" | "phrase" | "substring", options: { caseSensitive: true, wholeWord: false, includeGenerated: true, includeVendor: true, includeExcludedMetadata: false, semantic: "off", compact: false, explain: false } }).map((hit) => ({ ...hit, lane: "source" as const }))
+            : [];
+          const pathHits = sourceSnapshotId && mode === "path" ? searchPath(store, { snapshotId: sourceSnapshotId, repoId }, queryText, flags.includes("--include-excluded-metadata")) : [];
+          const graphHits = search(store, queryText, { includeSensitive: false });
+          const hits = mode === "regex"
+            ? (regexResult?.status === "ok" ? regexResult.hits.map((hit) => ({ ...hit, lane: "source" as const })) : [])
+            : mode === "path"
+            ? pathHits
+            : mode === "exact" || mode === "phrase" || mode === "substring"
+            ? sourceHits
+            : [...sourceHits, ...graphHits];
           const table = hits
-            .map((h) => `${h.nodeType}\t${h.identityKey}\t${h.filePath ?? "-"}\t${h.branch ?? "-"}\t${h.rank ?? "-"}`)
+            .map((h) => "lane" in h ? (h.lane === "path" ? `path\t${h.filePath}\t${h.coverageStatus}\t${h.metadataOnly ? "metadata-only" : "content"}` : `source\t${h.filePath}\t${h.startLine}\t${h.endLine}`) : `${h.nodeType}\t${h.identityKey}\t${h.filePath ?? "-"}\t${h.branch ?? "-"}\t${h.rank ?? "-"}`)
             .join("\n");
           emit(deps, json, table || "(no results)", hits);
           return 0;
+        }
+        case "graph-query": {
+          const requestPath = optionValue("request") ?? pos[0];
+          if (!requestPath) { deps.err("usage: penguin graph-query --request <json-file> --json"); return 2; }
+          let request: import("@penguin/knowledge-core").GraphQueryRequest;
+          try { request = JSON.parse(readFileSync(requestPath, "utf8")) as import("@penguin/knowledge-core").GraphQueryRequest; }
+          catch { deps.err("invalid graph-query request JSON"); return 2; }
+          try { const result = graphQuery(store, request); emit(deps, json, JSON.stringify(result), result); return 0; }
+          catch (error) { deps.err(String((error as Error).message ?? error)); return 2; }
+        }
+        case "hit":
+        case "get-hit": {
+          const snapshotId = optionValue("snapshot");
+          const filePath = pos.join(" ");
+          if (!snapshotId || !filePath) { deps.err("usage: penguin get-hit <file-path> --snapshot <snapshot-id> [--line <n>|--start-byte <n>]"); return 2; }
+          const repoId = optionValue("repo") ? resolveRepoId(store, optionValue("repo")) ?? undefined : undefined;
+          const hit = getSourceHit(store, { snapshotId, filePath, ...(repoId ? { repoId } : {}), ...(numberOption("line") !== undefined ? { startLine: numberOption("line") } : {}), ...(numberOption("end-line") !== undefined ? { endLine: numberOption("end-line") } : {}), ...(numberOption("start-byte") !== undefined ? { startByte: numberOption("start-byte") } : {}), ...(numberOption("context-lines") !== undefined ? { contextLines: numberOption("context-lines") } : {}) });
+          emit(deps, json, hit ? JSON.stringify(hit) : "source hit not found", hit);
+          return hit ? 0 : 1;
         }
         case "node": {
           const target = pos[0] ?? "";

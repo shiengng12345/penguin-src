@@ -23,7 +23,8 @@ test("dirty worktree materialization gets a distinct exact_worktree snapshot", a
   const clean = await indexRevision({ store, rootPath: root, repoId, revision: { commitSha: "HEAD" }, publishBranchId: branchId, parserVersion: "parser-v1", resolverVersion: "resolver-v1", coordinator });
   writeFileSync(join(root, "src", "main.ts"), "export const value = 2;\n");
   const dirty = await indexRevision({ store, rootPath: root, repoId, revision: { useWorktree: true }, publishBranchId: branchId, parserVersion: "parser-v1", resolverVersion: "resolver-v1", coordinator });
-  assert.equal(dirty.context.trust, "exact_worktree"); assert.notEqual(dirty.context.snapshotId, clean.context.snapshotId); assert.equal(store.db.prepare("SELECT state FROM revision_snapshots WHERE id=?").get(dirty.context.snapshotId).state, "ready"); store.close();
+  assert.equal(dirty.context.trust, "exact_worktree"); assert.notEqual(dirty.context.snapshotId, clean.context.snapshotId); assert.equal(store.db.prepare("SELECT state FROM revision_snapshots WHERE id=?").get(dirty.context.snapshotId).state, "ready");
+  store.close();
 });
 
 test("revision indexer uses immutable base plus changed/deleted overlays and keeps inherited files", async () => {

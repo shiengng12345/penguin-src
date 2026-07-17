@@ -1,0 +1,42 @@
+{
+  "passed": true,
+  "evidence": [],
+  "results": [
+    {
+      "name": "typecheck",
+      "command": "pnpm run typecheck",
+      "exitCode": 0,
+      "outputTail": "> @penguin/knowledge-indexer@0.0.1 build /Users/shieng/Desktop/Pengvi/packages/knowledge-indexer\n> tsc -p tsconfig.json\n\n\n> @penguin/api-doc-generator@0.0.1 build /Users/shieng/Desktop/Pengvi/packages/api-doc-generator\n> tsc -p tsconfig.json\n\n\n> @penguin/knowledge-cli@0.0.1 build /Users/shieng/Desktop/Pengvi/packages/knowledge-cli\n> tsc -p tsconfig.json\n\n\n> @penguin/mcp@0.0.1 build /Users/shieng/Desktop/Pengvi/packages/mcp\n> esbuild src/index.ts --bundle --platform=node --target=node18 --format=esm --outfile=dist/index.js --sourcemap --external:better-sqlite3 --banner:js='import { createRequire as __pgvCreateRequire } from \"node:module\"; import { fileURLToPath as __pgvFileURLToPath } from \"node:url\"; import { dirname as __pgvDirname } from \"node:path\"; const require = __pgvCreateRequire(import.meta.url); const __filename = __pgvFileURLToPath(import.meta.url); const __dirname = __pgvDirname(__filename);'\n\n\n  dist/index.js      2.1mb ⚠️\n  dist/index.js.map  4.2mb\n\n⚡ Done in 117ms"
+    },
+    {
+      "name": "surface-parity",
+      "command": "/Users/shieng/.nvm/versions/node/v18.20.8/bin/node scripts/knowledge-surface-parity.mjs --gate",
+      "exitCode": 0,
+      "outputTail": "{\n  \"capabilityCount\": 97,\n  \"cliRegistrationCount\": 97,\n  \"mcpToolCount\": 117,\n  \"missingCli\": [],\n  \"missingMcp\": [],\n  \"cliUnimplemented\": [],\n  \"mcpUnimplemented\": [],\n  \"mismatchCount\": 0\n}"
+    },
+    {
+      "name": "package-smoke",
+      "command": "/Users/shieng/.nvm/versions/node/v18.20.8/bin/node scripts/knowledge-package-install-smoke.mjs",
+      "exitCode": 0,
+      "outputTail": "{\n  \"results\": [\n    {\n      \"path\": \"packages/knowledge-cli/dist/bin.js\",\n      \"exists\": true\n    },\n    {\n      \"path\": \"packages/mcp/dist/index.js\",\n      \"exists\": true\n    },\n    {\n      \"path\": \"packages/knowledge-core/dist/index.js\",\n      \"exists\": true\n    }\n  ],\n  \"parityExitCode\": 0,\n  \"parity\": \"{\\n  \\\"capabilityCount\\\": 97,\\n  \\\"cliRegistrationCount\\\": 97,\\n  \\\"mcpToolCount\\\": 117,\\n  \\\"missingCli\\\": [],\\n  \\\"missingMcp\\\": [],\\n  \\\"cliUnimplemented\\\": [],\\n  \\\"mcpUnimplemented\\\": [],\\n  \\\"mismatchCount\\\": 0\\n}\"\n}"
+    },
+    {
+      "name": "universal-benchmark",
+      "command": "/Users/shieng/.nvm/versions/node/v18.20.8/bin/node scripts/knowledge-universal-retrieval-benchmark.mjs --root=/Users/shieng/Desktop/Pengvi --limit=10000 --gate --performance-gate",
+      "exitCode": 0,
+      "outputTail": "    \"duplicate\": {\n      \"non_duplicate\": 9000\n    },\n    \"length\": {\n      \"8-64\": 8770,\n      \"short\": 230\n    },\n    \"path\": {\n      \"full\": 354,\n      \"basename\": 323,\n      \"segment\": 323\n    }\n  },\n  \"coverage\": {\n    \"discovered\": 798,\n    \"admitted\": 772,\n    \"excluded\": 26,\n    \"failed\": 0\n  }\n}"
+    },
+    {
+      "name": "real-question-audit",
+      "command": "/Users/shieng/.nvm/versions/node/v18.20.8/bin/node scripts/knowledge-real-question-audit.mjs --input=/Users/shieng/Desktop/Pengvi/docs/knowledge-v2/real-question-corpus.jsonl --gate",
+      "exitCode": 0,
+      "outputTail": "    \"dead_code_architecture\": 5,\n    \"adversarial\": 5\n  },\n  \"reviewedCount\": 110,\n  \"baselinedCount\": 110,\n  \"requiredCategories\": {\n    \"exact_path\": 20,\n    \"caller_callee_impact\": 15,\n    \"cross_service_protocol\": 15,\n    \"field_data_flow\": 10,\n    \"branch_revision_history\": 10,\n    \"why_domain_onboarding\": 10,\n    \"notes_backlinks_properties\": 10,\n    \"incident_evidence\": 10,\n    \"dead_code_architecture\": 5,\n    \"adversarial\": 5\n  },\n  \"evidence\": [],\n  \"passed\": true\n}"
+    },
+    {
+      "name": "competitor-differential",
+      "command": "/Users/shieng/.nvm/versions/node/v18.20.8/bin/node scripts/knowledge-competitor-differential.mjs --gate",
+      "exitCode": 0,
+      "outputTail": "      \"category\": \"adversarial\",\n      \"codegraph\": {\n        \"version\": \"1.1.6\",\n        \"status\": \"captured\",\n        \"exitCode\": 0,\n        \"outputHash\": \"758aaa82653e9aa08c811d8adb3b5d967bf1d6fce4b9bbe8926d08e3753dc206\",\n        \"excerpt\": \"\\u001b[1m\\nSearch Results for \\\"Find the impossible identifier penguin_adversarial_zero_4_7f2c and explain the zero-result diagnostics.\\\":\\n\\u001b[0m\\n\\u001b[36mconstant    \\u001b[0m\\u001b[37midentifier\\u001b[0m\\n\\u001b[2m  template/tauri-react-release-starter/scripts/init-template.mjs:39\\u001b[0m\\n\\u001b[2m  = args.identifier\\u001b[0m\\n\\n\\u001b[36minterface   \\u001b[0m\\u001b[37mIdentifierEntry\\u001b[0m\\n\\u001b[2m  packages/knowledge-indexer/src/identifiers.ts:27\\u001b[0m\\n\\n\\u001b[36mfunction    \\u001b[0m\\u001b[37mextractIdentifiers\\u001b[0m\\n\\u001b[2m  packages/knowledge-indexer/src/identifiers.ts:62\\u001b[0m\\n\\u001b[2m  (root: Node): IdentifierEntry[]\\u001b[0m\\n\\n\\u001b[36mconstant    \\u001b[0m\\u001b[37mFIND_BOOTSTRAP\\u001b[0m\\n\\u001b[2m  src/lib/webview-find.ts:24\\u001b[0m\\n\\u001b[2m  = `\\n(function () {\\n  // Idempotent: a second install on the same document is a no-op.\\n  // Whether to ...\\u001b[0m\\n\\n\\u001b[36mfunction    \\u001b[0m\\u001b[37mcollectIdentifierNode\\u001b[0m\\n\\u001b[2m  packages/knowledge-indexer/src/identifiers.ts:33\\u001b[0m\\n\\u001b[2m  (n: Node, out: IdentifierEntry[]): void\\u001b[0m\\n\\n\\u001b[36mfunction    \\u001b[0m\\u001b[37mextractIdentifiersFromSource\\u001b[0m\\n\\u001b[2m  packages/knowledge-indexer/src/identifiers.ts:68\\u001b[0m\\n\\u001b[2m  (lang: Lang, source: string): Promise<IdentifierEntry[]>\\u001b[0m\\n\\n\\u001b[36mfunction    \\u001b[0m\\u001b[37mopenFindInWebview\\u001b[0m\\n\\u001b[2m  src/lib/webview-find.ts:390\\u001b[0m\\n\\u001b[2m  (label: string): Promise<void>\\u001b[0m\\n\\n\\u001b[36mmethod      \\u001b[0m\\u001b[37mlist\\u001b[0m\\n\\u001b[2m  packages/knowledge-core/src/validated-findings.ts:46\\u001b[0m\\n\\u001b[2m  (status?: FindingStatus): ValidatedFinding[]\\u001b[0m\\n\\n\\u001b[36mmethod      \\u001b[0m\\u001b[37mtransition\\u001b[0m\\n\\u001b[2m  packages/knowledge-core/src/validated-findings.ts:51\\u001b[0m\\n\\u001b[2m  (id: string, to: FindingStatus): ValidatedFinding\\u001b[0m\\n\\n\\u001b[36mtype_alias  \\u001b[0m\\u001b[37mFindingStatus\\u001b[0m\\n\\u001b[2m  packages/knowledg\"\n      },\n      \"graphify\": {\n        \"version\": \"0.9.5\",\n        \"status\": \"captured\",\n        \"exitCode\": 0,\n        \"outputHash\": \"66ef53577566517b2d875e269d586bc69647556264027699b68d82f537afa342\",\n        \"excerpt\": \"Traversal: BFS depth=2 | Start: ['Identifier', 'identifier', 'Identifier'] | 37 nodes found\\n\\nNODE definitions [src=src-tauri/gen/schemas/desktop-schema.json loc=L38 community=]\\nNODE definitions [src=src-tauri/gen/schemas/macOS-schema.json loc=L38 community=]\\nNODE properties [src=src-tauri/gen/schemas/desktop-schema.json loc=L46 community=]\\nNODE Capability [src=src-tauri/gen/schemas/macOS-schema.json loc=L39 community=]\\nNODE CapabilityRemote [src=src-tauri/gen/schemas/desktop-schema.json loc=L106 community=]\\nNODE permissions [src=src-tauri/gen/schemas/desktop-schema.json loc=L86 community=]\\nNODE Capability [src=src-tauri/gen/schemas/desktop-schema.json loc=L39 community=]\\nNODE macOS-schema.json [src=src-tauri/gen/schemas/macOS-schema.json loc=L1 community=]\\nNODE CapabilityRemote [src=src-tauri/gen/schemas/macOS-schema.json loc=L106 community=]\\nNODE desktop-schema.json [src=src-tauri/gen/schemas/desktop-schema.json loc=L1 community=]\\nNODE description [src=src-tauri/gen/schemas/desktop-schema.json loc=L51 community=]\\nNODE platforms [src=src-tauri/gen/schemas/desktop-schema.json loc=L94 community=]\\nNODE local [src=src-tauri/gen/schemas/desktop-schema.json loc=L67 community=]\\nNODE webviews [src=src-tauri/gen/schemas/desktop-schema.json loc=L79 community=]\\nNODE windows [src=src-tauri/gen/schemas/desktop-schema.json loc=L72 community=]\\nNODE ShellScopeEntryAllowedArg [src=src-tauri/gen/schemas/desktop-schema.json loc=L2921 community=]\\nNODE identifier [src=src-tauri/gen/schemas/macOS-schema.json loc=L47 community=]\\n... (truncated — 20 more nodes cut by ~500-token budget. Narrow with\"\n      },\n      \"goldLocatorCount\": 0,\n      \"goldFactCount\": 0\n    }\n  ]\n}"
+    }
+  ]
+}

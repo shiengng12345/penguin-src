@@ -40,6 +40,7 @@ export async function runApiDocCommand(argv: string[], input: ApiDocCommandDeps 
     const id = argv[1];
     if (sub === "show" && id) { const preview = store.load(id); const format = value("format") ?? "json"; input.out(format === "markdown" ? preview.rendered.markdown : format === "xml" ? preview.rendered.larkXml : JSON.stringify(preview)); return 0; }
     if (sub === "diff" && id) { const against = value("against"); if (!against) throw new Error("--against is required"); input.out(JSON.stringify(store.diff(id, against))); return 0; }
+    if (sub === "export" && id) { const preview = store.load(id); const format = value("format") ?? "markdown"; input.out(format === "xml" ? preview.rendered.larkXml : format === "json" ? JSON.stringify(preview.ir) : preview.rendered.markdown); return 0; }
     if (sub === "bind") {
       const documentKey = argv[1], nodeToken = value("node-token"), previewId = value("preview");
       if (!documentKey || !nodeToken || !previewId || !input.larkClient) throw new Error("bind requires document key, --node-token, --preview, and a configured Lark client");

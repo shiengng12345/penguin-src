@@ -16,7 +16,10 @@
     "dev": "tsc -p tsconfig.json --watch"
   },
   "dependencies": {
-    "better-sqlite3": "^11.10.0"
+    "@penguin/knowledge-contracts": "workspace:*",
+    "better-sqlite3": "^11.10.0",
+    "fflate": "0.8.2",
+    "re2-wasm": "^1.0.2"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.11",

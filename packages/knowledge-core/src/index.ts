@@ -11,7 +11,9 @@ export {
   type LedgerReadResult,
   type LedgerTarget,
 } from "./ledger.js";
-export { SCHEMA_VERSION, openDatabase } from "./schema.js";
+export { SCHEMA_VERSION, SCHEMA_MIGRATIONS, SCHEMA_TABLES, openDatabase } from "./schema.js";
+export { SourceStore, type EffectiveSource, type PutBlobInput, type PutSourceFactInput, type SourceCoverageInput } from "./source-store.js";
+export { buildLineIndex, locateOffset, type LineIndex, type LineIndexEntry } from "./line-index.js";
 export {
   packageDependencies,
   dependencyPath,
@@ -57,6 +59,41 @@ export {
   type SnapshotOverlayEntry,
   type SnapshotRenameEvent,
 } from "./file-fact-store.js";
+export { SourceSnapshotStore, type SourceSnapshotOverlayEntry } from "./source-cow.js";
+export { backfillSourceCorpus, type SourceBackfillOptions, type BackfillReport } from "./source-backfill.js";
+export { searchSource, type ResolvedRevisionScope, type SourceSearchOccurrence } from "./source-search.js";
+export { getSourceHit, locateSourceRange, sourceSnippet, type SourceHitRequest, type SourceLocation } from "./source-snippet.js";
+export { searchPath, type PathSearchHit } from "./path-search.js";
+export { searchRegex, type RegexSearchOptions, type RegexSearchResult } from "./regex-search.js";
+export { searchKnowledge, type SearchContext } from "./search-engine.js";
+export { searchKnowledgeAsync } from "./search-engine.js";
+export { VectorStore, type VectorHit, type VectorDoctorResult } from "./vector-store.js";
+export { chunkSemanticText, persistSemanticChunks, type SemanticChunk, type PersistSemanticChunksInput } from "./semantic-chunks.js";
+export { traceDataFlow, traceDataFlowPath, type DataFlowRequest, type DataFlowResult, type DataFlowStep, type DataFlowPath, type DataFlowPathRequest, type GraphEndpoint } from "./data-flow.js";
+export { ExternalSourceStore, fingerprintMarkdownDirectory, syncMarkdownDirectory, syncRemoteSource, validateExternalLocation, type ExternalKnowledgeSource, type ExternalKnowledgeSourceType, type MarkdownDirectorySyncResult, type RemoteSyncResult } from "./external-source.js";
+export { planSearch, type SearchPlan } from "./search-planner.js";
+export { rankSearchHits, LANE_WEIGHTS, semanticLaneScore } from "./search-ranking.js";
+export { HmacSearchCursorCodec } from "./search-cursor.js";
+export { createWhyCard, transitionWhyCard, WhyCardStore, type WhyCard } from "./why-card.js";
+export { MemoryStore, type MemoryItem, type MemoryClass } from "./memory.js";
+export { ValidatedFindingStore, type ValidatedFinding, type FindingStatus } from "./validated-findings.js";
+export { OntologyStore, type OntologyTerm, type OntologyAliasCandidate, type OntologyAliasResolution } from "./ontology.js";
+export { buildOnboarding, buildOnboardingDocument, type OnboardingDocument } from "./onboarding.js";
+export { buildDomainClaims, buildDomainFlow, type DomainClaimCandidate, type DomainFlowStep, type DomainPersona } from "./domain-model.js";
+export { EvidenceStore, type EvidenceRecord, type EvidenceStatus } from "./evidence-state.js";
+export { AuditStore } from "./audit.js";
+export { sanitizeUntrustedText, isPromptLikeContent, type SafeText } from "./content-safety.js";
+export { exportKnowledgeArtifact, previewKnowledgeArtifact, type ArtifactExportOptions, type ArtifactPreview } from "./artifact-export.js";
+export { importKnowledgeArtifact, restoreKnowledgeArtifact, type ArtifactImportResult } from "./artifact-import.js";
+export type { KnowledgeArtifactManifest } from "./artifact-manifest.js";
+export { graphQuery, type GraphQueryRequest, type GraphQueryResult } from "./graph-query.js";
+export { compileKnowledgeDsl, type CompiledKnowledgeDsl, type KnowledgeDslExpression, type KnowledgeDslPredicate } from "./knowledge-dsl.js";
+export { filterHitsByPropertyPredicates, filterHitsByMarkdownPredicates } from "./property-search.js";
+export { UnavailableEmbeddingProvider, inspectLocalModelDirectory, createRemoteEmbeddingProvider, type EmbeddingProvider, type LocalModelManifest, type LocalModelDescriptor, type RemoteEmbeddingProviderOptions } from "./embedding-provider.js";
+export { semanticSearch, type SemanticDocument, type SemanticHit } from "./semantic-search.js";
+export { recordSearchFeedback, listSearchFeedback, deleteSearchFeedback, exportSearchFeedback, type FeedbackVerdict } from "./search-feedback.js";
+export { SavedQueryStore, type SavedQuery } from "./saved-query.js";
+export { reflectSearchFeedback, listReflectionSuggestions, reviewReflectionSuggestion, type ReflectionSuggestion } from "./reflection.js";
 export { ResolutionStore, type ResolvedEdgeFact, type ResolutionSetRecord } from "./resolution-store.js";
 export { DEFAULT_REVISION_RETENTION, planRevisionCollection, applyRevisionCollection, type RevisionRetentionPolicy, type RevisionCollectionPlan, type RevisionCollectionApplyResult } from "./revision-retention.js";
 export { openRevisionView, type RevisionView, type RevisionFileRow, type RevisionSymbolRow, type RevisionEdgeFilter, type RevisionEdgeRow } from "./revision-view.js";

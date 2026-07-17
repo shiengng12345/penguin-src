@@ -75,3 +75,21 @@ test("CLI: penguin remove <name> works; unknown repo errors", async () => {
   assert.equal(await runCli(["remove", "no-such-repo"], deps), 1);
   assert.ok(errs.some((l) => l.includes("no-such-repo")));
 });
+
+test("CLI remove dry-run reports scope without mutating", async () => {
+  const { store, dir } = await twoRepoStore();
+  store.close();
+  const outs = [], errs = [];
+  const deps = {
+    cwd: dir,
+    out: (l) => outs.push(l),
+    err: (l) => errs.push(l),
+    openStore: () => KnowledgeStore.open({ dbPath: join(dir, "k.db"), ledgerPath: join(dir, "l.jsonl") }),
+    storeExists: () => true,
+  };
+  assert.equal(await runCli(["remove", "dropme", "--dry-run", "--json"], deps), 0);
+  assert.equal(JSON.parse(outs.at(-1)).mutated, false);
+  const check = deps.openStore();
+  assert.equal(check.db.prepare("SELECT COUNT(*) c FROM repos WHERE name='dropme'").get().c, 1);
+  check.close();
+});

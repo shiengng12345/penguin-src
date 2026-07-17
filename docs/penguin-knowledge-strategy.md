@@ -1,5 +1,7 @@
 # Penguin Knowledge — 最终战略与设计 (Branch-aware Engineering Memory Engine)
 
+> **实施状态：已被 `docs/superpowers/plans/2026-07-17-penguin-knowledge-v2-universal-retrieval.md` supersede。** 本文保留为历史战略背景；实施时以 Master Plan 的 contract、测试、schema、CLI/MCP/Wiki parity 与验收门槛为准。外部 indexer 仅可作为迁移期 oracle，Penguin release correctness 不得依赖 adapter fallback。
+
 > 日期：2026-07-09
 > 综合来源：DeepSeek + Codex 独立评审 + `understand_anything_graphify_penguin_strategy.md`
 > 状态：已完成 P1–P3 图谱底座(typed 边 / file·route·entity 节点 / import 收窄解析 / git 仓库名);

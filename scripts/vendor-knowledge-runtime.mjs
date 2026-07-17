@@ -83,6 +83,11 @@ copyInto(bsqSrc, "better-sqlite3");
 copyInto(pkgDir("bindings", bsqSrc), "bindings");
 copyInto(pkgDir("file-uri-to-path", pkgDir("bindings", bsqSrc)), "file-uri-to-path");
 
+// re2-wasm is loaded lazily by the bundled CLI/MCP regex lane through
+// createRequire, so esbuild cannot inline it. Keep the package beside the
+// self-contained runtime, including its wasm payload.
+copyInto(pkgDir("re2-wasm"), "re2-wasm");
+
 // Overlay the target-arch/ABI prebuilt .node when the installed one (built for
 // the host) doesn't match the target. Host-matches-target → keep installed.
 const dotNode = join(vendoredModules, "better-sqlite3/build/Release/better_sqlite3.node");

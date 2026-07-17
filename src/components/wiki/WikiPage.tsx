@@ -14,6 +14,7 @@ import {
   Pin,
   Radio,
   RefreshCw,
+  Search,
   Sparkles,
   Trash2,
   X,
@@ -26,6 +27,7 @@ import { WikiGraph, type GraphLayout } from "@/components/wiki/WikiGraph";
 import { WikiGraph3D } from "@/components/wiki/WikiGraph3D";
 import { WikiContextPane } from "@/components/wiki/WikiContextPane";
 import { EvidenceInbox } from "@/components/wiki/EvidenceInbox";
+import { WikiSearchPage } from "@/components/wiki/WikiSearchPage";
 import {
   filterGraphView,
   formatKnowledgeError,
@@ -59,7 +61,7 @@ import {
 
 interface WikiPageProps { onClose: () => void }
 
-type CenterTab = "context" | "graph" | "evidence";
+type CenterTab = "search" | "context" | "graph" | "evidence";
 // "home" = the repo/branch datatable (focusId null) — the implicit place
 // every FIRST symbol view was reached from (a graph node click, or nothing
 // yet). Without recording it, the very first symbol opened in a session had
@@ -887,7 +889,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
 
 
   const [focusId, setFocusId] = useState<string | null>(null);
-  const [tab, setTab] = useState<CenterTab>("context");
+  const [tab, setTab] = useState<CenterTab>("search");
 
   const [pack, setPack] = useState<ContextPack | null>(null);
   const [packBusy, setPackBusy] = useState(false);
@@ -1026,6 +1028,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
       <div className="flex min-h-0 flex-1 flex-col">
         <section className="flex min-h-0 min-w-0 flex-col bg-[#080d14]">
           <div className="flex h-12 shrink-0 items-center gap-1 border-b border-slate-800 bg-[#0d1420] px-3">
+            <TabBtn on={tab === "search"} onClick={() => setTab("search")} icon={<Search className="h-3.5 w-3.5" />}>Search</TabBtn>
             <TabBtn on={tab === "context"} onClick={() => setTab("context")} icon={<Sparkles className="h-3.5 w-3.5" />}>Context</TabBtn>
             <TabBtn on={tab === "graph"} onClick={() => setTab("graph")} icon={<Network className="h-3.5 w-3.5" />}>Graph</TabBtn>
             <TabBtn on={tab === "evidence"} onClick={() => setTab("evidence")} icon={<ClipboardList className="h-3.5 w-3.5" />}>SLS Evidence</TabBtn>
@@ -1048,7 +1051,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
             </div>
           </div>
 
-          {tab === "context" ? (
+          {tab === "search" ? <WikiSearchPage /> : tab === "context" ? (
             f ? <WikiContextPane packBusy={packBusy} pack={pack} onSelectSymbol={selectSymbol} /> : (
               <KnowledgeHomePanel
                 onOpenRepoGraph={(r, b) => void openRepoGraph(r, b)}

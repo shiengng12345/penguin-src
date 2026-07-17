@@ -1,0 +1,3 @@
+service: universal-retrieval-fixture
+needle: uniqueYamlNeedle
+description: "unsupported parser files remain source-searchable"

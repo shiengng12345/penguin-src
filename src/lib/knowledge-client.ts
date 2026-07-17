@@ -130,27 +130,73 @@ export interface KnowledgeIndexReport {
   errors: number;
 }
 
-async function query<T>(args: string[]): Promise<T> {
-  const raw = await invoke<string>("knowledge_query", { args });
+export interface KnowledgeRequestOptions { signal?: AbortSignal }
+
+function abortable<T>(request: Promise<T>, signal?: AbortSignal, onAbort?: () => void): Promise<T> {
+  if (!signal) return request;
+  if (signal.aborted) return Promise.reject(new DOMException("The operation was aborted", "AbortError"));
+  return new Promise<T>((resolve, reject) => {
+    const abort = () => { onAbort?.(); reject(new DOMException("The operation was aborted", "AbortError")); };
+    signal.addEventListener("abort", abort, { once: true });
+    request.then((value) => { signal.removeEventListener("abort", abort); resolve(value); }, (error) => { signal.removeEventListener("abort", abort); reject(error); });
+  });
+}
+
+async function query<T>(args: string[], signal?: AbortSignal): Promise<T> {
+  if (signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
+  const requestId = globalThis.crypto?.randomUUID?.() ?? `knowledge-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const raw = await abortable(invoke<string>("knowledge_query", { args: [...args, `--request-id=${requestId}`] }), signal, () => { void invoke("knowledge_query_cancel", { requestId }).catch(() => undefined); });
+  if (signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
   return JSON.parse(raw) as T;
 }
 
-export function knowledgeDbStatus(): Promise<KnowledgeDbStatus> {
-  return invoke<KnowledgeDbStatus>("knowledge_db_status");
+async function canonicalQuery<T>(capabilityId: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<T> {
+  if (signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
+  const requestId = globalThis.crypto?.randomUUID?.() ?? `knowledge-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const raw = await abortable(invoke<string>("knowledge_query_canonical", { capabilityId, input, requestId }), signal, () => { void invoke("knowledge_query_cancel", { requestId }).catch(() => undefined); });
+  if (signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
+  return JSON.parse(raw) as T;
 }
 
-export function knowledgeSearch(q: string): Promise<KnowledgeSearchHit[]> {
-  return query<KnowledgeSearchHit[]>(["search", q]);
+export function knowledgeDbStatus(options: KnowledgeRequestOptions = {}): Promise<KnowledgeDbStatus> {
+  return abortable(invoke<KnowledgeDbStatus>("knowledge_db_status"), options.signal);
 }
 
-export function knowledgeNode(idOrName: string): Promise<KnowledgeNodeDetail> {
-  return query<KnowledgeNodeDetail>(["node", idOrName]);
+export function knowledgeSearch(q: string, options: KnowledgeRequestOptions = {}): Promise<KnowledgeSearchHit[]> {
+  return query<KnowledgeSearchHit[]>(["search", q], options.signal);
+}
+
+export interface KnowledgeSearchV2Response {
+  schemaVersion: "2";
+  hits: Array<{ hitId: string; kind: string; lane: string; title: string; locator: { repoName: string; revisionId: string; filePath: string; startLine?: number; endLine?: number; startByte?: number }; snippet?: string; score: number; rankReasons: string[]; evidence: Array<{ status: string }> }>;
+  diagnostics: { searchedLanes: string[]; resolvedScopes: Array<{ repoId: string; snapshotId: string; branch: string }>; coverage: { discovered: number; admitted: number; excluded: number; failed: number; stale: number }; warnings: Array<{ code: string; message: string }> };
+  page: { limit: number; nextCursor?: string; totalIsExact: boolean };
+}
+
+export function knowledgeSearchV2(queryText: string, mode: string = "auto", options: { cursor?: string; limit?: number; repo?: string; branch?: string; snapshot?: string; path?: string; language?: string; kind?: string; includeGenerated?: boolean; includeVendor?: boolean; signal?: AbortSignal } = {}): Promise<KnowledgeSearchV2Response> {
+  const revision = options.repo || options.branch || options.snapshot ? [{ ...(options.repo ? { repoName: options.repo } : {}), ...(options.branch ? { branch: options.branch } : {}), ...(options.snapshot ? { snapshotId: options.snapshot } : {}) }] : undefined;
+  return canonicalQuery<KnowledgeSearchV2Response>("knowledge.search", {
+    query: queryText,
+    mode,
+    ...(revision ? { scope: { revisions: revision, ...(options.path ? { paths: [options.path] } : {}), ...(options.language ? { languages: [options.language] } : {}), ...(options.kind ? { kinds: [options.kind] } : {}) } } : options.path || options.language || options.kind ? { scope: { ...(options.path ? { paths: [options.path] } : {}), ...(options.language ? { languages: [options.language] } : {}), ...(options.kind ? { kinds: [options.kind] } : {}) } } : {}),
+    options: { compact: true, ...(options.includeGenerated ? { includeGenerated: true } : {}), ...(options.includeVendor ? { includeVendor: true } : {}) },
+    page: { limit: options.limit ?? 50, ...(options.cursor ? { cursor: options.cursor } : {}) },
+  }, options.signal);
+}
+
+export interface KnowledgeHitDetail { hitId: string; kind: string; lane: string; title: string; locator: KnowledgeSearchV2Response["hits"][number]["locator"]; snippet?: string; evidence: Array<{ source: string; status: string; locator: KnowledgeSearchV2Response["hits"][number]["locator"] }> }
+export function knowledgeGetHit(locator: KnowledgeSearchV2Response["hits"][number]["locator"], options: KnowledgeRequestOptions = {}): Promise<KnowledgeHitDetail> {
+  return canonicalQuery<KnowledgeHitDetail>("knowledge.get_hit", { filePath: locator.filePath, snapshotId: locator.revisionId, ...(locator.startLine ? { startLine: locator.startLine } : {}), ...(locator.startByte !== undefined ? { startByte: locator.startByte } : {}) }, options.signal);
+}
+
+export function knowledgeNode(idOrName: string, options: KnowledgeRequestOptions = {}): Promise<KnowledgeNodeDetail> {
+  return query<KnowledgeNodeDetail>(["node", idOrName], options.signal);
 }
 
 export type KnowledgeGraphVerb = "callers" | "calls" | "backlinks" | "impact" | "recent";
 
-export function knowledgeExplore(verb: KnowledgeGraphVerb, node: string): Promise<KnowledgeGraphResult> {
-  return query<KnowledgeGraphResult>([verb, node]);
+export function knowledgeExplore(verb: KnowledgeGraphVerb, node: string, options: KnowledgeRequestOptions = {}): Promise<KnowledgeGraphResult> {
+  return query<KnowledgeGraphResult>([verb, node], options.signal);
 }
 
 export async function knowledgeReindex(path?: string): Promise<KnowledgeIndexReport> {
@@ -214,8 +260,8 @@ export function filterGraphView(
 }
 
 // repos + branches for the navigation tree's top two levels.
-export function knowledgeIndexStatus(): Promise<KnowledgeIndexStatus> {
-  return query<KnowledgeIndexStatus>(["status"]);
+export function knowledgeIndexStatus(options: KnowledgeRequestOptions = {}): Promise<KnowledgeIndexStatus> {
+  return query<KnowledgeIndexStatus>(["status"], options.signal);
 }
 
 export interface KnowledgeEvidenceNote {
@@ -229,7 +275,7 @@ const CACHE_TTL_MS = 15_000;
 let serviceGraphCache: { expiresAt: number; promise: Promise<KnowledgeGraphView> } | null = null;
 const evidenceCache = new Map<string, { expiresAt: number; promise: Promise<KnowledgeEvidenceNote[]> }>();
 
-export function knowledgeEvidenceList(filters?: { target?: string; status?: string; limit?: number }): Promise<KnowledgeEvidenceNote[]> {
+export function knowledgeEvidenceList(filters?: { target?: string; status?: string; limit?: number; signal?: AbortSignal }): Promise<KnowledgeEvidenceNote[]> {
   const args = ["evidence", "list"];
   if (filters?.target) args.push("--target", filters.target);
   if (filters?.status) args.push("--status", filters.status);
@@ -239,51 +285,68 @@ export function knowledgeEvidenceList(filters?: { target?: string; status?: stri
   const now = Date.now();
   const cached = evidenceCache.get(key);
   if (cached && cached.expiresAt > now) return cached.promise;
-  const promise = query<KnowledgeEvidenceNote[]>(args).catch((error) => {
+  const promise = query<KnowledgeEvidenceNote[]>(args, filters?.signal).catch((error) => {
     evidenceCache.delete(key);
     throw error;
   });
   evidenceCache.set(key, { expiresAt: now + CACHE_TTL_MS, promise });
   return promise;
 }
-export function knowledgeEvidenceSetStatus(slug: string, status: KnowledgeEvidenceNote["status"]): Promise<KnowledgeEvidenceNote> {
-  return query<KnowledgeEvidenceNote>(["evidence", "status", slug, status, "--json"]);
+export function knowledgeEvidenceSetStatus(slug: string, status: KnowledgeEvidenceNote["status"], options: KnowledgeRequestOptions = {}): Promise<KnowledgeEvidenceNote> {
+  return query<KnowledgeEvidenceNote>(["evidence", "status", slug, status, "--json"], options.signal);
+}
+
+export interface KnowledgeSavedQuery {
+  id: string; name: string; request: Record<string, unknown>; scope: Record<string, unknown>;
+  contractVersion: string; createdAt: string; updatedAt: string;
+}
+export function knowledgeSavedQueryList(queryText?: string, options: KnowledgeRequestOptions = {}): Promise<KnowledgeSavedQuery[]> {
+  return query<KnowledgeSavedQuery[]>(["saved-query", "list", ...(queryText ? ["--query", queryText] : []), "--json"], options.signal);
+}
+export function knowledgeSavedQueryWrite(name: string, request: Record<string, unknown>, options: KnowledgeRequestOptions = {}): Promise<KnowledgeSavedQuery> {
+  return query<KnowledgeSavedQuery>(["saved-query", "write", name, JSON.stringify(request), "--json"], options.signal);
+}
+export function knowledgeSavedQueryRun(name: string, options: KnowledgeRequestOptions = {}): Promise<KnowledgeSearchV2Response> {
+  return query<KnowledgeSearchV2Response>(["saved-query", "run", name, "--json"], options.signal);
+}
+export function knowledgeWhyGet(cardId: string, options: KnowledgeRequestOptions = {}): Promise<Record<string, unknown>> {
+  return query<Record<string, unknown>>(["why", cardId, "--json"], options.signal);
 }
 
 // Remove a repo (by name or root path) from the index — parser data only,
 // rebuildable by re-indexing. Backs the Explorer/table delete buttons.
-export function knowledgeRemoveRepo(nameOrPath: string): Promise<{ ok: boolean; name: string }> {
-  return query<{ ok: boolean; name: string }>(["remove", nameOrPath]);
+export function knowledgeRemoveRepo(nameOrPath: string, options: KnowledgeRequestOptions = {}): Promise<{ ok: boolean; name: string }> {
+  return query<{ ok: boolean; name: string }>(["remove", nameOrPath], options.signal);
 }
 
 // Remove a single branch of a repo (refused while pinned).
-export function knowledgeRemoveBranch(repo: string, branch: string): Promise<{ ok: boolean }> {
-  return query<{ ok: boolean }>(["remove", repo, branch]);
+export function knowledgeRemoveBranch(repo: string, branch: string, options: KnowledgeRequestOptions = {}): Promise<{ ok: boolean }> {
+  return query<{ ok: boolean }>(["remove", repo, branch], options.signal);
 }
 
 // Toggle a branch's pin: pinned branches are exempt from auto-retention.
-export function knowledgePinBranch(repo: string, branch: string): Promise<{ ok: boolean; pinned: boolean }> {
-  return query<{ ok: boolean; pinned: boolean }>(["pin", repo, branch]);
+export function knowledgePinBranch(repo: string, branch: string, options: KnowledgeRequestOptions = {}): Promise<{ ok: boolean; pinned: boolean }> {
+  return query<{ ok: boolean; pinned: boolean }>(["pin", repo, branch], options.signal);
 }
 
 // Select the canonical master branch without checking out Git or indexing.
-export function knowledgeSetMaster(repo: string, branch: string): Promise<{ ok: boolean; branch: string; previousBranchId: string | null }> {
-  return query<{ ok: boolean; branch: string; previousBranchId: string | null }>(["master", repo, branch]);
+export function knowledgeSetMaster(repo: string, branch: string, options: KnowledgeRequestOptions = {}): Promise<{ ok: boolean; branch: string; previousBranchId: string | null }> {
+  return query<{ ok: boolean; branch: string; previousBranchId: string | null }>(["master", repo, branch], options.signal);
 }
 
 // The files captured for a repo/branch (tree leaf level, lazy-loaded).
-export function knowledgeFiles(repoId: string, branchId: string): Promise<KnowledgeFileRow[]> {
-  return query<KnowledgeFileRow[]>(["files", repoId, branchId]);
+export function knowledgeFiles(repoId: string, branchId: string, options: KnowledgeRequestOptions = {}): Promise<KnowledgeFileRow[]> {
+  return query<KnowledgeFileRow[]>(["files", repoId, branchId], options.signal);
 }
 
 // The symbols defined in one file (click-a-file → its symbols).
-export function knowledgeFileSymbols(branchId: string, filePath: string): Promise<KnowledgeFileSymbol[]> {
-  return query<KnowledgeFileSymbol[]>(["filesymbols", branchId, filePath]);
+export function knowledgeFileSymbols(branchId: string, filePath: string, options: KnowledgeRequestOptions = {}): Promise<KnowledgeFileSymbol[]> {
+  return query<KnowledgeFileSymbol[]>(["filesymbols", branchId, filePath], options.signal);
 }
 
 // Local graph: a focus node + its neighbourhood (recenter by picking a node).
-export function knowledgeGraph(node: string, depth = 1): Promise<KnowledgeGraphView> {
-  return query<KnowledgeGraphView>(["graph", node, String(depth)]);
+export function knowledgeGraph(node: string, depth = 1, options: KnowledgeRequestOptions = {}): Promise<KnowledgeGraphView> {
+  return query<KnowledgeGraphView>(["graph", node, String(depth)], options.signal);
 }
 
 // —— AI Context Pack + Flow (the hero views) ——
@@ -310,26 +373,26 @@ export interface ContextPack {
   importers: ContextBrief[];
   signals: string[];
 }
-export function knowledgeContext(target: string): Promise<ContextPack> {
-  return query<ContextPack>(["context", target]);
+export function knowledgeContext(target: string, options: KnowledgeRequestOptions = {}): Promise<ContextPack> {
+  return query<ContextPack>(["context", target], options.signal);
 }
 
 export interface FlowStep { depth: number; nodeId: string; title: string; nodeType: string; via: string }
 export interface FlowResult { target: string; root: FlowStep | null; steps: FlowStep[] }
-export function knowledgeFlow(target: string): Promise<FlowResult> {
-  return query<FlowResult>(["flow", target]);
+export function knowledgeFlow(target: string, options: KnowledgeRequestOptions = {}): Promise<FlowResult> {
+  return query<FlowResult>(["flow", target], options.signal);
 }
 
 // Repo/branch-scoped graph (top-degree hubs).
-export function knowledgeRepoGraph(repoId: string, branchId: string): Promise<KnowledgeGraphView> {
-  return query<KnowledgeGraphView>(["repograph", repoId, branchId]);
+export function knowledgeRepoGraph(repoId: string, branchId: string, options: KnowledgeRequestOptions = {}): Promise<KnowledgeGraphView> {
+  return query<KnowledgeGraphView>(["repograph", repoId, branchId], options.signal);
 }
 
 // System-level microservice map: services + cross-service gRPC links.
-export function knowledgeServiceGraph(): Promise<KnowledgeGraphView> {
+export function knowledgeServiceGraph(options: KnowledgeRequestOptions = {}): Promise<KnowledgeGraphView> {
   const now = Date.now();
   if (serviceGraphCache && serviceGraphCache.expiresAt > now) return serviceGraphCache.promise;
-  const promise = query<KnowledgeGraphView>(["services"]).catch((error) => {
+  const promise = query<KnowledgeGraphView>(["services"], options.signal).catch((error) => {
     serviceGraphCache = null;
     throw error;
   });
@@ -349,8 +412,8 @@ export interface KnowledgeCommunityResult {
   totalNodes: number;
   totalCommunities: number;
 }
-export function knowledgeCommunities(limit = 20): Promise<KnowledgeCommunityResult> {
-  return query<KnowledgeCommunityResult>(["communities", String(limit)]);
+export function knowledgeCommunities(limit = 20, options: KnowledgeRequestOptions = {}): Promise<KnowledgeCommunityResult> {
+  return query<KnowledgeCommunityResult>(["communities", String(limit)], options.signal);
 }
 
 // Recent commits across repos (timeline view).
@@ -363,14 +426,14 @@ export interface KnowledgeTimelineEntry {
   repo: string | null;
   tags: string[];
 }
-export function knowledgeTimeline(limit = 50): Promise<{ entries: KnowledgeTimelineEntry[] }> {
-  return query<{ entries: KnowledgeTimelineEntry[] }>(["timeline", String(limit)]);
+export function knowledgeTimeline(limit = 50, options: KnowledgeRequestOptions = {}): Promise<{ entries: KnowledgeTimelineEntry[] }> {
+  return query<{ entries: KnowledgeTimelineEntry[] }>(["timeline", String(limit)], options.signal);
 }
 
 // —— File-backed notes (C9): create / read / overwrite / list ——
 
-export function knowledgeNoteNew(title: string): Promise<{ ok: boolean; slug: string; path: string; nodeId: string }> {
-  return query(["note", "new", title]);
+export function knowledgeNoteNew(title: string, options: KnowledgeRequestOptions = {}): Promise<{ ok: boolean; slug: string; path: string; nodeId: string }> {
+  return query(["note", "new", title], options.signal);
 }
 
 // Typed note (decision/incident/compliance/bug/requirement/architecture) — the
@@ -380,26 +443,27 @@ export type KnowledgeNoteType =
 export function knowledgeNoteNewTyped(
   title: string,
   type: KnowledgeNoteType,
+  options: KnowledgeRequestOptions = {},
 ): Promise<{ ok: boolean; slug: string; path: string; nodeId: string; type?: string }> {
-  if (type === "incident") return query(["incident", "new", title]);
-  return query(["note", "new", title, `--type=${type}`]);
+  if (type === "incident") return query(["incident", "new", title], options.signal);
+  return query(["note", "new", title, `--type=${type}`], options.signal);
 }
 
-export function knowledgeNoteWrite(slug: string, body: string): Promise<{ ok: boolean; path: string; nodeId: string }> {
-  return query(["note", "write", slug, body]);
+export function knowledgeNoteWrite(slug: string, body: string, options: KnowledgeRequestOptions = {}): Promise<{ ok: boolean; path: string; nodeId: string }> {
+  return query(["note", "write", slug, body], options.signal);
 }
 
-export function knowledgeNoteRead(slug: string): Promise<{ slug: string; source: string }> {
-  return query(["note", "read", slug]);
+export function knowledgeNoteRead(slug: string, options: KnowledgeRequestOptions = {}): Promise<{ slug: string; source: string }> {
+  return query(["note", "read", slug], options.signal);
 }
 
-export function knowledgeNoteList(): Promise<string[]> {
-  return query(["note", "list"]);
+export function knowledgeNoteList(options: KnowledgeRequestOptions = {}): Promise<string[]> {
+  return query(["note", "list"], options.signal);
 }
 
 // Distinct tags across notes — powers the editor's `#` autocomplete.
-export function knowledgeTags(): Promise<string[]> {
-  return query<string[]>(["tags"]);
+export function knowledgeTags(options: KnowledgeRequestOptions = {}): Promise<string[]> {
+  return query<string[]>(["tags"], options.signal);
 }
 
 export interface IndexProgress {
@@ -471,6 +535,6 @@ export interface KnowledgeResponseSample {
   sample: string;
   capturedAt: string;
 }
-export function knowledgeEndpointSamples(endpoint: string): Promise<KnowledgeResponseSample[]> {
-  return query<KnowledgeResponseSample[]>(["samples", endpoint]);
+export function knowledgeEndpointSamples(endpoint: string, options: KnowledgeRequestOptions = {}): Promise<KnowledgeResponseSample[]> {
+  return query<KnowledgeResponseSample[]>(["samples", endpoint], options.signal);
 }

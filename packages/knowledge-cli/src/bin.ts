@@ -27,6 +27,10 @@ runCli(process.argv.slice(2), {
   notesDir: NOTES_DIR,
   apiDocPreviewRoot: API_DOC_PREVIEWS,
   larkProcessRunner: createLarkProcessRunner(),
+  // Pipes, the Tauri bridge, and CI are non-interactive: every mutating
+  // operation must first expose a scoped preview token and then receive that
+  // exact token back on --confirm. A real TTY can keep the interactive flow.
+  requireOperationConfirmation: !(process.stdin.isTTY && process.stdout.isTTY),
   // Machine-parseable progress lines on stderr (stdout stays the --json report).
   // The Rust bridge reads "PENGUIN_PROGRESS {json}" lines → Tauri events.
   progressEvent: (payload) => process.stderr.write(`PENGUIN_PROGRESS ${JSON.stringify(payload)}\n`),

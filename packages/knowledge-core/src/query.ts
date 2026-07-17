@@ -651,7 +651,7 @@ function edgeCountsByType(
     .prepare(
       `SELECT edge_type AS edgeType, COUNT(*) AS count
          FROM edges
-        WHERE ${column}=? AND status='active'
+        WHERE ${column}=? AND status='active' AND method IN ('EXTRACTED','ASSERTED')
         GROUP BY edge_type
         ORDER BY edge_type`,
     )
@@ -801,7 +801,10 @@ export function exploreGraph(
 
   // Trust filter (§3.3/§11): default traversal only follows confirmed edges —
   // unconfirmed AI suggestions (status='suggested') and rejected edges are out.
-  const ACTIVE = "status='active'";
+  // Parser confidence is explicit: EXTRACTED/ASSERTED edges are verified for
+  // deterministic impact; INFERRED edges remain candidate evidence and are
+  // never silently promoted into a hard blast-radius answer.
+  const ACTIVE = "status='active' AND method IN ('EXTRACTED','ASSERTED')";
   if (options?.revision?.snapshotId && !options.revision.snapshotId.startsWith("legacy:")) {
     const targetKey = store.getNode(nodeId)?.identity_key ?? nodeOrKey;
     const view = openRevisionView(store, options.revision);

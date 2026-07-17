@@ -1,0 +1,85 @@
+import type { NormalizedSearchRequest, SearchMode } from "@penguin/knowledge-contracts";
+import type { KnowledgeStore } from "./store.js";
+import { locateSourceRange, sourceSnippet, type SourceLocation } from "./source-snippet.js";
+
+export interface ResolvedRevisionScope { snapshotId: string; repoId?: string; }
+export interface SourceSearchOccurrence extends SourceLocation {
+  sourceFactId: string;
+  blobId: number;
+  contentHash: string;
+  filePath: string;
+  snippet: string;
+  verified: true;
+}
+
+function trigrams(value: string): string[] {
+  const chars = [...value]; const result = new Set<string>();
+  for (let i = 0; i + 3 <= chars.length; i += 1) result.add(chars.slice(i, i + 3).join(""));
+  return [...result];
+}
+
+function occurrences(content: string, query: string, mode: SearchMode, caseSensitive: boolean, wholeWord: boolean): Array<[number, number]> {
+  const haystack = caseSensitive ? content : content.toLocaleLowerCase();
+  const needle = caseSensitive ? query : query.toLocaleLowerCase();
+  const result: Array<[number, number]> = [];
+  if (!needle) return result;
+  let from = 0;
+  while (from <= haystack.length - needle.length) {
+    const at = haystack.indexOf(needle, from);
+    if (at < 0) break;
+    const end = at + needle.length;
+    const wordOk = !wholeWord || (!/[\p{L}\p{N}_]/u.test(haystack[at - 1] ?? "") && !/[\p{L}\p{N}_]/u.test(haystack[end] ?? ""));
+    if (wordOk && (mode === "exact" || mode === "phrase" || mode === "substring")) result.push([at, end]);
+    from = Math.max(at + 1, end);
+  }
+  return result;
+}
+
+type ScopeSourceRow = { sourceFactId: string; blobId: number; contentHash: string; filePath: string; content: string };
+
+function candidateBlobIds(store: KnowledgeStore, scope: ResolvedRevisionScope, query: string): Set<number> | null {
+  const grams = trigrams(query);
+  // An unbounded placeholder list is both slower and easier to abuse than a
+  // bounded full scan. The final verifier still guarantees correctness.
+  if (grams.length === 0 || grams.length > 256) return null;
+  const params: unknown[] = [scope.snapshotId];
+  let sql = `SELECT DISTINCT e.source_blob_id AS blobId
+    FROM effective_snapshot_sources e
+    JOIN source_blob_trigrams t ON t.source_blob_id=e.source_blob_id
+    WHERE e.snapshot_id=?`;
+  if (scope.repoId) {
+    sql += " AND EXISTS (SELECT 1 FROM source_facts sf WHERE sf.id=e.source_fact_id AND sf.repo_id=?)";
+    params.push(scope.repoId);
+  }
+  sql += ` AND t.trigram IN (${grams.map(() => "?").join(",")}) GROUP BY e.source_blob_id HAVING COUNT(DISTINCT t.trigram)=?`;
+  params.push(...grams, grams.length);
+  return new Set((store.db.prepare(sql).all(...params) as Array<{ blobId: number }>).map((row) => row.blobId));
+}
+
+function rowsForScope(store: KnowledgeStore, scope: ResolvedRevisionScope, query: string): ScopeSourceRow[] {
+  const params: unknown[] = [scope.snapshotId];
+  let sql = `SELECT e.source_fact_id AS sourceFactId, e.source_blob_id AS blobId, b.content_hash AS contentHash, e.file_path AS filePath, b.decoded_content AS content
+    FROM effective_snapshot_sources e JOIN source_blobs b ON b.id=e.source_blob_id WHERE e.snapshot_id=?`;
+  if (scope.repoId) { sql += " AND EXISTS (SELECT 1 FROM source_facts sf WHERE sf.id=e.source_fact_id AND sf.repo_id=?)"; params.push(scope.repoId); }
+  const candidates = candidateBlobIds(store, scope, query);
+  const rows = store.db.prepare(sql).all(...params) as ScopeSourceRow[];
+  return candidates ? rows.filter((row) => candidates.has(row.blobId)) : rows;
+}
+
+export function searchSource(store: KnowledgeStore, scope: ResolvedRevisionScope, request: Pick<NormalizedSearchRequest, "query" | "mode" | "options">, options: { signal?: AbortSignal } = {}): SourceSearchOccurrence[] {
+  const mode = request.mode === "auto" ? "substring" : request.mode;
+  if (mode !== "exact" && mode !== "phrase" && mode !== "substring") return [];
+  const hits: SourceSearchOccurrence[] = [];
+  const byBlob = new Map<number, ScopeSourceRow[]>();
+  for (const row of rowsForScope(store, scope, request.query)) byBlob.set(row.blobId, [...(byBlob.get(row.blobId) ?? []), row]);
+  for (const rows of byBlob.values()) {
+    if (options.signal?.aborted) throw new Error("SEARCH_CANCELLED");
+    const row = rows[0];
+    const matches = occurrences(row.content, request.query, mode, request.options.caseSensitive, request.options.wholeWord);
+    for (const [start, end] of matches) {
+      const location = locateSourceRange(store, row.blobId, row.content, start, end);
+      for (const mapped of rows) hits.push({ ...location, sourceFactId: mapped.sourceFactId, blobId: mapped.blobId, contentHash: mapped.contentHash, filePath: mapped.filePath, snippet: sourceSnippet(row.content, start, end), verified: true });
+    }
+  }
+  return hits.sort((a, b) => a.filePath.localeCompare(b.filePath) || a.startByte - b.startByte || a.sourceFactId.localeCompare(b.sourceFactId));
+}

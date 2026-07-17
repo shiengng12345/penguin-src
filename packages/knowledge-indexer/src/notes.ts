@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 import { basename } from "node:path";
 import type { KnowledgeStore } from "@penguin/knowledge-core";
+import { extractMarkdownLinks } from "./markdown-links.js";
+import { extractMarkdownProperties } from "./markdown-properties.js";
+import { resolveNoteLinks } from "./fusion.js";
 
 export interface ParsedNote {
   identityKey: string;
@@ -10,11 +13,16 @@ export interface ParsedNote {
   mcpAccess: "allowed" | "denied";
   isCredential: boolean;
   body: string;
-  wikilinks: Array<{ rawTarget: string; namespace: string | null }>;
+  wikilinks: Array<{ rawTarget: string; namespace: string | null; targetAnchor: string | null; displayText: string | null; embedded: boolean; sourceLine: number }>;
   tags: string[];
   entities: Array<{ entityType: string; value: string; normalizedValue: string }>;
   headings: Array<{ level: number; text: string }>;
   contentHash: string;
+}
+
+const SECRET_KEY = /(?:secret|password|token|api[_-]?key|private[_-]?key|credential|authorization)/i;
+function redactedFrontmatter(frontmatter: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(frontmatter).map(([key, value]) => [key, SECRET_KEY.test(key) ? "[REDACTED_SECRET]" : value]));
 }
 
 function sha256(input: string): string {
@@ -32,17 +40,32 @@ function parseFrontmatter(source: string): { data: Record<string, unknown>; body
   const rest = source.slice(source.indexOf("\n---", end === 3 ? 3 : end) + 4);
   const body = rest.replace(/^\r?\n/, "");
   const data: Record<string, unknown> = {};
-  for (const raw of block.split("\n")) {
-    const m = raw.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+  const scalar = (raw: string): unknown => {
+    const value = raw.trim().replace(/^["']|["']$/g, "");
+    if (value === "null" || value === "~") return null;
+    if (value === "true") return true;
+    if (value === "false") return false;
+    if (/^-?(?:\d+\.?\d*|\.\d+)$/.test(value)) return Number(value);
+    if (value.startsWith("[") && value.endsWith("]")) return value.slice(1, -1).split(",").map((item) => scalar(item)).filter((item) => item !== "");
+    return value;
+  };
+  const lines = block.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const m = lines[index].match(/^([A-Za-z0-9_.-]+):\s*(.*)$/);
     if (!m) continue;
     const key = m[1];
-    let value: unknown = m[2].trim().replace(/^["']|["']$/g, "");
-    if (value === "true") value = true;
-    else if (value === "false") value = false;
-    else if (typeof value === "string" && value.startsWith("[") && value.endsWith("]")) {
-      value = value.slice(1, -1).split(",").map((s) => s.trim().replace(/^["']|["']$/g, "")).filter(Boolean);
+    if (!m[2].trim()) {
+      const items: unknown[] = [];
+      let cursor = index + 1;
+      while (cursor < lines.length) {
+        const item = lines[cursor].match(/^\s+-\s+(.*)$/);
+        if (!item) break;
+        items.push(scalar(item[1]));
+        cursor += 1;
+      }
+      if (items.length) { data[key] = items; index = cursor - 1; continue; }
     }
-    data[key] = value;
+    data[key] = scalar(m[2]);
   }
   return { data, body };
 }
@@ -95,13 +118,17 @@ export function parseNote(input: { path: string; source: string }): ParsedNote {
   const isCredential = data.type === "credential";
 
   const wikilinks: ParsedNote["wikilinks"] = [];
-  for (const m of body.matchAll(/\[\[([^\]]+)\]\]/g)) {
-    const inner = m[1].trim();
-    const colon = inner.indexOf(":");
+  for (const m of body.matchAll(/(!?)\[\[([^\]]+)\]\]/g)) {
+    const rawInner = m[2].trim();
+    const pipe = rawInner.indexOf("|");
+    const targetAndAnchor = (pipe >= 0 ? rawInner.slice(0, pipe) : rawInner).trim();
+    const hash = targetAndAnchor.indexOf("#");
+    const rawTarget = (hash >= 0 ? targetAndAnchor.slice(0, hash) : targetAndAnchor).trim();
+    const colon = rawTarget.indexOf(":");
     if (colon > 0) {
-      wikilinks.push({ rawTarget: inner.slice(colon + 1).trim(), namespace: inner.slice(0, colon).trim() });
+      wikilinks.push({ rawTarget: rawTarget.slice(colon + 1).trim(), namespace: rawTarget.slice(0, colon).trim(), targetAnchor: hash >= 0 ? targetAndAnchor.slice(hash + 1) : null, displayText: pipe >= 0 ? rawInner.slice(pipe + 1).trim() : null, embedded: m[1] === "!", sourceLine: body.slice(0, m.index ?? 0).split(/\r?\n/).length });
     } else {
-      wikilinks.push({ rawTarget: inner, namespace: null });
+      wikilinks.push({ rawTarget, namespace: null, targetAnchor: hash >= 0 ? targetAndAnchor.slice(hash + 1) : null, displayText: pipe >= 0 ? rawInner.slice(pipe + 1).trim() : null, embedded: m[1] === "!", sourceLine: body.slice(0, m.index ?? 0).split(/\r?\n/).length });
     }
   }
 
@@ -126,18 +153,33 @@ export function indexNote(input: {
   parsed: ParsedNote;
 }): { nodeId: string } {
   const { store, parsed } = input;
+  const searchableFrontmatter = redactedFrontmatter(parsed.frontmatter);
   const nodeId = store.upsertNode({
     nodeType: parsed.isCredential ? "credential" : "note",
     identityKey: parsed.identityKey,
     title: parsed.title,
-    meta: { tags: parsed.tags, frontmatter: parsed.frontmatter },
+    meta: { tags: parsed.tags, frontmatter: searchableFrontmatter },
   });
+  const links = extractMarkdownLinks(parsed.body);
+  const properties = extractMarkdownProperties(searchableFrontmatter, parsed.body);
+  const tx = store.db.transaction(() => {
+    store.db.prepare("DELETE FROM note_properties WHERE note_node_id=?").run(nodeId);
+    const propertyInsert = store.db.prepare("INSERT INTO note_properties(note_node_id,property_key,ordinal,value_type,value_text,value_number,value_boolean,value_date,source_line) VALUES (?,?,?,?,?,?,?,?,?)");
+    for (const property of properties) propertyInsert.run(nodeId, property.key, property.ordinal, property.valueType, property.valueText, property.valueNumber, property.valueBoolean === null ? null : property.valueBoolean ? 1 : 0, property.valueDate, property.sourceLine);
+    store.db.prepare("DELETE FROM note_links WHERE source_node_id=?").run(nodeId);
+    const linkInsert = store.db.prepare("INSERT INTO note_links(source_node_id,source_line,raw_target,target_node_id,target_anchor,display_text,embedded,resolution_status) VALUES (?,?,?,?,?,?,?,?)");
+    for (const link of links) linkInsert.run(nodeId, link.sourceLine, link.rawTarget, null, link.targetAnchor, link.displayText, link.embedded ? 1 : 0, "unresolved");
+  });
+  tx();
+  resolveNoteLinks({ store, noteNodeId: nodeId, noteTitle: parsed.title, noteIdentityKey: parsed.identityKey, parsed });
+  // Derived properties/links are replaced first; FTS is the final derived
+  // layer so a failed transaction cannot expose a half-updated note.
   store.indexNoteText({
     nodeId,
     path: input.repoRelPath,
     title: parsed.title,
     body: parsed.isCredential ? "" : parsed.body,
-    frontmatter: parsed.frontmatter,
+    frontmatter: searchableFrontmatter,
     sensitive: parsed.sensitive || parsed.isCredential,
     mcpAccess: parsed.isCredential ? "denied" : parsed.mcpAccess,
     contentHash: parsed.contentHash,

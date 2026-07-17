@@ -398,9 +398,314 @@ CREATE TABLE IF NOT EXISTS global_resolved_edges (
   provenance TEXT NOT NULL DEFAULT '{}',
   UNIQUE (producer_key, src_identity_key, dst_identity_key, edge_type)
 );
+
+-- Content-addressed universal source corpus. Parser facts remain separately
+-- rebuildable; these tables preserve admitted text even when no grammar exists.
+CREATE TABLE IF NOT EXISTS source_blobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  content_hash TEXT NOT NULL UNIQUE,
+  byte_size INTEGER NOT NULL,
+  encoding TEXT NOT NULL,
+  raw_bytes BLOB NOT NULL,
+  decoded_content TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS source_blob_lines (
+  source_blob_id INTEGER NOT NULL,
+  line_number INTEGER NOT NULL,
+  start_byte INTEGER NOT NULL,
+  end_byte INTEGER NOT NULL,
+  start_char INTEGER NOT NULL,
+  end_char INTEGER NOT NULL,
+  PRIMARY KEY (source_blob_id, line_number)
+);
+CREATE INDEX IF NOT EXISTS idx_source_blob_lines_byte ON source_blob_lines(source_blob_id, start_byte, end_byte);
+CREATE TABLE IF NOT EXISTS source_blob_trigrams (
+  source_blob_id INTEGER NOT NULL,
+  trigram TEXT NOT NULL,
+  PRIMARY KEY (source_blob_id, trigram)
+);
+CREATE INDEX IF NOT EXISTS idx_source_blob_trigrams_lookup ON source_blob_trigrams(trigram, source_blob_id);
+CREATE TABLE IF NOT EXISTS source_facts (
+  source_fact_rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE,
+  repo_id TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  fact_fingerprint TEXT NOT NULL,
+  content_hash TEXT,
+  source_blob_id INTEGER,
+  coverage_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE (repo_id, file_path, fact_fingerprint)
+);
+CREATE INDEX IF NOT EXISTS idx_source_facts_scope ON source_facts(repo_id, file_path);
+CREATE TABLE IF NOT EXISTS file_fact_sources (
+  file_fact_id TEXT NOT NULL,
+  source_fact_id TEXT NOT NULL,
+  PRIMARY KEY (file_fact_id, source_fact_id)
+);
+CREATE TABLE IF NOT EXISTS effective_snapshot_sources (
+  snapshot_id TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  source_fact_id TEXT NOT NULL,
+  source_blob_id INTEGER,
+  PRIMARY KEY (snapshot_id, file_path)
+);
+CREATE TABLE IF NOT EXISTS source_snapshot_overlays (
+  snapshot_id TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  operation TEXT NOT NULL CHECK (operation IN ('add','modify','delete')),
+  source_fact_id TEXT,
+  renamed_from TEXT,
+  PRIMARY KEY (snapshot_id, file_path),
+  CHECK ((operation = 'delete' AND source_fact_id IS NULL) OR
+         (operation IN ('add','modify') AND source_fact_id IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_source_snapshot_overlays_fact ON source_snapshot_overlays(source_fact_id);
+CREATE TABLE IF NOT EXISTS source_backfill_checkpoints (
+  scope TEXT PRIMARY KEY,
+  last_key TEXT NOT NULL,
+  processed INTEGER NOT NULL DEFAULT 0,
+  unavailable INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS coverage_records (
+  repo_id TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  git_state TEXT NOT NULL,
+  coverage_status TEXT NOT NULL,
+  reason_code TEXT NOT NULL,
+  classification TEXT NOT NULL,
+  byte_size INTEGER NOT NULL,
+  reason TEXT NOT NULL,
+  parser_status TEXT NOT NULL DEFAULT 'not_applicable',
+  parser_language TEXT,
+  parser_version TEXT,
+  parser_error TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (repo_id, file_path)
+);
+CREATE INDEX IF NOT EXISTS idx_coverage_records_path ON coverage_records(repo_id, file_path);
+CREATE TABLE IF NOT EXISTS markdown_sections (
+  source_fact_id TEXT NOT NULL,
+  heading_path TEXT NOT NULL,
+  heading TEXT NOT NULL,
+  level INTEGER NOT NULL,
+  start_line INTEGER NOT NULL,
+  end_line INTEGER NOT NULL,
+  PRIMARY KEY (source_fact_id, heading_path)
+);
+CREATE TABLE IF NOT EXISTS note_properties (
+  note_node_id TEXT NOT NULL,
+  property_key TEXT NOT NULL,
+  ordinal INTEGER NOT NULL,
+  value_type TEXT NOT NULL,
+  value_text TEXT,
+  value_number REAL,
+  value_boolean INTEGER,
+  value_date TEXT,
+  source_line INTEGER NOT NULL,
+  PRIMARY KEY (note_node_id, property_key, ordinal)
+);
+CREATE INDEX IF NOT EXISTS idx_note_properties_lookup ON note_properties(property_key, value_text, value_number, value_date);
+CREATE TABLE IF NOT EXISTS note_links (
+  source_node_id TEXT NOT NULL,
+  source_line INTEGER NOT NULL,
+  raw_target TEXT NOT NULL,
+  target_node_id TEXT,
+  target_anchor TEXT,
+  display_text TEXT,
+  embedded INTEGER NOT NULL,
+  resolution_status TEXT NOT NULL,
+  PRIMARY KEY (source_node_id, source_line, raw_target, target_anchor)
+);
+CREATE INDEX IF NOT EXISTS idx_note_links_target ON note_links(target_node_id, source_node_id);
+CREATE TABLE IF NOT EXISTS why_cards (
+  id TEXT PRIMARY KEY,
+  subject_json TEXT NOT NULL,
+  question TEXT NOT NULL,
+  answer TEXT NOT NULL,
+  decision TEXT NOT NULL,
+  alternatives_json TEXT NOT NULL,
+  constraints_json TEXT NOT NULL,
+  consequences_json TEXT NOT NULL,
+  evidence_json TEXT NOT NULL,
+  gaps_json TEXT NOT NULL,
+  status TEXT NOT NULL,
+  revision_id TEXT,
+  owners_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  reviewed_at TEXT
+);
+CREATE TABLE IF NOT EXISTS memory_items (
+  id TEXT PRIMARY KEY,
+  class TEXT NOT NULL,
+  scope_json TEXT NOT NULL,
+  subject TEXT NOT NULL,
+  body TEXT NOT NULL,
+  source_json TEXT NOT NULL,
+  confidence REAL NOT NULL,
+  retention TEXT NOT NULL,
+  status TEXT NOT NULL,
+  expires_at TEXT,
+  content_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_memory_scope_status ON memory_items(class,status,expires_at);
+CREATE TABLE IF NOT EXISTS ontology_terms (
+  id TEXT PRIMARY KEY,
+  canonical_name TEXT NOT NULL,
+  aliases_json TEXT NOT NULL,
+  scope_json TEXT NOT NULL,
+  term_type TEXT NOT NULL,
+  definition TEXT NOT NULL,
+  evidence_json TEXT NOT NULL,
+  status TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS ontology_links (
+  from_id TEXT NOT NULL,
+  to_id TEXT NOT NULL,
+  relation TEXT NOT NULL,
+  evidence_json TEXT NOT NULL,
+  PRIMARY KEY (from_id,to_id,relation)
+);
+CREATE TABLE IF NOT EXISTS saved_queries (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL UNIQUE,
+  request_json TEXT NOT NULL,
+  scope_json TEXT NOT NULL,
+  contract_version TEXT NOT NULL DEFAULT '2',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_saved_queries_name ON saved_queries(name);
+CREATE TABLE IF NOT EXISTS trust_evidence (
+  id TEXT PRIMARY KEY,
+  status TEXT NOT NULL,
+  source_type TEXT NOT NULL,
+  locator TEXT NOT NULL,
+  revision_id TEXT,
+  environment TEXT,
+  content_hash TEXT,
+  query_hash TEXT,
+  observed_at TEXT,
+  expires_at TEXT,
+  redaction_policy TEXT NOT NULL,
+  claim_ids_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS validated_findings (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  severity TEXT NOT NULL,
+  claim TEXT NOT NULL,
+  affected_scopes_json TEXT NOT NULL,
+  reproduction_json TEXT NOT NULL,
+  status TEXT NOT NULL,
+  gaps_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS finding_evidence (
+  finding_id TEXT NOT NULL,
+  evidence_id TEXT NOT NULL,
+  evidence_role TEXT NOT NULL,
+  PRIMARY KEY (finding_id,evidence_id,evidence_role)
+);
+CREATE TABLE IF NOT EXISTS knowledge_audit_events (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_id TEXT NOT NULL UNIQUE,
+  previous_hash TEXT,
+  event_hash TEXT NOT NULL,
+  capability_id TEXT NOT NULL,
+  actor_id TEXT NOT NULL,
+  scope_hash TEXT NOT NULL,
+  input_digest TEXT NOT NULL,
+  result_code TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS search_feedback (
+  id TEXT PRIMARY KEY,
+  query_hash TEXT NOT NULL,
+  hit_id TEXT NOT NULL,
+  verdict TEXT NOT NULL,
+  correction_json TEXT,
+  scope_hash TEXT NOT NULL,
+  capability_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS semantic_chunks (
+  id TEXT PRIMARY KEY,
+  content_hash TEXT NOT NULL,
+  source_blob_id INTEGER,
+  node_id TEXT,
+  start_byte INTEGER,
+  end_byte INTEGER,
+  chunk_kind TEXT NOT NULL,
+  text_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS embedding_models (
+  model_hash TEXT PRIMARY KEY,
+  provider_id TEXT NOT NULL,
+  model_id TEXT NOT NULL,
+  dimensions INTEGER NOT NULL,
+  vec_table_name TEXT NOT NULL UNIQUE,
+  installed_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS semantic_embedding_refs (
+  model_hash TEXT NOT NULL,
+  chunk_id TEXT NOT NULL,
+  vec_rowid INTEGER,
+  status TEXT NOT NULL,
+  error TEXT,
+  embedded_at TEXT,
+  PRIMARY KEY (model_hash, chunk_id)
+);
+CREATE TABLE IF NOT EXISTS semantic_vector_values (
+  vec_rowid INTEGER PRIMARY KEY AUTOINCREMENT,
+  model_hash TEXT NOT NULL,
+  dimensions INTEGER NOT NULL,
+  vector_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_semantic_vector_values_model ON semantic_vector_values(model_hash);
+CREATE TABLE IF NOT EXISTS reflection_suggestions (
+  id TEXT PRIMARY KEY,
+  status TEXT NOT NULL,
+  reproduction_json TEXT NOT NULL,
+  evidence_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  reviewed_at TEXT
+);
+CREATE TABLE IF NOT EXISTS external_knowledge_sources (
+  id TEXT PRIMARY KEY,
+  source_type TEXT NOT NULL,
+  location TEXT NOT NULL,
+  config_json TEXT NOT NULL,
+  status TEXT NOT NULL,
+  content_hash TEXT,
+  final_url TEXT,
+  content_type TEXT,
+  retrieved_at TEXT,
+  license_warning TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_effective_snapshot_sources_fact ON effective_snapshot_sources(source_fact_id);
+CREATE VIRTUAL TABLE IF NOT EXISTS source_fts USING fts5(content, tokenize='unicode61');
+CREATE VIRTUAL TABLE IF NOT EXISTS source_lexical_fts USING fts5(content, tokenize='unicode61');
+CREATE VIRTUAL TABLE IF NOT EXISTS source_path_fts USING fts5(file_path, source_fact_id UNINDEXED, tokenize='unicode61');
 `;
 
-export const SCHEMA_VERSION = 9;
+export const SCHEMA_VERSION = 13;
+
+/** Canonical schema history consumed by generated operator documentation. */
+export const SCHEMA_MIGRATIONS = [
+  { version: 10, name: "source-snapshots", summary: "content-addressed source blobs, snapshot overlays, coverage and resolver metadata" },
+  { version: 11, name: "markdown-vault", summary: "Markdown sections, properties, wikilinks, evidence and saved-query records" },
+  { version: 12, name: "semantic-and-memory", summary: "memory, ontology, semantic chunks, embeddings and reflection records" },
+  { version: 13, name: "trust-and-external-sources", summary: "validated findings, audit events, external sources and revision-safe evidence" },
+] as const;
 
 // Idempotent additive migrations for schemas that predate SCHEMA_VERSION.
 // Each step guards on actual schema state (column presence) rather than the
@@ -410,6 +715,17 @@ export const SCHEMA_VERSION = 9;
 // (e.g. `if (from < 5) { ...backfill... }`). Additive column adds stay in the
 // idempotent guards below and need no version gate.
 function migrate(db: Database.Database, _from: number): void {
+  const evidenceCols = (db.prepare("PRAGMA table_info(trust_evidence)").all() as { name: string }[]).map((c) => c.name);
+  if (!evidenceCols.includes("query_hash")) db.exec("ALTER TABLE trust_evidence ADD COLUMN query_hash TEXT");
+  const coverageCols = (db.prepare("PRAGMA table_info(coverage_records)").all() as { name: string }[]).map((c) => c.name);
+  for (const [column, definition] of [
+    ["parser_status", "TEXT NOT NULL DEFAULT 'not_applicable'"],
+    ["parser_language", "TEXT"],
+    ["parser_version", "TEXT"],
+    ["parser_error", "TEXT"],
+  ] as const) {
+    if (!coverageCols.includes(column)) db.exec(`ALTER TABLE coverage_records ADD COLUMN ${column} ${definition}`);
+  }
   const edgeCols = (db.prepare("PRAGMA table_info(edges)").all() as { name: string }[]).map(
     (c) => c.name,
   );
@@ -422,6 +738,8 @@ function migrate(db: Database.Database, _from: number): void {
   const branchCols = (db.prepare("PRAGMA table_info(branches)").all() as { name: string }[]).map(
     (c) => c.name,
   );
+  const externalCols = (db.prepare("PRAGMA table_info(external_knowledge_sources)").all() as { name: string }[]).map((c) => c.name);
+  if (externalCols.length > 0 && !externalCols.includes("content_type")) db.exec("ALTER TABLE external_knowledge_sources ADD COLUMN content_type TEXT");
   if (!branchCols.includes("pinned")) {
     // Pinned branches are exempt from every automatic retention mechanism.
     db.exec("ALTER TABLE branches ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0");
@@ -455,6 +773,8 @@ function migrate(db: Database.Database, _from: number): void {
   ] as const) {
     if (!branchCols.includes(column)) db.exec(`ALTER TABLE branches ADD COLUMN ${column} ${definition}`);
   }
+  const savedQueryCols = (db.prepare("PRAGMA table_info(saved_queries)").all() as { name: string }[]).map((c) => c.name);
+  if (!savedQueryCols.includes("contract_version")) db.exec("ALTER TABLE saved_queries ADD COLUMN contract_version TEXT NOT NULL DEFAULT '2'");
   ensureOneDefaultBranchIndex(db);
 }
 
@@ -481,6 +801,11 @@ const DDL_OBJECT_NAMES: string[] = [
   ...DDL.matchAll(
     /CREATE\s+(?:VIRTUAL\s+)?(?:TABLE|INDEX|TRIGGER|VIEW)\s+(?:IF\s+NOT\s+EXISTS\s+)?([A-Za-z_]\w*)/gi,
   ),
+].map((m) => m[1]);
+
+/** Tables are derived from the same DDL used by openDatabase. */
+export const SCHEMA_TABLES: readonly string[] = [
+  ...DDL.matchAll(/CREATE\s+(?:VIRTUAL\s+)?TABLE\s+IF\s+NOT\s+EXISTS\s+([A-Za-z_]\w*)/gi),
 ].map((m) => m[1]);
 
 // Read-only probe: does this DB already contain everything the write path of
@@ -518,6 +843,10 @@ function isSchemaCurrent(db: Database.Database): boolean {
     "recover_until",
   ];
   if (!requiredBranchColumns.every((column) => branchCols.includes(column))) return false;
+  const externalCols = (db.prepare("PRAGMA table_info(external_knowledge_sources)").all() as { name: string }[]).map((c) => c.name);
+  if (!externalCols.includes("content_type")) return false;
+  const evidenceCols = (db.prepare("PRAGMA table_info(trust_evidence)").all() as { name: string }[]).map((c) => c.name);
+  if (!evidenceCols.includes("query_hash")) return false;
   if (!have.has("idx_branches_one_default_per_repo")) return false;
   return db.prepare("SELECT 1 FROM ledger_state WHERE id='main'").get() != null;
 }

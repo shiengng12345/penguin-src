@@ -1,0 +1,62 @@
+[
+  {
+    "path": "src/call-site.ts",
+    "status": "admitted",
+    "parser": "supported"
+  },
+  {
+    "path": "config/service.yml",
+    "status": "admitted",
+    "parser": "unsupported"
+  },
+  {
+    "path": "schema.sql",
+    "status": "admitted",
+    "parser": "unsupported"
+  },
+  {
+    "path": "protocol.proto",
+    "status": "admitted",
+    "parser": "supported-or-source-only"
+  },
+  {
+    "path": "docs/README.md",
+    "status": "admitted",
+    "parser": "not-applicable"
+  },
+  {
+    "path": "plain-text",
+    "status": "admitted",
+    "parser": "not-applicable"
+  },
+  {
+    "path": "generated/utf16le.txt",
+    "status": "admitted",
+    "parser": "source-only",
+    "materialized": true
+  },
+  {
+    "path": "generated/crlf.txt",
+    "status": "admitted",
+    "parser": "source-only",
+    "materialized": true
+  },
+  {
+    "path": "generated/large.txt",
+    "status": "admitted",
+    "parser": "source-only",
+    "materialized": true
+  },
+  {
+    "path": "generated/binary.bin",
+    "status": "excluded",
+    "parser": "binary",
+    "materialized": true
+  },
+  {
+    "path": "generated/.env",
+    "status": "excluded",
+    "parser": "secret",
+    "materialized": true
+  }
+]
