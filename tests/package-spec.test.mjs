@@ -146,6 +146,17 @@ test("PackageInstaller installs the selected row by exact displayed version", as
   assert.doesNotMatch(source, /buildPackageSpec\([^)]*install_tag\)/);
 });
 
+test("PackageInstaller spins a loader in the install button while installing", async () => {
+  const source = await readFile(
+    new URL("../src/components/packages/PackageInstaller.tsx", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /isInstalling\s*\?\s*\(\s*<Loader2 className="h-4 w-4 animate-spin" \/>\s*\)\s*:\s*\(\s*<Download className="h-4 w-4" \/>\s*\)/,
+  );
+});
+
 test("PackageInstaller renders compact rows with branch chip after build time", async () => {
   const source = await readFile(
     new URL("../src/components/packages/PackageInstaller.tsx", import.meta.url),

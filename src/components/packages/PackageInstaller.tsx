@@ -1060,7 +1060,11 @@ export function PackageInstaller({ onInstall, onClose, packages }: PackageInstal
             disabled={!canInstall}
             className="h-10 bg-cyan-500 px-6 font-medium text-slate-950 hover:bg-cyan-400 disabled:cursor-not-allowed disabled:bg-cyan-500/30 disabled:text-cyan-50/70"
           >
-            <Download className="h-4 w-4" />
+            {isInstalling ? (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            ) : (
+              <Download className="h-4 w-4" />
+            )}
             {isInstalling
               ? batchProgress
                 ? `安装中 ${batchProgress.done + 1}/${batchProgress.total}`
