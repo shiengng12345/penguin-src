@@ -10,7 +10,7 @@ const phase = arg("phase") ?? "RC1";
 const previousPath = arg("previous");
 const outPath = arg("out");
 const root = process.cwd();
-const files = ["package.json", "pnpm-lock.yaml", "packages/knowledge-core/dist/index.js", "packages/knowledge-cli/dist/bin.js", "packages/mcp/dist/index.js", "docs/knowledge-v2/cli-reference.md", "docs/knowledge-v2/mcp-reference.md", "docs/knowledge-v2/capability-matrix.md"];
+const files = ["package.json", "pnpm-lock.yaml", "packages/knowledge-core/dist/index.js", "packages/knowledge-cli/dist/bin.js", "packages/mcp/dist/index.js", "scripts/knowledge-release-gate.mjs", "scripts/knowledge-universal-retrieval-benchmark.mjs", "docs/knowledge-v2/cli-reference.md", "docs/knowledge-v2/mcp-reference.md", "docs/knowledge-v2/capability-matrix.md"];
 const hash = createHash("sha256");
 for (const file of files) { hash.update(file); hash.update("\0"); if (existsSync(resolve(root, file))) hash.update(readFileSync(resolve(root, file))); }
 const fingerprint = hash.digest("hex");
