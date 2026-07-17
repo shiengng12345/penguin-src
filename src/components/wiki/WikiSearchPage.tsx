@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, Search, Network, Bookmark, ClipboardList } from "lucide-react";
-import { knowledgeContext, knowledgeEvidenceList, knowledgeGetHit, knowledgeGraph, knowledgeSavedQueryList, knowledgeSavedQueryRun, knowledgeSavedQueryWrite, knowledgeSearchV2, type ContextPack, type KnowledgeEvidenceNote, type KnowledgeGraphView, type KnowledgeHitDetail, type KnowledgeSavedQuery, type KnowledgeSearchV2Response } from "@/lib/knowledge-client";
+import { knowledgeContext, knowledgeEvidenceList, knowledgeGetHit, knowledgeGraph, knowledgeReindex, knowledgeSavedQueryList, knowledgeSavedQueryRun, knowledgeSavedQueryWrite, knowledgeSearchV2, type ContextPack, type KnowledgeEvidenceNote, type KnowledgeGraphView, type KnowledgeHitDetail, type KnowledgeSavedQuery, type KnowledgeSearchV2Response } from "@/lib/knowledge-client";
 
 function initialSearchState() {
   if (typeof window === "undefined") return { query: "", mode: "auto", repo: "", branch: "", snapshot: "", path: "", language: "", kind: "" };
@@ -36,9 +36,15 @@ export function WikiSearchPage() {
   const [evidenceFilter, setEvidenceFilter] = useState("all");
   const [savedName, setSavedName] = useState("");
   const [savedQueries, setSavedQueries] = useState<KnowledgeSavedQuery[]>([]);
+  const [pinnedSavedQueries, setPinnedSavedQueries] = useState<string[]>(() => {
+    if (typeof window === "undefined") return [];
+    try { return JSON.parse(window.localStorage.getItem("penguin.wiki.pinnedSavedQueries") ?? "[]") as string[]; } catch { return []; }
+  });
   const [evidence, setEvidence] = useState<KnowledgeEvidenceNote[]>([]);
   const [contextBusy, setContextBusy] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [reindexBusy, setReindexBusy] = useState(false);
+  const [reindexVersion, setReindexVersion] = useState(0);
   const [recentQueries, setRecentQueries] = useState<string[]>(() => {
     if (typeof window === "undefined") return [];
     try { return JSON.parse(window.localStorage.getItem("penguin.wiki.recentQueries") ?? "[]") as string[]; } catch { return []; }
@@ -60,7 +66,7 @@ export function WikiSearchPage() {
     }
     const encoded = params.toString();
     window.history.replaceState({}, "", `${window.location.pathname}${encoded ? `?${encoded}` : ""}${window.location.hash}`);
-  }, [branchFilter, kindFilter, languageFilter, mode, pathFilter, query, repoFilter, snapshotFilter]);
+  }, [branchFilter, kindFilter, languageFilter, mode, pathFilter, query, reindexVersion, repoFilter, snapshotFilter]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -162,6 +168,22 @@ export function WikiSearchPage() {
     setSavedName("");
   };
 
+  const reindexScope = async () => {
+    const scope = [repoFilter && `repo=${repoFilter}`, branchFilter && `branch=${branchFilter}`, snapshotFilter && `snapshot=${snapshotFilter}`, pathFilter && `path=${pathFilter}`].filter(Boolean).join(", ") || "当前 workspace";
+    if (!window.confirm(`将重新索引 ${scope}。这是写操作，是否继续？`)) return;
+    setReindexBusy(true);
+    try { await knowledgeReindex(pathFilter || undefined); setReindexVersion((value) => value + 1); }
+    finally { setReindexBusy(false); }
+  };
+  const togglePinnedSavedQuery = (id: string) => {
+    setPinnedSavedQueries((current) => {
+      const next = current.includes(id) ? current.filter((value) => value !== id) : [...current, id];
+      window.localStorage.setItem("penguin.wiki.pinnedSavedQueries", JSON.stringify(next));
+      return next;
+    });
+  };
+  const orderedSavedQueries = useMemo(() => [...savedQueries].sort((left, right) => Number(pinnedSavedQueries.includes(right.id)) - Number(pinnedSavedQueries.includes(left.id))), [pinnedSavedQueries, savedQueries]);
+
   return <div className="flex min-h-0 flex-1 flex-col bg-[#080d14]">
     <div className="flex items-center gap-2 border-b border-slate-800 p-4">
       <Search className="h-4 w-4 text-cyan-300" />
@@ -190,13 +212,18 @@ export function WikiSearchPage() {
       if (event.key === "ArrowUp") { event.preventDefault(); setSelectedHitIndex((index) => Math.max(index - 1, 0)); }
       if (event.key === "Enter") { event.preventDefault(); activateSelectedHit(); }
     }} className="min-h-0 flex-1 overflow-auto p-4 outline-none" aria-label="知识搜索结果">
-      {savedQueries.length > 0 && <div className="mb-3 flex flex-wrap gap-1.5">{savedQueries.map((saved) => <button type="button" key={saved.id} onClick={() => { void knowledgeSavedQueryRun(saved.name).then(setResponse); }} className="rounded border border-slate-800 px-2 py-1 text-[11px] text-slate-400 hover:border-cyan-500/40 hover:text-cyan-200"><Bookmark className="mr-1 inline h-3 w-3" />{saved.name}</button>)}</div>}
+      {orderedSavedQueries.length > 0 && <div className="mb-3 flex flex-wrap gap-1.5" aria-label="Knowledge 已保存查询">{orderedSavedQueries.map((saved) => <span key={saved.id} className="inline-flex items-center rounded border border-slate-800"><button type="button" onClick={() => { void knowledgeSavedQueryRun(saved.name).then(setResponse); }} className="px-2 py-1 text-[11px] text-slate-400 hover:text-cyan-200"><Bookmark className="mr-1 inline h-3 w-3" />{saved.name}</button><button type="button" aria-label={`${pinnedSavedQueries.includes(saved.id) ? "取消置顶" : "置顶"} ${saved.name}`} onClick={() => togglePinnedSavedQuery(saved.id)} className="border-l border-slate-800 px-1.5 py-1 text-[10px] text-slate-500 hover:text-amber-300">{pinnedSavedQueries.includes(saved.id) ? "★" : "☆"}</button></span>)}</div>}
       {recentQueries.length > 0 && <div className="mb-3 flex flex-wrap items-center gap-1.5 text-[11px] text-slate-500"><span>最近查询</span>{recentQueries.map((recent) => <button type="button" key={recent} onClick={() => setQuery(recent)} className="rounded border border-slate-800 px-2 py-1 text-slate-400 hover:border-cyan-500/40 hover:text-cyan-200">{recent}</button>)}</div>}
       <div className="mb-3 rounded border border-slate-800 bg-slate-950/40 px-3 py-2 text-xs text-slate-400">
         已搜索：{response.diagnostics.searchedLanes.join(", ")} · 覆盖 {response.diagnostics.coverage.admitted} admitted / {response.diagnostics.coverage.excluded} excluded / {response.diagnostics.coverage.failed} failed
         {response.diagnostics.resolvedScopes[0] && <span className="ml-2 rounded border border-cyan-500/20 px-1.5 py-0.5 text-cyan-300">revision: {response.diagnostics.resolvedScopes[0].branch} · {response.diagnostics.resolvedScopes[0].snapshotId}</span>}
       </div>
-      {visibleHits.length === 0 ? <div className="rounded border border-yellow-500/20 bg-yellow-500/5 p-4 text-sm text-yellow-200">没有结果。{response.diagnostics.warnings.map((warning) => warning.message).join(" ")}</div> : <div className="space-y-2" style={{ contain: "layout paint", minHeight: `${visibleHits.length * 154}px` }}>
+      {visibleHits.length === 0 ? <div className="rounded border border-yellow-500/20 bg-yellow-500/5 p-4 text-sm text-yellow-200">
+        <div>没有结果。{response.diagnostics.warnings.map((warning) => warning.message).join(" ")}</div>
+        <div className="mt-2 text-[11px] text-yellow-200/70">已搜索 {response.diagnostics.searchedLanes.join(", ")} · scope 覆盖 {response.diagnostics.coverage.admitted} admitted / {response.diagnostics.coverage.excluded} excluded / {response.diagnostics.coverage.failed} failed。</div>
+        {response.diagnostics.exclusions.length > 0 && <div className="mt-1 text-[11px] text-amber-300/80">命中 excluded path metadata；内容因 secret policy 被隐藏。</div>}
+        <button type="button" onClick={() => void reindexScope()} disabled={reindexBusy} className="mt-3 rounded border border-yellow-400/30 px-2.5 py-1 text-xs text-yellow-100 hover:bg-yellow-400/10 disabled:opacity-50">{reindexBusy ? "重新索引中…" : "确认后重新索引此范围"}</button>
+      </div> : <div className="space-y-2" style={{ contain: "layout paint", minHeight: `${visibleHits.length * 154}px` }}>
         <div aria-hidden="true" style={{ height: `${virtualWindow.top}px` }} />
         {visibleHits.slice(virtualWindow.start, virtualWindow.end).map((hit, offset) => { const index = virtualWindow.start + offset; return <article key={hit.hitId} role="button" tabIndex={0} aria-selected={selectedHitIndex === index} onClick={() => { setSelectedHitIndex(index); void openContext(hit); }} onFocus={() => setSelectedHitIndex(index)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedHitIndex(index); void openContext(hit); } }} className={`cursor-pointer rounded-lg border bg-slate-950/35 p-3 ${selectedHitIndex === index ? "border-cyan-400/80 ring-1 ring-cyan-400/30" : hit.lane === "semantic" ? "border-violet-500/30" : "border-slate-800 hover:border-cyan-500/40"}`}>
           <div className="flex items-center gap-2 text-xs"><span className="font-semibold text-cyan-200">{hit.title}</span><span className="rounded bg-slate-800 px-1.5 py-0.5 text-slate-400">{hit.lane}</span><span className="text-slate-600">{hit.evidence[0]?.status}</span></div>

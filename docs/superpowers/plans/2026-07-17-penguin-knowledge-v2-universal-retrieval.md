@@ -2310,14 +2310,14 @@ Search | Context | Graph | Knowledge | Evidence
 建议：切换 substring；清除 path filter；重新索引 stale file
 ~~~
 
-- [ ] reindex 按钮是 mutation，先展示范围和确认。
-- [ ] excluded secret 不展示内容。
+- [x] Wiki 零结果提供 scope/coverage 摘要；`确认后重新索引此范围` 先展示范围并调用 `window.confirm`，完成后重新查询。
+- [x] excluded secret 只显示 path/policy reason，不渲染内容；content-safety 与 Wiki zero-result tests 覆盖。
 
 ### M9.7 Saved query
 
 - [x] 保存的是 canonical SearchRequest，不是 UI 私有 state。
 - [x] 保存时记录 contract version；旧 version 打开时 migration 或明确不兼容。
-- [ ] 支持 pin 到 Knowledge tab。
+- [x] 支持 pin 到 Knowledge tab；置顶 id 持久化在 `penguin.wiki.pinnedSavedQueries`，置顶项稳定排在 saved query 列表前。
 - [ ] M11 再把 saved query 写入 Markdown/Obsidian-compatible 文件；本阶段先走 core API。
 
 ### M9 验收
@@ -3495,7 +3495,7 @@ export interface ValidatedFinding {
 
 - [x] 默认不索引 .env/key/pem/credential paths。
 - [x] source snippet 做 defense-in-depth secret detector；高置信 token 以局部 mask 返回，并在本地 trusted exact 模式允许显式解锁。
-- [ ] 日志 evidence 使用现有 redaction；CPF/email/token fixture 验证。
+- [x] 日志 evidence 使用现有 redaction；`knowledge-content-safety.test.mjs` 与 `knowledge-evidence-audit-safety.test.mjs` 验证 CPF/email/token mask、prompt-like 文本保持 data，以及 audit export 不含原始 input。
 - [x] raw secret 不进入 notes、feedback、audit、embedding。
 - [x] path metadata 可见但说明 <code>secret_policy</code>。Excluded path hits carry `secret_policy=path_only`, with regression coverage in `knowledge-search-engine.test.mjs`.
 - [x] export artifact 默认排除 secret。
