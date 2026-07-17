@@ -3662,9 +3662,9 @@ rtk penguin artifact export \
 
 - [x] 先读 header/manifest，验证 format/capability/schema compatibility。
 - [ ] 解压路径防 <code>..</code>、absolute path、symlink。当前已拒绝 absolute、`..` 与反斜杠 entry，测试覆盖 `../escape`；ZIP symlink metadata 仍需单独拒绝。
-- [ ] dry-run 输出新增/冲突 repo、snapshot、notes。
+- [x] dry-run 输出新增/冲突 repo、snapshot、notes；`inspectKnowledgeArtifact` 与 CLI `artifact import --dry-run` 返回 repository/snapshot/note conflict report，且有 no-mutation regression。
 - [ ] repo identity 按 remote fingerprint + configured mapping；不按同名自动合并。
-- [ ] note conflict 保留双方并生成 conflict record。
+- [x] note conflict 在 dry-run 中保留双方 hash 并生成 conflict report；实际 restore 仍需 operator confirmation，不静默覆盖。
 - [x] import 到 staging DB，完成 SQLite integrity validation 后 atomic switch；restore test 验证旧 DB backup 保留。
 - [x] 失败不改变当前 DB。staging validation/atomic restore failure regression verifies the existing repository remains present.
 

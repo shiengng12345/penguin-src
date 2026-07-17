@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { test } from "node:test";
 import { generateKeyPairSync } from "node:crypto";
 import { zipSync, strToU8 } from "../packages/knowledge-core/node_modules/fflate/esm/index.mjs";
-import { KnowledgeStore, SourceStore, exportKnowledgeArtifact, importKnowledgeArtifact, restoreKnowledgeArtifact } from "../packages/knowledge-core/dist/index.js";
+import { KnowledgeStore, SourceStore, exportKnowledgeArtifact, importKnowledgeArtifact, inspectKnowledgeArtifact, restoreKnowledgeArtifact } from "../packages/knowledge-core/dist/index.js";
 
 test("artifact export/import is checksummed and portable", () => {
   const dir = mkdtempSync(join(tmpdir(), "pk-artifact-"));
@@ -54,6 +54,28 @@ test("artifact export can be restricted to an explicit repository scope", () => 
   assert.deepEqual(scoped.db.prepare("SELECT name FROM repos ORDER BY name").all(), [{ name: "keep" }]);
   scoped.close();
   store.close();
+});
+
+test("artifact dry-run reports repository and note conflicts without mutating destination", () => {
+  const sourceDir = mkdtempSync(join(tmpdir(), "pk-artifact-dry-source-"));
+  const source = KnowledgeStore.open({ dbPath: join(sourceDir, "knowledge.db"), ledgerPath: join(sourceDir, "ledger.jsonl") });
+  source.registerRepo({ name: "same-name", rootPath: "/source" });
+  const artifact = exportKnowledgeArtifact(source);
+  source.close();
+  const destinationDir = mkdtempSync(join(tmpdir(), "pk-artifact-dry-destination-"));
+  const destination = join(destinationDir, "knowledge.db");
+  const existing = KnowledgeStore.open({ dbPath: destination, ledgerPath: join(destinationDir, "ledger.jsonl") });
+  const existingRepoId = existing.registerRepo({ name: "same-name", rootPath: "/destination" });
+  const before = existing.db.prepare("SELECT COUNT(*) AS n FROM repos").get().n;
+  existing.close();
+  const report = inspectKnowledgeArtifact(artifact.bytes, destination);
+  assert.equal(report.conflictingRepositories.length, 1);
+  assert.equal(report.conflictingRepositories[0].reason, "name");
+  assert.equal(report.newRepositories.length, 0);
+  const after = KnowledgeStore.open({ dbPath: destination, ledgerPath: join(destinationDir, "readback-ledger.jsonl") });
+  assert.equal(after.db.prepare("SELECT COUNT(*) AS n FROM repos").get().n, before);
+  assert.ok(existingRepoId);
+  after.close();
 });
 
 test("artifact tamper and unsafe entry are rejected", () => {

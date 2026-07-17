@@ -17,6 +17,60 @@ function scryptKey(passphrase: string, salt: Uint8Array): Buffer {
   });
 }
 export interface ArtifactImportResult { manifest: KnowledgeArtifactManifest; database: Uint8Array; }
+export interface ArtifactConflictReport {
+  newRepositories: Array<{ id: string; name: string }>;
+  existingRepositories: Array<{ id: string; name: string }>;
+  conflictingRepositories: Array<{ incomingId: string; incomingName: string; existingId: string; existingName: string; reason: "id" | "name" }>;
+  newSnapshots: Array<{ id: string; repoId: string }>;
+  conflictingSnapshots: Array<{ id: string; repoId: string }>;
+  noteConflicts: Array<{ path: string; incomingHash: string | null; existingHash: string | null }>;
+}
+type RepoConflict = ArtifactConflictReport["conflictingRepositories"][number];
+
+function inventory(path: string, label: string): { repositories: Array<{ id: string; name: string }>; snapshots: Array<{ id: string; repoId: string }>; notes: Array<{ path: string; hash: string | null }> } {
+  const store = KnowledgeStore.open({ dbPath: path, ledgerPath: `${path}.${label}.ledger.jsonl` });
+  try {
+    return {
+      repositories: store.db.prepare("SELECT id,name FROM repos ORDER BY id").all() as Array<{ id: string; name: string }>,
+      snapshots: store.db.prepare("SELECT id,repo_id AS repoId FROM revision_snapshots ORDER BY id").all() as Array<{ id: string; repoId: string }>,
+      notes: store.db.prepare("SELECT path,content_hash AS hash FROM notes_index ORDER BY path").all() as Array<{ path: string; hash: string | null }>,
+    };
+  } finally { store.close(); }
+}
+
+/** Inspect an artifact without changing the destination. The report is
+ * deliberately conservative: same names are conflicts, never an implicit
+ * merge. Remote identity mappings can be applied by the operator later. */
+export function inspectKnowledgeArtifact(bytes: Uint8Array, destination: string, options: Parameters<typeof importKnowledgeArtifact>[1] = {}): ArtifactConflictReport {
+  const imported = importKnowledgeArtifact(bytes, options);
+  const dir = mkdtempSync(join(tmpdir(), "penguin-artifact-dry-run-"));
+  const staging = join(dir, "knowledge.db");
+  writeFileSync(staging, imported.database, { flag: "wx", mode: 0o600 });
+  try {
+    const incoming = inventory(staging, "incoming");
+    const existing = existsSync(destination) ? inventory(destination, "existing") : { repositories: [], snapshots: [], notes: [] };
+    const byId = new Map(existing.repositories.map((repo) => [repo.id, repo]));
+    const byName = new Map(existing.repositories.map((repo) => [repo.name.toLocaleLowerCase(), repo]));
+    const conflicts: RepoConflict[] = incoming.repositories.flatMap((repo): RepoConflict[] => {
+      const match = byId.get(repo.id);
+      if (match) return [{ incomingId: repo.id, incomingName: repo.name, existingId: match.id, existingName: match.name, reason: "id" as const }];
+      const sameName = byName.get(repo.name.toLocaleLowerCase());
+      return sameName ? [{ incomingId: repo.id, incomingName: repo.name, existingId: sameName.id, existingName: sameName.name, reason: "name" as const }] : [];
+    });
+    const conflictRepoIds = new Set(conflicts.map((item) => item.incomingId));
+    const existingSnapshotIds = new Set(existing.snapshots.map((snapshot) => snapshot.id));
+    const incomingNotes = new Map(incoming.notes.map((note) => [note.path, note.hash]));
+    const existingNotes = new Map(existing.notes.map((note) => [note.path, note.hash]));
+    return {
+      newRepositories: incoming.repositories.filter((repo) => !conflictRepoIds.has(repo.id)),
+      existingRepositories: conflicts.map((item) => ({ id: item.existingId, name: item.existingName })),
+      conflictingRepositories: conflicts,
+      newSnapshots: incoming.snapshots.filter((snapshot) => !existingSnapshotIds.has(snapshot.id)),
+      conflictingSnapshots: incoming.snapshots.filter((snapshot) => existingSnapshotIds.has(snapshot.id)),
+      noteConflicts: [...incomingNotes].filter(([path, hash]) => existingNotes.has(path) && existingNotes.get(path) !== hash).map(([path, hash]) => ({ path, incomingHash: hash, existingHash: existingNotes.get(path) ?? null })),
+    };
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+}
 export function importKnowledgeArtifact(bytes: Uint8Array, expectedCapabilityHashOrOptions?: string | { expectedCapabilityHash?: string; expectedSchemaVersion?: number; expectedContractVersion?: string; signingKey?: string; signingPublicKey?: string; encryptionKey?: string; baseDatabase?: Uint8Array }): ArtifactImportResult {
   const options = typeof expectedCapabilityHashOrOptions === "string" ? { expectedCapabilityHash: expectedCapabilityHashOrOptions } : (expectedCapabilityHashOrOptions ?? {});
   const magic = Buffer.from(bytes).subarray(0, 4).toString();

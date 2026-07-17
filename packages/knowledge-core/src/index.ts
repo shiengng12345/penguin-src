@@ -84,7 +84,7 @@ export { EvidenceStore, type EvidenceRecord, type EvidenceStatus } from "./evide
 export { AuditStore } from "./audit.js";
 export { sanitizeUntrustedText, isPromptLikeContent, type SafeText } from "./content-safety.js";
 export { exportKnowledgeArtifact, previewKnowledgeArtifact, type ArtifactExportOptions, type ArtifactPreview } from "./artifact-export.js";
-export { importKnowledgeArtifact, restoreKnowledgeArtifact, type ArtifactImportResult } from "./artifact-import.js";
+export { importKnowledgeArtifact, inspectKnowledgeArtifact, restoreKnowledgeArtifact, type ArtifactImportResult, type ArtifactConflictReport } from "./artifact-import.js";
 export type { KnowledgeArtifactManifest } from "./artifact-manifest.js";
 export { graphQuery, type GraphQueryRequest, type GraphQueryResult } from "./graph-query.js";
 export { compileKnowledgeDsl, type CompiledKnowledgeDsl, type KnowledgeDslExpression, type KnowledgeDslPredicate } from "./knowledge-dsl.js";

@@ -47,6 +47,7 @@ import {
   exportKnowledgeArtifact,
   previewKnowledgeArtifact,
   importKnowledgeArtifact,
+  inspectKnowledgeArtifact,
   restoreKnowledgeArtifact,
   SavedQueryStore,
   reflectSearchFeedback,
@@ -380,8 +381,10 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
         const destination = optionValue("into");
         if (destination) {
           if (flags.includes("--dry-run")) {
-            const preview = importKnowledgeArtifact(readFileSync(input), optionValue("capability-hash"));
-            emit(deps, json, `dry-run restore ${input} into ${destination}`, { mode: "dry-run", operation: "artifact.import", input, destination, manifest: preview.manifest, databaseBytes: preview.database.byteLength, mutated: false });
+            const artifactBytes = readFileSync(input);
+            const preview = importKnowledgeArtifact(artifactBytes, optionValue("capability-hash"));
+            const conflicts = inspectKnowledgeArtifact(artifactBytes, destination, optionValue("capability-hash"));
+            emit(deps, json, `dry-run restore ${input} into ${destination}`, { mode: "dry-run", operation: "artifact.import", input, destination, manifest: preview.manifest, databaseBytes: preview.database.byteLength, conflicts, mutated: false });
             return 0;
           }
           const token = operationToken("artifact.import", { input, destination });
