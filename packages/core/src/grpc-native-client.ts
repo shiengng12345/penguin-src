@@ -127,14 +127,19 @@ function findProtos(dir) {
 }
 
 const allProtos = [];
-const allIncludeDirs = new Set();
+const protoOwners = new Map();
+const pkgIncludeDirs = new Map();
 for (const dep of userDeps) {
   const pkgProtoDir = path.join(nodeModules, dep, 'dist', 'protos');
   const found = findProtos(pkgProtoDir);
+  if (found.length === 0) continue;
+  const dirs = new Set([pkgProtoDir]);
   for (const p of found) {
     allProtos.push(p);
-    allIncludeDirs.add(path.dirname(p));
+    protoOwners.set(p, dep);
+    dirs.add(path.dirname(p));
   }
+  pkgIncludeDirs.set(dep, [...dirs]);
 }
 
 if (allProtos.length === 0) {
@@ -153,33 +158,51 @@ const matchingProtos = allProtos.filter(p => {
 
 const protosToLoad = matchingProtos.length > 0 ? matchingProtos : allProtos;
 
-let packageDef;
-try {
-  packageDef = protoLoader.loadSync(protosToLoad, {
+// Group protos by owning package and load each group with ONLY that
+// package's proto dirs: several packages ship same-named protos (e.g.
+// common.proto), and a shared includeDirs list lets an import resolve to
+// another package's copy, breaking type references.
+const protosByPkg = new Map();
+for (const proto of protosToLoad) {
+  const dep = protoOwners.get(proto);
+  if (!protosByPkg.has(dep)) protosByPkg.set(dep, []);
+  protosByPkg.get(dep).push(proto);
+}
+
+function loadProtoGroup(protos, includeDirs) {
+  return protoLoader.loadSync(protos, {
     keepCase: true,
     longs: String,
     enums: String,
     defaults: false,
     oneofs: true,
-    includeDirs: [...allIncludeDirs],
+    includeDirs: includeDirs,
   });
-} catch (loadErr) {
-  // Fallback: load one proto at a time and merge, skipping duplicates
-  packageDef = {};
-  for (const proto of protosToLoad) {
-    try {
-      const single = protoLoader.loadSync([proto], {
-        keepCase: true,
-        longs: String,
-        enums: String,
-        defaults: false,
-        oneofs: true,
-        includeDirs: [...allIncludeDirs],
-      });
-      for (const [k, v] of Object.entries(single)) {
-        if (!packageDef[k]) packageDef[k] = v;
+}
+
+const packageDef = {};
+let lastLoadError = null;
+
+function mergeDefinition(single) {
+  for (const [k, v] of Object.entries(single)) {
+    if (!packageDef[k]) packageDef[k] = v;
+  }
+}
+
+for (const [dep, protos] of protosByPkg) {
+  const includeDirs = pkgIncludeDirs.get(dep) || [];
+  try {
+    mergeDefinition(loadProtoGroup(protos, includeDirs));
+  } catch (loadErr) {
+    // Fallback: load one proto at a time and merge, skipping duplicates
+    for (const proto of protos) {
+      try {
+        mergeDefinition(loadProtoGroup([proto], includeDirs));
+      } catch (protoErr) {
+        lastLoadError = protoErr;
       }
-    } catch { /* skip proto files that conflict */ }
+    }
+    if (!lastLoadError) lastLoadError = loadErr;
   }
 }
 
@@ -197,7 +220,11 @@ function findService(obj, typeName) {
 
 const ServiceClass = findService(grpcObj, input.typeName);
 if (!ServiceClass || !ServiceClass.service) {
-  console.log(JSON.stringify({ error: 'Service not found: ' +input.typeName, statusCode: 0, body: '', headers: {} }));
+  let notFound = 'Service not found: ' +input.typeName;
+  if (lastLoadError) {
+    notFound += ' (proto load failed: ' +(lastLoadError.message || String(lastLoadError)) +')';
+  }
+  console.log(JSON.stringify({ error: notFound, statusCode: 0, body: '', headers: {} }));
   process.exit(0);
 }
 
