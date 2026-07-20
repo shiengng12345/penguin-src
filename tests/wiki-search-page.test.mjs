@@ -29,6 +29,12 @@ test("Wiki search exposes canonical scope filters and saved-query actions", () =
   assert.match(source, /knowledgeEvidenceList/);
   assert.match(source, /pinnedSavedQueries/);
   assert.match(source, /置顶/);
+  assert.match(source, /预览行数/);
+  assert.match(source, /metaKey/);
+  assert.match(source, /backlinks/);
+  assert.match(source, /送到搜索/);
+  assert.match(source, /送到 context/);
+  assert.match(source, /导出 Canvas/);
 });
 
 test("Wiki search windows large result sets instead of rendering every hit", () => {

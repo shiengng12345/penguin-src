@@ -1,0 +1,1786 @@
+{
+  "generatedAt": "2026-07-18T03:00:06.785Z",
+  "root": "/Users/shieng/Desktop/Pengvi",
+  "corpusPath": "docs/knowledge-v2/real-question-corpus.jsonl",
+  "repoId": "repo_538388fb-327f-445e-a865-11fb280c3ad9",
+  "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf",
+  "questionCount": 110,
+  "results": [
+    {
+      "id": "RQ-001",
+      "category": "exact_path",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 185.9333329796791,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-002",
+      "category": "exact_path",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 31.891541957855225,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-003",
+      "category": "exact_path",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 33.0445419549942,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-004",
+      "category": "exact_path",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 30.542374968528748,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-005",
+      "category": "exact_path",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 26.972583949565887,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-006",
+      "category": "exact_path",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 22.467833995819092,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-007",
+      "category": "exact_path",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 32.33212500810623,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-008",
+      "category": "exact_path",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 49.287042021751404,
+        "queryCount": 2,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-009",
+      "category": "exact_path",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 53.939375042915344,
+        "queryCount": 2,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-010",
+      "category": "exact_path",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 75.09166699647903,
+        "queryCount": 2,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-011",
+      "category": "exact_path",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 67.90870803594589,
+        "queryCount": 2,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-012",
+      "category": "exact_path",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 61.44308400154114,
+        "queryCount": 2,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-013",
+      "category": "exact_path",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 30.48012501001358,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-014",
+      "category": "exact_path",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 50.40200001001358,
+        "queryCount": 2,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-015",
+      "category": "exact_path",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 26.97095799446106,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-016",
+      "category": "exact_path",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 30.385666012763977,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-017",
+      "category": "exact_path",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 22.95966601371765,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-018",
+      "category": "exact_path",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 25.883416950702667,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-019",
+      "category": "exact_path",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 42.151542007923126,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-020",
+      "category": "exact_path",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 25.001915991306305,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-021",
+      "category": "caller_callee_impact",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 25.333541989326477,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-022",
+      "category": "caller_callee_impact",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 42.049749970436096,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-023",
+      "category": "caller_callee_impact",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 39.789167046546936,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-024",
+      "category": "caller_callee_impact",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 102.23650002479553,
+        "queryCount": 2,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-025",
+      "category": "caller_callee_impact",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 40.2900829911232,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-026",
+      "category": "caller_callee_impact",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 37.77537500858307,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-027",
+      "category": "caller_callee_impact",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 35.96029198169708,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-028",
+      "category": "caller_callee_impact",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 27.777791023254395,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-029",
+      "category": "caller_callee_impact",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 37.87379199266434,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-030",
+      "category": "caller_callee_impact",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 37.238332986831665,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-031",
+      "category": "caller_callee_impact",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 35.13416600227356,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-032",
+      "category": "caller_callee_impact",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 35.54645800590515,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-033",
+      "category": "caller_callee_impact",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 39.994750022888184,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-034",
+      "category": "caller_callee_impact",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 38.248750030994415,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-035",
+      "category": "caller_callee_impact",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 33.80387496948242,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-036",
+      "category": "cross_service_protocol",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 25.12075001001358,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-037",
+      "category": "cross_service_protocol",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 24.451958000659943,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-038",
+      "category": "cross_service_protocol",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 30.688665986061096,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-039",
+      "category": "cross_service_protocol",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 36.00499999523163,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-040",
+      "category": "cross_service_protocol",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 36.52183300256729,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-041",
+      "category": "cross_service_protocol",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 33.805542051792145,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-042",
+      "category": "cross_service_protocol",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 29.14116597175598,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-043",
+      "category": "cross_service_protocol",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 37.077666997909546,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-044",
+      "category": "cross_service_protocol",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 36.02962499856949,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-045",
+      "category": "cross_service_protocol",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 33.582084000110626,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-046",
+      "category": "cross_service_protocol",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 42.735667049884796,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-047",
+      "category": "cross_service_protocol",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 35.2090830206871,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-048",
+      "category": "cross_service_protocol",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 41.00325000286102,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-049",
+      "category": "cross_service_protocol",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 38.33737504482269,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-050",
+      "category": "cross_service_protocol",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 38.90116596221924,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-051",
+      "category": "field_data_flow",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 30.876957952976227,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-052",
+      "category": "field_data_flow",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 45.367791056632996,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-053",
+      "category": "field_data_flow",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 27.997375011444092,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-054",
+      "category": "field_data_flow",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 25.32887500524521,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-055",
+      "category": "field_data_flow",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 26.412000000476837,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-056",
+      "category": "field_data_flow",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 45.72466599941254,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-057",
+      "category": "field_data_flow",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 43.23474997282028,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-058",
+      "category": "field_data_flow",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 44.69216698408127,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-059",
+      "category": "field_data_flow",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 55.81366699934006,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-060",
+      "category": "field_data_flow",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 37.846457958221436,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-061",
+      "category": "branch_revision_history",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 27.78666603565216,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-062",
+      "category": "branch_revision_history",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 22.741792023181915,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-063",
+      "category": "branch_revision_history",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 30.67500001192093,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-064",
+      "category": "branch_revision_history",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 23.772749960422516,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-065",
+      "category": "branch_revision_history",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 28.786042034626007,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-066",
+      "category": "branch_revision_history",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 26.170374989509583,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-067",
+      "category": "branch_revision_history",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 26.14029097557068,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-068",
+      "category": "branch_revision_history",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 29.08583402633667,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-069",
+      "category": "branch_revision_history",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 22.810083985328674,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-070",
+      "category": "branch_revision_history",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 31.57370799779892,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-071",
+      "category": "why_domain_onboarding",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 46.42512500286102,
+        "queryCount": 2,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-072",
+      "category": "why_domain_onboarding",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 63.83025002479553,
+        "queryCount": 2,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-073",
+      "category": "why_domain_onboarding",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 40.7905410528183,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-074",
+      "category": "why_domain_onboarding",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 33.09554100036621,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-075",
+      "category": "why_domain_onboarding",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 26.144666016101837,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-076",
+      "category": "why_domain_onboarding",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 37.647541999816895,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-077",
+      "category": "why_domain_onboarding",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 37.62537503242493,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-078",
+      "category": "why_domain_onboarding",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 41.47833299636841,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-079",
+      "category": "why_domain_onboarding",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 44.26587504148483,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-080",
+      "category": "why_domain_onboarding",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 36.56504201889038,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-081",
+      "category": "notes_backlinks_properties",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 36.96891701221466,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-082",
+      "category": "notes_backlinks_properties",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 35.926624953746796,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-083",
+      "category": "notes_backlinks_properties",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 34.10991704463959,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-084",
+      "category": "notes_backlinks_properties",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 38.08441698551178,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-085",
+      "category": "notes_backlinks_properties",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 30.327125012874603,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-086",
+      "category": "notes_backlinks_properties",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 36.186541974544525,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-087",
+      "category": "notes_backlinks_properties",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 28.303749978542328,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-088",
+      "category": "notes_backlinks_properties",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 45.22520798444748,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-089",
+      "category": "notes_backlinks_properties",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 40.9435830116272,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-090",
+      "category": "notes_backlinks_properties",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 29.043374955654144,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-091",
+      "category": "incident_evidence",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 25.83745801448822,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-092",
+      "category": "incident_evidence",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 28.14316701889038,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-093",
+      "category": "incident_evidence",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 32.18283402919769,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-094",
+      "category": "incident_evidence",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 29.775334000587463,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-095",
+      "category": "incident_evidence",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 26.36266702413559,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-096",
+      "category": "incident_evidence",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 34.53770798444748,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-097",
+      "category": "incident_evidence",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 38.872125029563904,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-098",
+      "category": "incident_evidence",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 30.933209002017975,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-099",
+      "category": "incident_evidence",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 32.85387498140335,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-100",
+      "category": "incident_evidence",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 32.506416976451874,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-101",
+      "category": "dead_code_architecture",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 24.357083022594452,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-102",
+      "category": "dead_code_architecture",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 24.90716701745987,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-103",
+      "category": "dead_code_architecture",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 27.183540999889374,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-104",
+      "category": "dead_code_architecture",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 29.78533297777176,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-105",
+      "category": "dead_code_architecture",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 26.732915997505188,
+        "queryCount": 1,
+        "verifiedHits": 1,
+        "requiredLocatorCount": 1,
+        "matchedLocatorCount": 1,
+        "factEvidence": true,
+        "snapshotId": "snapshot_54050491-69d6-466e-ad23-ae077233feaf"
+      }
+    },
+    {
+      "id": "RQ-106",
+      "category": "adversarial",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 44.133833050727844,
+        "queryCount": 1,
+        "verifiedHits": 0,
+        "requiredLocatorCount": 0,
+        "matchedLocatorCount": 0,
+        "factEvidence": true,
+        "adversarialZeroResult": true,
+        "snapshotId": "snapshot_dfa7a792-4728-47b8-87ac-f15a7147dc82"
+      }
+    },
+    {
+      "id": "RQ-107",
+      "category": "adversarial",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 41.18804198503494,
+        "queryCount": 1,
+        "verifiedHits": 0,
+        "requiredLocatorCount": 0,
+        "matchedLocatorCount": 0,
+        "factEvidence": true,
+        "adversarialZeroResult": true,
+        "snapshotId": "snapshot_dfa7a792-4728-47b8-87ac-f15a7147dc82"
+      }
+    },
+    {
+      "id": "RQ-108",
+      "category": "adversarial",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 43.848916947841644,
+        "queryCount": 1,
+        "verifiedHits": 0,
+        "requiredLocatorCount": 0,
+        "matchedLocatorCount": 0,
+        "factEvidence": true,
+        "adversarialZeroResult": true,
+        "snapshotId": "snapshot_dfa7a792-4728-47b8-87ac-f15a7147dc82"
+      }
+    },
+    {
+      "id": "RQ-109",
+      "category": "adversarial",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 44.38720899820328,
+        "queryCount": 1,
+        "verifiedHits": 0,
+        "requiredLocatorCount": 0,
+        "matchedLocatorCount": 0,
+        "factEvidence": true,
+        "adversarialZeroResult": true,
+        "snapshotId": "snapshot_dfa7a792-4728-47b8-87ac-f15a7147dc82"
+      }
+    },
+    {
+      "id": "RQ-110",
+      "category": "adversarial",
+      "penguin": {
+        "correctness": 1,
+        "provenance": 1,
+        "completeness": 1,
+        "latencyMs": 34.752083003520966,
+        "queryCount": 1,
+        "verifiedHits": 0,
+        "requiredLocatorCount": 0,
+        "matchedLocatorCount": 0,
+        "factEvidence": true,
+        "adversarialZeroResult": true,
+        "snapshotId": "snapshot_dfa7a792-4728-47b8-87ac-f15a7147dc82"
+      }
+    }
+  ],
+  "strengths": {
+    "universalExact": true,
+    "surfaceParity": true,
+    "revisionDiagnostics": true
+  },
+  "summary": {
+    "minCorrectness": 1,
+    "minProvenance": 1,
+    "minCompleteness": 1,
+    "p95LatencyMs": 61.44308400154114
+  }
+}

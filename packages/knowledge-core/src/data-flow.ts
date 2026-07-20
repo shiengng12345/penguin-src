@@ -16,6 +16,8 @@ export interface DataFlowPath {
 }
 
 export interface DataFlowPathRequest extends DataFlowRequest { maxNodes?: number; }
+export interface VerifiedCallEdge { fromFilePath: string; fromLine: number; toFilePath: string; toVariable: string; status: "verified" | "candidate"; }
+export interface InterproceduralDataFlowRequest extends DataFlowPathRequest { callEdges: VerifiedCallEdge[]; }
 
 function pathLocator(store: KnowledgeStore, snapshotId: string, filePath: string, line: number): SearchLocator {
   const row = store.db.prepare("SELECT sf.repo_id AS repoId,r.name AS repoName FROM effective_snapshot_sources e JOIN source_facts sf ON sf.id=e.source_fact_id JOIN repos r ON r.id=sf.repo_id WHERE e.snapshot_id=? AND e.file_path=? LIMIT 1").get(snapshotId, filePath) as { repoId: string; repoName: string } | undefined;
@@ -79,6 +81,39 @@ export function traceDataFlowPath(store: KnowledgeStore, request: DataFlowPathRe
   const sinkKind: GraphEndpoint["kind"] = last.kind === "return" ? "return" : last.kind === "call" || last.kind === "argument" ? "call" : last.kind === "field" ? "field" : "variable";
   const sink = { kind: sinkKind, name: variable, locator: last.locator } satisfies GraphEndpoint;
   return { source: sourceEndpoint, sink, steps, truncated: steps.length >= maxSteps, gaps: [...new Set(gaps)] };
+}
+
+/** Follow only explicitly verified call edges across files. Candidate or
+ * missing edges are returned as gaps and never used to invent a whole-program
+ * flow. Each appended step remains anchored to its own revision source. */
+export function traceVerifiedInterproceduralFlow(store: KnowledgeStore, request: InterproceduralDataFlowRequest): DataFlowPath | null {
+  const first = traceDataFlowPath(store, request);
+  if (!first) return null;
+  const steps = [...first.steps];
+  const gaps = [...first.gaps];
+  let sink = first.sink;
+  let currentFile = request.filePath;
+  let currentLine = steps.at(-1)?.locator.startLine ?? 0;
+  const usedEdges = new Set<VerifiedCallEdge>();
+  const maxNodes = Math.max(1, Math.min(request.maxNodes ?? 20, 100));
+  for (let depth = 0; depth < maxNodes; depth += 1) {
+    const edge = request.callEdges.find((candidate) => candidate.fromFilePath === currentFile && !usedEdges.has(candidate));
+    if (!edge) break;
+    usedEdges.add(edge);
+    if (edge.status !== "verified") { gaps.push(`unverified inter-procedural edge at ${edge.fromFilePath}:${edge.fromLine}`); break; }
+    const target = traceDataFlowPath(store, { snapshotId: request.snapshotId, filePath: edge.toFilePath, variable: edge.toVariable, maxSteps: request.maxSteps, maxNodes: request.maxNodes });
+    if (!target) { gaps.push(`verified target source unavailable at ${edge.toFilePath}`); break; }
+    const edgeLocator = pathLocator(store, request.snapshotId, edge.fromFilePath, edge.fromLine);
+    for (let index = steps.length - 1; index >= 0; index -= 1) {
+      if (steps[index].locator.filePath === edge.fromFilePath && steps[index].locator.startLine === edge.fromLine && steps[index].status === "candidate") steps.splice(index, 1);
+    }
+    steps.push({ kind: "call", locator: edgeLocator, status: "verified", expression: `verified call -> ${edge.toFilePath}:${edge.toVariable}` });
+    steps.push(...target.steps);
+    sink = target.sink;
+    currentFile = edge.toFilePath;
+    currentLine = target.steps.at(-1)?.locator.startLine ?? 0;
+  }
+  return { source: first.source, sink, steps: steps.slice(0, request.maxSteps ?? 100), truncated: steps.length > (request.maxSteps ?? 100), gaps: [...new Set(gaps)] };
 }
 
 /** Bounded lexical data-flow for unsupported languages and parser gaps. It is

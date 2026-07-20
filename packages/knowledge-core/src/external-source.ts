@@ -6,9 +6,27 @@ import { GitTopologyStore } from "./git-topology-store.js";
 import { SourceSnapshotStore } from "./source-cow.js";
 import { SourceStore } from "./source-store.js";
 import { SCHEMA_VERSION } from "./schema.js";
+import { EvidenceStore } from "./evidence-state.js";
 
 export type ExternalKnowledgeSourceType = "markdown_directory" | "url" | "postgres_schema" | "openapi";
 export interface ExternalKnowledgeSource { id: string; type: ExternalKnowledgeSourceType; location: string; config: Record<string, unknown>; status: "registered" | "synced" | "stale" | "blocked"; contentHash?: string; finalUrl?: string; contentType?: string; retrievedAt?: string; licenseWarning?: string; createdAt: string; }
+
+export interface PostgresSchemaClient {
+  query<T extends Record<string, unknown> = Record<string, unknown>>(sql: string, values?: readonly unknown[]): Promise<{ rows: T[] }>;
+  release?: () => Promise<void> | void;
+}
+
+export interface PostgresSchemaSyncResult {
+  source: ExternalKnowledgeSource;
+  repoId: string;
+  branchId: string;
+  snapshotId: string;
+  schemas: string[];
+  tables: number;
+  columns: number;
+  functions: number;
+  bytes: number;
+}
 
 function blockedHostname(hostname: string): boolean {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
@@ -165,10 +183,75 @@ export async function syncRemoteSource(store: KnowledgeStore, sourceId: string, 
   return { source: synced, repoId, branchId, snapshotId: snapshot.id, bytes: bytes.byteLength, contentType, finalUrl: current };
 }
 
+/**
+ * Read-only Postgres schema introspection. The connector is deliberately
+ * injected: the Knowledge core never receives or persists a password and the
+ * query set cannot read application rows. A production adapter may resolve
+ * `credentialEntryId` from the existing credential store and return a pooled
+ * client; tests use the same narrow interface with a fake client.
+ */
+export async function syncPostgresSchema(store: KnowledgeStore, sourceId: string, client?: PostgresSchemaClient): Promise<PostgresSchemaSyncResult> {
+  const manager = new ExternalSourceStore(store);
+  const source = manager.list().find((candidate) => candidate.id === sourceId);
+  if (!source) throw new Error("EXTERNAL_SOURCE_NOT_FOUND");
+  if (source.type !== "postgres_schema") throw new Error("EXTERNAL_POSTGRES_SOURCE_REQUIRED");
+  const credentialEntryId = typeof source.config.credentialEntryId === "string" ? source.config.credentialEntryId : "";
+  if (!credentialEntryId) throw new Error("POSTGRES_CREDENTIAL_ENTRY_REQUIRED");
+  if (!store.db.prepare("SELECT 1 FROM credential_entries WHERE node_id=? LIMIT 1").get(credentialEntryId)) throw new Error("POSTGRES_CREDENTIAL_ENTRY_NOT_FOUND");
+  if (!client) throw new Error("POSTGRES_SCHEMA_CLIENT_REQUIRED");
+  const configuredSchemas = Array.isArray(source.config.schemas) ? source.config.schemas.map(String).filter(Boolean) : ["public"];
+  const schemas = [...new Set(configuredSchemas)].sort();
+  const schemaParam = schemas;
+  const [columns, constraints, functions] = await Promise.all([
+    client.query(`SELECT table_schema,table_name,column_name,data_type,is_nullable,ordinal_position
+      FROM information_schema.columns
+      WHERE table_schema = ANY($1::text[])
+      ORDER BY table_schema,table_name,ordinal_position`, [schemaParam]),
+    client.query(`SELECT table_schema,table_name,constraint_name,constraint_type
+      FROM information_schema.table_constraints
+      WHERE table_schema = ANY($1::text[])
+      ORDER BY table_schema,table_name,constraint_name`, [schemaParam]),
+    client.query(`SELECT routine_schema,routine_name,routine_type,data_type
+      FROM information_schema.routines
+      WHERE routine_schema = ANY($1::text[])
+      ORDER BY routine_schema,routine_name`, [schemaParam]),
+  ]);
+  const document = JSON.stringify({ schemaVersion: 1, sourceType: "postgres_schema", schemas, columns: columns.rows, constraints: constraints.rows, functions: functions.rows }, null, 2) + "\n";
+  const raw = Buffer.from(document, "utf8");
+  const rawHash = createHash("sha256").update(raw).digest("hex");
+  const repoId = store.registerRepo({ name: `external:${source.id}`, rootPath: `external://${source.id}` });
+  const branchId = store.registerBranch({ repoId, name: "main", checkoutPath: `external://${source.id}`, status: "snapshot" });
+  const topology = new GitTopologyStore(store);
+  const snapshot = topology.createBuildingSnapshot({ snapshotKey: `external:${source.id}:${rawHash}:schema-${SCHEMA_VERSION}`, repoId, worktreeFingerprint: rawHash, parserVersion: "external-postgres-schema-v1", resolverVersion: "external-postgres-schema-v1", schemaVersion: SCHEMA_VERSION });
+  if (snapshot.state === "ready") {
+    const synced = manager.markSynced(source.id, { content: rawHash, contentType: "application/json", licenseWarning: "Postgres schema metadata is external and untrusted; no business rows were read" });
+    await client.release?.();
+    return { source: synced, repoId, branchId, snapshotId: snapshot.id, schemas, tables: new Set(columns.rows.map((row) => `${row.table_schema}.${row.table_name}`)).size, columns: columns.rows.length, functions: functions.rows.length, bytes: raw.byteLength };
+  }
+  if (source.contentHash && source.contentHash !== rawHash) new EvidenceStore(store).markStaleByContentHash(source.contentHash);
+  const sourceStore = new SourceStore(store);
+  const sourceBlobId = sourceStore.putBlob({ contentHash: rawHash, rawBytes: raw, decodedContent: document, encoding: "utf8" });
+  const sourceFactId = sourceStore.putSourceFact({ repoId, filePath: "postgres-schema.json", factFingerprint: `external-postgres-schema-v1:${rawHash}`, contentHash: rawHash, sourceBlobId, coverage: { status: "admitted", reasonCode: "external_postgres_schema", classification: "schema_metadata", byteSize: raw.byteLength, encoding: "utf8", untrusted: true } });
+  const cow = new SourceSnapshotStore(store);
+  cow.replaceOverlay(snapshot.id, [{ op: "add", path: "postgres-schema.json", sourceFactId }]);
+  cow.materializeManifest(snapshot.id);
+  if (snapshot.state === "building") topology.markSnapshotReady(snapshot.id);
+  topology.publishSnapshot({ branchId, snapshotId: snapshot.id, headCommit: null });
+  const synced = manager.markSynced(source.id, { content: rawHash, contentType: "application/json", licenseWarning: "Postgres schema metadata is external and untrusted; no business rows were read" });
+  await client.release?.();
+  return { source: synced, repoId, branchId, snapshotId: snapshot.id, schemas, tables: new Set(columns.rows.map((row) => `${row.table_schema}.${row.table_name}`)).size, columns: columns.rows.length, functions: functions.rows.length, bytes: raw.byteLength };
+}
+
 export class ExternalSourceStore {
   constructor(private readonly store: KnowledgeStore) {}
   register(input: { type: ExternalKnowledgeSourceType; location: string; config?: Record<string, unknown>; allowHosts?: string[] }): ExternalKnowledgeSource {
     validateExternalLocation(input.type, input.location, input.allowHosts);
+    if (input.type === "postgres_schema") {
+      const credentialEntryId = input.config?.credentialEntryId;
+      if (typeof credentialEntryId !== "string" || !credentialEntryId.trim()) throw new Error("POSTGRES_CREDENTIAL_ENTRY_REQUIRED");
+      if (!this.store.db.prepare("SELECT 1 FROM credential_entries WHERE node_id=? LIMIT 1").get(credentialEntryId)) throw new Error("POSTGRES_CREDENTIAL_ENTRY_NOT_FOUND");
+      if (input.config?.schemas !== undefined && (!Array.isArray(input.config.schemas) || input.config.schemas.some((schema) => typeof schema !== "string" || !schema.trim()))) throw new Error("POSTGRES_SCHEMA_LIST_INVALID");
+    }
     const now = new Date().toISOString(); const id = `external_${randomUUID()}`;
     const config = { ...(input.config ?? {}), ...(input.allowHosts?.length ? { allowHosts: [...input.allowHosts] } : {}) };
     const source: ExternalKnowledgeSource = { id, type: input.type, location: input.location, config, status: "registered", createdAt: now };

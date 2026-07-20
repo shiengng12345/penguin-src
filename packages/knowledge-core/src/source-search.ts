@@ -57,13 +57,30 @@ function candidateBlobIds(store: KnowledgeStore, scope: ResolvedRevisionScope, q
 }
 
 function rowsForScope(store: KnowledgeStore, scope: ResolvedRevisionScope, query: string): ScopeSourceRow[] {
-  const params: unknown[] = [scope.snapshotId];
-  let sql = `SELECT e.source_fact_id AS sourceFactId, e.source_blob_id AS blobId, b.content_hash AS contentHash, e.file_path AS filePath, b.decoded_content AS content
-    FROM effective_snapshot_sources e JOIN source_blobs b ON b.id=e.source_blob_id WHERE e.snapshot_id=?`;
-  if (scope.repoId) { sql += " AND EXISTS (SELECT 1 FROM source_facts sf WHERE sf.id=e.source_fact_id AND sf.repo_id=?)"; params.push(scope.repoId); }
   const candidates = candidateBlobIds(store, scope, query);
-  const rows = store.db.prepare(sql).all(...params) as ScopeSourceRow[];
-  return candidates ? rows.filter((row) => candidates.has(row.blobId)) : rows;
+  // A trigram miss is a definitive miss for exact/phrase/substring source
+  // search. Do not materialize the entire snapshot just to filter it out in
+  // JavaScript; this was the main cross-repository timeout multiplier.
+  if (candidates?.size === 0) return [];
+
+  const candidateBatches = candidates
+    ? [...candidates].reduce<number[][]>((batches, blobId, index) => {
+      const batch = batches[Math.floor(index / 900)] ?? [];
+      batch.push(blobId);
+      batches[Math.floor(index / 900)] = batch;
+      return batches;
+    }, [])
+    : [undefined];
+  const rows: ScopeSourceRow[] = [];
+  for (const batch of candidateBatches) {
+    const params: unknown[] = [scope.snapshotId];
+    let sql = `SELECT e.source_fact_id AS sourceFactId, e.source_blob_id AS blobId, b.content_hash AS contentHash, e.file_path AS filePath, b.decoded_content AS content
+      FROM effective_snapshot_sources e JOIN source_blobs b ON b.id=e.source_blob_id WHERE e.snapshot_id=?`;
+    if (scope.repoId) { sql += " AND EXISTS (SELECT 1 FROM source_facts sf WHERE sf.id=e.source_fact_id AND sf.repo_id=?)"; params.push(scope.repoId); }
+    if (batch) { sql += ` AND e.source_blob_id IN (${batch.map(() => "?").join(",")})`; params.push(...batch); }
+    rows.push(...store.db.prepare(sql).all(...params) as ScopeSourceRow[]);
+  }
+  return rows;
 }
 
 export function searchSource(store: KnowledgeStore, scope: ResolvedRevisionScope, request: Pick<NormalizedSearchRequest, "query" | "mode" | "options">, options: { signal?: AbortSignal } = {}): SourceSearchOccurrence[] {

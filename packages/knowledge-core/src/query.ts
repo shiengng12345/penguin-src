@@ -30,6 +30,13 @@ export interface RevisionQueryOptions {
   limit?: number;
 }
 
+export interface LegacySearchFilters extends RevisionQueryOptions {
+  type?: string[];
+  repo?: string;
+  workspace?: string;
+  includeSensitive?: boolean;
+}
+
 function snapshotNodeIds(store: KnowledgeStore, revision?: RevisionContext): Set<string> | null {
   if (!revision || revision.snapshotId.startsWith("legacy:")) return null;
   return new Set(openRevisionView(store, revision).symbolVersions().map((row) => row.nodeId));
@@ -188,10 +195,10 @@ export function renderAmbiguousSymbols(
 // search comes back empty — a real field name deserves file:line, not a bare
 // empty result (the reporting session's longest-stuck point: searching for
 // object-literal keys/interface fields always returned nothing).
-export function search(
+export function searchLegacyRows(
   store: KnowledgeStore,
   query: string,
-  filters?: { type?: string[]; repo?: string; workspace?: string; includeSensitive?: boolean; limit?: number; revision?: RevisionContext },
+  filters?: LegacySearchFilters,
 ): SearchResultRow[] {
   const requestedTypes = filters?.type;
   const wantsFields = requestedTypes?.includes("field") ?? false;
@@ -208,19 +215,47 @@ export function search(
     });
 
   if (filters?.revision?.snapshotId && !filters.revision.snapshotId.startsWith("legacy:")) {
+    const revision = filters.revision;
     const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
-    const revisionHits = openRevisionView(store, filters.revision).symbolVersions().filter((row) => terms.every((term) => `${row.title} ${row.identityKey} ${row.signature ?? ""}`.toLowerCase().includes(term))).slice(0, filters.limit ?? 50).map((row) => ({ nodeId: row.nodeId, nodeType: "symbol", title: row.title, snippet: row.signature ?? null, identityKey: row.identityKey, filePath: row.filePath, branch: filters.revision?.branch ?? null, rank: 100, startLine: row.startLine ?? null }));
-    hits = revisionHits;
+    // Do not materialize every symbol in the snapshot for every lexical
+    // query. A large snapshot's manifest is intentionally lazy, and the
+    // previous unfiltered symbolVersions() call walked every indexed file
+    // before applying the query terms. That made the default `auto` search
+    // appear to hang on large repositories even though exact/source search
+    // was responsive. Use the bounded FTS candidates first, then resolve
+    // only those candidates against the revision view.
+    const candidateIds = hits.map((hit) => hit.nodeId).filter((id): id is string => Boolean(id));
+    const revisionView = openRevisionView(store, revision);
+    const revisionHits = revisionView.symbolVersions(candidateIds).filter((row) => terms.every((term) => `${row.title} ${row.identityKey} ${row.signature ?? ""}`.toLowerCase().includes(term))).slice(0, filters.limit ?? 50).map((row) => ({ nodeId: row.nodeId, nodeType: "symbol", title: row.title, snippet: row.signature ?? null, identityKey: row.identityKey, filePath: row.filePath, branch: revision.branch ?? null, rank: 100, startLine: row.startLine ?? null }));
+    if (revisionHits.length || !revision.branchId) {
+      hits = revisionHits;
+    } else {
+      // A ready snapshot can exist before its materialized file manifest is
+      // rebuilt (or after an interrupted backfill). Do not hide symbols that
+      // are already present in the branch index in that transitional state.
+      // The fallback is restricted to an actually empty manifest and still
+      // applies the branch's fresh-version visibility filter.
+      const materialized = Number((store.db.prepare("SELECT COUNT(*) AS n FROM effective_snapshot_files WHERE snapshot_id=?").get(revision.snapshotId) as { n: number } | undefined)?.n ?? 0);
+      if (materialized === 0) {
+        hits = hits.filter((hit) => !hit.nodeId || nodeVisibleInRevision(store, hit.nodeId, { ...revision, snapshotId: `legacy:${revision.branchId}` })).slice(0, filters.limit ?? 50);
+      } else {
+        hits = revisionHits;
+      }
+    }
   }
 
   if (filters?.revision) {
-    hits = hits.filter((hit) => !hit.nodeId || nodeVisibleInRevision(store, hit.nodeId, filters.revision));
+    const revision = filters.revision;
+    const emptySnapshot = revision.branchId && !revision.snapshotId.startsWith("legacy:")
+      && Number((store.db.prepare("SELECT COUNT(*) AS n FROM effective_snapshot_files WHERE snapshot_id=?").get(revision.snapshotId) as { n: number } | undefined)?.n ?? 0) === 0;
+    const visibilityRevision = emptySnapshot ? { ...revision, snapshotId: `legacy:${revision.branchId}` } : revision;
+    hits = hits.filter((hit) => !hit.nodeId || nodeVisibleInRevision(store, hit.nodeId, visibilityRevision));
   }
 
   // Endpoints/services/entities are graph nodes rather than source symbols, so
   // they have no fts_symbols row. Include them by title/identity to make real
   // routes and proto RPCs discoverable through the same search entry point.
-  const structuralTypes = ["endpoint", "service", "entity", "log_site"]
+  const structuralTypes = ["endpoint", "service", "entity", "log_site", "field"]
     .filter((nodeType) => !requestedTypes?.length || requestedTypes.includes(nodeType));
   if (!skipSymbolSearch && structuralTypes.length > 0) {
     const placeholders = structuralTypes.map(() => "?").join(",");
@@ -228,10 +263,10 @@ export function search(
     const structuralHits = store.db
       .prepare(
         `SELECT id AS nodeId, node_type AS nodeType, title, identity_key AS identityKey,
-                CASE WHEN node_type='log_site' THEN json_extract(meta, '$.filePath') ELSE NULL END AS filePath,
+                CASE WHEN node_type IN ('log_site', 'field') THEN json_extract(meta, '$.filePath') ELSE NULL END AS filePath,
                 NULL AS branch, NULL AS rank,
                 CASE WHEN node_type='log_site' THEN json_extract(meta, '$.message') ELSE NULL END AS snippet,
-                CASE WHEN node_type='log_site' THEN json_extract(meta, '$.startLine') ELSE NULL END AS startLine
+                CASE WHEN node_type IN ('log_site', 'field') THEN json_extract(meta, '$.startLine') ELSE NULL END AS startLine
            FROM nodes
           WHERE node_type IN (${placeholders})
             AND (title LIKE ? COLLATE NOCASE OR identity_key LIKE ? COLLATE NOCASE)
@@ -1071,7 +1106,7 @@ export function listFileSymbols(
 
 export interface GraphView {
   focus: string | null; // the centered node (null for repo-scoped view)
-  nodes: Array<{ nodeId: string; title: string; nodeType: string }>;
+  nodes: Array<{ nodeId: string; title: string; nodeType: string; revisionId?: string }>;
   edges: Array<{ src: string; dst: string; edgeType: string; sourceType?: string | null }>;
 }
 
@@ -1089,10 +1124,22 @@ export function graphNeighborhood(
   if (options?.revision && !options.revision.snapshotId.startsWith("legacy:")) {
     const pairs = snapshotEdgePairs(store, options.revision);
     const ids = new Set<string>([focus]);
-    for (const pair of pairs) if (pair.src === focus || pair.dst === focus) { ids.add(pair.src); if (pair.dst) ids.add(pair.dst); }
-    return { focus, ...collectGraph(store, [...ids], undefined, options?.limit ?? 150, pairs) };
+    const maxDepth = Math.min(3, Math.max(1, options.depth ?? 1));
+    let frontier = [focus];
+    for (let depth = 0; depth < maxDepth && frontier.length && ids.size < (options?.limit ?? 150); depth += 1) {
+      const next: string[] = [];
+      for (const pair of pairs) {
+        if (!pair.dst) continue;
+        if (!frontier.includes(pair.src) && !frontier.includes(pair.dst)) continue;
+        const other = frontier.includes(pair.src) ? pair.dst : pair.src;
+        if (!ids.has(other) && ids.size < (options?.limit ?? 150)) { ids.add(other); next.push(other); }
+      }
+      frontier = next;
+    }
+    const graph = collectGraph(store, [...ids], undefined, options?.limit ?? 150, pairs);
+    return { focus, nodes: graph.nodes.map((node) => ({ ...node, revisionId: options.revision!.snapshotId })), edges: graph.edges };
   }
-  const depth = options?.depth ?? 1;
+  const depth = Math.min(3, Math.max(1, options?.depth ?? 1));
   const limit = options?.limit ?? 150;
   const branchId = revisionBranchId(options) ?? null;
   const bx = branchId ? " AND (branch_id = ? OR branch_id IS NULL)" : "";
@@ -1606,6 +1653,7 @@ export interface FlowStep {
   title: string;
   nodeType: string;
   via: string; // edge type from its parent ("root" for the entry)
+  source?: { repoId: string; filePath: string; startLine: number; endLine?: number; revisionId: string };
 }
 export type FlowDiagnosticReason =
   | "not_indexed" // no gRPC endpoint or symbol/note matches the target at all
@@ -1745,9 +1793,10 @@ export function buildFlow(
     const nodeOf = (key: string) => store.findNodeIdByIdentity(key);
     const pairs = snapshotEdgePairs(store, options.revision);
     const outEdges = (id: string) => pairs.filter((edge) => edge.src === id && edge.dst).map((edge) => ({ id: edge.dst!, via: edge.edgeType }));
-    const root: FlowStep = { depth: 0, ...nodeBriefStep(store, focus), via: "root" };
+    const flowRevisionId = options.revision.snapshotId ?? options.revision.branchId ?? "live";
+    const root: FlowStep = { depth: 0, ...nodeBriefStep(store, focus, flowRevisionId), via: "root" };
     const steps: FlowStep[] = [root]; const seen = new Set<string>([focus]);
-    const visit = (id: string, depth: number) => { if (depth >= depthCap || steps.length >= limit) return; for (const edge of outEdges(id)) { if (steps.length >= limit) break; const child = nodeOf(identityOf(edge.id)) ?? edge.id; if (!store.getNode(child)) continue; steps.push({ depth: depth + 1, ...nodeBriefStep(store, child), via: edge.via }); if (!seen.has(child)) { seen.add(child); visit(child, depth + 1); } } };
+    const visit = (id: string, depth: number) => { if (depth >= depthCap || steps.length >= limit) return; for (const edge of outEdges(id)) { if (steps.length >= limit) break; const child = nodeOf(identityOf(edge.id)) ?? edge.id; if (!store.getNode(child)) continue; steps.push({ depth: depth + 1, ...nodeBriefStep(store, child, flowRevisionId), via: edge.via }); if (!seen.has(child)) { seen.add(child); visit(child, depth + 1); } } };
     visit(focus, 0);
     return { target, trust: options.revision.branchId ? trustEnvelopeForBranch(store, options.revision.branchId) : null, root, steps, ...(steps.length === 1 ? { diagnostic: { reason: "no_outgoing_edges" as const, message: `"${root.title}" is indexed but has no outgoing edges in the selected revision.` } } : {}) };
   }
@@ -1766,7 +1815,7 @@ export function buildFlow(
       .all(...params) as Array<{ id: string; via: string }>;
   };
 
-  const root: FlowStep = { depth: 0, ...nodeBriefStep(store, focus), via: "root" };
+  const root: FlowStep = { depth: 0, ...nodeBriefStep(store, focus, branchId ?? "live"), via: "root" };
   const steps: FlowStep[] = [root];
   const seen = new Set<string>([focus]);
   // DFS so a chain reads top-to-bottom (controller → service → repo → db).
@@ -1774,7 +1823,7 @@ export function buildFlow(
     if (depth >= depthCap || steps.length >= limit) return;
     for (const e of outEdges(id)) {
       if (steps.length >= limit) break;
-      const brief = nodeBriefStep(store, e.id);
+      const brief = nodeBriefStep(store, e.id, branchId ?? "live");
       steps.push({ depth: depth + 1, ...brief, via: e.via });
       if (!seen.has(e.id)) {
         seen.add(e.id);
@@ -1799,9 +1848,15 @@ export function buildFlow(
   return { target, trust: trustEnvelopeForBranch(store, branchId), root, steps };
 }
 
-function nodeBriefStep(store: KnowledgeStore, id: string) {
+function nodeBriefStep(store: KnowledgeStore, id: string, revisionId = "live") {
   const b = nodeBrief(store, id);
-  return { nodeId: b.nodeId, title: b.title, nodeType: b.nodeType };
+  const source = store.db.prepare("SELECT b.repo_id AS repoId,sv.file_path AS filePath,sv.start_line AS startLine,sv.end_line AS endLine FROM symbol_versions sv JOIN branches b ON b.id=sv.branch_id WHERE sv.node_id=? AND sv.status='fresh' ORDER BY sv.start_line LIMIT 1").get(id) as { repoId: string | null; filePath: string | null; startLine: number | null; endLine: number | null } | undefined;
+  return {
+    nodeId: b.nodeId,
+    title: b.title,
+    nodeType: b.nodeType,
+    ...(source?.repoId && source.filePath && source.startLine != null ? { source: { repoId: source.repoId, filePath: source.filePath, startLine: source.startLine, ...(source.endLine != null ? { endLine: source.endLine } : {}), revisionId } } : {}),
+  };
 }
 
 export interface ExplorePack {

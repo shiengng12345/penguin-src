@@ -162,6 +162,16 @@ fn note_runtime_crash(state: &QueryRuntimeState) -> Result<bool, String> {
 // the Tauri build; accepting any non-empty hash would allow silent drift.
 const EXPECTED_CAPABILITY_HASH: &str = "9bd579294b91fbe6397df3eb5045457858221dbaa922627c5b108f6cf24f5a55";
 
+fn validate_runtime_hello(frame: &serde_json::Value) -> Result<(), String> {
+    if frame.get("type").and_then(|v| v.as_str()) != Some("hello")
+        || frame.get("protocolVersion").and_then(|v| v.as_u64()) != Some(1)
+        || frame.get("schemaVersion").and_then(|v| v.as_u64()).is_none()
+        || frame.get("capabilityHash").and_then(|v| v.as_str()) != Some(EXPECTED_CAPABILITY_HASH) {
+        return Err("RUNTIME_CAPABILITY_MISMATCH: query runtime handshake mismatch".to_string());
+    }
+    Ok(())
+}
+
 impl ResidentQueryWorker {
     fn spawn<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<Arc<Self>, String> {
         let inv = resolve_invocation(app)?;
@@ -201,13 +211,10 @@ impl ResidentQueryWorker {
                 return Err(format!("query runtime handshake invalid: {error}"));
             }
         };
-        if frame.get("type").and_then(|v| v.as_str()) != Some("hello")
-            || frame.get("protocolVersion").and_then(|v| v.as_u64()) != Some(1)
-            || frame.get("schemaVersion").and_then(|v| v.as_u64()).is_none()
-            || frame.get("capabilityHash").and_then(|v| v.as_str()) != Some(EXPECTED_CAPABILITY_HASH) {
+        if let Err(error) = validate_runtime_hello(&frame) {
             let _ = child.kill();
             let _ = child.wait();
-            return Err("RUNTIME_CAPABILITY_MISMATCH: query runtime handshake mismatch".to_string());
+            return Err(error);
         }
         let pending: Arc<std::sync::Mutex<HashMap<String, mpsc::Sender<Result<serde_json::Value, String>>>>> = Arc::new(std::sync::Mutex::new(HashMap::new()));
         let pending_reader = Arc::clone(&pending);
@@ -903,7 +910,7 @@ fn write_launcher_script(target: &std::path::Path, script: &str) -> std::io::Res
 mod tests {
     use super::{
         ensure_zshrc_path, reconcile_claude_hooks, reconcile_guidance_block,
-        note_runtime_crash, write_launcher_script, QueryRuntimeState,
+        note_runtime_crash, validate_runtime_hello, write_launcher_script, QueryRuntimeState,
     };
     use std::path::PathBuf;
 
@@ -943,6 +950,19 @@ mod tests {
         assert!(!note_runtime_crash(&state).unwrap());
         assert!(!note_runtime_crash(&state).unwrap());
         assert!(note_runtime_crash(&state).unwrap());
+    }
+
+    #[test]
+    fn resident_runtime_rejects_protocol_schema_and_capability_drift() {
+        let valid = serde_json::json!({ "type": "hello", "protocolVersion": 1, "schemaVersion": 13, "capabilityHash": super::EXPECTED_CAPABILITY_HASH });
+        assert!(validate_runtime_hello(&valid).is_ok());
+        for invalid in [
+            serde_json::json!({ "type": "hello", "protocolVersion": 2, "schemaVersion": 13, "capabilityHash": super::EXPECTED_CAPABILITY_HASH }),
+            serde_json::json!({ "type": "hello", "protocolVersion": 1, "schemaVersion": 13, "capabilityHash": "stale" }),
+            serde_json::json!({ "type": "hello", "protocolVersion": 1, "capabilityHash": super::EXPECTED_CAPABILITY_HASH }),
+        ] {
+            assert!(validate_runtime_hello(&invalid).unwrap_err().starts_with("RUNTIME_CAPABILITY_MISMATCH"));
+        }
     }
 
     #[test]

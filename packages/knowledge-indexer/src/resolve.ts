@@ -25,7 +25,12 @@ function bareOf(qualifiedName: string): string {
   const c = qualifiedName.lastIndexOf("::");
   const d = qualifiedName.lastIndexOf(".");
   const cut = c >= 0 && c + 2 > d ? c + 2 : d + 1;
-  return cut > 0 ? qualifiedName.slice(cut) : qualifiedName;
+  const bare = cut > 0 ? qualifiedName.slice(cut) : qualifiedName;
+  // Extracted overload identities carry a normalized parameter discriminator
+  // (`method(a: string)` / `method(x: number)`), while call refs carry only the
+  // callee. Bare resolution must compare the shared symbol name without
+  // discarding the discriminator from the stored identity.
+  return bare.replace(/\([^)]*\)$/, "");
 }
 
 // A bare name matching more candidates than this is too ambiguous to guess —

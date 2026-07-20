@@ -168,7 +168,7 @@ export function knowledgeSearch(q: string, options: KnowledgeRequestOptions = {}
 
 export interface KnowledgeSearchV2Response {
   schemaVersion: "2";
-  hits: Array<{ hitId: string; kind: string; lane: string; title: string; locator: { repoName: string; revisionId: string; filePath: string; startLine?: number; endLine?: number; startByte?: number }; snippet?: string; score: number; rankReasons: string[]; evidence: Array<{ status: string }> }>;
+  hits: Array<{ hitId: string; kind: string; lane: string; title: string; locator: { repoName: string; revisionId: string; revisionKind?: "commit" | "working_tree"; commitSha?: string; filePath: string; startLine?: number; endLine?: number; startByte?: number }; snippet?: string; score: number; rankReasons: string[]; evidence: Array<{ status: string }> }>;
   diagnostics: { searchedLanes: string[]; resolvedScopes: Array<{ repoId: string; snapshotId: string; branch: string }>; coverage: { discovered: number; admitted: number; excluded: number; failed: number; stale: number }; warnings: Array<{ code: string; message: string }>; exclusions: Array<{ filePath: string; code: string; reason: string }> };
   page: { limit: number; nextCursor?: string; totalIsExact: boolean };
 }
@@ -185,8 +185,8 @@ export function knowledgeSearchV2(queryText: string, mode: string = "auto", opti
 }
 
 export interface KnowledgeHitDetail { hitId: string; kind: string; lane: string; title: string; locator: KnowledgeSearchV2Response["hits"][number]["locator"]; snippet?: string; evidence: Array<{ source: string; status: string; locator: KnowledgeSearchV2Response["hits"][number]["locator"] }> }
-export function knowledgeGetHit(locator: KnowledgeSearchV2Response["hits"][number]["locator"], options: KnowledgeRequestOptions = {}): Promise<KnowledgeHitDetail> {
-  return canonicalQuery<KnowledgeHitDetail>("knowledge.get_hit", { filePath: locator.filePath, snapshotId: locator.revisionId, ...(locator.startLine ? { startLine: locator.startLine } : {}), ...(locator.startByte !== undefined ? { startByte: locator.startByte } : {}) }, options.signal);
+export function knowledgeGetHit(locator: KnowledgeSearchV2Response["hits"][number]["locator"], options: KnowledgeRequestOptions = {}, contextLines = 5): Promise<KnowledgeHitDetail> {
+  return canonicalQuery<KnowledgeHitDetail>("knowledge.get_hit", { filePath: locator.filePath, snapshotId: locator.revisionId, contextLines: Math.max(0, Math.min(100, contextLines)), ...(locator.startLine ? { startLine: locator.startLine } : {}), ...(locator.startByte !== undefined ? { startByte: locator.startByte } : {}) }, options.signal);
 }
 
 export function knowledgeNode(idOrName: string, options: KnowledgeRequestOptions = {}): Promise<KnowledgeNodeDetail> {

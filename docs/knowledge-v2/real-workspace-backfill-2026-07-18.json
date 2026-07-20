@@ -1,0 +1,26 @@
+{
+  "generatedAt": "2026-07-18",
+  "database": "/Users/shieng/.penguin/knowledge/knowledge.db",
+  "command": "penguin source backfill --json",
+  "completed": {
+    "candidates": 2546,
+    "processed": 2539,
+    "bytes": 28360019,
+    "unavailable": 7
+  },
+  "retry": {
+    "candidates": 7,
+    "processed": 0,
+    "unavailable": 7,
+    "reasonCode": "revision_content_unavailable",
+    "reason": "checkout content hash differs from the revision fact",
+    "files": [
+      "src/libs/tools/src/client-grpc/cp-player-client-grpc/cp-player-client-grpc.module.ts",
+      "src-tauri/capabilities/default.json",
+      "src/components/packages/PackageInstaller.tsx",
+      "tests/package-spec.test.mjs",
+      "tests/security-performance.test.mjs"
+    ],
+    "policy": "Do not fabricate source content; retain explicit failed coverage and retry after the corresponding revision checkout is restored."
+  }
+}

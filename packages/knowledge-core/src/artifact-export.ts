@@ -6,8 +6,14 @@ import { join } from "node:path";
 import { capabilityHash, CAPABILITIES } from "@penguin/knowledge-contracts";
 import type { KnowledgeStore } from "./store.js";
 import type { KnowledgeArtifactManifest } from "./artifact-manifest.js";
+import { buildLogicalDelta, type LogicalDelta } from "./artifact-delta.js";
 
 function sha(value: Uint8Array): string { return createHash("sha256").update(value).digest("hex"); }
+function remoteFingerprint(remoteUrl: string | null): string | undefined {
+  if (!remoteUrl) return undefined;
+  const normalized = remoteUrl.trim().replace(/\.git$/i, "").replace(/\/+$/, "").toLowerCase();
+  return normalized ? sha(Buffer.from(normalized, "utf8")) : undefined;
+}
 export interface ArtifactExportOptions { buildId?: string; includeSource?: boolean; includeNotes?: boolean; includeEvidence?: boolean; includeEmbeddings?: boolean; repoIds?: string[]; snapshotIds?: string[]; signingKey?: string; signingPrivateKey?: string; encryptionKey?: string; baseDatabase?: Uint8Array; }
 export interface ArtifactPreview { estimatedBytes: number; included: { source: boolean; notes: boolean; evidence: boolean; embeddings: boolean }; counts: Record<string, number>; repoIds?: string[]; snapshotIds?: string[]; requiresConfirmation: true; }
 export function previewKnowledgeArtifact(store: KnowledgeStore, options: Pick<ArtifactExportOptions, "includeSource" | "includeNotes" | "includeEvidence" | "includeEmbeddings" | "repoIds" | "snapshotIds"> = {}): ArtifactPreview {
@@ -128,25 +134,35 @@ export function exportKnowledgeArtifact(store: KnowledgeStore, options: Artifact
   rmSync(cloneDir, { recursive: true, force: true });
   const selectedRepoIds = options.repoIds?.length ? new Set(options.repoIds) : undefined;
   const selectedSnapshotIds = options.snapshotIds?.length ? new Set(options.snapshotIds) : undefined;
-  const repos = (store.db.prepare("SELECT id,name FROM repos ORDER BY id").all() as Array<{id:string;name:string}>)
+  const repos = (store.db.prepare("SELECT id,name,remote_url AS remoteUrl FROM repos ORDER BY id").all() as Array<{id:string;name:string;remoteUrl:string|null}>)
     .filter((repo) => !selectedRepoIds || selectedRepoIds.has(repo.id))
-    .map((repo) => ({ repoId: repo.id, name: repo.name, revisions: (store.db.prepare("SELECT id,commit_sha FROM revision_snapshots WHERE repo_id=? ORDER BY id").all(repo.id) as Array<{id:string;commit_sha:string|null}>)
+    .map((repo) => ({ repoId: repo.id, name: repo.name, ...(remoteFingerprint(repo.remoteUrl) ? { remoteFingerprint: remoteFingerprint(repo.remoteUrl) } : {}), revisions: (store.db.prepare("SELECT id,commit_sha FROM revision_snapshots WHERE repo_id=? ORDER BY id").all(repo.id) as Array<{id:string;commit_sha:string|null}>)
       .filter((row) => !selectedSnapshotIds || selectedSnapshotIds.has(row.id))
       .map((row) => ({ snapshotId: row.id, ...(row.commit_sha ? { commitSha: row.commit_sha } : {}) })) }));
   const manifest: KnowledgeArtifactManifest = { formatVersion: 1, createdAt: new Date().toISOString(), buildId: options.buildId ?? "local", capabilityHash: capabilityHash(CAPABILITIES), contractVersion: "2", schemaVersion: Number((store.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get() as {value:string}).value), repositories: repos, contentPolicy: { includesSource: options.includeSource === true, includesNotes: options.includeNotes === true, includesEvidence: options.includeEvidence === true, includesEmbeddings: options.includeEmbeddings === true, secretPolicyHash: "default" } };
   if (options.baseDatabase) { manifest.baseArtifactHash = sha(options.baseDatabase); }
   const computedDelta = options.baseDatabase ? deltaFor(options.baseDatabase, db, tombstoneCount) : undefined;
-  if (computedDelta) manifest.delta = computedDelta.manifest;
+  let logicalDelta: LogicalDelta | undefined;
+  if (options.baseDatabase) {
+    const deltaDir = mkdtempSync(join(tmpdir(), "penguin-logical-export-"));
+    const deltaPath = join(deltaDir, "target.sqlite");
+    writeFileSync(deltaPath, Buffer.from(db), { flag: "wx", mode: 0o600 });
+    const deltaDb = new DatabaseConstructor(deltaPath);
+    try { logicalDelta = buildLogicalDelta(options.baseDatabase, deltaDb); } finally { deltaDb.close(); rmSync(deltaDir, { recursive: true, force: true }); }
+  }
+  if (logicalDelta) manifest.delta = { algorithm: "logical-row-v1", tombstoneCount, operationCount: logicalDelta.operations.length, tableCount: logicalDelta.tableCount };
   if (options.encryptionKey) manifest.encryption = { algorithm: "aes-256-gcm", envelope: "PKA2" };
+  const signedDatabaseDigest = logicalDelta ? sha(strToU8(JSON.stringify(logicalDelta))) : sha(db);
   if (options.signingPrivateKey) {
     const privateKey = createPrivateKey(options.signingPrivateKey);
     const unsigned = JSON.stringify(manifest);
-    const payload = Buffer.from(`${unsigned}\n${sha(db)}`, "utf8");
+    const payload = Buffer.from(`${unsigned}\n${signedDatabaseDigest}`, "utf8");
     const publicKey = privateKey.asymmetricKeyType === "ed25519" ? createPublicKey(privateKey).export({ type: "spki", format: "der" }).toString("base64") : undefined;
     manifest.signature = { algorithm: "ed25519", value: sign(null, payload, privateKey).toString("base64"), ...(publicKey ? { publicKey } : {}) };
-  } else if (options.signingKey) manifest.signature = { algorithm: "hmac-sha256", value: createHmac("sha256", options.signingKey).update(JSON.stringify(manifest)).update(sha(db)).digest("hex") };
+  } else if (options.signingKey) manifest.signature = { algorithm: "hmac-sha256", value: createHmac("sha256", options.signingKey).update(JSON.stringify(manifest)).update(signedDatabaseDigest).digest("hex") };
   const entries: Record<string, Uint8Array> = { "manifest.json": strToU8(JSON.stringify(manifest, null, 2)) };
-  if (computedDelta) entries["database/knowledge.sqlite.delta.json"] = computedDelta.delta;
+  if (logicalDelta) entries["database/knowledge.sqlite.logical-delta.json"] = strToU8(JSON.stringify(logicalDelta));
+  else if (computedDelta) entries["database/knowledge.sqlite.delta.json"] = computedDelta.delta;
   else entries["database/knowledge.sqlite"] = db;
   const checksums = Object.entries(entries).map(([path, bytes]) => `${sha(bytes)}  ${path}`).join("\n") + "\n";
   entries["checksums.sha256"] = strToU8(checksums);

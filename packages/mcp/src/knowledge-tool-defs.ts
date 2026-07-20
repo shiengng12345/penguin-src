@@ -4,7 +4,7 @@
 // release-bundled server initializes without the knowledge deps present; the
 // actual handler (knowledge-tools.ts) is dynamically imported on first call.
 import { isLogInvestigationTool } from "./log-investigation-tool-defs.js";
-import { CAPABILITIES, CAPABILITY_ALIASES } from "@penguin/knowledge-contracts";
+import { CAPABILITIES, CAPABILITY_ALIASES, canonicalInputSchema } from "@penguin/knowledge-contracts";
 export const KNOWLEDGE_TOOL_DEFS = [
   {
     name: "knowledge_capabilities",
@@ -115,7 +115,7 @@ export const KNOWLEDGE_TOOL_DEFS = [
         type: { type: "array", items: { type: "string" } },
         repo: {
           type: "string",
-          description: "Repo's display name (as shown by index_status, e.g. \"fpms\" — case-insensitive) or its internal repo id. Unknown name → zero results, not an error.",
+          description: "Repo display name, internal repo id, or registered repository root path. Unknown selector returns REPOSITORY_NOT_FOUND instead of being treated as an unscoped search.",
         },
         include_sensitive: { type: "boolean" },
         limit: { type: "number" },
@@ -304,10 +304,25 @@ for (const tool of KNOWLEDGE_TOOL_DEFS) {
     (tool as { "x-penguin-capability-id"?: string })["x-penguin-capability-id"] = tool.name.replaceAll("_", ".");
   }
 }
+for (const tool of KNOWLEDGE_TOOL_DEFS) {
+  if ((tool as { "x-penguin-capability-id"?: string })["x-penguin-capability-id"]) continue;
+  const exact = `knowledge.${tool.name}`;
+  const dotted = `knowledge.${tool.name.replaceAll("_", ".")}`;
+  const capability = CAPABILITIES.find(({ id }) => id === exact || id === dotted);
+  if (capability) (tool as { "x-penguin-capability-id"?: string })["x-penguin-capability-id"] = capability.id;
+}
 const CANONICAL_ALIASES: Record<string, string> = { ...CAPABILITY_ALIASES };
 for (const [alias, capabilityId] of Object.entries(CANONICAL_ALIASES)) {
   const tool = KNOWLEDGE_TOOL_DEFS.find((candidate) => candidate.name === alias);
   if (tool) (tool as { "x-penguin-capability-id"?: string })["x-penguin-capability-id"] = capabilityId;
+}
+
+// Input schemas are canonical contract data, not a second MCP-only type
+// system. Keep the descriptive definitions above for human-facing context,
+// then replace the wire schema with the exact shared registry object.
+for (const tool of KNOWLEDGE_TOOL_DEFS) {
+  const capabilityId = (tool as { "x-penguin-capability-id"?: string })["x-penguin-capability-id"];
+  if (capabilityId) (tool as { inputSchema: unknown }).inputSchema = canonicalInputSchema(capabilityId);
 }
 
 // Kept as a separate pure module for release-bundle startup, but accepted by

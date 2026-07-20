@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, Search, Network, Bookmark, ClipboardList } from "lucide-react";
-import { knowledgeContext, knowledgeEvidenceList, knowledgeGetHit, knowledgeGraph, knowledgeReindex, knowledgeSavedQueryList, knowledgeSavedQueryRun, knowledgeSavedQueryWrite, knowledgeSearchV2, type ContextPack, type KnowledgeEvidenceNote, type KnowledgeGraphView, type KnowledgeHitDetail, type KnowledgeSavedQuery, type KnowledgeSearchV2Response } from "@/lib/knowledge-client";
+import { knowledgeContext, knowledgeEvidenceList, knowledgeExplore, knowledgeGetHit, knowledgeGraph, knowledgeIndexStatus, knowledgeReindex, knowledgeSavedQueryList, knowledgeSavedQueryRun, knowledgeSavedQueryWrite, knowledgeSearchV2, type ContextPack, type KnowledgeEvidenceNote, type KnowledgeGraphResult, type KnowledgeGraphView, type KnowledgeHitDetail, type KnowledgeSavedQuery, type KnowledgeSearchV2Response } from "@/lib/knowledge-client";
 
 function initialSearchState() {
   if (typeof window === "undefined") return { query: "", mode: "auto", repo: "", branch: "", snapshot: "", path: "", language: "", kind: "" };
@@ -25,6 +25,8 @@ export function WikiSearchPage() {
   const [contextPack, setContextPack] = useState<ContextPack | null>(null);
   const [hitPreview, setHitPreview] = useState<KnowledgeHitDetail | null>(null);
   const [graphView, setGraphView] = useState<KnowledgeGraphView | null>(null);
+  const [selectedGraphNode, setSelectedGraphNode] = useState<KnowledgeGraphView["nodes"][number] | null>(null);
+  const [noteLinks, setNoteLinks] = useState<KnowledgeGraphResult["nodes"]>([]);
   const [graphBusy, setGraphBusy] = useState(false);
   const [laneFilter, setLaneFilter] = useState("all");
   const [repoFilter, setRepoFilter] = useState(initial.repo);
@@ -45,6 +47,11 @@ export function WikiSearchPage() {
   const [busy, setBusy] = useState(false);
   const [reindexBusy, setReindexBusy] = useState(false);
   const [reindexVersion, setReindexVersion] = useState(0);
+  const [previewLines, setPreviewLines] = useState(() => {
+    if (typeof window === "undefined") return 5;
+    const value = Number(window.localStorage.getItem("penguin.wiki.previewLines") ?? 5);
+    return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 5;
+  });
   const [recentQueries, setRecentQueries] = useState<string[]>(() => {
     if (typeof window === "undefined") return [];
     try { return JSON.parse(window.localStorage.getItem("penguin.wiki.recentQueries") ?? "[]") as string[]; } catch { return []; }
@@ -110,12 +117,14 @@ export function WikiSearchPage() {
     setContextBusy(true);
     try {
       const [preview, context] = await Promise.all([
-        knowledgeGetHit(hit.locator, { signal: controller.signal }).catch(() => null),
+        knowledgeGetHit(hit.locator, { signal: controller.signal }, previewLines).catch(() => null),
         knowledgeContext(hit.locator.filePath, { signal: controller.signal }),
       ]);
       setHitPreview(preview);
       setContextPack(context);
       void knowledgeEvidenceList({ target: hit.title, limit: 20, signal: controller.signal }).then(setEvidence).catch(() => setEvidence([]));
+      if (hit.lane === "note") void knowledgeExplore("backlinks", hit.title, { signal: controller.signal }).then((result) => setNoteLinks(result.nodes ?? [])).catch(() => setNoteLinks([]));
+      else setNoteLinks([]);
     }
     finally { if (contextAbort.current === controller) setContextBusy(false); }
   };
@@ -139,7 +148,26 @@ export function WikiSearchPage() {
     const controller = new AbortController();
     contextAbort.current?.abort();
     contextAbort.current = controller;
-    try { setGraphView(await knowledgeGraph(target, 1, { signal: controller.signal })); } finally { if (contextAbort.current === controller) setGraphBusy(false); }
+    try { const view = await knowledgeGraph(target, 1, { signal: controller.signal }); setGraphView(view); setSelectedGraphNode(view.nodes.find((node) => node.nodeId === target) ?? null); } finally { if (contextAbort.current === controller) setGraphBusy(false); }
+  };
+
+  const focusGraphNode = (node: KnowledgeGraphView["nodes"][number]) => {
+    setSelectedGraphNode(node);
+    setQuery(node.title);
+  };
+  const openGraphNodeContext = async () => {
+    if (!selectedGraphNode) return;
+    setContextBusy(true);
+    try { setContextPack(await knowledgeContext(selectedGraphNode.nodeId)); } finally { setContextBusy(false); }
+  };
+  const exportGraphSelection = () => {
+    if (!graphView) return;
+    const canvas = {
+      nodes: graphView.nodes.map((node, index) => ({ id: node.nodeId, type: "text", text: `${node.title} (${node.nodeType})`, x: (index % 4) * 260, y: Math.floor(index / 4) * 150, width: 220, height: 90, "penguin-locator": { nodeId: node.nodeId } })),
+      edges: graphView.edges.map((edge, index) => ({ id: `edge-${index + 1}`, fromNode: edge.src, toNode: edge.dst, label: edge.edgeType })),
+    };
+    const url = URL.createObjectURL(new Blob([JSON.stringify(canvas, null, 2)], { type: "application/json" }));
+    const anchor = document.createElement("a"); anchor.href = url; anchor.download = "penguin-graph-selection.canvas"; anchor.click(); URL.revokeObjectURL(url);
   };
 
   const visibleHits = response?.hits.filter((hit) => (laneFilter === "all" || hit.lane === laneFilter) && (evidenceFilter === "all" || hit.evidence[0]?.status === evidenceFilter)) ?? [];
@@ -158,6 +186,16 @@ export function WikiSearchPage() {
   const activateSelectedHit = () => {
     const hit = visibleHits[selectedHitIndex];
     if (hit) void openContext(hit);
+  };
+  const openCodeLocation = async (hit: KnowledgeSearchV2Response["hits"][number]) => {
+    if (hit.locator.revisionKind !== "working_tree") return;
+    if (hit.locator.filePath.split("/").some((part) => part === ".." || part === "")) return;
+    const status = await knowledgeIndexStatus();
+    const repo = status.repos.find((item) => item.name === hit.locator.repoName);
+    if (!repo) return;
+    const absolute = `${repo.rootPath.replace(/\/+$/, "")}/${hit.locator.filePath}`;
+    const { open } = await import("@tauri-apps/plugin-shell");
+    await open(`vscode://file${encodeURI(absolute)}${hit.locator.startLine ? `:${hit.locator.startLine}` : ""}`);
   };
 
   const saveCurrentQuery = async () => {
@@ -201,6 +239,7 @@ export function WikiSearchPage() {
       <input aria-label="筛选路径" value={pathFilter} onChange={(event) => setPathFilter(event.target.value)} placeholder="path" className="w-28 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300" />
       <input aria-label="筛选语言" value={languageFilter} onChange={(event) => setLanguageFilter(event.target.value)} placeholder="language" className="w-20 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300" />
       <input aria-label="筛选 kind" value={kindFilter} onChange={(event) => setKindFilter(event.target.value)} placeholder="kind" className="w-16 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300" />
+      <input aria-label="预览行数" type="number" min={0} max={100} value={previewLines} onChange={(event) => { const value = Math.max(0, Math.min(100, Number(event.target.value) || 0)); setPreviewLines(value); window.localStorage.setItem("penguin.wiki.previewLines", String(value)); }} className="w-14 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300" title="预览前后行数" />
       <select aria-label="筛选 evidence 状态" value={evidenceFilter} onChange={(event) => setEvidenceFilter(event.target.value)} className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300"><option value="all">evidence</option><option value="verified">verified</option><option value="observed">observed</option><option value="inference">inference</option></select>
       <input aria-label="保存查询名称" value={savedName} onChange={(event) => setSavedName(event.target.value)} placeholder="保存名" className="w-20 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300" />
       <button type="button" aria-label="保存当前查询" disabled={!savedName.trim() || !query.trim()} onClick={() => void saveCurrentQuery()} className="rounded border border-slate-700 p-1 text-slate-400 disabled:opacity-40"><Bookmark className="h-3.5 w-3.5" /></button>
@@ -225,7 +264,7 @@ export function WikiSearchPage() {
         <button type="button" onClick={() => void reindexScope()} disabled={reindexBusy} className="mt-3 rounded border border-yellow-400/30 px-2.5 py-1 text-xs text-yellow-100 hover:bg-yellow-400/10 disabled:opacity-50">{reindexBusy ? "重新索引中…" : "确认后重新索引此范围"}</button>
       </div> : <div className="space-y-2" style={{ contain: "layout paint", minHeight: `${visibleHits.length * 154}px` }}>
         <div aria-hidden="true" style={{ height: `${virtualWindow.top}px` }} />
-        {visibleHits.slice(virtualWindow.start, virtualWindow.end).map((hit, offset) => { const index = virtualWindow.start + offset; return <article key={hit.hitId} role="button" tabIndex={0} aria-selected={selectedHitIndex === index} onClick={() => { setSelectedHitIndex(index); void openContext(hit); }} onFocus={() => setSelectedHitIndex(index)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedHitIndex(index); void openContext(hit); } }} className={`cursor-pointer rounded-lg border bg-slate-950/35 p-3 ${selectedHitIndex === index ? "border-cyan-400/80 ring-1 ring-cyan-400/30" : hit.lane === "semantic" ? "border-violet-500/30" : "border-slate-800 hover:border-cyan-500/40"}`}>
+        {visibleHits.slice(virtualWindow.start, virtualWindow.end).map((hit, offset) => { const index = virtualWindow.start + offset; return <article key={hit.hitId} role="button" tabIndex={0} aria-selected={selectedHitIndex === index} onClick={() => { setSelectedHitIndex(index); void openContext(hit); }} onFocus={() => setSelectedHitIndex(index)} onKeyDown={(event) => { if (event.key === "Enter" && event.metaKey) { event.preventDefault(); void openCodeLocation(hit); } else if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedHitIndex(index); void openContext(hit); } }} className={`cursor-pointer rounded-lg border bg-slate-950/35 p-3 ${selectedHitIndex === index ? "border-cyan-400/80 ring-1 ring-cyan-400/30" : hit.lane === "semantic" ? "border-violet-500/30" : "border-slate-800 hover:border-cyan-500/40"}`}>
           <div className="flex items-center gap-2 text-xs"><span className="font-semibold text-cyan-200">{hit.title}</span><span className="rounded bg-slate-800 px-1.5 py-0.5 text-slate-400">{hit.lane}</span><span className="text-slate-600">{hit.evidence[0]?.status}</span></div>
           <div className="mt-1 font-mono text-[11px] text-slate-400">{hit.locator.repoName} / {hit.locator.filePath}{hit.locator.startLine ? `:${hit.locator.startLine}` : ""} · {hit.locator.revisionId}</div>
           {hit.snippet && <pre className="mt-2 overflow-x-auto whitespace-pre-wrap text-xs text-slate-300">{hit.snippet}</pre>}
@@ -235,8 +274,9 @@ export function WikiSearchPage() {
         </div>}
       {contextBusy && <div className="mt-4 text-xs text-slate-500">加载知识上下文…</div>}
       {hitPreview && <section className="mt-4 rounded-lg border border-slate-700 bg-slate-950/70 p-4">
-        <div className="flex items-center gap-2 text-xs text-slate-400"><span className="text-slate-200">完整 excerpt</span><span>{hitPreview.evidence[0]?.status}</span><span className="rounded border border-slate-700 px-1.5 py-0.5">只读 revision: {hitPreview.locator.revisionId}</span></div>
-        {hitPreview.snippet && <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap text-xs text-slate-300">{hitPreview.snippet}</pre>}
+        <div className="flex items-center gap-2 text-xs text-slate-400"><span className="text-slate-200">完整 excerpt</span><span>{hitPreview.evidence[0]?.status}</span><span className="rounded border border-slate-700 px-1.5 py-0.5">{hitPreview.locator.revisionKind === "working_tree" ? "working tree" : `只读 commit: ${hitPreview.locator.commitSha ?? hitPreview.locator.revisionId}`}</span></div>
+        {hitPreview.snippet && <div className="mt-2 max-h-64 overflow-auto font-mono text-xs text-slate-300">{hitPreview.snippet.split("\n").map((line, index) => <div key={`${hitPreview.hitId}-line-${index}`} className="flex min-w-max"><button type="button" className="mr-3 w-10 shrink-0 select-none text-right text-slate-600 hover:text-cyan-300" onClick={() => { const hit = visibleHits.find((item) => item.hitId === hitPreview.hitId); if (hit) void openCodeLocation({ ...hit, locator: { ...hit.locator, startLine: (hitPreview.locator.startLine ?? 1) + index } }); }}>{(hitPreview.locator.startLine ?? 1) + index}</button><span className="whitespace-pre">{line}</span></div>)}</div>}
+        {hitPreview.locator.revisionKind === "working_tree" && <button type="button" onClick={() => { const hit = visibleHits.find((item) => item.hitId === hitPreview.hitId); if (hit) void openCodeLocation(hit); }} className="mt-3 rounded border border-cyan-500/30 px-2 py-1 text-xs text-cyan-200">打开代码位置</button>}
       </section>}
       {contextPack && <section className="mt-4 rounded-lg border border-cyan-500/30 bg-cyan-950/10 p-4">
         <div className="text-xs uppercase tracking-wide text-cyan-300">Knowledge context</div>
@@ -256,10 +296,12 @@ export function WikiSearchPage() {
         {contextPack.errors.length > 0 && <div className="mt-2 text-xs text-yellow-200">{contextPack.errors.join(" · ")}</div>}
       </section>}
       {evidence.length > 0 && <section className="mt-4 rounded-lg border border-emerald-500/30 bg-emerald-950/10 p-4"><div className="text-xs uppercase tracking-wide text-emerald-300"><ClipboardList className="mr-1 inline h-3.5 w-3.5" />相关 Evidence</div><div className="mt-2 space-y-1 text-xs text-slate-300">{evidence.map((item) => <div key={item.slug}>{item.title} · {item.status} · {item.targetId}</div>)}</div></section>}
+      {noteLinks.length > 0 && <section className="mt-4 rounded-lg border border-amber-500/30 bg-amber-950/10 p-4"><div className="text-xs uppercase tracking-wide text-amber-300">Note backlinks / mentions</div><div className="mt-2 space-y-1 text-xs text-slate-300">{noteLinks.map((item) => <div key={item.nodeId}>{item.title} · {item.nodeType}</div>)}</div></section>}
       {graphView && <section className="mt-4 rounded-lg border border-violet-500/30 bg-violet-950/10 p-4">
         <div className="text-xs uppercase tracking-wide text-violet-300">局部知识图</div>
         <div className="mt-2 text-xs text-slate-300">{graphView.nodes.length} nodes · {graphView.edges.length} edges</div>
-        <div className="mt-2 flex flex-wrap gap-1.5">{graphView.nodes.slice(0, 30).map((node) => <span key={node.nodeId} className="rounded bg-slate-900 px-2 py-1 text-[11px] text-slate-300">{node.title} <span className="text-slate-600">{node.nodeType}</span></span>)}</div>
+        <div className="mt-2 flex flex-wrap gap-1.5">{graphView.nodes.slice(0, 30).map((node) => <button type="button" key={node.nodeId} onClick={() => focusGraphNode(node)} className={`rounded bg-slate-900 px-2 py-1 text-[11px] ${selectedGraphNode?.nodeId === node.nodeId ? "text-cyan-200 ring-1 ring-cyan-400/50" : "text-slate-300"}`}>{node.title} <span className="text-slate-600">{node.nodeType}</span></button>)}</div>
+        {selectedGraphNode && <div className="mt-3 flex flex-wrap items-center gap-2 rounded border border-cyan-500/20 px-2 py-2 text-xs text-slate-300"><span>已选：{selectedGraphNode.title}</span><button type="button" onClick={() => setQuery(selectedGraphNode.title)} className="rounded border border-slate-700 px-2 py-1 text-cyan-200">送到搜索</button><button type="button" onClick={() => void openGraphNodeContext()} className="rounded border border-slate-700 px-2 py-1 text-cyan-200">送到 context</button><button type="button" onClick={exportGraphSelection} className="rounded border border-slate-700 px-2 py-1 text-cyan-200">导出 Canvas</button></div>}
       </section>}
       {response.page.nextCursor && <button type="button" onClick={() => void loadMore()} className="mt-4 w-full rounded border border-slate-700 px-3 py-2 text-xs text-slate-300 hover:border-cyan-500/50 hover:text-cyan-200">加载更多结果</button>}
     </div>}

@@ -62,7 +62,7 @@ test("without --progress-events, no structured events (bar path)", async () => {
 });
 
 test("progress events identify the repository and finish cleanly", async () => {
-  const source = readFileSync(new URL("../packages/knowledge-cli/src/index.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../packages/knowledge-cli/src/command-dispatch.ts", import.meta.url), "utf8");
   assert.match(source, /progressEvent!\(\{ \.\.\.p, rootPath: target \}\)/);
   assert.match(source, /phase: "complete"/);
 });

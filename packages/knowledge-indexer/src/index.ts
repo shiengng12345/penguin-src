@@ -49,3 +49,6 @@ export {
 } from "./package-dependencies.js";
 export { extractIdentifiers, extractIdentifiersFromSource, type IdentifierEntry } from "./identifiers.js";
 export { extractFieldAccesses, type FieldAccess, type FieldAccessKind } from "./field-access.js";
+export { extractChannelBindings, type ExtractedChannelBinding, type ChannelProtocol, type ChannelBindingStatus } from "./channels.js";
+export { deploymentBlastRadius, extractIacFacts, type DeploymentBlastRadiusResult, type IacFact, type IacKind } from "./iac.js";
+export { anonymousCallbackIdentity } from "./identity.js";

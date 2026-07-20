@@ -6,7 +6,31 @@ import { join } from "node:path";
 import type { KnowledgeArtifactManifest } from "./artifact-manifest.js";
 import { KnowledgeStore } from "./store.js";
 import { tmpdir } from "node:os";
+import { applyLogicalDelta, type LogicalDelta } from "./artifact-delta.js";
 function sha(value: Uint8Array): string { return createHash("sha256").update(value).digest("hex"); }
+function remoteFingerprint(remoteUrl: string | null): string | null {
+  if (!remoteUrl) return null;
+  const normalized = remoteUrl.trim().replace(/\.git$/i, "").replace(/\/+$/, "").toLowerCase();
+  return normalized ? sha(Buffer.from(normalized, "utf8")) : null;
+}
+function rejectZipSymlinkEntries(bytes: Uint8Array): void {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let eocd = -1;
+  for (let offset = bytes.byteLength - 22; offset >= Math.max(0, bytes.byteLength - 65_557); offset -= 1) {
+    if (view.getUint32(offset, true) === 0x06054b50) { eocd = offset; break; }
+  }
+  if (eocd < 0) return;
+  const entries = view.getUint16(eocd + 10, true);
+  let offset = view.getUint32(eocd + 16, true);
+  for (let index = 0; index < entries && offset + 46 <= bytes.byteLength; index += 1) {
+    if (view.getUint32(offset, true) !== 0x02014b50) return;
+    const madeBy = view.getUint16(offset + 4, true);
+    const externalAttributes = view.getUint32(offset + 38, true);
+    const unixMode = externalAttributes >>> 16;
+    if ((madeBy >>> 8) === 3 && (unixMode & 0xf000) === 0xa000) throw new Error("ARTIFACT_SYMLINK_UNSAFE");
+    offset += 46 + view.getUint16(offset + 28, true) + view.getUint16(offset + 30, true) + view.getUint16(offset + 32, true);
+  }
+}
 function legacyKey(passphrase: string): Buffer { return createHash("sha256").update(passphrase).digest(); }
 function scryptKey(passphrase: string, salt: Uint8Array): Buffer {
   return scryptSync(passphrase, salt, 32, {
@@ -20,18 +44,18 @@ export interface ArtifactImportResult { manifest: KnowledgeArtifactManifest; dat
 export interface ArtifactConflictReport {
   newRepositories: Array<{ id: string; name: string }>;
   existingRepositories: Array<{ id: string; name: string }>;
-  conflictingRepositories: Array<{ incomingId: string; incomingName: string; existingId: string; existingName: string; reason: "id" | "name" }>;
+  conflictingRepositories: Array<{ incomingId: string; incomingName: string; existingId: string; existingName: string; reason: "id" | "remote" | "name" }>;
   newSnapshots: Array<{ id: string; repoId: string }>;
   conflictingSnapshots: Array<{ id: string; repoId: string }>;
   noteConflicts: Array<{ path: string; incomingHash: string | null; existingHash: string | null }>;
 }
 type RepoConflict = ArtifactConflictReport["conflictingRepositories"][number];
 
-function inventory(path: string, label: string): { repositories: Array<{ id: string; name: string }>; snapshots: Array<{ id: string; repoId: string }>; notes: Array<{ path: string; hash: string | null }> } {
+function inventory(path: string, label: string): { repositories: Array<{ id: string; name: string; remoteFingerprint: string | null }>; snapshots: Array<{ id: string; repoId: string }>; notes: Array<{ path: string; hash: string | null }> } {
   const store = KnowledgeStore.open({ dbPath: path, ledgerPath: `${path}.${label}.ledger.jsonl` });
   try {
     return {
-      repositories: store.db.prepare("SELECT id,name FROM repos ORDER BY id").all() as Array<{ id: string; name: string }>,
+      repositories: (store.db.prepare("SELECT id,name,remote_url AS remoteUrl FROM repos ORDER BY id").all() as Array<{ id: string; name: string; remoteUrl: string | null }>).map((repo) => ({ id: repo.id, name: repo.name, remoteFingerprint: remoteFingerprint(repo.remoteUrl) })),
       snapshots: store.db.prepare("SELECT id,repo_id AS repoId FROM revision_snapshots ORDER BY id").all() as Array<{ id: string; repoId: string }>,
       notes: store.db.prepare("SELECT path,content_hash AS hash FROM notes_index ORDER BY path").all() as Array<{ path: string; hash: string | null }>,
     };
@@ -50,10 +74,13 @@ export function inspectKnowledgeArtifact(bytes: Uint8Array, destination: string,
     const incoming = inventory(staging, "incoming");
     const existing = existsSync(destination) ? inventory(destination, "existing") : { repositories: [], snapshots: [], notes: [] };
     const byId = new Map(existing.repositories.map((repo) => [repo.id, repo]));
+    const byRemote = new Map(existing.repositories.filter((repo) => repo.remoteFingerprint).map((repo) => [repo.remoteFingerprint!, repo]));
     const byName = new Map(existing.repositories.map((repo) => [repo.name.toLocaleLowerCase(), repo]));
     const conflicts: RepoConflict[] = incoming.repositories.flatMap((repo): RepoConflict[] => {
       const match = byId.get(repo.id);
       if (match) return [{ incomingId: repo.id, incomingName: repo.name, existingId: match.id, existingName: match.name, reason: "id" as const }];
+      const sameRemote = repo.remoteFingerprint ? byRemote.get(repo.remoteFingerprint) : undefined;
+      if (sameRemote) return [{ incomingId: repo.id, incomingName: repo.name, existingId: sameRemote.id, existingName: sameRemote.name, reason: "remote" as const }];
       const sameName = byName.get(repo.name.toLocaleLowerCase());
       return sameName ? [{ incomingId: repo.id, incomingName: repo.name, existingId: sameName.id, existingName: sameName.name, reason: "name" as const }] : [];
     });
@@ -89,6 +116,7 @@ export function importKnowledgeArtifact(bytes: Uint8Array, expectedCapabilityHas
   }
   let files: Record<string, Uint8Array>;
   try { files = unzipSync(bytes); } catch { throw new Error("ARTIFACT_INVALID"); }
+  rejectZipSymlinkEntries(bytes);
   for (const path of Object.keys(files)) if (!path || path.startsWith("/") || path.split("/").includes("..") || path.includes("\\")) throw new Error("ARTIFACT_PATH_UNSAFE");
   if (!files["manifest.json"] || !files["checksums.sha256"]) throw new Error("ARTIFACT_INCOMPLETE");
   const manifest = JSON.parse(strFromU8(files["manifest.json"])) as KnowledgeArtifactManifest;
@@ -98,6 +126,13 @@ export function importKnowledgeArtifact(bytes: Uint8Array, expectedCapabilityHas
   if ("expectedContractVersion" in options && options.expectedContractVersion !== undefined && manifest.contractVersion !== options.expectedContractVersion) throw new Error("CONTRACT_VERSION_MISMATCH");
   for (const line of strFromU8(files["checksums.sha256"]).trim().split("\n")) { const [expected, ...pathParts] = line.trim().split(/\s+/); const path = pathParts.join(" "); if (!files[path] || sha(files[path]) !== expected) throw new Error("ARTIFACT_CHECKSUM_MISMATCH"); }
   let database = files["database/knowledge.sqlite"];
+  if (!database && files["database/knowledge.sqlite.logical-delta.json"]) {
+    if (!options.baseDatabase) throw new Error("ARTIFACT_BASE_DATABASE_REQUIRED");
+    let logical: LogicalDelta;
+    try { logical = JSON.parse(strFromU8(files["database/knowledge.sqlite.logical-delta.json"])) as LogicalDelta; } catch { throw new Error("ARTIFACT_DELTA_INVALID"); }
+    if (logical.algorithm !== "logical-row-v1" || !Array.isArray(logical.operations) || !Number.isInteger(logical.tableCount)) throw new Error("ARTIFACT_DELTA_INVALID");
+    database = applyLogicalDelta(options.baseDatabase, logical);
+  }
   if (!database && files["database/knowledge.sqlite.delta.json"]) {
     if (!options.baseDatabase) throw new Error("ARTIFACT_BASE_DATABASE_REQUIRED");
     if (!manifest.baseArtifactHash || sha(options.baseDatabase) !== manifest.baseArtifactHash) throw new Error("ARTIFACT_BASE_MISMATCH");
@@ -115,11 +150,14 @@ export function importKnowledgeArtifact(bytes: Uint8Array, expectedCapabilityHas
   }
   if (!database) throw new Error("ARTIFACT_INCOMPLETE");
   if (manifest.signature) {
+    const signedDatabaseDigest = manifest.delta?.algorithm === "logical-row-v1"
+      ? sha(files["database/knowledge.sqlite.logical-delta.json"])
+      : sha(database);
     if (manifest.signature.algorithm === "ed25519") {
       const publicKey = options.signingPublicKey ?? manifest.signature.publicKey;
       if (!publicKey) throw new Error("ARTIFACT_SIGNATURE_KEY_REQUIRED");
       const unsigned = { ...manifest }; delete unsigned.signature;
-      const payload = Buffer.from(`${JSON.stringify(unsigned)}\n${sha(database)}`, "utf8");
+      const payload = Buffer.from(`${JSON.stringify(unsigned)}\n${signedDatabaseDigest}`, "utf8");
       try {
         const key = createPublicKey(publicKey.includes("BEGIN") ? publicKey : { key: Buffer.from(publicKey, "base64"), format: "der", type: "spki" });
         if (!verify(null, payload, key, Buffer.from(manifest.signature.value, "base64"))) throw new Error("invalid");
@@ -127,7 +165,7 @@ export function importKnowledgeArtifact(bytes: Uint8Array, expectedCapabilityHas
     } else {
       if (!options.signingKey) throw new Error("ARTIFACT_SIGNATURE_KEY_REQUIRED");
       const unsigned = { ...manifest }; delete unsigned.signature;
-      const expected = createHmac("sha256", options.signingKey).update(JSON.stringify(unsigned)).update(sha(database)).digest("hex");
+      const expected = createHmac("sha256", options.signingKey).update(JSON.stringify(unsigned)).update(signedDatabaseDigest).digest("hex");
       if (expected.length !== manifest.signature.value.length || !timingSafeEqual(Buffer.from(expected), Buffer.from(manifest.signature.value))) throw new Error("ARTIFACT_SIGNATURE_INVALID");
     }
   }

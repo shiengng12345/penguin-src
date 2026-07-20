@@ -15,7 +15,9 @@ import {
   CLI_IMPLEMENTED_CAPABILITIES,
   MCP_IMPLEMENTED_CAPABILITIES,
   hasCapabilityOutputValidator,
+  canonicalInputSchema,
 } from "../packages/knowledge-contracts/dist/index.js";
+import { KNOWLEDGE_TOOL_DEFS } from "../packages/mcp/dist/index.js";
 
 test("surface parity contract exposes every canonical capability", () => {
   for (const surface of ["cli", "mcp"]) {
@@ -92,5 +94,15 @@ test("all registered output validators reject non-JSON adapter output", () => {
   for (const registration of [...listCliRegistrations(), ...listMcpRegistrations(), ...listWikiRegistrations()]) {
     if (registration.capabilityId === "knowledge.search") continue;
     assert.throws(() => registration.validateOutput({ invalid: () => "not JSON" }), /JSON-compatible/);
+  }
+});
+
+test("every MCP tool input schema equals the canonical contract schema", () => {
+  const registrations = new Map(listMcpRegistrations().map((registration) => [registration.capabilityId, registration]));
+  for (const tool of KNOWLEDGE_TOOL_DEFS) {
+    const capabilityId = tool["x-penguin-capability-id"];
+    assert.ok(capabilityId, `${tool.name} has no canonical capability id`);
+    assert.deepEqual(tool.inputSchema, canonicalInputSchema(capabilityId), `${tool.name} input schema drift`);
+    assert.deepEqual(registrations.get(capabilityId)?.inputSchema, canonicalInputSchema(capabilityId), `${capabilityId} registration schema drift`);
   }
 });

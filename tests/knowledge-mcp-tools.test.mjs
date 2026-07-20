@@ -173,6 +173,15 @@ test("knowledge_search rejects an empty query instead of enumerating the index",
   store.close();
 });
 
+test("knowledge_search resolves repository roots and rejects unknown repo selectors", () => {
+  const { store } = seed();
+  const byRoot = handleKnowledgeTool("knowledge_search", { query: "login", repo: "/r" }, store);
+  assert.equal(byRoot.error, undefined, "registered root path must be accepted as a repository selector");
+  const missing = handleKnowledgeTool("knowledge_search", { query: "login", repo: "/missing-repo", mode: "exact", contract_version: "2" }, store);
+  assert.equal(missing.error, "REPOSITORY_NOT_FOUND");
+  store.close();
+});
+
 test("knowledge_explore is the documented hero entry and empty graphs require diagnostics", () => {
   const explore = KNOWLEDGE_TOOL_DEFS.find((tool) => tool.name === "knowledge_explore");
   const graph = KNOWLEDGE_TOOL_DEFS.find((tool) => tool.name === "explore_graph");
@@ -254,6 +263,21 @@ test("MCP markdown source sync uses the shared source corpus", () => {
 test("MCP external source removal is confirmation guarded", () => {
   const { store } = seed();
   const source = handleKnowledgeTool("knowledge_source_register", { type: "url", location: "https://docs.example.com" }, store);
+  assert.equal(handleKnowledgeTool("knowledge_source_remove", { id: source.id }, store).error, "CONFIRMATION_REQUIRED");
+  assert.deepEqual(handleKnowledgeTool("knowledge_source_remove", { id: source.id, confirmed: true }, store), { ok: true, id: source.id });
+  store.close();
+});
+
+test("MCP external Postgres source lifecycle accepts a host-owned read-only adapter", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "pk-mcp-pg-"));
+  const store = KnowledgeStore.open({ dbPath: join(dir, "k.db"), ledgerPath: join(dir, "l.jsonl") });
+  const credential = store.upsertNode({ nodeType: "credential", identityKey: "credential:mcp-pg", title: "mcp postgres" });
+  store.putCredential({ nodeId: credential, title: "mcp postgres", kind: "postgres", body: "never returned" });
+  const source = handleKnowledgeTool("knowledge_source_register", { type: "postgres_schema", location: "postgres://schema-only", config: { credentialEntryId: credential, schemas: ["public"] } }, store);
+  assert.equal(handleKnowledgeTool("knowledge_source_list", {}, store).length, 1);
+  const client = { query: async (sql) => sql.includes("information_schema.columns") ? { rows: [{ table_schema: "public", table_name: "players", column_name: "id", data_type: "uuid", is_nullable: "NO", ordinal_position: 1 }] } : { rows: [] } };
+  const synced = await handleKnowledgeTool("knowledge_source_sync", { id: source.id }, store, { postgresSchemaClient: client });
+  assert.equal(synced.tables, 1);
   assert.equal(handleKnowledgeTool("knowledge_source_remove", { id: source.id }, store).error, "CONFIRMATION_REQUIRED");
   assert.deepEqual(handleKnowledgeTool("knowledge_source_remove", { id: source.id, confirmed: true }, store), { ok: true, id: source.id });
   store.close();

@@ -66,6 +66,18 @@ export function validateSearchResponse(input: unknown): SearchResponse {
   if (!Array.isArray(input.hits)) invalid("response.hits", "response.hits must be an array");
   input.hits.forEach((hit, index) => validateHit(hit, "response.hits[" + index + "]"));
   if (!isRecord(input.diagnostics)) invalid("response.diagnostics", "response.diagnostics must be an object");
+  if (![
+    "MATCH",
+    "NO_MATCH_VERIFIED",
+    "NO_MATCH_INCOMPLETE",
+    "SCOPE_ERROR",
+    "INDEX_ERROR",
+  ].includes(String(input.diagnostics.queryStatus))) {
+    invalid("response.diagnostics.queryStatus", "response.diagnostics.queryStatus is invalid");
+  }
+  if (!Array.isArray(input.diagnostics.nextActions)) {
+    invalid("response.diagnostics.nextActions", "response.diagnostics.nextActions must be an array");
+  }
   if (input.error !== undefined) {
     if (!isRecord(input.error) || typeof input.error.code !== "string" || typeof input.error.message !== "string" || !isRecord(input.error.details) || typeof input.error.retryable !== "boolean") {
       invalid("response.error", "response.error must be a typed error envelope");
@@ -92,6 +104,7 @@ export function normalizeSearchResponse(input: unknown): SearchResponse {
       skippedLanes: [...response.diagnostics.skippedLanes].sort((a, b) => a.lane.localeCompare(b.lane)),
       exclusions: [...response.diagnostics.exclusions].sort((a, b) => a.filePath.localeCompare(b.filePath)),
       warnings: [...response.diagnostics.warnings].sort((a, b) => a.code.localeCompare(b.code)),
+      nextActions: [...response.diagnostics.nextActions].sort((a, b) => a.command.localeCompare(b.command)),
       suggestions: [...response.diagnostics.suggestions].sort((a, b) => a.query.localeCompare(b.query)),
       timingsMs: {},
     } as SearchDiagnostics,

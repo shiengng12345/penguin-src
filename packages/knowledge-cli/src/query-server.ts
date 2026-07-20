@@ -16,19 +16,34 @@ export class QueryExecutionQueue {
   }
 }
 
+/** Resident-only caches. The capability registry is immutable for the process;
+ * prepared statements and FTS rows live until an explicit mutation invalidates
+ * them, so idle runtime does not poll SQLite just to detect drift. */
+export class QueryServerCaches {
+  readonly capabilityRegistry = Object.freeze(CAPABILITIES.map((capability) => ({ ...capability })));
+  private readonly prepared = new Map<string, ReturnType<any>>();
+  private invalidationEpoch = 0;
+  constructor(private readonly store: { db: any; invalidateQueryCaches(): void }) {}
+  prepare(sql: string): any { const cached = this.prepared.get(sql); if (cached) return cached; const statement = this.store.db.prepare(sql); this.prepared.set(sql, statement); return statement; }
+  invalidate(): void { this.invalidationEpoch += 1; this.store.invalidateQueryCaches(); }
+  stats(): { preparedStatements: number; invalidationEpoch: number; fts: { entries: number; hits: number; misses: number } } { return { preparedStatements: this.prepared.size, invalidationEpoch: this.invalidationEpoch, fts: this.store.db && typeof this.store.db === "object" && typeof (this.store as any).queryCacheStats === "function" ? (this.store as any).queryCacheStats() : { entries: 0, hits: 0, misses: 0 } }; }
+}
+
 export async function runQueryServer(deps: CliDeps, input = process.stdin, output = process.stdout): Promise<number> {
   if (!deps.storeExists()) { output.write(encodeFrame({ type: "hello", protocolVersion: 1, capabilityHash: capabilityHash(CAPABILITIES), schemaVersion: SCHEMA_VERSION })); return 3; }
   const store = deps.openStore();
   const cancelled = new Set<string>();
   const active = new Map<string, AbortController>();
   const executionQueue = new QueryExecutionQueue();
+  const caches = new QueryServerCaches(store);
+  caches.prepare("SELECT 1");
   output.write(encodeFrame(queryHello(SCHEMA_VERSION)));
   const rl = createInterface({ input });
   const tasks: Promise<void>[] = [];
   let framingErrors = 0;
   let framingCorruption = false;
   const invoke = async (capabilityId: string, value: unknown, signal?: AbortSignal): Promise<unknown> => {
-    if (capabilityId === "knowledge.capabilities") return { schemaVersion: "1", capabilityHash: capabilityHash(CAPABILITIES), capabilities: CAPABILITIES };
+    if (capabilityId === "knowledge.capabilities") return { schemaVersion: "1", capabilityHash: capabilityHash(CAPABILITIES), capabilities: caches.capabilityRegistry };
     if (capabilityId === "knowledge.index_status") return compactIndexStatus(store);
     if (capabilityId === "knowledge.get_hit") {
       const request = value as { snapshotId: string; filePath: string; repoId?: string; startLine?: number; endLine?: number; startByte?: number; contextLines?: number };
@@ -73,7 +88,7 @@ export async function runQueryServer(deps: CliDeps, input = process.stdin, outpu
     }
     const capability = frame.type === "request" ? CAPABILITIES.find((candidate) => candidate.id === frame.capabilityId) : undefined;
     const task = frame.type === "request"
-      ? executionQueue.run(capability?.mutating ?? true, () => dispatchQueryFrame(frame, invoke, cancelled, active))
+      ? executionQueue.run(capability?.mutating ?? true, async () => { const response = await dispatchQueryFrame(frame, invoke, cancelled, active); if (capability?.mutating) caches.invalidate(); return response; })
       : dispatchQueryFrame(frame, invoke, cancelled, active);
     tasks.push(task.then((response) => { if (response) output.write(encodeFrame(response)); }));
   }

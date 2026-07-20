@@ -78,6 +78,21 @@ test("artifact dry-run reports repository and note conflicts without mutating de
   after.close();
 });
 
+test("artifact dry-run uses normalized remote identity before same-name heuristics", () => {
+  const sourceDir = mkdtempSync(join(tmpdir(), "pk-artifact-remote-source-"));
+  const source = KnowledgeStore.open({ dbPath: join(sourceDir, "knowledge.db"), ledgerPath: join(sourceDir, "ledger.jsonl") });
+  source.registerRepo({ name: "renamed-source", rootPath: "/source", remoteUrl: "https://example.test/team/repo.git" });
+  const artifact = exportKnowledgeArtifact(source);
+  source.close();
+  const destinationDir = mkdtempSync(join(tmpdir(), "pk-artifact-remote-destination-"));
+  const destination = join(destinationDir, "knowledge.db");
+  const existing = KnowledgeStore.open({ dbPath: destination, ledgerPath: join(destinationDir, "ledger.jsonl") });
+  existing.registerRepo({ name: "renamed-destination", rootPath: "/destination", remoteUrl: "https://example.test/team/repo" });
+  existing.close();
+  const report = inspectKnowledgeArtifact(artifact.bytes, destination);
+  assert.equal(report.conflictingRepositories[0].reason, "remote");
+});
+
 test("artifact tamper and unsafe entry are rejected", () => {
   const dir = mkdtempSync(join(tmpdir(), "pk-artifact-tamper-"));
   const store = KnowledgeStore.open({ dbPath: join(dir, "knowledge.db"), ledgerPath: join(dir, "ledger.jsonl") });
@@ -87,6 +102,16 @@ test("artifact tamper and unsafe entry are rejected", () => {
   const unsafe = zipSync({ "../escape": strToU8("no"), "manifest.json": strToU8("{}"), "checksums.sha256": strToU8("") });
   assert.throws(() => importKnowledgeArtifact(unsafe), /ARTIFACT_PATH_UNSAFE/);
   store.close();
+});
+
+test("artifact rejects Unix symlink metadata even when the entry name is safe", () => {
+  const zipped = Buffer.from(zipSync({ "safe/link": strToU8("target"), "manifest.json": strToU8("{}"), "checksums.sha256": strToU8("") }));
+  const signature = Buffer.from([0x50, 0x4b, 0x01, 0x02]);
+  for (let offset = zipped.lastIndexOf(signature); offset >= 0; offset = zipped.lastIndexOf(signature, offset - 1)) {
+    zipped.writeUInt16LE(0x0314, offset + 4);
+    zipped.writeUInt32LE(((0xa000 | 0o777) << 16) >>> 0, offset + 38);
+  }
+  assert.throws(() => importKnowledgeArtifact(zipped), /ARTIFACT_SYMLINK_UNSAFE/);
 });
 
 test("artifact import rejects incompatible schema or contract before opening the database", () => {
@@ -156,9 +181,18 @@ test("artifact delta export reconstructs the target database from a verified bas
   store.registerRepo({ name: "delta-target", rootPath: "/delta-target" });
   const targetDatabase = importKnowledgeArtifact(exportKnowledgeArtifact(store).bytes).database;
   const exported = exportKnowledgeArtifact(store, { baseDatabase, signingKey: "delta-signing-secret" });
-  assert.equal(exported.manifest.delta.algorithm, "fixed-chunk-v1");
+  assert.equal(exported.manifest.delta.algorithm, "logical-row-v1");
   const imported = importKnowledgeArtifact(exported.bytes, { baseDatabase, signingKey: "delta-signing-secret" });
-  assert.deepEqual(Buffer.from(imported.database), Buffer.from(targetDatabase));
+  const normalize = (bytes) => {
+    const path = join(dir, `normalize-${Math.random().toString(16).slice(2)}.sqlite`);
+    writeFileSync(path, bytes);
+    const normalized = KnowledgeStore.open({ dbPath: path, ledgerPath: `${path}.ledger.jsonl` });
+    const tables = normalized.db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND sql NOT LIKE 'CREATE VIRTUAL TABLE%'").all();
+    const rows = tables.map(({ name }) => [name, normalized.db.prepare(`SELECT * FROM \"${name.replaceAll('"', '""')}\"`).all()]);
+    normalized.close();
+    return JSON.stringify(rows);
+  };
+  assert.equal(normalize(imported.database), normalize(targetDatabase));
   assert.throws(() => importKnowledgeArtifact(exported.bytes, { baseDatabase: new Uint8Array([1, 2, 3]) }), /BASE_MISMATCH|SIGNATURE_KEY_REQUIRED/);
   store.close();
 });

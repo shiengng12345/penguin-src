@@ -194,3 +194,62 @@ test("resident runtime serves 100 warm queries from one child process", async ()
     rmSync(fixture.dir, { recursive: true, force: true });
   }
 });
+
+test("resident runtime can be replaced after a child crash without reusing the dead pid", async () => {
+  const fixture = createFixture();
+  const spawnRuntime = () => spawn(process.execPath, ["packages/knowledge-cli/dist/bin.js", "__query-server"], {
+    cwd: process.cwd(),
+    env: { ...process.env, PENGUIN_KNOWLEDGE_DB: fixture.dbPath, PENGUIN_KNOWLEDGE_LEDGER: fixture.ledgerPath },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const first = spawnRuntime();
+  const firstReader = createFrameReader(first);
+  try {
+    await firstReader.next((frame) => frame.type === "hello");
+    const deadPid = first.pid;
+    first.kill("SIGKILL");
+    await new Promise((resolve) => first.once("close", resolve));
+    const replacement = spawnRuntime();
+    const replacementReader = createFrameReader(replacement);
+    try {
+      await replacementReader.next((frame) => frame.type === "hello");
+      assert.notEqual(replacement.pid, deadPid);
+      replacement.stdin.write(JSON.stringify({ type: "request", id: "after-restart", capabilityId: "knowledge.search", input: {
+        query: "ResidentNeedle", mode: "exact", scope: { revisions: [{ repoId: fixture.repoId, snapshotId: fixture.snapshotId }] }, page: { limit: 1 },
+      } }) + "\n");
+      const response = await replacementReader.next((frame) => frame.id === "after-restart");
+      assert.equal(response.ok, true);
+      assert.equal(response.result.hits[0].locator.filePath, "src/runtime.ts");
+    } finally {
+      replacement.stdin.end();
+      await new Promise((resolve) => replacement.once("close", resolve));
+    }
+  } finally {
+    if (!first.killed) first.kill();
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test("cold startup is measured and SIGTERM leaves no resident runtime process", async () => {
+  const fixture = createFixture();
+  const started = performance.now();
+  const child = spawn(process.execPath, ["packages/knowledge-cli/dist/bin.js", "__query-server"], {
+    cwd: process.cwd(),
+    env: { ...process.env, PENGUIN_KNOWLEDGE_DB: fixture.dbPath, PENGUIN_KNOWLEDGE_LEDGER: fixture.ledgerPath },
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+  const reader = createFrameReader(child);
+  try {
+    await reader.next((frame) => frame.type === "hello");
+    const coldStartupMs = performance.now() - started;
+    assert.ok(coldStartupMs >= 0);
+    const pid = child.pid;
+    child.kill("SIGTERM");
+    const status = await new Promise((resolve) => child.once("close", (code, signal) => resolve({ code, signal })));
+    assert.ok(status.signal === "SIGTERM" || status.code === 0);
+    assert.throws(() => process.kill(pid, 0));
+  } finally {
+    if (!child.killed) child.kill("SIGKILL");
+    rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});

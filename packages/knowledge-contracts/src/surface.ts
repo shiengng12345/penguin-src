@@ -5,6 +5,7 @@ import {
   type Surface,
 } from "./capabilities.js";
 import { validateSearchResponse } from "./response.js";
+import { canonicalInputSchema, type KnowledgeInputSchema } from "./input-schemas.js";
 
 export type RegistrationStatus = "implemented" | "not_implemented";
 
@@ -84,6 +85,9 @@ export const CAPABILITY_ALIASES = Object.freeze({
   set_evidence_status: "knowledge.evidence.status.set",
   repair_evidence: "knowledge.evidence.repair",
   api_doc_generate: "knowledge.api_doc.generate",
+  api_doc_list: "knowledge.api_doc.list",
+  api_doc_show: "knowledge.api_doc.show",
+  api_doc_diff: "knowledge.api_doc.diff",
   api_doc_bind: "knowledge.api_doc.bind",
   api_doc_unbind: "knowledge.api_doc.unbind",
 } as const);
@@ -102,6 +106,7 @@ export interface SurfaceRegistration {
   status: RegistrationStatus;
   invoke(input: unknown, context: SurfaceContext): Promise<unknown>;
   inputSchemaId: string;
+  inputSchema: KnowledgeInputSchema;
   outputSchemaId: string;
   validateOutput(output: unknown): unknown;
 }
@@ -153,6 +158,7 @@ function registration(capability: CapabilityDefinition, implemented: boolean): S
     capabilityId: capability.id,
     status: implemented ? "implemented" : "not_implemented",
     inputSchemaId: capability.inputSchemaId,
+    inputSchema: canonicalInputSchema(capability.id),
     outputSchemaId: capability.outputSchemaId,
     validateOutput: (output) => validateCapabilityOutput(capability.id, output),
     async invoke() {

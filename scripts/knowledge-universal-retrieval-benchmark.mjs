@@ -17,7 +17,12 @@ const snapshot = new GitTopologyStore(store).createBuildingSnapshot({ snapshotKe
 const source = new SourceStore(store);
 const cow = new SourceSnapshotStore(store);
 const indexStarted = performance.now();
-const admitted = discoverRepoCoverage(root).files.filter((file) => file.coverageStatus === "admitted" && !file.isSymlink);
+// Release/evaluation JSON is evidence about the corpus, not product source.
+// Excluding it prevents each RC report from recursively inflating the next
+// real-workspace benchmark while preserving source, docs, and the JSONL
+// question corpus itself.
+const isEvidenceArtifact = (filePath) => /^docs\/knowledge-v2\/(?:rc.*|release-gate.*|competitor-differential.*|real-question-penguin-eval)\.json$/i.test(filePath);
+const admitted = discoverRepoCoverage(root).files.filter((file) => file.coverageStatus === "admitted" && !file.isSymlink && !isEvidenceArtifact(file.relativePath));
 const manifest = [];
 for (const file of admitted) {
   const raw = readFileSync(file.absolutePath);
@@ -99,7 +104,7 @@ for (const needle of needles) {
   const expectedKeys = new Set(expectedOccurrences.map((occurrence) => `${occurrence.filePath}:${occurrence.line}:${occurrence.byte}`));
   unexpected += response.hits.filter((hit) => hit.evidence.some((evidence) => evidence.status === "verified") && !expectedKeys.has(`${hit.locator.filePath}:${hit.locator.startLine ?? 0}:${hit.locator.startByte ?? 0}`) && needle.mode === "exact").length;
 }
-const discoveryAgain = discoverRepoCoverage(root).files;
+const discoveryAgain = discoverRepoCoverage(root).files.filter((file) => !isEvidenceArtifact(file.relativePath));
 const percentile = (values, p) => { if (!values.length) return 0; const sorted = [...values].sort((a, b) => a - b); return sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * p) - 1)]; };
 const timingReport = {
   exactMs: { p50: percentile(exactDurations, 0.5), p95: percentile(exactDurations, 0.95), p99: percentile(exactDurations, 0.99) },

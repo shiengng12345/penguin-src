@@ -69,8 +69,8 @@ export { searchKnowledge, type SearchContext } from "./search-engine.js";
 export { searchKnowledgeAsync } from "./search-engine.js";
 export { VectorStore, type VectorHit, type VectorDoctorResult } from "./vector-store.js";
 export { chunkSemanticText, persistSemanticChunks, type SemanticChunk, type PersistSemanticChunksInput } from "./semantic-chunks.js";
-export { traceDataFlow, traceDataFlowPath, type DataFlowRequest, type DataFlowResult, type DataFlowStep, type DataFlowPath, type DataFlowPathRequest, type GraphEndpoint } from "./data-flow.js";
-export { ExternalSourceStore, fingerprintMarkdownDirectory, syncMarkdownDirectory, syncRemoteSource, validateExternalLocation, type ExternalKnowledgeSource, type ExternalKnowledgeSourceType, type MarkdownDirectorySyncResult, type RemoteSyncResult } from "./external-source.js";
+export { traceDataFlow, traceDataFlowPath, traceVerifiedInterproceduralFlow, type DataFlowRequest, type DataFlowResult, type DataFlowStep, type DataFlowPath, type DataFlowPathRequest, type GraphEndpoint, type VerifiedCallEdge, type InterproceduralDataFlowRequest } from "./data-flow.js";
+export { ExternalSourceStore, fingerprintMarkdownDirectory, syncMarkdownDirectory, syncRemoteSource, syncPostgresSchema, validateExternalLocation, type ExternalKnowledgeSource, type ExternalKnowledgeSourceType, type MarkdownDirectorySyncResult, type RemoteSyncResult, type PostgresSchemaClient, type PostgresSchemaSyncResult } from "./external-source.js";
 export { planSearch, type SearchPlan } from "./search-planner.js";
 export { rankSearchHits, LANE_WEIGHTS, semanticLaneScore } from "./search-ranking.js";
 export { HmacSearchCursorCodec } from "./search-cursor.js";
@@ -83,24 +83,29 @@ export { buildDomainClaims, buildDomainFlow, type DomainClaimCandidate, type Dom
 export { EvidenceStore, type EvidenceRecord, type EvidenceStatus } from "./evidence-state.js";
 export { AuditStore } from "./audit.js";
 export { sanitizeUntrustedText, isPromptLikeContent, type SafeText } from "./content-safety.js";
+export { parseWorkspaceRoots, canonicalExistingPath, canonicalPathForCheck, isPathWithinWorkspace, assertWorkspacePath } from "./workspace-scope.js";
 export { exportKnowledgeArtifact, previewKnowledgeArtifact, type ArtifactExportOptions, type ArtifactPreview } from "./artifact-export.js";
 export { importKnowledgeArtifact, inspectKnowledgeArtifact, restoreKnowledgeArtifact, type ArtifactImportResult, type ArtifactConflictReport } from "./artifact-import.js";
 export type { KnowledgeArtifactManifest } from "./artifact-manifest.js";
+export { buildLogicalDelta, applyLogicalDelta, type LogicalDelta, type LogicalDeltaOperation } from "./artifact-delta.js";
 export { graphQuery, type GraphQueryRequest, type GraphQueryResult } from "./graph-query.js";
+export { classifyEdgeTrust, type EdgeProofKind, type EdgeProofInput, type EdgeTrust } from "./edge-proof.js";
 export { compileKnowledgeDsl, type CompiledKnowledgeDsl, type KnowledgeDslExpression, type KnowledgeDslPredicate } from "./knowledge-dsl.js";
 export { filterHitsByPropertyPredicates, filterHitsByMarkdownPredicates } from "./property-search.js";
 export { UnavailableEmbeddingProvider, inspectLocalModelDirectory, createRemoteEmbeddingProvider, type EmbeddingProvider, type LocalModelManifest, type LocalModelDescriptor, type RemoteEmbeddingProviderOptions } from "./embedding-provider.js";
 export { semanticSearch, type SemanticDocument, type SemanticHit } from "./semantic-search.js";
 export { recordSearchFeedback, listSearchFeedback, deleteSearchFeedback, exportSearchFeedback, type FeedbackVerdict } from "./search-feedback.js";
-export { SavedQueryStore, type SavedQuery } from "./saved-query.js";
+export { SavedQueryStore, writeSavedQueryMarkdown, type SavedQuery } from "./saved-query.js";
 export { reflectSearchFeedback, listReflectionSuggestions, reviewReflectionSuggestion, type ReflectionSuggestion } from "./reflection.js";
 export { ResolutionStore, type ResolvedEdgeFact, type ResolutionSetRecord } from "./resolution-store.js";
+export { ResolutionProviderChain, type ResolutionProvider, type ResolutionProviderKind, type ResolutionRequest, type ResolutionResult, type ResolutionTarget } from "./resolution-provider.js";
+export { applyRuntimeDispatchObservation, resolveDispatch, resolveFrameworkDispatch, type DispatchImplementation, type DispatchRequest, type DispatchResolution, type DispatchTarget, type FrameworkDispatchAdapter, type RuntimeDispatchObservation } from "./dispatch-resolution.js";
 export { DEFAULT_REVISION_RETENTION, planRevisionCollection, applyRevisionCollection, type RevisionRetentionPolicy, type RevisionCollectionPlan, type RevisionCollectionApplyResult } from "./revision-retention.js";
 export { openRevisionView, type RevisionView, type RevisionFileRow, type RevisionSymbolRow, type RevisionEdgeFilter, type RevisionEdgeRow } from "./revision-view.js";
 export { CodeVersionResolver, type CodeVersionRequest, type CodeVersionResolution, type CodeVersionResolverDeps } from "./code-version-resolver.js";
 export { resolveBranchBase, type BranchBaseInput, type BranchBaseReason, type BranchBaseResolution } from "./branch-base.js";
 export {
-  search,
+  searchLegacyRows,
   getNodeDetail,
   exploreGraph,
   compareBranches,
@@ -158,7 +163,9 @@ export {
   type CompactIndexStatus,
   type CompactRepoStatus,
   type SearchResultRow,
+  type LegacySearchFilters,
   type IndexedFileRow,
   type FileSymbolRow,
   type GraphView,
 } from "./query.js";
+export { legacySearch as search, type LegacySearchResponse } from "./legacy-search.js";

@@ -48,12 +48,17 @@ import {
   endpointSamples,
   resolveEndpointId,
   SavedQueryStore,
+  writeSavedQueryMarkdown,
   reflectSearchFeedback,
   packageDependencies,
   dependencyPath,
   resolveRevisionContext,
   type RevisionContext,
   type GraphMode,
+  parseWorkspaceRoots,
+  assertWorkspacePath,
+  syncPostgresSchema,
+  type PostgresSchemaClient,
 } from "@penguin/knowledge-core";
 import { CAPABILITIES, capabilityHash, listMcpRegistrations, CAPABILITY_ALIASES } from "@penguin/knowledge-contracts";
 import { analyzeRepository } from "./repository-analysis.js";
@@ -68,6 +73,11 @@ import { ApiDocPreviewStore, buildApiDocumentation, collectDocumentationFacts, r
 import { createKnowledgeApiDocAdapter } from "../../knowledge-cli/src/api-doc-knowledge-adapter.js";
 
 const execFileAsync = promisify(execFile);
+
+export interface KnowledgeToolOptions {
+  /** Host-owned adapter; credentials are resolved outside the MCP process. */
+  postgresSchemaClient?: PostgresSchemaClient;
+}
 
 async function invokeLocalCli(args: string[]): Promise<Record<string, unknown>> {
   const configured = process.env.PENGUIN_KNOWLEDGE_CLI;
@@ -107,6 +117,8 @@ function investigationStateStore(): FileInvestigationStateStore {
 }
 
 const TOOL_CAPABILITY_ALIASES: Record<string, string> = { ...CAPABILITY_ALIASES };
+// Capture workspace roots once at server startup; requests cannot widen them.
+const MCP_WORKSPACE_ROOTS = parseWorkspaceRoots(process.env.PENGUIN_MCP_WORKSPACE_ROOTS, process.cwd());
 
 /** Map generated canonical tool names to the legacy handler names that already
  * implement the same core operation.  The public MCP name remains canonical;
@@ -252,7 +264,7 @@ function knowledgePreflight(store: KnowledgeStore | null): KnowledgeEvidencePref
   };
 }
 
-export async function runKnowledgeTool(name: string, a: Record<string, unknown>): Promise<unknown> {
+export async function runKnowledgeTool(name: string, a: Record<string, unknown>, options: KnowledgeToolOptions = {}): Promise<unknown> {
   const mutation = mutationGuard(name, a);
   if (mutation && "error" in mutation) return mutation;
   const store = openKnowledgeStore();
@@ -272,6 +284,8 @@ export async function runKnowledgeTool(name: string, a: Record<string, unknown>)
     if (routedName === "knowledge_watch") {
       const rootPath = String(a.root_path ?? a.path ?? "").trim();
       if (!rootPath) return { error: "ROOT_PATH_REQUIRED" };
+      try { assertWorkspacePath(rootPath, MCP_WORKSPACE_ROOTS, "MCP watch root"); }
+      catch (error) { return { error: (error as Error).message }; }
       return invokeLocalCli(["watch", rootPath]);
     }
     if (routedName === "knowledge_capabilities") {
@@ -361,6 +375,8 @@ export async function runKnowledgeTool(name: string, a: Record<string, unknown>)
       }
       const rootPath = String(a.root_path ?? a.path ?? "").trim();
       if (!rootPath) return { error: "ROOT_PATH_REQUIRED" };
+      try { assertWorkspacePath(rootPath, MCP_WORKSPACE_ROOTS, "MCP index root"); }
+      catch (error) { return { error: (error as Error).message }; }
       return indexer.indexRepo({ store, rootPath, mode: routedName === "knowledge_rebuild" ? "rebuild" : "incremental" });
     }
     if (routedName === "knowledge_snapshot_materialize") {
@@ -375,7 +391,7 @@ export async function runKnowledgeTool(name: string, a: Record<string, unknown>)
       const indexer = await import("@penguin/knowledge-indexer");
       return indexer.indexRevision({ store, rootPath: repo.rootPath, repoId, revision: branch ? { branch } : { commitSha: commitSha! }, parserVersion: "tree-sitter-wasm-v5-single-pass-log-sites", resolverVersion: "resolver-v1", coordinator: new indexer.RevisionIndexCoordinator() });
     }
-    return handleKnowledgeTool(routedName, a, store);
+    return handleKnowledgeTool(routedName, a, store, options);
   } finally {
     if (store) {
       try {
@@ -433,6 +449,7 @@ export function handleKnowledgeTool(
   name: string,
   a: Record<string, unknown>,
   store: KnowledgeStore | null,
+  options: KnowledgeToolOptions = {},
 ): unknown {
   if (name === "api_doc_list" || name === "api_doc_show" || name === "api_doc_diff") {
     const root = process.env.PENGUIN_API_DOC_PREVIEWS ?? join(homedir(), ".penguin", "knowledge", "api-docs", "previews");
@@ -513,6 +530,9 @@ export function handleKnowledgeTool(
       if (source.type === "url" || source.type === "openapi") {
         return syncRemoteSource(store, source.id).catch((error) => ({ error: String((error as Error).message ?? error) }));
       }
+      if (source.type === "postgres_schema") {
+        return syncPostgresSchema(store, source.id, options.postgresSchemaClient).catch((error) => ({ error: String((error as Error).message ?? error), sourceType: source.type, credentialEntryId: source.config.credentialEntryId ?? null }));
+      }
       if (source.type !== "markdown_directory") return { error: "EXTERNAL_SYNC_REQUIRES_EXPLICIT_EXECUTION", sourceType: source.type, note: "network fetching is never implicit; provide a bounded sync job" };
       try { return syncMarkdownDirectory(store, source.id); }
       catch (error) { return { error: String((error as Error).message ?? error) }; }
@@ -558,26 +578,44 @@ export function handleKnowledgeTool(
         return { error: "knowledge_search requires a non-empty query" };
       }
       {
-        const revision = resolveMcpRevision(store, a);
-        if (revision.error) return revision.error;
-      const graphResults = search(store, String(a.query ?? ""), {
-          type: a.type as string[] | undefined,
-          repo: a.repo as string | undefined,
-          includeSensitive: a.include_sensitive !== false,
-          limit: a.limit as number | undefined,
-          revision: revision.context,
-        });
+        const requestedRepo = typeof a.repo === "string" ? a.repo : undefined;
+        const resolvedRepoIds = requestedRepo ? store.resolveRepoIds(requestedRepo) : [];
+        if (requestedRepo && resolvedRepoIds.length === 0) return { error: "REPOSITORY_NOT_FOUND", repo: requestedRepo };
+        if (requestedRepo && resolvedRepoIds.length > 1) return { error: "REPOSITORY_AMBIGUOUS", repo: requestedRepo, candidates: resolvedRepoIds };
+        const resolvedRepoId = resolvedRepoIds[0];
+      const resolvedRepoName = resolvedRepoId
+          ? (store.db.prepare("SELECT name FROM repos WHERE id=?").get(resolvedRepoId) as { name: string } | undefined)?.name
+          : undefined;
+      const revision = resolveMcpRevision(store, resolvedRepoId ? { ...a, repo: resolvedRepoId } : a);
+      if (revision.error) return revision.error;
+      const queryText = String(a.query ?? "");
+      const camelCaseIdentifier = /^[A-Za-z_$][\w$]*$/u.test(queryText) && /[a-z][A-Z]/u.test(queryText);
+      const defaultIdentifier = camelCaseIdentifier && a.mode === undefined;
+      const useV2 = a.mode !== undefined || a.contract_version === "2" || camelCaseIdentifier;
       const sourceSnapshotId = revision.context && !revision.context.snapshotId.startsWith("legacy:")
           ? revision.context.snapshotId
           : (revision.context?.branchId
           ? (store.db.prepare("SELECT current_snapshot_id FROM branches WHERE id=?").get(revision.context.branchId) as { current_snapshot_id: string | null } | undefined)?.current_snapshot_id ?? null
-          : (store.db.prepare("SELECT current_snapshot_id FROM branches WHERE status='live' AND current_snapshot_id IS NOT NULL ORDER BY default_branch DESC, name LIMIT 1").get() as { current_snapshot_id: string | null } | undefined)?.current_snapshot_id ?? null);
-      const repoId = revision.context?.repoId ?? (typeof a.repo === "string" ? store.resolveRepoIds(a.repo)[0] : undefined);
+          : resolvedRepoId
+            ? (store.db.prepare("SELECT current_snapshot_id FROM branches WHERE repo_id=? AND status='live' AND current_snapshot_id IS NOT NULL ORDER BY default_branch DESC, name LIMIT 1").get(resolvedRepoId) as { current_snapshot_id: string | null } | undefined)?.current_snapshot_id ?? null
+            : null);
+      const repoId = revision.context?.repoId ?? resolvedRepoId;
       const mode = ["exact", "phrase", "substring", "auto", "path", "regex"].includes(String(a.mode ?? "auto")) ? String(a.mode ?? "auto") as "exact" | "phrase" | "substring" | "auto" | "path" | "regex" : "auto";
-      if (a.mode !== undefined || a.contract_version === "2") {
-        const v2 = searchKnowledge({ query: String(a.query ?? ""), mode, scope: sourceSnapshotId ? { revisions: [{ ...(repoId ? { repoId } : {}), snapshotId: sourceSnapshotId }] } : undefined, options: { caseSensitive: a.case_sensitive !== false, wholeWord: a.whole_word === true, includeExcludedMetadata: a.include_excluded_metadata === true, compact: a.compact !== false, explain: a.explain === true }, page: { limit: Number.isInteger(a.limit as number) ? a.limit as number : 20, ...(typeof a.cursor === "string" ? { cursor: a.cursor } : {}) } }, { store, scopes: sourceSnapshotId ? [{ snapshotId: sourceSnapshotId, repoId }] : undefined });
+      if (useV2) {
+        const v2 = searchKnowledge({ query: queryText, mode: defaultIdentifier ? "exact" : mode, scope: sourceSnapshotId ? { revisions: [{ ...(repoId ? { repoId } : {}), snapshotId: sourceSnapshotId }] } : undefined, options: { caseSensitive: defaultIdentifier ? false : a.case_sensitive !== false, wholeWord: a.whole_word === true, includeExcludedMetadata: a.include_excluded_metadata === true, compact: a.compact !== false, explain: a.explain === true }, page: { limit: Number.isInteger(a.limit as number) ? a.limit as number : 20, ...(typeof a.cursor === "string" ? { cursor: a.cursor } : {}) } }, { store, scopes: sourceSnapshotId ? [{ snapshotId: sourceSnapshotId, repoId }] : undefined });
         return v2;
       }
+      // Preserve the legacy response shape, but do not pay the global graph
+      // search cost for requests that can be answered by the source lane.
+      // The old eager call made a plain camelCase lookup fan out through every
+      // repository before the legacy response was assembled.
+      const graphResults = search(store, queryText, {
+        type: a.type as string[] | undefined,
+        repo: resolvedRepoName ?? requestedRepo,
+        includeSensitive: a.include_sensitive !== false,
+        limit: a.limit as number | undefined,
+        revision: revision.context,
+      });
       const regexResult = sourceSnapshotId && mode === "regex" ? searchRegex(store, { snapshotId: sourceSnapshotId, repoId }, String(a.query ?? ""), { flags: String(a.regex_flags ?? "g"), maxScannedBytes: Number.isFinite(a.max_scanned_bytes as number) ? a.max_scanned_bytes as number : undefined, allowPartial: a.allow_partial === true }) : null;
       if (regexResult?.status === "error") return regexResult;
       const sourceResults = sourceSnapshotId && mode !== "path" && mode !== "regex" ? searchSource(store, { snapshotId: sourceSnapshotId, repoId }, { query: String(a.query ?? ""), mode, options: { caseSensitive: a.case_sensitive !== false, wholeWord: a.whole_word === true, includeGenerated: true, includeVendor: true, includeExcludedMetadata: a.include_excluded_metadata === true, semantic: "off", compact: false, explain: false } }).map((hit) => ({ ...hit, lane: "source" })) : [];
@@ -795,7 +833,9 @@ export function handleKnowledgeTool(
       return searchKnowledge(saved.request as never, { store });
     }
     case "knowledge_saved_query_write":
-      return new SavedQueryStore(store).write({ name: String(a.name ?? ""), request: (a.request ?? {}) as Record<string, unknown>, scope: (a.scope ?? {}) as Record<string, unknown> });
+      const saved = new SavedQueryStore(store).write({ name: String(a.name ?? ""), request: (a.request ?? {}) as Record<string, unknown>, scope: (a.scope ?? {}) as Record<string, unknown> });
+      const markdownPath = writeSavedQueryMarkdown(evidenceNotesDir(), saved);
+      return { ...saved, markdownPath };
     case "knowledge_note_backlinks": {
       const target = String(a.node ?? a.target ?? a.id ?? "");
       return exploreGraph(store, "backlinks", target, { limit: Number(a.limit ?? 100) });

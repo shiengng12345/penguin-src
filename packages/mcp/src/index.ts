@@ -11,6 +11,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 // deps). The handler is dynamically imported on first knowledge-tool call so
 // the release-bundled server initializes without those deps present.
 import { KNOWLEDGE_TOOL_DEFS, LOG_INVESTIGATION_TOOL_DEFS, isKnowledgeTool } from "./knowledge-tool-defs.js";
+export { KNOWLEDGE_TOOL_DEFS } from "./knowledge-tool-defs.js";
 import { CAPABILITIES, capabilityHash } from "@penguin/knowledge-contracts";
 import {
   CallToolRequestSchema,

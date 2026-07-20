@@ -1,0 +1,30 @@
+{
+  "passed": false,
+  "evidence": [],
+  "results": [
+    {
+      "name": "typecheck",
+      "command": "pnpm run typecheck",
+      "exitCode": 0,
+      "outputTail": "> @penguin/knowledge-indexer@0.0.1 build /Users/shieng/Desktop/Pengvi/packages/knowledge-indexer\n> tsc -p tsconfig.json\n\n\n> @penguin/api-doc-generator@0.0.1 build /Users/shieng/Desktop/Pengvi/packages/api-doc-generator\n> tsc -p tsconfig.json\n\n\n> @penguin/knowledge-cli@0.0.1 build /Users/shieng/Desktop/Pengvi/packages/knowledge-cli\n> tsc -p tsconfig.json\n\n\n> @penguin/mcp@0.0.1 build /Users/shieng/Desktop/Pengvi/packages/mcp\n> esbuild src/index.ts --bundle --platform=node --target=node18 --format=esm --outfile=dist/index.js --sourcemap --external:better-sqlite3 --banner:js='import { createRequire as __pgvCreateRequire } from \"node:module\"; import { fileURLToPath as __pgvFileURLToPath } from \"node:url\"; import { dirname as __pgvDirname } from \"node:path\"; const require = __pgvCreateRequire(import.meta.url); const __filename = __pgvFileURLToPath(import.meta.url); const __dirname = __pgvDirname(__filename);'\n\n\n  dist/index.js      2.2mb ⚠️\n  dist/index.js.map  4.3mb\n\n⚡ Done in 1745ms"
+    },
+    {
+      "name": "surface-parity",
+      "command": "/Users/shieng/.nvm/versions/node/v18.20.8/bin/node scripts/knowledge-surface-parity.mjs --gate",
+      "exitCode": 0,
+      "outputTail": "{\n  \"capabilityCount\": 97,\n  \"cliRegistrationCount\": 97,\n  \"mcpToolCount\": 117,\n  \"missingCli\": [],\n  \"missingMcp\": [],\n  \"cliUnimplemented\": [],\n  \"mcpUnimplemented\": [],\n  \"mismatchCount\": 0\n}"
+    },
+    {
+      "name": "package-smoke",
+      "command": "/Users/shieng/.nvm/versions/node/v18.20.8/bin/node scripts/knowledge-package-install-smoke.mjs",
+      "exitCode": 0,
+      "outputTail": "{\n  \"results\": [\n    {\n      \"path\": \"packages/knowledge-cli/dist/bin.js\",\n      \"exists\": true\n    },\n    {\n      \"path\": \"packages/mcp/dist/index.js\",\n      \"exists\": true\n    },\n    {\n      \"path\": \"packages/knowledge-core/dist/index.js\",\n      \"exists\": true\n    }\n  ],\n  \"parityExitCode\": 0,\n  \"parity\": \"{\\n  \\\"capabilityCount\\\": 97,\\n  \\\"cliRegistrationCount\\\": 97,\\n  \\\"mcpToolCount\\\": 117,\\n  \\\"missingCli\\\": [],\\n  \\\"missingMcp\\\": [],\\n  \\\"cliUnimplemented\\\": [],\\n  \\\"mcpUnimplemented\\\": [],\\n  \\\"mismatchCount\\\": 0\\n}\"\n}"
+    },
+    {
+      "name": "universal-benchmark",
+      "command": "/Users/shieng/.nvm/versions/node/v18.20.8/bin/node scripts/knowledge-universal-retrieval-benchmark.mjs --root=/Users/shieng/Desktop/Pengvi --limit=10000 --gate --performance-gate",
+      "exitCode": 1,
+      "outputTail": ""
+    }
+  ]
+}

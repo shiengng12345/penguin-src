@@ -6,6 +6,7 @@ type Database = DatabaseCtor.Database;
 import type { LedgerEvent, LedgerEventInput } from "./ledger.js";
 import { materialize, LedgerGapError } from "./materializer.js";
 import { openDatabase } from "./schema.js";
+import { canonicalPathForCheck } from "./workspace-scope.js";
 
 function cjkBigrams(value: string): string[] {
   const chars = [...value].filter((char) => /[\p{Script=Han}]/u.test(char));
@@ -174,6 +175,9 @@ export interface SymbolVersionRow {
 // §2.2 铁律在代码层的收口点：不可再生知识只有 recordKnowledge() 一个入口，
 // 本类不提供任何绕过账本写 events/node_aliases/非 parser 边的方法。
 export class KnowledgeStore {
+  private readonly ftsCache = new Map<string, SearchHit[]>();
+  private ftsCacheHits = 0;
+  private ftsCacheMisses = 0;
   private constructor(
     readonly db: Database,
     private readonly ledger: Ledger,
@@ -190,6 +194,10 @@ export class KnowledgeStore {
   close(): void {
     this.db.close();
   }
+
+  /** Invalidate resident query caches after an index/mutation transaction. */
+  invalidateQueryCaches(): void { this.ftsCache.clear(); }
+  queryCacheStats(): { entries: number; hits: number; misses: number } { return { entries: this.ftsCache.size, hits: this.ftsCacheHits, misses: this.ftsCacheMisses }; }
 
   // —— 不可再生知识唯一写入口：先账本，后物化 ——
   recordKnowledge(input: LedgerEventInput): LedgerEvent {
@@ -301,7 +309,12 @@ export class KnowledgeStore {
     const byName = this.db
       .prepare("SELECT id FROM repos WHERE name = ? COLLATE NOCASE")
       .all(idOrName) as { id: string }[];
-    return byName.map((r) => r.id);
+    if (byName.length > 0) return byName.map((r) => r.id);
+    const canonicalRoot = canonicalPathForCheck(idOrName);
+    const byPath = this.db
+      .prepare("SELECT id FROM repos WHERE root_path = ?")
+      .get(canonicalRoot) as { id: string } | undefined;
+    return byPath ? [byPath.id] : [];
   }
 
   registerBranch(p: {
@@ -1094,6 +1107,10 @@ export class KnowledgeStore {
     opts?: { types?: string[]; includeSensitive?: boolean; limit?: number },
   ): SearchHit[] {
     const limit = opts?.limit ?? 50;
+    const cacheKey = JSON.stringify({ query, types: opts?.types ?? null, includeSensitive: opts?.includeSensitive === true, limit });
+    const cached = this.ftsCache.get(cacheKey);
+    if (cached) { this.ftsCacheHits += 1; return cached.map((hit) => ({ ...hit })); }
+    this.ftsCacheMisses += 1;
     // Split into individual terms and AND them together (FTS5's implicit
     // operator between space-separated quoted phrases) instead of wrapping
     // the WHOLE query as one quoted PHRASE. A phrase requires every word
@@ -1155,7 +1172,9 @@ export class KnowledgeStore {
     if (opts?.types?.length) {
       hits = hits.filter((h) => opts.types!.includes(h.nodeType));
     }
-    return hits.slice(0, limit);
+    const result = hits.slice(0, limit);
+    this.ftsCache.set(cacheKey, result.map((hit) => ({ ...hit })));
+    return result;
   }
 
   resolveIdentity(

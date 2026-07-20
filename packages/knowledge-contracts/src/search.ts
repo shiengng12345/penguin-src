@@ -135,6 +135,7 @@ export interface SearchHit {
 }
 
 export interface SearchDiagnostics {
+  queryStatus: "MATCH" | "NO_MATCH_VERIFIED" | "NO_MATCH_INCOMPLETE" | "SCOPE_ERROR" | "INDEX_ERROR";
   requestId: string;
   contractVersion: string;
   capabilityHash: string;
@@ -157,6 +158,7 @@ export interface SearchDiagnostics {
   };
   exclusions: Array<{ filePath: string; code: string; reason: string }>;
   warnings: Array<{ code: string; message: string }>;
+  nextActions: Array<{ command: string; reason: string }>;
   suggestions: Array<{ query: string; mode: SearchMode; reason: string }>;
   timingsMs: Record<string, number>;
   truncated: boolean;

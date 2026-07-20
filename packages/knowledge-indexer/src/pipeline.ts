@@ -4,6 +4,7 @@ import { basename, dirname, relative, resolve as pathResolve } from "node:path";
 import { SCHEMA_VERSION, GitTopologyStore, FileFactStore, SourceStore, SourceSnapshotStore, resolveBranchBase, type KnowledgeStore, type ParsedFileFact, type ParsedEdge, type SnapshotOverlayEntry, type SourceSnapshotOverlayEntry } from "@penguin/knowledge-core";
 import { extractSymbols, type ExtractedSymbol } from "./extract.js";
 import { extractFieldAccesses } from "./field-access.js";
+import { extractIacFacts } from "./iac.js";
 import { grpcEndpointKey } from "./grpc-client.js";
 import { allForwardingMethods, extractFunctionNameCalls } from "./frontend-grpc-client.js";
 import { verifiedConnectRpcGetters, extractConnectRpcCalls } from "./connect-rpc-client.js";
@@ -21,6 +22,7 @@ import { discoverRepoCoverage } from "./walk.js";
 import { summarizeCoverage, type CoverageSummary, type CoverageWarning } from "./coverage.js";
 import { ingestSourceFile } from "./source-ingest.js";
 import { hashFileStream } from "./encoding.js";
+import { anonymousCallbackIdentity } from "./identity.js";
 
 export interface IndexReport {
   repoId: string;
@@ -238,9 +240,19 @@ async function indexFileWithSource(
   fileFactId?: string;
 }> {
   const lang = langForExtension(p.relPath);
+  const iacFacts = extractIacFacts(p.relPath, p.source);
   // Skip non-source files AND minified/generated bundles that slipped past the
   // name filter — parsing them yields single-letter symbols that dominate hubs.
   if (!lang || isLikelyMinified(p.source)) {
+    if (iacFacts.length > 0) {
+      const fileNodeId = store.upsertNode({ nodeType: "file", identityKey: fileIdentityKey(p.repoId, p.relPath), repoId: p.repoId, title: p.relPath, meta: { path: p.relPath, kind: "iac" } });
+      const edges: ParsedEdge[] = [];
+      for (const fact of iacFacts) {
+        const nodeId = store.upsertNode({ nodeType: fact.kind === "secret_ref" ? "entity" : "service", identityKey: `${p.repoId}::iac::${fact.kind}::${fact.name}`, repoId: p.repoId, title: fact.name, meta: { iacKind: fact.kind, status: fact.status, filePath: fact.locator.filePath, startLine: fact.startLine, locatorOnly: fact.kind === "secret_ref" } });
+        edges.push({ src: fileNodeId, dst: nodeId, edgeType: fact.relation ?? "references", origin: "parser", method: fact.status === "verified" ? "EXTRACTED" : "INFERRED", ...(fact.status === "candidate" ? { confidence: 0.5 } : {}), provenance: { source: "iac", filePath: fact.locator.filePath, startLine: fact.startLine, kind: fact.kind } });
+      }
+      store.replaceFileEdges({ repoId: p.repoId, branchId: p.branchId, filePath: p.relPath, edges });
+    }
     store.upsertFileCheckpoint({
       repoId: p.repoId, branchId: p.branchId, filePath: p.relPath,
       mtimeMs: p.mtimeMs, sizeBytes: p.sizeBytes, contentHash: p.contentHash, status: "skipped",
@@ -387,7 +399,7 @@ async function indexFileWithSource(
     // targets that live outside this file). Grounded in real usage, not guessed.
     if (isTestFile(p.relPath)) {
       const localIds = new Set(fileSymbolIds.values());
-      const tested = new Map<string, { method: "EXTRACTED" | "INFERRED"; confidence?: number }>();
+      const tested = new Map<string, { method: "EXTRACTED" | "INFERRED"; confidence?: number; callbackIdentity?: string }>();
       for (const edge of resolved.edges) {
         if (!edge.dst || localIds.has(edge.dst)) continue;
         tested.set(edge.dst, { method: edge.method, confidence: edge.confidence });
@@ -395,8 +407,10 @@ async function indexFileWithSource(
       // Jest/Vitest callbacks are commonly anonymous, so their calls have no
       // enclosing symbol and cannot form normal calls edges. Import scoping is
       // still strong evidence: accept only a unique symbol from an imported file.
+      let callbackOrdinal = 0;
       for (const ref of extracted.refs) {
         if (ref.enclosingQualifiedName || (ref.kind !== "call" && ref.kind !== "type")) continue;
+        const callbackIdentity = anonymousCallbackIdentity(`${p.relPath}::test-file`, callbackOrdinal++);
         const importedCandidates = symbolLookup
           .bareNameCandidates(ref.rawName)
           .filter((candidate) => candidate.filePath && importedFiles.has(candidate.filePath));
@@ -405,18 +419,18 @@ async function indexFileWithSource(
           continue;
         }
         if (importedCandidates.length === 1) {
-          tested.set(importedCandidates[0].id, { method: "EXTRACTED" });
+          tested.set(importedCandidates[0].id, { method: "EXTRACTED", callbackIdentity });
           continue;
         }
         const confidence = 1 / importedCandidates.length;
         for (const candidate of importedCandidates) {
-          if (!tested.has(candidate.id)) tested.set(candidate.id, { method: "INFERRED", confidence });
+          if (!tested.has(candidate.id)) tested.set(candidate.id, { method: "INFERRED", confidence, callbackIdentity });
         }
       }
       for (const [dst, evidence] of tested) {
         structural.push({
           src: fileNodeId, dst, edgeType: "tests", origin: "parser",
-          method: evidence.method, ...(evidence.confidence != null ? { confidence: evidence.confidence } : {}),
+          method: evidence.method, ...(evidence.confidence != null ? { confidence: evidence.confidence } : {}), ...(evidence.callbackIdentity ? { provenance: { callbackIdentity: evidence.callbackIdentity, astOrdinal: Number(evidence.callbackIdentity.split("#").at(-1)) } } : {}),
         });
       }
     }
@@ -481,6 +495,19 @@ async function indexFileWithSource(
         });
         structural.push({ src, dst: endpointId, edgeType: "invokes", origin: "parser", method: "EXTRACTED", branchless: true });
       }
+    }
+    // Protocol/channel bindings are explicit graph facts. Literal names are
+    // extracted as verified; template/computed names remain candidate edges.
+    for (const channel of extracted.channels) {
+      const topicId = store.upsertNode({
+        nodeType: channel.protocol === "websocket" ? "websocket_event" : "topic",
+        identityKey: `${p.repoId}::channel::${channel.protocol}::${channel.name}`,
+        repoId: p.repoId,
+        title: channel.name,
+        meta: { protocol: channel.protocol, status: channel.status, source: channel.source, filePath: p.relPath, startLine: channel.startLine },
+      });
+      const src = channel.enclosingQualifiedName ? fileSymbolIds.get(channel.enclosingQualifiedName) ?? fileNodeId : fileNodeId;
+      structural.push({ src, dst: topicId, edgeType: channel.role === "producer" ? "publishes" : "subscribes", origin: "parser", method: channel.status === "verified" ? "EXTRACTED" : "INFERRED", ...(channel.status === "candidate" ? { confidence: 0.5 } : {}), provenance: { protocol: channel.protocol, source: channel.source, filePath: p.relPath, startLine: channel.startLine } });
     }
     // code entities: thrown errors + env reads → entity nodes, edges from the
     // enclosing symbol ('throws' / 'uses'). "where is XError thrown / who uses JWT_SECRET".

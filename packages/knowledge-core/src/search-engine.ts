@@ -5,10 +5,11 @@ import { join } from "node:path";
 import { normalizeSearchRequest, validateSearchResponse, type NormalizedSearchRequest, type SearchHit, type SearchResponse, type SearchRequest } from "@penguin/knowledge-contracts";
 import { capabilityHash, CAPABILITIES } from "@penguin/knowledge-contracts";
 import type { KnowledgeStore } from "./store.js";
+import type { RevisionContext } from "./revision.js";
 import { searchSource, type ResolvedRevisionScope } from "./source-search.js";
 import { searchPath } from "./path-search.js";
 import { searchRegex } from "./regex-search.js";
-import { search } from "./query.js";
+import { searchLegacyRows } from "./query.js";
 import { HmacSearchCursorCodec } from "./search-cursor.js";
 import { LANE_WEIGHTS, rankSearchHits, semanticLaneScore } from "./search-ranking.js";
 import { planSearch } from "./search-planner.js";
@@ -43,8 +44,26 @@ const DEFAULT_CURSOR_SECRET = defaultCursorSecret();
 function hash(value: unknown): string { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
 function queryHash(value: string): string { return createHash("sha256").update(value).digest("hex"); }
 function repoName(store: KnowledgeStore, repoId: string): string { return (store.db.prepare("SELECT name FROM repos WHERE id=?").get(repoId) as { name: string } | undefined)?.name ?? repoId; }
+function revisionContext(store: KnowledgeStore, scope: ResolvedRevisionScope): RevisionContext | undefined {
+  if (scope.snapshotId.startsWith("legacy:")) {
+    const branchId = scope.snapshotId.slice("legacy:".length);
+    const branch = store.db.prepare("SELECT repo_id AS repoId,name FROM branches WHERE id=? AND status <> 'gone'").get(branchId) as { repoId: string; name: string } | undefined;
+    if (!branch) return undefined;
+    return { repoId: scope.repoId ?? branch.repoId, branchId, branch: branch.name, commitSha: "(legacy)", snapshotId: scope.snapshotId, trust: "fallback_live", degradationReason: "legacy branch index has no immutable source snapshot" };
+  }
+  const snapshot = store.db.prepare("SELECT repo_id AS repoId,commit_sha AS commitSha,worktree_fingerprint AS worktreeFingerprint FROM revision_snapshots WHERE id=?").get(scope.snapshotId) as { repoId: string; commitSha: string | null; worktreeFingerprint: string | null } | undefined;
+  if (!snapshot || !scope.repoId) return undefined;
+  const branch = store.db.prepare("SELECT id,name FROM branches WHERE current_snapshot_id=? AND repo_id=? ORDER BY default_branch DESC LIMIT 1").get(scope.snapshotId, scope.repoId) as { id: string; name: string } | undefined;
+  // The legacy symbol index is branch-backed. A building snapshot that has not
+  // yet been published to a branch must not be treated as a complete symbol
+  // revision, otherwise newly inserted fixture/live-branch symbols disappear
+  // from the compatibility lane while source search still has valid snapshot
+  // data. Source/path lanes remain scoped by the resolved snapshot above.
+  if (!branch) return undefined;
+  return { repoId: scope.repoId, branchId: branch.id, branch: branch.name, commitSha: snapshot.commitSha ?? "", snapshotId: scope.snapshotId, ...(snapshot.worktreeFingerprint ? { worktreeFingerprint: snapshot.worktreeFingerprint } : {}), trust: snapshot.worktreeFingerprint ? "exact_worktree" : "exact_commit" };
+}
 function scopeRows(store: KnowledgeStore): ResolvedRevisionScope[] {
-  return (store.db.prepare("SELECT repo_id AS repoId,current_snapshot_id AS snapshotId FROM branches WHERE status='live' AND current_snapshot_id IS NOT NULL ORDER BY default_branch DESC,name").all() as Array<{ repoId: string; snapshotId: string }>).map((row) => row);
+  return (store.db.prepare("SELECT repo_id AS repoId,id AS branchId,current_snapshot_id AS snapshotId FROM branches WHERE status='live' ORDER BY default_branch DESC,name").all() as Array<{ repoId: string; branchId: string; snapshotId: string | null }>).map((row) => ({ repoId: row.repoId, snapshotId: row.snapshotId ?? `legacy:${row.branchId}` }));
 }
 function hitId(scope: ResolvedRevisionScope, path: string, startByte = 0, endByte = 0, contentHash?: string): string { return `hit_${hash([scope.snapshotId, path, startByte, endByte, contentHash ?? null]).slice(0, 24)}`; }
 
@@ -138,12 +157,13 @@ export function searchKnowledge(input: SearchRequest | NormalizedSearchRequest, 
           hits.push({ hitId: hitId(scope, item.filePath), kind: "path", lane: "path", title: item.filePath, locator, score: item.metadataOnly ? 0.7 : exactPath ? 1.2 : 1, rankReasons: [item.metadataOnly ? "excluded path metadata; secret_policy=path_only" : exactPath ? "exact full path; exact boost=0.2" : "path match", `coverage_status=${item.coverageStatus}`, `reason_code=${item.reasonCode}`], evidence: [{ source: "source", locator, status: item.metadataOnly ? "observed" : "verified" }] });
         }
       } else if (stage.lane === "symbol") {
-        const expansion = request.mode === "exact" || request.mode === "phrase" || request.mode === "path" || request.mode === "regex"
+        const identifierQuery = /^[A-Za-z_$][\w$]*$/u.test(request.query);
+        const expansion = request.mode === "exact" || request.mode === "phrase" || request.mode === "path" || request.mode === "regex" || identifierQuery
           ? { terms: [], boost: 0, ambiguous: [] }
           : ontology.expansion(request.query, { ...(request.scope.workspaceId ? { workspaceId: request.scope.workspaceId } : {}), ...(scope.repoId ? { repoIds: [scope.repoId] } : {}) });
         if (expansion.ambiguous.length) warnings.push({ code: "ONTOLOGY_ALIAS_AMBIGUOUS", message: `alias has multiple ontology candidates: ${expansion.ambiguous.map((candidate) => candidate.canonicalName).join(", ")}` });
         const symbolQueries = [request.query, ...expansion.terms];
-        for (const [query, expansionQuery] of symbolQueries.map((value, index) => [value, index > 0] as const)) for (const item of search(context.store, query, { repo: scope.repoId, limit: request.page.limit })) {
+        for (const [query, expansionQuery] of symbolQueries.map((value, index) => [value, index > 0] as const)) for (const item of searchLegacyRows(context.store, query, { repo: scope.repoId, limit: request.page.limit, ...(revisionContext(context.store, scope) ? { revision: revisionContext(context.store, scope) } : {}) })) {
           if (context.signal?.aborted) throw Object.assign(new Error("SEARCH_CANCELLED"), { code: "SEARCH_CANCELLED" });
           const filePath = item.filePath;
           if (!filePath || (request.scope.paths?.length && !request.scope.paths.some((prefix) => filePath === prefix || filePath.startsWith(`${prefix.replace(/\/$/, "")}/`)))) continue;
@@ -151,7 +171,7 @@ export function searchKnowledge(input: SearchRequest | NormalizedSearchRequest, 
           const symbolLine = item.startLine ?? (item.nodeId
             ? (context.store.db.prepare("SELECT start_line AS startLine FROM symbol_versions WHERE node_id=? AND status <> 'deleted' ORDER BY (status='fresh') DESC, start_line LIMIT 1").get(item.nodeId) as { startLine: number | null } | undefined)?.startLine ?? undefined
             : undefined);
-          const locator = { repoId: locatorRepoId, repoName: repoName(context.store, locatorRepoId), revisionId: scope.snapshotId, revisionKind: "commit" as const, filePath, ...(symbolLine != null ? { startLine: symbolLine } : {}) };
+          const locator = { repoId: locatorRepoId, repoName: repoName(context.store, locatorRepoId), revisionId: scope.snapshotId, revisionKind: "commit" as const, filePath, ...(item.nodeId ? { nodeId: item.nodeId } : {}), ...(symbolLine != null ? { startLine: symbolLine } : {}) };
           const symbolLane = item.nodeType === "note" ? "note" : "symbol";
           const exactSymbol = symbolLane === "symbol" && (item.title === request.query || item.identityKey === request.query);
           hits.push({ hitId: hitId(scope, filePath, item.startLine ?? 0), kind: item.nodeType, lane: symbolLane, title: item.title, locator, snippet: item.snippet ?? undefined, score: LANE_WEIGHTS[symbolLane] + (exactSymbol ? 0.1 : 0) + (expansionQuery ? expansion.boost : 0), rankReasons: [exactSymbol ? "exact symbol name; exact boost=0.1" : "indexed lexical symbol/name match", ...(expansionQuery ? ["ontology alias expansion; non-proof ranking boost=0.04"] : [])], evidence: [{ source: item.nodeType === "note" ? "note" : "graph", locator, excerpt: item.snippet ?? undefined, status: "verified" }] });
@@ -159,8 +179,11 @@ export function searchKnowledge(input: SearchRequest | NormalizedSearchRequest, 
       }
     }
   }
+  const kindFiltered = request.scope.kinds?.length
+    ? hits.filter((hit) => request.scope.kinds!.includes(hit.kind))
+    : hits;
   const deduped = new Map<string, SearchHit>();
-  for (const hit of hits) {
+  for (const hit of kindFiltered) {
     const key = `${hit.locator.revisionId}:${hit.locator.filePath}:${hit.locator.startByte ?? hit.locator.startLine ?? 0}:${hit.locator.endByte ?? hit.locator.endLine ?? 0}`;
     const old = deduped.get(key);
     if (!old) deduped.set(key, hit);
@@ -206,7 +229,20 @@ export function searchKnowledge(input: SearchRequest | NormalizedSearchRequest, 
     ? { code: "REPOSITORY_NOT_FOUND" as const, message: "requested repository or revision was not found in the indexed knowledge store", details: { revisions: request.scope.revisions }, retryable: false }
     : undefined;
   const totalIsExact = coverage.stale === 0 && coverage.failed === 0 && coverage.excluded === 0 && request.mode === "exact" && ranked.length <= request.page.limit;
-  return validateSearchResponse({ schemaVersion: "2", hits: pageHits, ...(error ? { error } : {}), diagnostics: { requestId: `search_${hash([normalizedHash, Date.now()]).slice(0, 16)}`, contractVersion: "2", capabilityHash: capabilityHash(CAPABILITIES), resolvedScopes: scopes.map((scope) => ({ repoId: scope.repoId ?? "", branch: (storeBranch(context.store, scope.snapshotId) ?? ""), snapshotId: scope.snapshotId, revisionKind: "commit" as const })), searchedLanes: plan.stages.map((stage) => stage.lane), skippedLanes: [], coverage, exclusions, warnings, suggestions, timingsMs: {}, truncated: false }, page: { limit: request.page.limit, ...(nextCursor ? { nextCursor } : {}), totalIsExact, ...(totalIsExact ? { total: ranked.length } : {}) } });
+  const incomplete = coverage.failed > 0 || coverage.excluded > 0 || coverage.stale > 0;
+  const queryStatus = error
+    ? "SCOPE_ERROR"
+    : pageHits.length > 0
+      ? "MATCH"
+      : incomplete
+        ? "NO_MATCH_INCOMPLETE"
+        : "NO_MATCH_VERIFIED";
+  const nextActions = error?.code === "REPOSITORY_NOT_FOUND"
+    ? [{ command: "penguin init <repo-path>", reason: "register the requested repository before searching" }]
+    : incomplete
+      ? [{ command: "penguin index <repo-path>", reason: "refresh stale or failed coverage before relying on a negative result" }]
+      : [];
+  return validateSearchResponse({ schemaVersion: "2", hits: pageHits, ...(error ? { error } : {}), diagnostics: { queryStatus, requestId: `search_${hash([normalizedHash, Date.now()]).slice(0, 16)}`, contractVersion: "2", capabilityHash: capabilityHash(CAPABILITIES), resolvedScopes: scopes.map((scope) => ({ repoId: scope.repoId ?? "", branch: (storeBranch(context.store, scope.snapshotId) ?? ""), snapshotId: scope.snapshotId, revisionKind: "commit" as const })), searchedLanes: plan.stages.map((stage) => stage.lane), skippedLanes: [], coverage, exclusions, warnings, nextActions, suggestions, timingsMs: {}, truncated: false }, page: { limit: request.page.limit, ...(nextCursor ? { nextCursor } : {}), totalIsExact, ...(totalIsExact ? { total: ranked.length } : {}) } });
 }
 
 /** Async companion for the optional semantic lane. Deterministic search remains
@@ -268,5 +304,6 @@ export async function searchKnowledgeAsync(input: SearchRequest | NormalizedSear
 }
 
 function storeBranch(store: KnowledgeStore, snapshotId: string): string | undefined {
+  if (snapshotId.startsWith("legacy:")) return (store.db.prepare("SELECT name FROM branches WHERE id=?").get(snapshotId.slice("legacy:".length)) as { name: string } | undefined)?.name;
   return (store.db.prepare("SELECT name FROM branches WHERE current_snapshot_id=? ORDER BY default_branch DESC LIMIT 1").get(snapshotId) as { name: string } | undefined)?.name;
 }

@@ -34,6 +34,23 @@ test("read verb without a DB refuses (exit 3) and does not create one", async ()
   assert.equal(deps.storeExists(), false);
 });
 
+test("CLI external Postgres source lifecycle uses the injected read-only adapter", async () => {
+  const { deps, lines } = harness();
+  const seed = deps.openStore();
+  const credential = seed.upsertNode({ nodeType: "credential", identityKey: "credential:cli-pg", title: "cli postgres" });
+  seed.putCredential({ nodeId: credential, title: "cli postgres", kind: "postgres", body: "never returned" });
+  seed.close();
+  deps.postgresSchemaClient = { query: async (sql) => sql.includes("information_schema.columns") ? { rows: [{ table_schema: "public", table_name: "players", column_name: "id", data_type: "uuid", is_nullable: "NO", ordinal_position: 1 }] } : { rows: [] } };
+  assert.equal(await runCli(["source", "register", "--type", "postgres_schema", "--location", "postgres://schema-only", "--credential-id", credential, "--schema", "public", "--json"], deps), 0);
+  const registered = JSON.parse(lines.at(-1));
+  assert.equal(await runCli(["source", "list", "--json"], deps), 0);
+  assert.equal(JSON.parse(lines.at(-1)).length, 1);
+  assert.equal(await runCli(["source", "sync", registered.id, "--json"], deps), 0);
+  assert.equal(JSON.parse(lines.at(-1)).tables, 1);
+  assert.equal(await runCli(["source", "remove", registered.id, "--confirm", "--json"], deps), 0);
+  assert.equal(JSON.parse(lines.at(-1)).ok, true);
+});
+
 test("non-interactive mutations require the exact operation token", async () => {
   const { dir, deps, lines, errs } = harness();
   deps.requireOperationConfirmation = true;
@@ -89,7 +106,7 @@ test("events-jsonl keeps stdout machine-readable and ends with a result event", 
 });
 
 test("init indexes a repo, then status + search + callers work", async () => {
-  const { dir, deps, lines } = harness();
+  const { dir, deps, lines, errs } = harness();
   mkdirSync(join(dir, ".git", "refs", "heads"), { recursive: true });
   writeFileSync(join(dir, ".git", "HEAD"), "ref: refs/heads/main\n");
   writeFileSync(join(dir, ".git", "refs", "heads", "main"), "c0\n");
@@ -121,7 +138,7 @@ test("init indexes a repo, then status + search + callers work", async () => {
 
   lines.length = 0;
   assert.equal(await runCli(["search", "inner"], deps), 0);
-  assert.match(lines[0], /^\d+ hits · coverage /);
+  assert.match(lines[0], /^MATCH · \d+ hits · coverage /);
   assert.match(lines.join("\n"), /src\/a\.ts:\d+\tsymbol\t/);
 
   lines.length = 0;
@@ -136,6 +153,13 @@ test("init indexes a repo, then status + search + callers work", async () => {
   const repeatedRepoHits = JSON.parse(lines[0]);
   assert.ok(repeatedRepoHits.hits.some((h) => h.title === "inner"), "repeated --repo must remain a valid live multi-repo selector");
   assert.equal(await runCli(["search", "inner", "--repo", dir.split("/").at(-1), "--repo", dir.split("/").at(-1), "--branch", "main", "--json"], deps), 2);
+
+  lines.length = 0;
+  assert.equal(await runCli(["search", "inner", "--repo", dir, "--json"], deps), 0);
+  assert.ok(JSON.parse(lines[0]).hits.some((h) => h.title === "inner"), "absolute repo root must resolve to the registered repository");
+
+  assert.equal(await runCli(["coverage", "--repo", join(dir, "missing-repo")], deps), 2);
+  assert.match(errs.at(-1), /unknown repo/);
 
   lines.length = 0;
   assert.equal(await runCli(["callers", "inner", "--json"], deps), 0);

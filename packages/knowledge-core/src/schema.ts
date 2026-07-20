@@ -451,6 +451,8 @@ CREATE TABLE IF NOT EXISTS effective_snapshot_sources (
   source_blob_id INTEGER,
   PRIMARY KEY (snapshot_id, file_path)
 );
+CREATE INDEX IF NOT EXISTS idx_effective_snapshot_sources_snapshot_blob
+  ON effective_snapshot_sources(snapshot_id, source_blob_id);
 CREATE TABLE IF NOT EXISTS source_snapshot_overlays (
   snapshot_id TEXT NOT NULL,
   file_path TEXT NOT NULL,

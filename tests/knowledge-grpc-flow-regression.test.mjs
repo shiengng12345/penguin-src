@@ -147,6 +147,7 @@ test("flow walks endpoint -> handler -> injected processor -> provider -> reposi
     assert.ok(nodeIds.includes(processorId), `${target}: reaches processor`);
     assert.ok(nodeIds.includes(providerId), `${target}: reaches SPI provider`);
     assert.ok(nodeIds.includes(repoMethodId), `${target}: reaches repository`);
+    assert.ok(flow.steps.filter((step) => step.nodeType === "symbol").every((step) => step.source?.filePath && step.source.startLine > 0), `${target}: every cross-service hop carries source`);
   }
   store.close();
 });

@@ -61,8 +61,21 @@ test("source search exposes an indexed scope plan and honours cancellation betwe
     WHERE e.snapshot_id=? AND e.source_blob_id IN
       (SELECT source_blob_id FROM source_blob_trigrams WHERE trigram IN (?, ?, ?) GROUP BY source_blob_id)`).all(snapshot.id, "pla", "lan", "ane");
   assert.equal(plan.some((row) => /SCAN source_facts/i.test(String(row.detail))), false);
+  assert.ok(plan.some((row) => /idx_effective_snapshot_sources_snapshot_blob/i.test(String(row.detail))));
   const controller = new AbortController();
   controller.abort();
   assert.throws(() => searchSource(store, { snapshotId: snapshot.id }, { query: "plan-indexed-needle", mode: "exact", options: { caseSensitive: true, wholeWord: false } }, { signal: controller.signal }), /SEARCH_CANCELLED/);
+  store.close();
+});
+
+test("source search does not materialize a snapshot after an indexed trigram miss", () => {
+  const store = openStore();
+  const snapshot = new GitTopologyStore(store).createBuildingSnapshot({ snapshotKey: "miss", repoId: "repo-1", parserVersion: "p", resolverVersion: "r", schemaVersion: 10 });
+  const fact = addSource(store, "src/unrelated.ts", "a completely unrelated source file\n");
+  const cow = new SourceSnapshotStore(store);
+  cow.replaceOverlay(snapshot.id, [{ op: "add", path: "src/unrelated.ts", sourceFactId: fact }]);
+  cow.materializeManifest(snapshot.id);
+  const hits = searchSource(store, { snapshotId: snapshot.id, repoId: "repo-1" }, { query: "cpfLookupResults", mode: "exact", options: { caseSensitive: true, wholeWord: false } });
+  assert.deepEqual(hits, []);
   store.close();
 });

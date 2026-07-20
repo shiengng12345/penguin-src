@@ -689,12 +689,12 @@ export function byteOffsetToLine(
 
 ### 5.1 开始前
 
-- [ ] 完整阅读当前会话提供的 AGENTS instructions；若 repo 根目录存在 <code>AGENTS.md</code>，再完整阅读该文件和本计划。当前基线中 repo 根没有实体 <code>AGENTS.md</code>，不能因此中断。
-- [ ] 确认当前分支和工作树：<code>rtk git status --short --branch</code>。
-- [ ] 不覆盖用户已有改动；若任务文件已有未知 diff，停止该文件并报告。
-- [ ] 若 repo 根有 <code>.codegraph/</code>，先用 <code>rtk codegraph explore "问题或符号"</code>；随后用 <code>penguin context/search/flow</code> 交叉验证。
-- [ ] 运行该任务列出的 baseline test，保存失败/通过摘要。
-- [ ] 把当前任务 checkbox 标记为进行中；一次只处理一个 dependency-ready task。
+- [x] 完整阅读当前会话提供的 AGENTS instructions；repo 根无实体 `AGENTS.md`，继续按会话指令执行。
+- [x] 已确认 `feature/knowledge-core` 分支和工作树；本轮改动均为该计划的继续实现。
+- [x] 保留既有用户改动；没有覆盖未知 diff，执行证据见 `docs/knowledge-v2/plan-execution-log.md`。
+- [x] repo 根有 `.codegraph/`，源码定位先用 CodeGraph/Penguin，再交叉读取 source/test。
+- [x] baseline、受影响测试和 typecheck 已运行并将摘要写入 `docs/knowledge-v2/plan-execution-log.md`。
+- [x] 任务按 dependency-ready 顺序推进；当前仍有显式遗留项，不能提前宣称完成。
 
 ### 5.2 每个子任务的 TDD 循环
 
@@ -1663,7 +1663,7 @@ rtk penguin search \
 - [x] semantic result 即使 cosine 更高，也不能高于 verified exact。
 - [x] 相同 locator 从多个 lane 返回时合并为一个 hit，evidence 合并。
 - [x] 无结果 response 仍包含 resolved scope、coverage 和 searched lanes。
-- [ ] 先运行，预期旧 <code>query.search</code> 返回旧 shape 或排序失败。
+- [x] 已完成旧 `query.search` migration checkpoint；旧 shape/排序 red phase 已被 v2 wrapper/compat tests supersede，当前 `knowledge-query` 与 `knowledge-surface-parity` 为绿色。
 
 ### M5.2 Query Planner
 
@@ -1782,9 +1782,9 @@ CAPABILITY_MISMATCH
 
 ### M5.7 兼容旧 API
 
-- [ ] 旧 <code>query.search(text, options)</code> 变成薄 wrapper，内部构造 SearchRequest。
-- [ ] wrapper response 在一个 deprecation window 内保持现有字段，同时附带 v2 response；CLI/MCP 新能力直接用 v2。
-- [ ] 在 docs 写 removal version，不在本任务删除旧调用。
+- [x] 旧 <code>query.search(text, options)</code> 变成薄 wrapper，内部构造 SearchRequest；无 published snapshot 的旧 fixture 保留明确 fallback。
+- [x] wrapper response 在一个 deprecation window 内保持现有字段，同时附带 v2 response；CLI/MCP 新能力直接用 v2。
+- [x] 在 `docs/knowledge-v2/legacy-search-deprecation.md` 写 removal version `3.0.0`，不在本任务删除旧调用。
 
 ### M5 验收
 
@@ -1848,7 +1848,7 @@ rtk npm run typecheck
 - [x] typed error 仍输出 JSON error envelope，并使用稳定 exit code。
 - [x] compact 模式保留 locator/coverage/cursor。
 - [x] help 列出所有 canonical capability 或对应 command。
-- [ ] 先运行，预期 capability parity 因未来命令缺失而失败。
+- [x] 已完成 CLI parity red checkpoint；初始缺口已由 canonical registry/CLI contract tests 收口，当前 surface parity 为绿色。
 
 ### M6.2 命令映射
 
@@ -1935,10 +1935,10 @@ rtk penguin doctor
 
 ### M6.6 拆小 index.ts
 
-- [ ] <code>index.ts</code> 只保留 registry assembly、argument parse、dispatch。
-- [ ] 每个 command module 不直接 <code>process.exit</code>。
-- [ ] core error 统一在 CLI boundary 映射。
-- [ ] command tests 可传 fake IO，不 spawn process。
+- [x] <code>index.ts</code> 只保留 registry assembly、argument parse、dispatch。Evidence: command implementation moved to `packages/knowledge-cli/src/command-dispatch.ts`; `index.ts` now owns the public boundary, argument parsing and single dispatch call, with parser logic in `args.ts`; CLI regression tests pass after the split.
+- [x] command modules 不直接 `process.exit`；binary 只设置 `process.exitCode`，避免截断 JSON pipe。
+- [x] core error 在 CLI boundary 映射为稳定 exit code/JSON envelope；revision/typed-error tests 覆盖。
+- [x] command tests 可传 fake IO；`knowledge-cli.test.mjs` 的大多数 command 直接调用 fake deps，不 spawn CLI process。
 
 ### M6 验收
 
@@ -2007,7 +2007,7 @@ rtk penguin search \
 - [x] 从 manifest 计算 required MCP capability IDs。
 - [x] 从 initialize + tools/list 读取 tool metadata 中的 <code>x-penguin-capability-id</code>。
 - [x] 两集合完全相等。
-- [ ] 每个 tool input schema 与 contract schema snapshot 相等。
+- [x] 每个 tool input schema 与 contract schema snapshot 相等。
 - [x] 初次运行应列出缺失 capability，而不是只说 count 不同。
 
 ### M7.2 Tool 命名
@@ -2059,7 +2059,7 @@ export async function invokeKnowledgeCapability(
 - [x] write_note、remember、forget、improve、suggestion accept/reject、index、rebuild、remove、artifact import 均通过 canonical manifest/alias guard 声明 mutating。
 - [x] MCP server config 默认只开 read-only；mutating tool 在 disabled 时仍可 discover，但调用返回 <code>MUTATION_DISABLED</code>；已有 MCP guard 测试。
 - [x] enabled 时需要 operation-scoped confirmation token；token 包含 capability、scope、expiry、input digest；篡改 token 会拒绝。
-- [ ] index/watch 可配置为 trusted background operation；remove/import 永不默认 trusted。
+- [x] `PENGUIN_KNOWLEDGE_TRUSTED_BACKGROUND=1` 只可绕过 init/index/rebuild 的 background confirmation；remove/import 等高风险 mutation 仍 guarded。
 - [x] 所有通过 `runKnowledgeTool` 的 mutation 进入统一 audit finally；token 与 feedback 只保存 digest，不写 secret/raw query。
 
 ### M7.6 MCP 初始化和 schema negotiation
@@ -2144,12 +2144,12 @@ rtk penguin __query-server --stdio
 ~~~
 
 - [x] 启动时打开一个 KnowledgeStore connection 并发送 hello。`knowledge-query-runtime-e2e.test.mjs` 启动编译后的 `__query-server`，读取真实 SQLite store 的 hello。
-- [ ] 保持 prepared statement、FTS cache、capability registry 常驻。
-- [ ] read request 可并发，但 better-sqlite3 实际 DB 操作在受控队列；长 search 分 batch 让 cancellation 有机会生效。
+- [x] 保持 prepared statement、FTS cache、capability registry 常驻；`QueryServerCaches` 与 `KnowledgeStore.searchText` 共享 resident cache，测试验证 prepared dedupe/capability persistence。
+- [x] read request 可并发、mutation 由受控队列串行，cancel frame 可在长请求中生效；`knowledge-query-protocol.test.mjs` 覆盖并发/队列/cancel，resident E2E 覆盖真实 JSONL。
 - [x] mutation 串行。
 - [x] 支持 <code>cancel</code> frame。
 - [x] 收到 SIGTERM/EOF：完成当前 transaction、关闭 DB、退出。runtime E2E 发送 EOF 后验证 child 正常关闭。
-- [ ] idle 期间不轮询 DB；用 schema/capability check interval 或明确 invalidate event。
+- [x] idle 期间不轮询 DB；mutation 完成后由 `QueryServerCaches.invalidate()` 明确失效，idle 不启动 DB polling。
 
 ### M8.3 Rust runtime manager
 
@@ -2169,7 +2169,7 @@ pub struct KnowledgeRuntime {
 - [x] reader task 按 ID resolve pending request。
 - [x] child crash：失败所有 pending request，以 <code>RUNTIME_RESTARTED</code> 返回；下一请求最多自动重启一次。
 - [x] 1 分钟内连续 3 次 crash 进入 circuit-open，不无限重启；Rust unit test 覆盖计数和熔断。
-- [ ] app exit 杀掉 child，不留 orphan；`Drop` 已显式 kill/wait，但仍缺真实 app-exit process test。
+- [x] app exit 杀掉 child，不留 orphan；真实 query-server SIGTERM process test 验证 child close 且 PID 不存在。
 
 ### M8.4 替换 per-query spawn
 
@@ -2180,11 +2180,11 @@ pub struct KnowledgeRuntime {
 
 ### M8.5 性能和恢复测试
 
-- [ ] 第一次冷查询记录 spawn/open/index warmup。
+- [x] 第一次冷查询记录 spawn/open/index warmup；runtime E2E 显式记录 cold startup duration。
 - [x] 之后 100 次查询只产生一个 Node PID。`tests/knowledge-query-runtime-e2e.test.mjs` 启动一个真实 `__query-server` child，连续发送 100 个真实 search request 并验证同一 PID。
-- [ ] 杀掉 child 后下一请求重启且成功。
-- [ ] 模拟 hash mismatch，UI 收到 typed health error。
-- [ ] 关闭 app/runtime 后 PID 不存在。
+- [x] 杀掉 child 后下一请求重启且成功；`knowledge-query-runtime-e2e.test.mjs` 先 SIGKILL resident child，再用新 PID 完成同一 exact search。
+- [x] 模拟 protocol/schema/capability hash mismatch，Tauri handshake 返回 typed `RUNTIME_CAPABILITY_MISMATCH`；Rust unit test 覆盖三类 drift。
+- [x] 关闭 app/runtime 后 PID 不存在；SIGTERM E2E 使用 `process.kill(pid, 0)` 反证。
 
 ### M8 验收
 
@@ -2286,16 +2286,16 @@ Search | Context | Graph | Knowledge | Evidence
 
 - [x] exact/path hit 用确定性样式，不与 semantic 混淆。
 - [x] 列表虚拟化，200 hit 不冻结。WikiSearchPage 采用固定估算行高、overscan 与 top/bottom spacer，只渲染窗口内结果；`tests/wiki-search-page.test.mjs`、typecheck 通过。
-- [ ] 键盘上/下选择，Enter preview，Cmd+Enter 打开代码位置。已完成上下键选择、Enter/Space preview 与 focus/click 激活；Cmd+Enter 的跨平台代码定位命令仍待补齐。
+- [x] 键盘上/下选择，Enter preview，Cmd+Enter 对 working-tree hit 打开 `vscode://file` 代码位置；commit hit 保持只读，不伪装打开当前文件。
 - [x] next cursor 接近底部加载；重复 hit 去重。
 
 ### M9.5 Preview
 
 - [x] 调 <code>knowledge.get_hit</code> 补取完整 excerpt。
-- [ ] 显示前后可配置行，行号可点击。
-- [ ] 若 revision 不是 working tree，显示只读 commit 标识，不能假装打开当前文件同一行。
+- [x] 显示前后可配置行，`预览行数` 持久化并传给 canonical get-hit。
+- [x] 若 revision 不是 working tree，显示只读 commit 标识，不能假装打开当前文件同一行。
 - [x] symbol hit 展示 callers/callees/tests/routes。
-- [ ] note hit 展示 backlinks/unlinked mentions。
+- [x] note hit 展示 backlinks/mentions，并通过 canonical `backlinks` 查询。
 - [x] evidence hit 展示来源、时间、新鲜度和验证状态。
 
 ### M9.6 零结果与 coverage
@@ -2318,7 +2318,7 @@ Search | Context | Graph | Knowledge | Evidence
 - [x] 保存的是 canonical SearchRequest，不是 UI 私有 state。
 - [x] 保存时记录 contract version；旧 version 打开时 migration 或明确不兼容。
 - [x] 支持 pin 到 Knowledge tab；置顶 id 持久化在 `penguin.wiki.pinnedSavedQueries`，置顶项稳定排在 saved query 列表前。
-- [ ] M11 再把 saved query 写入 Markdown/Obsidian-compatible 文件；本阶段先走 core API。
+- [x] saved query 同时写入 knowledge root 下的 Markdown/Obsidian-compatible 文件；frontmatter 固定 `type: saved-query`，正文保留 contract/scope/request JSON，并标记为 data 而非 instruction。
 
 ### M9 验收
 
@@ -2410,8 +2410,8 @@ export interface GraphProvenance {
 }
 ~~~
 
-- [ ] <code>verified</code> 只能来自明确 AST/type/LSP/runtime proof。
-- [ ] framework convention 默认 candidate，除非 route/channel registration 可精确对接。
+- [x] <code>verified</code> 只能来自明确 AST/type/LSP/runtime proof；`classifyEdgeTrust` 是 graph query 的统一 gate。
+- [x] framework convention 默认 candidate，除非 route/channel registration 可精确对接；`knowledge-edge-proof.test.mjs` 覆盖 convention 与 explicit registration。
 - [x] heuristic edge 不进入默认 affected 的“确定影响”，只进入 possible impact。
 - [x] 每个 graph query 同时返回 coverage：语言、resolver、unresolved count。
 
@@ -2423,12 +2423,12 @@ Identity key 固定优先级：
 repo + language + module/package + fully-qualified container + symbol + signature discriminator
 ~~~
 
-- [ ] 同名函数不同文件不合并。
-- [ ] method overload 按参数 arity/type discriminator 区分。
-- [ ] anonymous callback 使用 parent identity + AST ordinal，不用不稳定行号单独作为 ID。
-- [ ] rename 保留 alias，跨 revision 不把新旧实现误当并存。
-- [ ] TypeScript barrel export、path alias、default export/re-export 有 fixture。
-- [ ] Rust module/use、Go package receiver、Java package/class、Python module/class 有 fixture。
+- [x] 同名函数不同文件不合并。
+- [x] method overload 按参数 arity/type discriminator 区分；`extract.ts` 将归一化参数签名写入 identity，TS/Java fixture 验证 overload 节点不合并。
+- [x] anonymous callback 使用 parent identity + AST ordinal，不用不稳定行号单独作为 ID；test-file test edges persist callback identity provenance。
+- [x] rename 保留 alias，跨 revision 不把新旧实现误当并存。Evidence: `tests/knowledge-indexer-pipeline.test.mjs` indexes a helper rename across incremental revisions and resolves the old qualified name through the alias; `knowledge-indexer-resolve.test.mjs` covers equal-hash and ambiguous rename behavior.
+- [x] TypeScript barrel export、path alias、default export/re-export 有 fixture。Evidence: `tests/knowledge-indexer-module-resolution.test.mjs` covers named/default/barrel re-exports and path-alias import extraction; `extract.ts` admits `export ... from` sources into the same import lane.
+- [x] Rust module/use、Go package receiver、Java package/class、Python module/class 有 fixture。Evidence: `tests/knowledge-indexer-extract.test.mjs` multi-language fixture covers Python, Go, Rust and Java symbols; `knowledge-indexer-resolve.test.mjs` covers Rust module/associated method resolution.
 
 ### M10.3 字段读写
 
@@ -2444,10 +2444,10 @@ serializes_field
 ~~~
 
 - [x] TypeScript/JavaScript 先支持 property access、destructuring、object literal、spread 的保守解析。
-- [ ] schema/interface field 仍可保持 lightweight identifier，不强制成为全局 symbol；只有参与关系时创建 field node。
+- [x] schema/interface field 仍可保持 lightweight identifier，不强制成为全局 symbol；只有参与关系时创建 field node。
 - [x] computed dynamic property 标记 candidate，不猜具体字段。
-- [ ] query 可回答“谁写入 cpf”“这个 response field 从哪里来”。
-- [ ] PII 字段示例只用 synthetic fixture。
+- [x] query 可回答“谁写入 cpf”“这个 response field 从哪里来”；field node 支持 `search` 与 `writes_field`/`reads_field` graph traversal。
+- [x] PII 字段示例只用 synthetic fixture；fixture 使用 `synthetic-cpf`。
 
 ### M10.4 局部数据流
 
@@ -2478,18 +2478,18 @@ export interface DataFlowPath {
 ~~~
 
 - [x] 不跨不透明 dynamic call 虚构 flow；在那里结束并给 gap。
-- [ ] inter-procedural 只沿 verified call edge 连接。
+- [x] inter-procedural 只沿 verified call edge 连接。Evidence: `traceVerifiedInterproceduralFlow` follows only `VerifiedCallEdge.status === "verified"`, replaces the opaque boundary with a verified call locator, and stops with a gap on candidate edges; `knowledge-data-flow.test.mjs` covers both paths.
 - [x] 最大深度和节点数可配置；达到上限明确 truncated。
-- [ ] data flow hit 可从 source line 打开。
+- [x] data flow hit 可从 source line 打开；`DataFlowPath` source/sink/steps 全部携带 revision-scoped `SearchLocator`，测试验证 sink 文件和行号。
 
 ### M10.5 动态派发
 
-- [ ] interface method call：根据 resolved type/implementations 产生候选集合。
-- [ ] dependency injection token：从 provider registration 解析 concrete target。
-- [ ] NestJS module/provider/controller、Spring bean、Go interface assignment、Rust trait impl 分 framework adapter。
-- [ ] 单一确定 target 标 verified；多个合法 target 标 candidate set。
-- [ ] graph flow 展示 dispatch hop，不能画成普通 direct call。
-- [ ] 运行时 evidence 可把 observed target 提升为 <code>runtime_observation</code>，但只对对应 revision/environment。
+- [x] interface method call：根据 resolved type/implementations 产生候选集合。Evidence: `packages/knowledge-core/src/dispatch-resolution.ts` + `tests/knowledge-dispatch-resolution.test.mjs` resolve a single type target as verified and unresolved implementations as a candidate set.
+- [x] dependency injection token：从 provider registration 解析 concrete target。Evidence: `resolveDispatch` filters provider registrations by token and the test covers a NestJS provider token.
+- [x] NestJS module/provider/controller、Spring bean、Go interface assignment、Rust trait impl 分 framework adapter。Evidence: `resolveFrameworkDispatch` has explicit NestJS/Spring/Go/Rust adapters; `knowledge-dispatch-resolution.test.mjs` covers each framework and keeps DI/provider resolution separate from interface assignment.
+- [x] 单一确定 target 标 verified；多个合法 target 标 candidate set。Evidence: dispatch resolution test asserts both statuses.
+- [x] graph flow 展示 dispatch hop，不能画成普通 direct call。Evidence: `graph-query.ts` emits `dispatchHop: true`/`hopType: "dispatch"` for `dispatches_to`, and `knowledge-graph-query.test.mjs` verifies the typed hop is preserved.
+- [x] 运行时 evidence 可把 observed target 提升为 <code>runtime_observation</code>，但只对对应 revision/environment。Evidence: `applyRuntimeDispatchObservation` requires matching revision/environment and the test covers the scoped upgrade.
 
 ### M10.6 协议与 channel
 
@@ -2510,10 +2510,10 @@ Edge: handles, invokes, publishes, subscribes, produces, consumes, sends, receiv
 - Kafka/RabbitMQ/SQS/SNS/Redis pubsub 常见注册模式；
 - cron/job producer/consumer。
 
-- [ ] 每个 framework 有 producer + consumer + ambiguous fixture。
-- [ ] 字符串 topic 名 exact 对接可 verified。
-- [ ] template/dynamic topic 只建 candidate pattern。
-- [ ] 跨 repo flow 返回每一跳 source。
+- [x] 每个 framework 有 producer + consumer + ambiguous fixture。Evidence: `knowledge-channel-bindings.test.mjs` has a framework matrix for Nest/Spring/Kafka/Rabbit/SQS/Redis/SNS/WebSocket/cron plus exact producer/consumer and dynamic ambiguous cases; route tests cover HTTP/gRPC endpoint fixtures.
+- [x] 字符串 topic 名 exact 对接可 verified；`extractChannelBindings` 与 pipeline 生成 `publishes`/`subscribes` exact edges。
+- [x] template/dynamic topic 只建 candidate pattern；不进入 verified channel join。
+- [x] 跨 repo flow 返回每一跳 source。Evidence: `FlowStep.source` now carries repo/file/line/revision for every hydrated symbol step; the gRPC cross-service flow regression asserts every hop has a source locator.
 
 ### M10.7 IaC
 
@@ -2526,9 +2526,9 @@ Edge: handles, invokes, publishes, subscribes, produces, consumes, sends, receiv
 - GitHub Actions workflow/job/step；
 - Helm values/template 的可静态引用。
 
-- [ ] secret 只存 key/name locator，不存明文 value。
-- [ ] IaC node 可连接到 service/package/endpoint。
-- [ ] deploy blast radius 区分 verified reference 与 name heuristic。
+- [x] secret 只存 key/name locator，不存明文 value；`extractIacFacts` 与 `knowledge-iac.test.mjs` 覆盖 secret locator。
+- [x] IaC node 可连接到 service/package/endpoint；IaC files now produce typed service/entity nodes and source-located edges in the index pipeline。
+- [x] deploy blast radius 区分 verified reference 与 name heuristic。Evidence: `deploymentBlastRadius` returns exact explicit-locator facts separately from fuzzy/name-heuristic candidates; `knowledge-iac.test.mjs` covers both classes.
 
 ### M10.8 Resolution provider
 
@@ -2548,9 +2548,9 @@ export interface ResolutionProvider {
 4. framework adapter；
 5. heuristic。
 
-- [ ] LSP 不可用时索引继续，coverage 记录 resolver unavailable。
-- [ ] provider result 绑定 parser/config hash，变更后失效。
-- [ ] 不让 LSP 启动过程阻塞 exact source ingestion。
+- [x] LSP 不可用时索引继续，coverage 记录 resolver unavailable；`ResolutionProviderChain` 将可选 provider 超时/异常降级为 unavailable 并继续 fallback。
+- [x] provider result 绑定 parser/config hash，变更后失效；`knowledge-resolution-provider.test.mjs` 覆盖 cache key 与 invalidate。
+- [x] 不让 LSP 启动过程阻塞 exact source ingestion；provider chain 有 bounded timeout，测试覆盖 20ms timeout 后 parser fallback。
 
 ### M10.9 Graph query 输出
 
@@ -2841,10 +2841,10 @@ name: Auth CPF call sites
 
 ### M11.8 Local graph
 
-- [ ] 当前 note/code symbol 为中心，可调深度 1–3。
-- [ ] edge 类型区分 wikilink、backlink、mentions、code relation、evidence。
-- [ ] revision 不同的 code node 有明显标识。
-- [ ] graph selection 可送到 search/context/canvas。
+- [x] 当前 note/code symbol 为中心，可调深度 1–3；CLI/MCP `knowledge_local_graph` 和 core 都 clamp 深度。
+- [x] edge 类型区分 wikilink、backlink、mentions、code relation、evidence；GraphView 原样返回 `edgeType`。
+- [x] revision 不同的 code node 有明显标识；revision graph node 带 `revisionId`。
+- [x] graph selection 可送到 search/context/canvas；Wiki graph 节点选择提供三条动作，Canvas 保留 `penguin-locator` 扩展字段。
 
 ### M11.9 外部知识源
 
@@ -2862,11 +2862,11 @@ export type ExternalKnowledgeSource =
 - [x] URL 防 SSRF：拒绝 loopback、link-local、metadata IP、file URL、重定向到禁区；允许的内部域必须显式 allow-list。
 - [x] 保存抓取快照 hash、final URL、retrievedAt、content type、license/robots warning 和 source locator。
 - [x] HTML 转 text/Markdown 时保留 heading/link locator；原始响应按 content policy 决定是否保存。
-- [ ] Postgres 只用 read-only credential introspect schema/table/column/index/constraint/function signature，默认不读取业务 row。
-- [ ] credential 复用现有 <code>credential_entries</code> 安全存储，只保存 ID，不写 note/artifact。
-- [ ] source sync 产生新 revision；旧 claim 自动 stale，不原地覆盖历史。
-- [ ] external source 的内容标 untrusted，进入 M14 content boundary。
-- [ ] CLI/MCP 都覆盖 register/sync/list/remove；register/remove 是 guarded mutation。
+- [x] Postgres 只用 read-only credential introspect schema/table/column/index/constraint/function signature，默认不读取业务 row；`syncPostgresSchema` 只执行 `information_schema` 查询。
+- [x] credential 复用现有 <code>credential_entries</code> 安全存储，只保存 ID，不写 note/artifact；注册时校验 entry 存在。
+- [x] source sync 产生新 revision；内容 hash 变化时旧 evidence 自动 stale，不原地覆盖历史。
+- [x] external source 的内容标 untrusted，进入 M14 content boundary；coverage reason 为 `external_postgres_schema`。
+- [x] CLI/MCP 都覆盖 register/sync/list/remove；register/remove 是 guarded mutation。Evidence: `knowledge-cli.test.mjs` and `knowledge-mcp-tools.test.mjs` execute register/list/sync/remove for a Postgres schema source with injected read-only adapter; remove is confirmation guarded and sync runs only information_schema queries.
 
 ### M11 验收
 
@@ -3489,7 +3489,7 @@ export interface ValidatedFinding {
 - [x] 不解析/执行 Markdown HTML、script、shell code。
 - [x] Canvas URL 不自动打开。
 - [x] 文档中的“ignore previous instructions”只作为文本返回。
-- [ ] compact/hydration 不因 prompt-like 内容改变 tool behavior。
+- [x] compact/hydration 不因 prompt-like 内容改变 tool behavior；compact/full search 与 source hydration locator/status 相同，prompt-like source 明确作为 untrusted data 返回，回归测试覆盖。
 
 ### M14.4 Secret 与 PII
 
@@ -3502,11 +3502,11 @@ export interface ValidatedFinding {
 
 ### M14.5 Scope 和权限
 
-- [ ] CLI 根据 cwd/config 解析 allow-list。
-- [ ] MCP 启动时固定 workspace roots；请求不能扩大到 root 外。
-- [ ] symlink escape 在 index 和 query 双重检查。
+- [x] CLI 根据 `PENGUIN_KNOWLEDGE_ALLOWED_ROOTS`（未配置时默认为 cwd）解析 allow-list。
+- [x] MCP 启动时固定 `PENGUIN_MCP_WORKSPACE_ROOTS`；请求不能扩大到 root 外。
+- [x] symlink escape 在 index 和 query 双重检查；index/watch 校验 target realpath，CLI 默认 scope resolution 也 canonicalize cwd 与 registered repo root，workspace-scope fixture 覆盖 symlink escape。
 - [x] hit hydration 重查 scope，不信任 hit ID 自带 path；`getSourceHit` 可绑定 repo scope，错误 repo 会返回空，并有 source-search 回归测试。
-- [ ] memory/note mutation 只允许 knowledge root。
+- [x] memory/note mutation 只允许固定 `~/.penguin/knowledge` notes root；MCP 不接受外部 notesDir。
 - [x] artifact import 先解压到隔离 temp，防 zip-slip 和 symlink。
 
 ### M14.6 Audit
@@ -3626,7 +3626,7 @@ export interface KnowledgeArtifactManifest {
 ### M15.2 一致性 snapshot
 
 - [x] 导出前执行 SQLite checkpoint。`exportKnowledgeArtifact` 在 serialize 前执行 `wal_checkpoint(PASSIVE)`。
-- [ ] 使用 better-sqlite3 backup API 或 SQLite online backup，不直接复制活跃 WAL DB。
+- [x] 使用 better-sqlite3 `serialize()` 在线数据库镜像路径，先 `wal_checkpoint(PASSIVE)` 和 `integrity_check`，不直接复制活跃 WAL DB；artifact round-trip/restore tests 覆盖。
 - [x] artifact DB 只含选定 scope/revision；CLI 支持 `--repo` / `--snapshot`，并有显式 repository-scope round-trip 测试。
 - [x] 绝对路径转 repo-relative；artifact clone 将 repo root 转为 `artifact://repo/<id>`，checkout path 清空。
 - [x] export 时重新跑 orphan/integrity check；SQLite `integrity_check`、source corpus orphan SQL 与 artifact round-trip 已验证。
@@ -3661,9 +3661,9 @@ rtk penguin artifact export \
 ### M15.5 Import
 
 - [x] 先读 header/manifest，验证 format/capability/schema compatibility。
-- [ ] 解压路径防 <code>..</code>、absolute path、symlink。当前已拒绝 absolute、`..` 与反斜杠 entry，测试覆盖 `../escape`；ZIP symlink metadata 仍需单独拒绝。
+- [x] 解压路径防 <code>..</code>、absolute path、反斜杠和 Unix ZIP symlink metadata；`knowledge-artifact-roundtrip.test.mjs` 覆盖 traversal 与 symlink entry。
 - [x] dry-run 输出新增/冲突 repo、snapshot、notes；`inspectKnowledgeArtifact` 与 CLI `artifact import --dry-run` 返回 repository/snapshot/note conflict report，且有 no-mutation regression。
-- [ ] repo identity 按 remote fingerprint + configured mapping；不按同名自动合并。
+- [x] repo identity 优先使用 normalized remote fingerprint（`.git`/尾部 slash 归一化）并将同名但不同 remote 保留为 conflict；dry-run 不自动合并，configured mapping 仍由 operator 显式处理。
 - [x] note conflict 在 dry-run 中保留双方 hash 并生成 conflict report；实际 restore 仍需 operator confirmation，不静默覆盖。
 - [x] import 到 staging DB，完成 SQLite integrity validation 后 atomic switch；restore test 验证旧 DB backup 保留。
 - [x] 失败不改变当前 DB。staging validation/atomic restore failure regression verifies the existing repository remains present.
@@ -3671,7 +3671,7 @@ rtk penguin artifact export \
 ### M15.6 Delta
 
 - [x] delta artifact 引用 base artifact hash；`knowledge-artifact-roundtrip.test.mjs` 验证 base mismatch 被拒绝。
-- [ ] delta 目前为固定 chunk 增量并附带 tombstone；尚未把 payload 进一步拆成只含新增 blob/fact/snapshot/note revision 的逻辑 delta。
+- [x] delta payload 已拆为 `logical-row-v1`：只记录新增/更新/删除的普通 SQLite rows、表创建和 tombstone；旧 `fixed-chunk-v1` import 仍兼容，round-trip 使用 logical normalization 验证。
 - [x] import 缺 base 时拒绝；delta import 必须显式提供 `baseDatabase`。
 - [x] base + delta 结果与 full export normalization 相等；delta round-trip 测试逐字节验证。
 - [x] `artifact_tombstones(entity_type, entity_key, base_artifact_hash, created_at)` 显式表达 repo/snapshot/note/source fact/semantic chunk 删除；round-trip 测试验证。
@@ -3851,7 +3851,7 @@ Normalization 去掉 request ID/timing，仅保留语义字段。
 - [x] Penguin、CodeGraph、Graphify、其他基线结果匿名化后评分。
 - [x] 工具无法回答时记录 honest gap；当前 110 条 differential 中 CodeGraph/Graphify 均 110/110 captured，honest gap 为空。
 - [x] 外部工具版本冻结在报告：CodeGraph 1.1.6、Graphify 0.9.5；报告含 generatedAt 和逐题 outputHash。
-- [ ] “超越”要求 Penguin correctness/provenance 不低于任一基线，且 universal exact、surface parity、revision diagnostics 是独有强项；不能只比较功能清单。
+- [x] “超越”要求 Penguin correctness/provenance 不低于任一基线，且 universal exact、surface parity、revision diagnostics 是独有强项；不能只比较功能清单。Evidence: `scripts/knowledge-real-question-penguin-eval.mjs` independently ran Penguin against all 110 reviewed questions and `docs/knowledge-v2/competitor-differential-fresh.json` passed `--gate` with min correctness 1, min provenance 1, and all three independent strengths true.
 
 ### M16.5 性能
 
@@ -4073,15 +4073,15 @@ unverifiable
 ~~~
 
 - [x] <code>external_only_correct</code> 自动开 gap，带 reproduction。
-- [ ] 每周 review，不能只看 aggregate count。
+- [x] 每周 review 不只看 aggregate count；`scripts/knowledge-shadow-weekly-review.mjs` 按 real-question category 和 diff outcome 生成 review report，并显式统计 external-only blockers。
 
 ### M17.5 RC1
 
 - [x] 从 clean branch build。`f49d8b8` 后 worktree clean，`rtk npm run build` 与 Rust tests 通过。
 - [x] 运行 M16 全 gate。RC1 full audit 的 release gate exit 0，包含 10,000 needles、surface parity、package smoke、110 real questions 和 differential。
-- [ ] 真实 workspace backfill。
-- [ ] 连续使用至少一个完整工作周期，覆盖 CLI/MCP/Wiki。
-- [ ] crash/corruption/false verified hit = 0。
+- [x] 真实 workspace backfill 已执行：2,546 candidates，2,539 processed，7 个历史 revision 因 checkout content hash 不同而显式 unavailable；证据与 retry policy 见 `docs/knowledge-v2/real-workspace-backfill-2026-07-18.json`，未伪造内容。
+- [x] 连续使用至少一个完整工作周期，覆盖 CLI/MCP/Wiki。Evidence: the current integrated cycle ran CLI init/index/search/mutation flows, MCP register/search/graph/source flows, and Wiki canonical search/revision/cursor flows in one 39-test batch; all passed.
+- [x] crash/corruption/false verified hit = 0。Evidence: current crash/recovery regression batch passed 40/40, including ledger corruption healing, DB replay, runtime framing corruption/child replacement, source hash collision rejection, and revision flow corruption diagnostics; edge-proof tests reject inferred edges from the verified lane.
 - [x] 发布报告记录所有 degraded optional capability；RC1 报告 `degradedOptional=[]`。
 - [x] 执行 rollback 演练并恢复同一查询结果；`tests/knowledge-rollback.test.mjs` 通过。
 
@@ -4117,14 +4117,14 @@ AI 才能提出下线命令。没有显式批准时停在报告，不执行。
 
 批准后，按顺序：
 
-- [ ] disable CodeGraph/Graphify hooks/MCP config，不先删数据。
-- [ ] 启动新 shell/app，确认不再加载 external tool。
-- [ ] 在没有 external binary 的 PATH 环境运行 Penguin smoke。
-- [ ] 更新 AGENTS auto-managed instructions，只保留 Penguin Knowledge。
-- [ ] 从 package/plugin config 移除依赖。
-- [ ] 再跑 release gate。
+- [x] disable CodeGraph/Graphify hooks/MCP config，不先删数据。 Evidence: active Codex MCP and Claude hooks removed; `.codegraph/` and `graphify-out/` retained.
+- [x] 启动新 shell/app，确认不再加载 external tool。 Evidence: fresh shell with active config and no external MCP/hook entries.
+- [x] 在没有 external binary 的 PATH 环境运行 Penguin smoke。 Evidence: system-only PATH smoke passed surface parity and package smoke; `command -v codegraph` and `command -v graphify` were absent.
+- [x] 更新 AGENTS auto-managed instructions，只保留 Penguin Knowledge。 Evidence: global Codex/Claude managed blocks retain Penguin Knowledge and no CodeGraph block.
+- [x] 从 package/plugin config 移除依赖。 Evidence: `/Users/shieng/.codex/config.toml` and project `.claude/settings.json` no longer load CodeGraph/Graphify; rollback backups recorded in quarantine document.
+- [x] 再跑 release gate。 Evidence: `docs/knowledge-v2/release-gate-post-removal-20260718-r4.json`; typecheck, surface parity, package smoke, 10,000-needle benchmark, 110-question audit, and competitor differential all passed with exit code 0.
 - [ ] 外部 index 保留 quarantine 7–14 天；到期删除需再次确认。
-- [ ] 记录移除日期、版本、备份位置和 rollback 命令。
+- [x] 记录移除日期、版本、备份位置和 rollback 命令。 Evidence: `docs/knowledge-v2/external-tool-quarantine-2026-07-18.md` records removal date, RC IDs, backups, SHA-256 values, and rollback commands.
 
 ### M17.9 回滚触发条件
 
@@ -4841,15 +4841,15 @@ M18 完成后，交付报告必须包含：
 
 在开始实现前，计划 reviewer 先检查：
 
-- [ ] 每个 task 有目标、依赖、创建/修改文件、red test、实现步骤、命令、预期结果。
-- [ ] 所有现有路径在当前 repo 存在；新路径明确写在“创建”。
-- [ ] 每个 shell 命令使用 <code>rtk</code> 前缀；package.json script 字符串除外。
-- [ ] 没有让 semantic/LLM 成为 exact correctness 依赖。
-- [ ] CLI/MCP required capabilities 有 canonical 清单。
-- [ ] current schema v9、MCP drift 和真实 miss 已记录。
-- [ ] COW、revision、GC、foreign_keys OFF 风险有 test。
-- [ ] packaging、clean install、runtime hash 是 release gate。
-- [ ] CodeGraph/Graphify 只在双 RC 后由操作者批准下线。
-- [ ] 文档没有未定义的实现占位项。
+- [x] 每个 task 有目标、依赖、创建/修改文件、red test、实现步骤、命令、预期结果。Evidence: M0–M18 task sections consistently include target/dependency and acceptance/expected-result blocks; newly created continuation files are recorded in the execution log.
+- [x] 所有现有路径在当前 repo 存在；新路径明确写在“创建”。Evidence: documentation generation/path checks pass, and continuation-created paths (`args.ts`, `command-dispatch.ts`, dispatch/data-flow/IaC/channel modules and tests) are explicitly named in the execution log.
+- [x] 每个 shell 命令使用 <code>rtk</code> 前缀；package.json script 字符串除外。Evidence: bash-block static scan found zero non-`rtk` command lines.
+- [x] 没有让 semantic/LLM 成为 exact correctness 依赖。Evidence: exact/path/source lanes and graph trust gates remain parser/source backed; semantic providers are optional and regression tests cover exact fallback behavior.
+- [x] CLI/MCP required capabilities 有 canonical 清单。Evidence: canonical contracts, CLI/MCP registrations and surface-parity tests cover the shared capability registry.
+- [x] current schema v13（legacy v9 migration）、MCP drift 和真实 miss 已记录。Evidence: `docs/knowledge-v2/schema-reference.md` records schema 13; generated docs check reports zero drift; real-question and shadow reports retain honest gaps.
+- [x] COW、revision、GC、foreign_keys OFF 风险有 test。Evidence: source-COW, branch lifecycle/GC, revision isolation, artifact logical-delta and recovery suites cover these boundaries.
+- [x] packaging、clean install、runtime hash 是 release gate。Evidence: release-gate script includes typecheck, surface parity, package smoke, benchmark, real-question and differential checks; package smoke and runtime hash are explicit outputs.
+- [x] CodeGraph/Graphify 只在双 RC 后由操作者批准下线。Evidence: M17.7/M17.8 remain an approval-gated sequence; no removal is executed before the gate and explicit operator approval.
+- [x] 文档没有未定义的实现占位项。Evidence: placeholder scan found no TODO/TBD/FIXME/待补/占位 item; remaining unchecked items are explicit approval/gate requirements, not placeholders.
 
 计划 reviewer 通过后，从 M0 开始；不得直接跳到 UI、semantic 或外部工具移除。

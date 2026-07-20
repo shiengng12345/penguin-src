@@ -14,6 +14,7 @@ import {
   buildContextPack,
   buildFlow,
   indexStatus,
+  graphQuery,
 } from "../packages/knowledge-core/dist/index.js";
 
 // Seed a small but realistic graph:
@@ -84,10 +85,27 @@ test("graphNeighborhood: focus + 1-hop neighbours (both directions) + internal e
   store.close();
 });
 
+test("graph query renders dispatches_to as an explicit dispatch hop", () => {
+  const { store, caller, login, branchId } = seed();
+  store.replaceFileEdges({ branchId, filePath: "a.ts", edges: [{ src: caller, dst: login, edgeType: "dispatches_to", origin: "parser", method: "EXTRACTED", provenance: { evidence: "type_resolution" } }] });
+  const result = graphQuery(store, { start: { nodeIds: [caller] }, traverse: [{ edgeTypes: ["dispatches_to"], direction: "out", minDepth: 1, maxDepth: 1, statuses: ["verified"] }], project: ["nodes", "edges", "paths", "provenance"], limit: 10 });
+  assert.equal(result.edges[0].edge_type, "dispatches_to");
+  assert.equal(result.edges[0].dispatchHop, true);
+  assert.equal(result.provenance[0].hopType, "dispatch");
+  store.close();
+});
+
 test("graphNeighborhood respects the node limit", () => {
   const { store, caller } = seed();
   const g = graphNeighborhood(store, caller, { depth: 5, limit: 2 });
   assert.equal(g.nodes.length, 2); // focus + 1 before cap
+  store.close();
+});
+
+test("graphNeighborhood clamps local traversal to depth 1-3", () => {
+  const { store, caller } = seed();
+  const g = graphNeighborhood(store, caller, { depth: 99, limit: 10 });
+  assert.equal(g.nodes.length, 3);
   store.close();
 });
 
