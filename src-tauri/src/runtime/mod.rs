@@ -1,5 +1,6 @@
 pub mod error;
 pub mod controller;
+pub mod manager;
 
 pub use error::RuntimeError;
 
