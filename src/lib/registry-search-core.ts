@@ -278,7 +278,11 @@ export function filterPackageRows(
     .filter((pkg) => !branchQuery || pkg.branch.toLowerCase().startsWith(branchQuery));
 
   const query = filters.query.trim();
-  if (!query) {
+  // 勾了家族时，搜索框文字只是「在下拉里找到这个家族」的手段，不应再作为结果
+  // 过滤条件二次 AND：像 "pro" 这种短前缀覆盖 "provider" 仅 37.5%，低于
+  // fuzzyTokenMatches 的 0.6 覆盖阈值，会把用户刚勾选的家族整个滤空。
+  // 家族选择即结果过滤器；纯文字搜索（无家族）时 query 照常生效。
+  if (!query || familyKeys.size > 0) {
     return [...scoped].sort(rowNewestFirst).slice(0, RESULT_LIMIT);
   }
 
