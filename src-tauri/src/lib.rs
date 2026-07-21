@@ -13,6 +13,7 @@ mod redis;
 mod registry;
 mod registry_search;
 mod rest;
+mod runtime;
 
 pub use packages::{InstalledPackage, ProtoFile};
 pub use proxy::{HttpProxyRequest, HttpProxyResponse};
