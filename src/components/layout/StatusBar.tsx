@@ -37,6 +37,7 @@ const ErrorLogDialog = lazy(() =>
 
 interface StatusBarProps {
   onOpenSettings: () => void;
+  onOpenRuntimeSettings: () => void;
   onOpenShortcuts: () => void;
 }
 
@@ -47,7 +48,7 @@ function readLastSeenAt(): number {
   return Number.isFinite(n) ? n : 0;
 }
 
-export function StatusBar({ onOpenSettings, onOpenShortcuts }: StatusBarProps) {
+export function StatusBar({ onOpenSettings, onOpenRuntimeSettings, onOpenShortcuts }: StatusBarProps) {
   // Error-log dialog open state + unread-count badge. Re-fetched on
   // every "penguin:error-log-changed" event so logger.error()s landing
   // mid-session update the badge in real time.
@@ -185,11 +186,7 @@ export function StatusBar({ onOpenSettings, onOpenShortcuts }: StatusBarProps) {
       >
         <SettingsIcon className="h-3 w-3" />
       </button>
-      <RuntimeStatusButton
-        onOpenSettings={() => {
-          /* TODO(Task 13): wire this to open the Settings dialog scoped to the Runtime section. */
-        }}
-      />
+      <RuntimeStatusButton onOpenSettings={onOpenRuntimeSettings} />
       <span
         className="px-1.5 text-muted-foreground/60"
         title={`Pengvi v${pkg.version} · NgSE`}
