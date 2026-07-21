@@ -1,5 +1,8 @@
 use crate::runtime::error::RuntimeError;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::Arc;
+use tokio::process::{Child, Command};
+use tokio::sync::Mutex as AsyncMutex;
 
 #[async_trait::async_trait]
 pub trait SleepController: Send + Sync {
@@ -59,6 +62,83 @@ impl SleepController for FakeSleepController {
         Ok(())
     }
     async fn is_active(&self) -> bool { self.active.load(Ordering::SeqCst) }
+}
+
+/// macOS: keeps the machine awake by holding a `caffeinate` child process.
+/// `-d` prevents display sleep, `-i` prevents idle system sleep. `-w <pid>`
+/// binds caffeinate's lifetime to Penguin's PID so a Penguin crash auto-kills
+/// it (no orphaned process). The command line is never surfaced to the UI.
+#[cfg(target_os = "macos")]
+pub struct MacosCaffeinateController {
+    child: AsyncMutex<Option<Child>>,
+}
+
+#[cfg(target_os = "macos")]
+impl MacosCaffeinateController {
+    pub fn new() -> Self {
+        Self { child: AsyncMutex::new(None) }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[async_trait::async_trait]
+impl SleepController for MacosCaffeinateController {
+    async fn engage(&self) -> Result<(), RuntimeError> {
+        let mut slot = self.child.lock().await;
+        if slot.is_some() {
+            return Ok(()); // idempotent — one instance only
+        }
+        let pid = std::process::id();
+        let child = Command::new("caffeinate")
+            .args(["-d", "-i", "-w", &pid.to_string()])
+            .spawn()
+            .map_err(|e| RuntimeError::EngageFailed(e.to_string()))?;
+        *slot = Some(child);
+        Ok(())
+    }
+
+    async fn release(&self) -> Result<(), RuntimeError> {
+        let mut slot = self.child.lock().await;
+        if let Some(mut child) = slot.take() {
+            // caffeinate has no cleanup work; kill + reap is sufficient.
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
+        Ok(())
+    }
+
+    async fn is_active(&self) -> bool {
+        self.child.lock().await.is_some()
+    }
+}
+
+/// Non-macOS placeholder. Reports failure explicitly rather than pretending
+/// success, so the UI can show "not supported on this platform". Refcount
+/// bookkeeping in RuntimeManager still runs deterministically.
+pub struct UnsupportedSleepController;
+
+#[async_trait::async_trait]
+impl SleepController for UnsupportedSleepController {
+    async fn engage(&self) -> Result<(), RuntimeError> { Err(RuntimeError::Unsupported) }
+    async fn release(&self) -> Result<(), RuntimeError> { Ok(()) }
+    async fn is_active(&self) -> bool { false }
+}
+
+/// Whether prevent-sleep is implemented on the current platform.
+pub fn platform_supported() -> bool {
+    cfg!(target_os = "macos")
+}
+
+/// Build the controller for the current platform.
+pub fn controller() -> Arc<dyn SleepController> {
+    #[cfg(target_os = "macos")]
+    {
+        Arc::new(MacosCaffeinateController::new())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Arc::new(UnsupportedSleepController)
+    }
 }
 
 #[cfg(test)]
