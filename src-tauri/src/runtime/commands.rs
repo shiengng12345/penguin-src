@@ -47,13 +47,17 @@ pub async fn runtime_get_status(state: State<'_, RuntimeState>) -> Result<Runtim
 #[tauri::command]
 pub async fn runtime_set_prevent_sleep(
     enabled: bool,
+    app: tauri::AppHandle,
     state: State<'_, RuntimeState>,
 ) -> Result<bool, String> {
     let transition = state.set_manual(enabled).await.map_err(|e| e.to_string())?;
     if transition == RuntimeTransition::Failed {
         return Err("Unable to prevent computer sleep. Penguin will continue running normally.".into());
     }
-    Ok(state.is_prevent_sleep_enabled().await)
+    let now = state.is_prevent_sleep_enabled().await;
+    use tauri::Emitter;
+    let _ = app.emit("runtime://transition", serde_json::json!({ "enabled": now }));
+    Ok(now)
 }
 
 #[tauri::command]
