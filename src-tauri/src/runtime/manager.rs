@@ -90,6 +90,29 @@ impl RuntimeManager {
             }
             Err(e) => {
                 eprintln!("[runtime] error: controller transition failed: {e}");
+                // Roll back the count mutation applied above: `active` was
+                // never flipped (we're in the Err arm), so per_source/total
+                // must stay consistent with it, or a future toggle will
+                // observe a stale non-zero count and short-circuit to Noop
+                // without ever retrying the controller call.
+                {
+                    let mut st = self.state.lock().await;
+                    let entry = st.per_source.entry(source).or_insert(0);
+                    if delta > 0 {
+                        let dec = delta as u32;
+                        if *entry < dec {
+                            *entry = 0;
+                        } else {
+                            *entry -= dec;
+                        }
+                    } else if delta < 0 {
+                        *entry = entry.saturating_add((-delta) as u32);
+                    }
+                    if *entry == 0 {
+                        st.per_source.remove(&source);
+                    }
+                    st.total = st.per_source.values().sum();
+                }
                 Ok(RuntimeTransition::Failed)
             }
         }
@@ -201,11 +224,59 @@ impl RuntimeManager {
 mod tests {
     use super::*;
     use crate::runtime::controller::FakeSleepController;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     fn manager() -> (Arc<RuntimeManager>, Arc<FakeSleepController>) {
         let fake = Arc::new(FakeSleepController::new());
         let mgr = Arc::new(RuntimeManager::new(fake.clone()));
         (mgr, fake)
+    }
+
+    /// Test-only controller whose `engage()` ALWAYS fails, so we can prove
+    /// the refcount rollback on the `Err` arm of `apply_delta_inner`.
+    struct FailingEngageController {
+        engage_attempts: AtomicU32,
+    }
+
+    impl FailingEngageController {
+        fn new() -> Self {
+            Self { engage_attempts: AtomicU32::new(0) }
+        }
+        fn engage_attempts(&self) -> u32 {
+            self.engage_attempts.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::runtime::controller::SleepController for FailingEngageController {
+        async fn engage(&self) -> Result<(), RuntimeError> {
+            self.engage_attempts.fetch_add(1, Ordering::SeqCst);
+            Err(RuntimeError::EngageFailed("test".into()))
+        }
+        async fn release(&self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        async fn is_active(&self) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_engage_rolls_back_count_so_retry_works() {
+        let controller = Arc::new(FailingEngageController::new());
+        let mgr = Arc::new(RuntimeManager::new(controller.clone()));
+
+        // First attempt fails; count must roll back to keep `active` and
+        // `per_source` consistent.
+        assert_eq!(mgr.set_manual(true).await.unwrap(), RuntimeTransition::Failed);
+        assert!(!mgr.is_prevent_sleep_enabled().await);
+        assert!(mgr.active_sources().await.is_empty());
+
+        // Second attempt must ALSO invoke engage (not Noop) — proving the
+        // rollback actually cleared the count so a retry is possible.
+        assert_eq!(mgr.set_manual(true).await.unwrap(), RuntimeTransition::Failed);
+
+        assert_eq!(controller.engage_attempts(), 2);
     }
 
     #[tokio::test]
