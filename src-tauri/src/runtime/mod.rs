@@ -2,8 +2,10 @@ pub mod error;
 pub mod controller;
 pub mod manager;
 pub mod policy;
+pub mod commands;
 
 pub use error::RuntimeError;
+pub use commands::{new_state, RuntimeState};
 
 /// Logical reasons the OS is being kept awake. Reference-counted per source.
 #[derive(Clone, Copy, Hash, Eq, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
