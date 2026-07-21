@@ -55,8 +55,10 @@ pub async fn runtime_set_prevent_sleep(
         return Err("Unable to prevent computer sleep. Penguin will continue running normally.".into());
     }
     let now = state.is_prevent_sleep_enabled().await;
-    use tauri::Emitter;
-    let _ = app.emit("runtime://transition", serde_json::json!({ "enabled": now }));
+    if matches!(transition, RuntimeTransition::Engaged | RuntimeTransition::Released) {
+        use tauri::Emitter;
+        let _ = app.emit("runtime://transition", serde_json::json!({ "enabled": now }));
+    }
     Ok(now)
 }
 

@@ -27,15 +27,13 @@ export function useRuntime() {
       refresh();
       toast(evt.payload.enabled ? "☕ Prevent Sleep Enabled" : "☕ Prevent Sleep Disabled");
     });
-    return () => { un.then((f) => f()); };
+    return () => { un.then((f) => f()).catch(() => {}); };
   }, [refresh]);
 
   const togglePreventSleep = useCallback(async (enabled: boolean) => {
     setLoading(true);
     try {
       await setPreventSleep(enabled);
-      await refresh();
-      toast(enabled ? "☕ Prevent Sleep Enabled" : "☕ Prevent Sleep Disabled");
     } catch (e) {
       toast(String(e)); // backend returns the friendly "Unable to prevent…" string
     } finally {
