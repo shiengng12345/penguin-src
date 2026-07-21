@@ -4,15 +4,12 @@ import { getVersion } from "@tauri-apps/api/app";
 import { logger } from "@/lib/logger";
 import { useAppStore, type ProtocolTab, type VisibleProtocolTab, type MetadataEntry } from "@/lib/store";
 import type { AppUpdateController } from "@/hooks/useAppUpdateScheduler";
-import { getPersistedValue, setPersistedValue } from "@/lib/app-persistence";
+import { setPersistedValue } from "@/lib/app-persistence";
 import { persistEnvironmentSnapshot } from "@/lib/environment-persistence";
-import { APP_VALUE_KEYS, RUNTIME_PREVENT_SLEEP_KEY } from "@/lib/persistence-keys";
+import { APP_VALUE_KEYS } from "@/lib/persistence-keys";
 import { persistSavedRequests } from "@/lib/penguin-db";
-import { useRuntime } from "@/hooks/useRuntime";
-import type { PreventSleepPolicy } from "@/lib/runtime-client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { RegistryAuthSection } from "@/components/settings/RegistryAuthSection";
 import {
   X,
@@ -36,20 +33,9 @@ import {
   Sparkles,
   Settings2,
   ChevronRight,
-  Coffee,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { writeClipboard } from "@/lib/clipboard";
-
-// Only two honest, working policy choices — Penguin has no Flow/Backend/AI
-// subsystems, so "Ask Every Time" and the combinable auto-conditions from
-// the original design are intentionally NOT offered here (see Task 13
-// scope change). auto_conditions always persists as [].
-type PreventSleepUiMode = "never" | "on_startup";
-const PREVENT_SLEEP_MODES: { value: PreventSleepUiMode; label: string }[] = [
-  { value: "never", label: "Never — I'll turn it on manually" },
-  { value: "on_startup", label: "Automatically when Penguin starts" },
-];
 
 const PROTOCOL_TABS: { id: VisibleProtocolTab; label: string; icon: typeof Globe }[] = [
   { id: "grpc-web", label: "gRPC-Web", icon: Globe },
@@ -84,11 +70,6 @@ interface SettingsDialogProps {
   onOpenEnvManager: () => void;
   appUpdate: AppUpdateController;
   onPackagesCleared: () => Promise<void>;
-  // Task 13: when "runtime", scroll the Runtime section into view on open —
-  // this dialog is a single-page grid of cards (not a tabbed section
-  // switcher), so "opening at a section" means focusing that card rather
-  // than switching a tab.
-  initialFocus?: "runtime";
 }
 
 export function SettingsDialog({
@@ -96,7 +77,6 @@ export function SettingsDialog({
   onOpenEnvManager,
   appUpdate,
   onPackagesCleared,
-  initialFocus,
 }: SettingsDialogProps) {
   const [clearing, setClearing] = useState(false);
   const [cleared, setCleared] = useState(false);
@@ -214,46 +194,6 @@ export function SettingsDialog({
     getVersion().then(setAppVersion).catch(() => setAppVersion("unknown"));
     refreshMcpStatus();
   }, [refreshMcpStatus]);
-
-  // Runtime — Prevent Sleep policy. Initialize from the live runtime status
-  // once it loads; fall back to the persisted value, then to "on_startup".
-  const { status: runtimeStatus, setMode: setRuntimeModePolicy } = useRuntime();
-  const runtimeSectionRef = useRef<HTMLDivElement>(null);
-  const [preventSleepMode, setPreventSleepModeState] = useState<PreventSleepUiMode>(() => {
-    const persisted = getPersistedValue(RUNTIME_PREVENT_SLEEP_KEY);
-    if (persisted) {
-      try {
-        const policy = JSON.parse(persisted) as PreventSleepPolicy;
-        if (policy.mode === "never" || policy.mode === "on_startup") return policy.mode;
-      } catch {
-        /* fall through to default */
-      }
-    }
-    return "on_startup";
-  });
-
-  useEffect(() => {
-    const mode = runtimeStatus?.policy.mode;
-    if (mode === "never" || mode === "on_startup") {
-      setPreventSleepModeState(mode);
-    }
-  }, [runtimeStatus?.policy.mode]);
-
-  useEffect(() => {
-    if (initialFocus === "runtime") {
-      runtimeSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-    }
-    // Only run once per dialog mount — initialFocus is fixed for the
-    // lifetime of a single Settings open.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  const applyPreventSleepMode = (mode: PreventSleepUiMode) => {
-    setPreventSleepModeState(mode);
-    const policy: PreventSleepPolicy = { mode, auto_conditions: [] };
-    setPersistedValue(RUNTIME_PREVENT_SLEEP_KEY, JSON.stringify(policy));
-    void setRuntimeModePolicy(policy);
-  };
 
   const currentHeaders = defaultHeaders[headerProtocol];
 
@@ -591,34 +531,6 @@ export function SettingsDialog({
                 </p>
               </div>
             </label>
-          </div>
-
-          {/* Runtime — Prevent Sleep */}
-          <div
-            ref={runtimeSectionRef}
-            className="scroll-mt-4 rounded-lg border border-border bg-muted/20 p-4"
-          >
-            <h3 className="text-sm font-medium text-foreground flex items-center gap-1.5">
-              <Coffee className="h-3.5 w-3.5" />
-              Prevent Sleep / 防止休眠
-            </h3>
-            <p className="mt-0.5 text-xs text-muted-foreground">
-              Keep this computer awake while Penguin is running.
-            </p>
-            <RadioGroup
-              value={preventSleepMode}
-              onValueChange={applyPreventSleepMode}
-              className="mt-3"
-            >
-              {PREVENT_SLEEP_MODES.map((m) => (
-                <RadioGroupItem
-                  key={m.value}
-                  selected={preventSleepMode === m.value}
-                  onSelect={() => applyPreventSleepMode(m.value)}
-                  label={m.label}
-                />
-              ))}
-            </RadioGroup>
           </div>
 
           <RegistryAuthSection />

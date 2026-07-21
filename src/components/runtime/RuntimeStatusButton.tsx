@@ -8,11 +8,7 @@ import { cn } from "@/lib/utils";
 import { useRuntime } from "@/hooks/useRuntime";
 import { RuntimePanel } from "./RuntimePanel";
 
-interface RuntimeStatusButtonProps {
-  onOpenSettings: () => void;
-}
-
-export function RuntimeStatusButton({ onOpenSettings }: RuntimeStatusButtonProps) {
+export function RuntimeStatusButton() {
   const { status } = useRuntime();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -45,12 +41,7 @@ export function RuntimeStatusButton({ onOpenSettings }: RuntimeStatusButtonProps
       </button>
       {open && (
         <div className="absolute bottom-full right-0 z-50 mb-1">
-          <RuntimePanel
-            onOpenSettings={() => {
-              setOpen(false);
-              onOpenSettings();
-            }}
-          />
+          <RuntimePanel />
         </div>
       )}
     </div>

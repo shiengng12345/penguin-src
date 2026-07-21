@@ -133,16 +133,7 @@ export default function App() {
   const [browserOpen, setBrowserOpen] = useState(initialModule === "browser");
   const [databaseOpen, setDatabaseOpen] = useState(initialModule === "database");
   const [wikiOpen, setWikiOpen] = useState(initialModule === "wiki");
-  // Task 13: which Settings card to scroll into view on open. Reset to
-  // undefined on a normal Settings launch so the Runtime status-bar link's
-  // scroll target doesn't linger across unrelated opens.
-  const [settingsInitialFocus, setSettingsInitialFocus] = useState<"runtime" | undefined>(undefined);
   const openSettings = useCallback(() => {
-    setSettingsInitialFocus(undefined);
-    setSettingsOpen(true);
-  }, []);
-  const openRuntimeSettings = useCallback(() => {
-    setSettingsInitialFocus("runtime");
     setSettingsOpen(true);
   }, []);
   const closeVault = useCallback(() => setVaultOpen(false), []);
@@ -815,7 +806,6 @@ export default function App() {
             module is mounted. */}
         <StatusBar
           onOpenSettings={openSettings}
-          onOpenRuntimeSettings={openRuntimeSettings}
           onOpenShortcuts={() => setShortcutsOpen(true)}
         />
 
@@ -833,7 +823,6 @@ export default function App() {
               onOpenEnvManager={() => setEnvManagerOpen(true)}
               appUpdate={appUpdate}
               onPackagesCleared={handlePackagesCleared}
-              initialFocus={settingsInitialFocus}
             />
           )}
           {envManagerOpen && (
