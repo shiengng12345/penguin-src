@@ -499,3 +499,19 @@ test("component-boundary filter strips backend before search", () => {
   const rows = filterPackageRows(allowed, { query: "", protocol: "all" });
   assert.deepEqual(rows.map((r) => r.name), ["@snsoft/player-grpc"]);
 });
+
+test("selected family is not zeroed out by leftover search text (bug: 'pro' + provider)", () => {
+  // Repro: user types "pro" to find the family in the suggestion dropdown,
+  // ticks "provider", but the search box still holds "pro". The residual text
+  // must NOT additionally AND-filter the results — "pro" (len 3) covers only
+  // 37.5% of "provider" (len 8), below fuzzyTokenMatches' 0.6 coverage gate,
+  // so ANDing it would wrongly zero out the very family the user selected.
+  const list = [
+    { name: "@snsoft/provider-grpc", latest_version: "1.0.0", newest_version: "1.0.0-20260101000000", description: null, tags: ["master"], dist_tags: { master: "1.0.0-20260101000000" } },
+    { name: "@snsoft/provider-grpc-web", latest_version: "1.0.0", newest_version: "1.0.0-20260101000000", description: null, tags: ["master"], dist_tags: { master: "1.0.0-20260101000000" } },
+    { name: "@snsoft/promotion-grpc", latest_version: "2.0.0", newest_version: "2.0.0-20260101000000", description: null, tags: ["master"], dist_tags: { master: "2.0.0-20260101000000" } },
+  ];
+  const hits = filterPackageRows(list, { query: "pro", protocol: "all", families: ["provider"] }).map((r) => r.name);
+  assert.ok(hits.length > 0, "provider family must still return rows when the box still says 'pro'");
+  assert.ok(hits.every((n) => n.includes("provider")), "only provider-family rows should show");
+});
