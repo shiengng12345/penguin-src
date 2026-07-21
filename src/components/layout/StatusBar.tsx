@@ -18,6 +18,7 @@ import {
   Settings as SettingsIcon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { RuntimeStatusButton } from "@/components/runtime/RuntimeStatusButton";
 import { closeAllInlineWebviews } from "@/lib/inline-webview";
 import { countErrorLogSince } from "@/lib/penguin-db";
 import { subscribeErrorLogChanged } from "@/lib/error-log-events";
@@ -184,6 +185,11 @@ export function StatusBar({ onOpenSettings, onOpenShortcuts }: StatusBarProps) {
       >
         <SettingsIcon className="h-3 w-3" />
       </button>
+      <RuntimeStatusButton
+        onOpenSettings={() => {
+          /* TODO(Task 13): wire this to open the Settings dialog scoped to the Runtime section. */
+        }}
+      />
       <span
         className="px-1.5 text-muted-foreground/60"
         title={`Pengvi v${pkg.version} · NgSE`}
