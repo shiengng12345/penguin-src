@@ -1,34 +1,20 @@
 import { useCallback, useEffect, useState } from "react";
-import { listen } from "@tauri-apps/api/event";
 import { toast } from "@/components/ui/toast";
 import {
-  getRuntimeStatus,
   setPreventSleep,
   setRuntimeMode,
   type PreventSleepPolicy,
-  type RuntimeStatus,
 } from "@/lib/runtime-client";
+import { ensureRuntimeListener, useRuntimeStore } from "@/lib/runtime-store";
 
 export function useRuntime() {
-  const [status, setStatus] = useState<RuntimeStatus | null>(null);
+  const status = useRuntimeStore((s) => s.status);
+  const refresh = useRuntimeStore((s) => s.refresh);
   const [loading, setLoading] = useState(false);
 
-  const refresh = useCallback(async () => {
-    try {
-      setStatus(await getRuntimeStatus());
-    } catch (e) {
-      console.error("runtime status failed", e);
-    }
-  }, []);
-
   useEffect(() => {
-    refresh();
-    const un = listen<{ enabled: boolean }>("runtime://transition", (evt) => {
-      refresh();
-      toast(evt.payload.enabled ? "☕ Prevent Sleep Enabled" : "☕ Prevent Sleep Disabled");
-    });
-    return () => { un.then((f) => f()).catch(() => {}); };
-  }, [refresh]);
+    ensureRuntimeListener();
+  }, []);
 
   const togglePreventSleep = useCallback(async (enabled: boolean) => {
     setLoading(true);
@@ -39,7 +25,7 @@ export function useRuntime() {
     } finally {
       setLoading(false);
     }
-  }, [refresh]);
+  }, []);
 
   const setMode = useCallback(async (policy: PreventSleepPolicy) => {
     await setRuntimeMode(policy);
