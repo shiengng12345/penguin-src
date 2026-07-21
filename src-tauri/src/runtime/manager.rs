@@ -1,0 +1,356 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+use crate::runtime::controller::SleepController;
+use crate::runtime::error::RuntimeError;
+use crate::runtime::policy::{PreventSleepMode, PreventSleepPolicy};
+use crate::runtime::{RuntimeSource, RuntimeTransition};
+
+#[derive(Default)]
+struct RuntimeManagerState {
+    per_source: HashMap<RuntimeSource, u32>,
+    total: u32,
+    active: bool,
+    policy: PreventSleepPolicy,
+}
+
+pub struct RuntimeManager {
+    controller: Arc<dyn SleepController>,
+    state: Mutex<RuntimeManagerState>,
+    transition: Mutex<()>,
+}
+
+impl RuntimeManager {
+    pub fn new(controller: Arc<dyn SleepController>) -> Self {
+        Self {
+            controller,
+            state: Mutex::new(RuntimeManagerState::default()),
+            transition: Mutex::new(()),
+        }
+    }
+
+    /// Apply a signed delta to one source's count and, if the total crosses the
+    /// 0<->1 boundary, drive the controller. The `transition` mutex serializes
+    /// the whole check-then-act so concurrent callers can never double-drive.
+    ///
+    /// Callers MUST already hold `self.transition` for the duration of this
+    /// call (see `apply_delta` and `set_manual`). `tokio::sync::Mutex` is not
+    /// re-entrant, so this fn never locks `transition` itself.
+    async fn apply_delta_inner(
+        &self,
+        source: RuntimeSource,
+        delta: i32,
+    ) -> Result<RuntimeTransition, RuntimeError> {
+        // Short critical section: mutate counts, decide desired state.
+        let (was_active, want_active) = {
+            let mut st = self.state.lock().await;
+            let entry = st.per_source.entry(source).or_insert(0);
+            if delta > 0 {
+                *entry = entry.saturating_add(delta as u32);
+            } else if delta < 0 {
+                let dec = (-delta) as u32;
+                if *entry < dec {
+                    // unregister without matching register — ignore + warn.
+                    eprintln!("[runtime] warn: unregister {:?} below zero ignored", source);
+                } else {
+                    *entry -= dec;
+                }
+            }
+            if *entry == 0 {
+                st.per_source.remove(&source);
+            }
+            st.total = st.per_source.values().sum();
+            let was = st.active;
+            let want = st.total > 0;
+            (was, want)
+        };
+
+        if was_active == want_active {
+            return Ok(RuntimeTransition::Noop);
+        }
+
+        // Controller call happens OUTSIDE the state lock but INSIDE the
+        // transition lock, so no other transition can interleave.
+        let result = if want_active {
+            self.controller.engage().await
+        } else {
+            self.controller.release().await
+        };
+
+        match result {
+            Ok(()) => {
+                self.state.lock().await.active = want_active;
+                eprintln!(
+                    "[runtime] prevent-sleep {} (source={:?})",
+                    if want_active { "ENGAGED" } else { "RELEASED" },
+                    source
+                );
+                Ok(if want_active { RuntimeTransition::Engaged } else { RuntimeTransition::Released })
+            }
+            Err(e) => {
+                eprintln!("[runtime] error: controller transition failed: {e}");
+                // Roll back the count mutation applied above: `active` was
+                // never flipped (we're in the Err arm), so per_source/total
+                // must stay consistent with it, or a future toggle will
+                // observe a stale non-zero count and short-circuit to Noop
+                // without ever retrying the controller call.
+                {
+                    let mut st = self.state.lock().await;
+                    let entry = st.per_source.entry(source).or_insert(0);
+                    if delta > 0 {
+                        let dec = delta as u32;
+                        if *entry < dec {
+                            *entry = 0;
+                        } else {
+                            *entry -= dec;
+                        }
+                    } else if delta < 0 {
+                        *entry = entry.saturating_add((-delta) as u32);
+                    }
+                    if *entry == 0 {
+                        st.per_source.remove(&source);
+                    }
+                    st.total = st.per_source.values().sum();
+                }
+                Ok(RuntimeTransition::Failed)
+            }
+        }
+    }
+
+    /// Public register/unregister path: acquire the transition lock once per
+    /// call, then delegate to the inner implementation.
+    async fn apply_delta(
+        &self,
+        source: RuntimeSource,
+        delta: i32,
+    ) -> Result<RuntimeTransition, RuntimeError> {
+        let _guard = self.transition.lock().await;
+        self.apply_delta_inner(source, delta).await
+    }
+
+    pub async fn register_source(&self, source: RuntimeSource) -> Result<RuntimeTransition, RuntimeError> {
+        self.apply_delta(source, 1).await
+    }
+
+    pub async fn unregister_source(&self, source: RuntimeSource) -> Result<RuntimeTransition, RuntimeError> {
+        self.apply_delta(source, -1).await
+    }
+
+    /// Manual toggle: sets the Manual source to exactly present/absent
+    /// (boolean semantics — repeated `true` does not stack).
+    ///
+    /// The transition lock is held across the read-decide-act sequence so
+    /// that concurrent `set_manual` calls cannot both observe `currently ==
+    /// false` and both increment (TOCTOU) — the whole thing is atomic w.r.t.
+    /// other transitions.
+    pub async fn set_manual(&self, enabled: bool) -> Result<RuntimeTransition, RuntimeError> {
+        let _guard = self.transition.lock().await;
+
+        let currently = {
+            let st = self.state.lock().await;
+            st.per_source.get(&RuntimeSource::Manual).copied().unwrap_or(0) > 0
+        };
+
+        if enabled && !currently {
+            self.apply_delta_inner(RuntimeSource::Manual, 1).await
+        } else if !enabled && currently {
+            self.apply_delta_inner(RuntimeSource::Manual, -1).await
+        } else {
+            Ok(RuntimeTransition::Noop)
+        }
+    }
+
+    pub async fn is_prevent_sleep_enabled(&self) -> bool {
+        self.state.lock().await.active
+    }
+
+    pub async fn active_sources(&self) -> Vec<(RuntimeSource, u32)> {
+        self.state.lock().await.per_source.iter().map(|(k, v)| (*k, *v)).collect()
+    }
+
+    /// Reconcile local state with the controller before clearing counts:
+    /// only clear `per_source`/`total` and flip `active` off once the
+    /// controller confirms it released. On failure, leave `active` (and the
+    /// counts) as-is since the OS inhibitor may still be held.
+    pub async fn shutdown(&self) -> Result<(), RuntimeError> {
+        let _guard = self.transition.lock().await;
+
+        let was_active = self.state.lock().await.active;
+
+        if !was_active {
+            let mut st = self.state.lock().await;
+            st.per_source.clear();
+            st.total = 0;
+            return Ok(());
+        }
+
+        // Controller call happens OUTSIDE the state lock but INSIDE the
+        // transition lock.
+        match self.controller.shutdown().await {
+            Ok(()) => {
+                let mut st = self.state.lock().await;
+                st.active = false;
+                st.per_source.clear();
+                st.total = 0;
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("[runtime] error: controller shutdown failed: {e}");
+                // Leave active=true and counts intact — the inhibitor may
+                // still be held; do not lose track of that.
+                Err(e)
+            }
+        }
+    }
+
+    pub async fn set_policy(&self, policy: PreventSleepPolicy) {
+        self.state.lock().await.policy = policy;
+    }
+
+    pub async fn policy(&self) -> PreventSleepPolicy {
+        self.state.lock().await.policy.clone()
+    }
+
+    /// Does the current policy want prevent-sleep held while `source` is active?
+    pub async fn auto_wants(&self, source: RuntimeSource) -> bool {
+        let st = self.state.lock().await;
+        matches!(st.policy.mode, PreventSleepMode::Auto)
+            && st.policy.auto_conditions.contains(&source)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::controller::FakeSleepController;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn manager() -> (Arc<RuntimeManager>, Arc<FakeSleepController>) {
+        let fake = Arc::new(FakeSleepController::new());
+        let mgr = Arc::new(RuntimeManager::new(fake.clone()));
+        (mgr, fake)
+    }
+
+    /// Test-only controller whose `engage()` ALWAYS fails, so we can prove
+    /// the refcount rollback on the `Err` arm of `apply_delta_inner`.
+    struct FailingEngageController {
+        engage_attempts: AtomicU32,
+    }
+
+    impl FailingEngageController {
+        fn new() -> Self {
+            Self { engage_attempts: AtomicU32::new(0) }
+        }
+        fn engage_attempts(&self) -> u32 {
+            self.engage_attempts.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl crate::runtime::controller::SleepController for FailingEngageController {
+        async fn engage(&self) -> Result<(), RuntimeError> {
+            self.engage_attempts.fetch_add(1, Ordering::SeqCst);
+            Err(RuntimeError::EngageFailed("test".into()))
+        }
+        async fn release(&self) -> Result<(), RuntimeError> {
+            Ok(())
+        }
+        async fn is_active(&self) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_engage_rolls_back_count_so_retry_works() {
+        let controller = Arc::new(FailingEngageController::new());
+        let mgr = Arc::new(RuntimeManager::new(controller.clone()));
+
+        // First attempt fails; count must roll back to keep `active` and
+        // `per_source` consistent.
+        assert_eq!(mgr.set_manual(true).await.unwrap(), RuntimeTransition::Failed);
+        assert!(!mgr.is_prevent_sleep_enabled().await);
+        assert!(mgr.active_sources().await.is_empty());
+
+        // Second attempt must ALSO invoke engage (not Noop) — proving the
+        // rollback actually cleared the count so a retry is possible.
+        assert_eq!(mgr.set_manual(true).await.unwrap(), RuntimeTransition::Failed);
+
+        assert_eq!(controller.engage_attempts(), 2);
+    }
+
+    #[tokio::test]
+    async fn zero_to_one_engages_once() {
+        let (mgr, fake) = manager();
+        assert_eq!(mgr.register_source(RuntimeSource::Flow).await.unwrap(), RuntimeTransition::Engaged);
+        assert_eq!(mgr.register_source(RuntimeSource::Ai).await.unwrap(), RuntimeTransition::Noop);
+        assert!(mgr.is_prevent_sleep_enabled().await);
+        assert_eq!(fake.engage_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn one_to_zero_releases_once() {
+        let (mgr, fake) = manager();
+        mgr.register_source(RuntimeSource::Flow).await.unwrap();
+        mgr.register_source(RuntimeSource::Ai).await.unwrap();
+        assert_eq!(mgr.unregister_source(RuntimeSource::Flow).await.unwrap(), RuntimeTransition::Noop);
+        assert_eq!(mgr.unregister_source(RuntimeSource::Ai).await.unwrap(), RuntimeTransition::Released);
+        assert!(!mgr.is_prevent_sleep_enabled().await);
+        assert_eq!(fake.release_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn unregister_without_register_is_noop_and_underflow_safe() {
+        let (mgr, fake) = manager();
+        assert_eq!(mgr.unregister_source(RuntimeSource::Docker).await.unwrap(), RuntimeTransition::Noop);
+        assert!(!mgr.is_prevent_sleep_enabled().await);
+        assert_eq!(fake.release_calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn manual_toggle_engages_and_releases() {
+        let (mgr, fake) = manager();
+        assert_eq!(mgr.set_manual(true).await.unwrap(), RuntimeTransition::Engaged);
+        assert_eq!(mgr.set_manual(true).await.unwrap(), RuntimeTransition::Noop);
+        assert_eq!(mgr.set_manual(false).await.unwrap(), RuntimeTransition::Released);
+        assert_eq!(fake.engage_calls(), 1);
+        assert_eq!(fake.release_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn concurrent_registers_engage_exactly_once() {
+        let (mgr, fake) = manager();
+        let mut handles = Vec::new();
+        for src in [RuntimeSource::Flow, RuntimeSource::Ai, RuntimeSource::Backend, RuntimeSource::Docker] {
+            let m = mgr.clone();
+            handles.push(tokio::spawn(async move { m.register_source(src).await.unwrap() }));
+        }
+        for h in handles { h.await.unwrap(); }
+        assert!(mgr.is_prevent_sleep_enabled().await);
+        assert_eq!(fake.engage_calls(), 1);
+        // Stronger: prove the MANAGER only invoked engage once (not just
+        // that repeated invocations were absorbed by an idempotent swap).
+        assert_eq!(fake.engage_invocations(), 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_releases() {
+        let (mgr, fake) = manager();
+        mgr.register_source(RuntimeSource::Flow).await.unwrap();
+        mgr.shutdown().await.unwrap();
+        assert_eq!(fake.release_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn auto_wants_reflects_policy_conditions() {
+        use crate::runtime::policy::{PreventSleepMode, PreventSleepPolicy};
+        let (mgr, _fake) = manager();
+        mgr.set_policy(PreventSleepPolicy {
+            mode: PreventSleepMode::Auto,
+            auto_conditions: vec![RuntimeSource::Flow, RuntimeSource::Ai],
+        }).await;
+        assert!(mgr.auto_wants(RuntimeSource::Flow).await);
+        assert!(mgr.auto_wants(RuntimeSource::Ai).await);
+        assert!(!mgr.auto_wants(RuntimeSource::Backend).await);
+    }
+}

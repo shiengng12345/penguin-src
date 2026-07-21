@@ -1,5 +1,10 @@
 export type PersistedProtocol = "grpc-web" | "grpc" | "sdk" | "rest";
 
+// Runtime Manager — Prevent Sleep policy (Task 13). Stores a JSON-encoded
+// PreventSleepPolicy ({ mode, auto_conditions }) so the saved choice can be
+// re-applied on the next launch, not just held in memory for the session.
+export const RUNTIME_PREVENT_SLEEP_KEY = "runtime.preventSleep";
+
 export const APP_VALUE_KEYS = {
   theme: "penguin-theme",
   tutorialSeen: "penguin-tutorial-seen",

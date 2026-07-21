@@ -13,6 +13,7 @@ mod redis;
 mod registry;
 mod registry_search;
 mod rest;
+mod runtime;
 
 pub use packages::{InstalledPackage, ProtoFile};
 pub use proxy::{HttpProxyRequest, HttpProxyResponse};
@@ -144,6 +145,7 @@ pub fn run() {
         .manage(redis::RedisState::default())
         .manage(redis::RedisRegistry::default())
         .manage(knowledge::WatchRegistry::default())
+        .manage(runtime::new_state())
         .setup(|app| {
             packages::start_package_watcher(app.handle().clone());
             // Warm the knowledge CLI (node resolution + cold-start + DB) in the
@@ -153,6 +155,10 @@ pub fn run() {
             // use it in a terminal without any manual step (no chicken-and-egg
             // `penguin install`). Idempotent, off-main-thread, self-healing.
             knowledge::install_cli_command(app.handle().clone());
+            // Runtime Manager: if the persisted policy is "on startup", the
+            // frontend calls runtime_set_prevent_sleep after hydrating settings.
+            // No blocking DB read here — startup stays fast. (Frontend drives.)
+            let _ = app; // keep closure signature; nothing to spawn yet.
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -295,6 +301,11 @@ pub fn run() {
             auth_popover::auth_load_standalone,
             auth_popover::auth_save_standalone,
             auth_popover::auth_capture_qr,
+            runtime::commands::runtime_get_status,
+            runtime::commands::runtime_set_prevent_sleep,
+            runtime::commands::runtime_set_mode,
+            runtime::commands::runtime_register_source,
+            runtime::commands::runtime_unregister_source,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
@@ -305,6 +316,13 @@ pub fn run() {
                 app_handle
                     .state::<knowledge::WatchRegistry>()
                     .stop_all();
+
+                let runtime_state = app_handle.state::<runtime::RuntimeState>();
+                let rt = runtime_state.inner().clone();
+                // Block briefly to ensure caffeinate is killed before exit.
+                tauri::async_runtime::block_on(async move {
+                    let _ = rt.shutdown().await;
+                });
             }
         });
 }
