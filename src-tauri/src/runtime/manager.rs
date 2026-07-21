@@ -4,6 +4,7 @@ use tokio::sync::Mutex;
 
 use crate::runtime::controller::SleepController;
 use crate::runtime::error::RuntimeError;
+use crate::runtime::policy::{PreventSleepMode, PreventSleepPolicy};
 use crate::runtime::{RuntimeSource, RuntimeTransition};
 
 #[derive(Default)]
@@ -11,6 +12,7 @@ struct RuntimeManagerState {
     per_source: HashMap<RuntimeSource, u32>,
     total: u32,
     active: bool,
+    policy: PreventSleepPolicy,
 }
 
 pub struct RuntimeManager {
@@ -178,6 +180,21 @@ impl RuntimeManager {
             }
         }
     }
+
+    pub async fn set_policy(&self, policy: PreventSleepPolicy) {
+        self.state.lock().await.policy = policy;
+    }
+
+    pub async fn policy(&self) -> PreventSleepPolicy {
+        self.state.lock().await.policy.clone()
+    }
+
+    /// Does the current policy want prevent-sleep held while `source` is active?
+    pub async fn auto_wants(&self, source: RuntimeSource) -> bool {
+        let st = self.state.lock().await;
+        matches!(st.policy.mode, PreventSleepMode::Auto)
+            && st.policy.auto_conditions.contains(&source)
+    }
 }
 
 #[cfg(test)]
@@ -251,5 +268,18 @@ mod tests {
         mgr.register_source(RuntimeSource::Flow).await.unwrap();
         mgr.shutdown().await.unwrap();
         assert_eq!(fake.release_calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn auto_wants_reflects_policy_conditions() {
+        use crate::runtime::policy::{PreventSleepMode, PreventSleepPolicy};
+        let (mgr, _fake) = manager();
+        mgr.set_policy(PreventSleepPolicy {
+            mode: PreventSleepMode::Auto,
+            auto_conditions: vec![RuntimeSource::Flow, RuntimeSource::Ai],
+        }).await;
+        assert!(mgr.auto_wants(RuntimeSource::Flow).await);
+        assert!(mgr.auto_wants(RuntimeSource::Ai).await);
+        assert!(!mgr.auto_wants(RuntimeSource::Backend).await);
     }
 }
