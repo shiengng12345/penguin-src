@@ -31,14 +31,15 @@ impl RuntimeManager {
     /// Apply a signed delta to one source's count and, if the total crosses the
     /// 0<->1 boundary, drive the controller. The `transition` mutex serializes
     /// the whole check-then-act so concurrent callers can never double-drive.
-    async fn apply_delta(
+    ///
+    /// Callers MUST already hold `self.transition` for the duration of this
+    /// call (see `apply_delta` and `set_manual`). `tokio::sync::Mutex` is not
+    /// re-entrant, so this fn never locks `transition` itself.
+    async fn apply_delta_inner(
         &self,
         source: RuntimeSource,
         delta: i32,
     ) -> Result<RuntimeTransition, RuntimeError> {
-        // Serialize the entire transition decision + controller call.
-        let _guard = self.transition.lock().await;
-
         // Short critical section: mutate counts, decide desired state.
         let (was_active, want_active) = {
             let mut st = self.state.lock().await;
@@ -92,6 +93,17 @@ impl RuntimeManager {
         }
     }
 
+    /// Public register/unregister path: acquire the transition lock once per
+    /// call, then delegate to the inner implementation.
+    async fn apply_delta(
+        &self,
+        source: RuntimeSource,
+        delta: i32,
+    ) -> Result<RuntimeTransition, RuntimeError> {
+        let _guard = self.transition.lock().await;
+        self.apply_delta_inner(source, delta).await
+    }
+
     pub async fn register_source(&self, source: RuntimeSource) -> Result<RuntimeTransition, RuntimeError> {
         self.apply_delta(source, 1).await
     }
@@ -102,15 +114,23 @@ impl RuntimeManager {
 
     /// Manual toggle: sets the Manual source to exactly present/absent
     /// (boolean semantics — repeated `true` does not stack).
+    ///
+    /// The transition lock is held across the read-decide-act sequence so
+    /// that concurrent `set_manual` calls cannot both observe `currently ==
+    /// false` and both increment (TOCTOU) — the whole thing is atomic w.r.t.
+    /// other transitions.
     pub async fn set_manual(&self, enabled: bool) -> Result<RuntimeTransition, RuntimeError> {
+        let _guard = self.transition.lock().await;
+
         let currently = {
             let st = self.state.lock().await;
             st.per_source.get(&RuntimeSource::Manual).copied().unwrap_or(0) > 0
         };
+
         if enabled && !currently {
-            self.apply_delta(RuntimeSource::Manual, 1).await
+            self.apply_delta_inner(RuntimeSource::Manual, 1).await
         } else if !enabled && currently {
-            self.apply_delta(RuntimeSource::Manual, -1).await
+            self.apply_delta_inner(RuntimeSource::Manual, -1).await
         } else {
             Ok(RuntimeTransition::Noop)
         }
@@ -124,17 +144,39 @@ impl RuntimeManager {
         self.state.lock().await.per_source.iter().map(|(k, v)| (*k, *v)).collect()
     }
 
+    /// Reconcile local state with the controller before clearing counts:
+    /// only clear `per_source`/`total` and flip `active` off once the
+    /// controller confirms it released. On failure, leave `active` (and the
+    /// counts) as-is since the OS inhibitor may still be held.
     pub async fn shutdown(&self) -> Result<(), RuntimeError> {
         let _guard = self.transition.lock().await;
-        let mut st = self.state.lock().await;
-        st.per_source.clear();
-        st.total = 0;
-        if st.active {
-            st.active = false;
-            drop(st);
-            return self.controller.shutdown().await;
+
+        let was_active = self.state.lock().await.active;
+
+        if !was_active {
+            let mut st = self.state.lock().await;
+            st.per_source.clear();
+            st.total = 0;
+            return Ok(());
         }
-        Ok(())
+
+        // Controller call happens OUTSIDE the state lock but INSIDE the
+        // transition lock.
+        match self.controller.shutdown().await {
+            Ok(()) => {
+                let mut st = self.state.lock().await;
+                st.active = false;
+                st.per_source.clear();
+                st.total = 0;
+                Ok(())
+            }
+            Err(e) => {
+                eprintln!("[runtime] error: controller shutdown failed: {e}");
+                // Leave active=true and counts intact — the inhibitor may
+                // still be held; do not lose track of that.
+                Err(e)
+            }
+        }
     }
 }
 
@@ -198,6 +240,9 @@ mod tests {
         for h in handles { h.await.unwrap(); }
         assert!(mgr.is_prevent_sleep_enabled().await);
         assert_eq!(fake.engage_calls(), 1);
+        // Stronger: prove the MANAGER only invoked engage once (not just
+        // that repeated invocations were absorbed by an idempotent swap).
+        assert_eq!(fake.engage_invocations(), 1);
     }
 
     #[tokio::test]

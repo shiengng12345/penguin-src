@@ -21,6 +21,12 @@ pub struct FakeSleepController {
     active: AtomicBool,
     engage_calls: AtomicU32,
     release_calls: AtomicU32,
+    /// Counts every INVOCATION of `engage()`, before the idempotent swap.
+    /// Unlike `engage_calls` (which absorbs duplicate invocations that find
+    /// the controller already active), this proves how many times the
+    /// manager actually called into the controller — the right signal for
+    /// asserting manager-side serialization.
+    engage_invocations: AtomicU32,
 }
 
 impl FakeSleepController {
@@ -29,15 +35,18 @@ impl FakeSleepController {
             active: AtomicBool::new(false),
             engage_calls: AtomicU32::new(0),
             release_calls: AtomicU32::new(0),
+            engage_invocations: AtomicU32::new(0),
         }
     }
     pub fn engage_calls(&self) -> u32 { self.engage_calls.load(Ordering::SeqCst) }
     pub fn release_calls(&self) -> u32 { self.release_calls.load(Ordering::SeqCst) }
+    pub fn engage_invocations(&self) -> u32 { self.engage_invocations.load(Ordering::SeqCst) }
 }
 
 #[async_trait::async_trait]
 impl SleepController for FakeSleepController {
     async fn engage(&self) -> Result<(), RuntimeError> {
+        self.engage_invocations.fetch_add(1, Ordering::SeqCst);
         if !self.active.swap(true, Ordering::SeqCst) {
             self.engage_calls.fetch_add(1, Ordering::SeqCst);
         }
