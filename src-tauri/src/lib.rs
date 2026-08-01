@@ -148,6 +148,75 @@ pub fn run() {
         .manage(knowledge::QueryRuntimeState::default())
         .manage(runtime::new_state())
         .setup(|app| {
+            // macOS' default menu binds ⌘W to "Close Window", which quits this
+            // single-window app before the webview ever sees the key. Replace it
+            // with the standard menu minus every close_window item so ⌘W falls
+            // through to the frontend handler (App.tsx → close the active tab).
+            // The red traffic-light button and ⌘Q still quit. Other platforms
+            // keep Tauri's default menu untouched.
+            #[cfg(target_os = "macos")]
+            {
+                use tauri::menu::{AboutMetadata, Menu, PredefinedMenuItem, Submenu};
+                let h = app.handle();
+                let pkg = h.package_info();
+                let about = AboutMetadata {
+                    name: Some(pkg.name.clone()),
+                    version: Some(pkg.version.to_string()),
+                    ..Default::default()
+                };
+                let app_menu = Submenu::with_items(
+                    h,
+                    pkg.name.clone(),
+                    true,
+                    &[
+                        &PredefinedMenuItem::about(h, None, Some(about))?,
+                        &PredefinedMenuItem::separator(h)?,
+                        &PredefinedMenuItem::services(h, None)?,
+                        &PredefinedMenuItem::separator(h)?,
+                        // NOTE: `hide` (⌘H) is intentionally omitted so ⌘H
+                        // falls through to the webview → App.tsx opens History
+                        // (its intended binding). `hide_others` (⌥⌘H) stays.
+                        &PredefinedMenuItem::hide_others(h, None)?,
+                        &PredefinedMenuItem::separator(h)?,
+                        &PredefinedMenuItem::quit(h, None)?,
+                    ],
+                )?;
+                let edit_menu = Submenu::with_items(
+                    h,
+                    "Edit",
+                    true,
+                    &[
+                        &PredefinedMenuItem::undo(h, None)?,
+                        &PredefinedMenuItem::redo(h, None)?,
+                        &PredefinedMenuItem::separator(h)?,
+                        &PredefinedMenuItem::cut(h, None)?,
+                        &PredefinedMenuItem::copy(h, None)?,
+                        &PredefinedMenuItem::paste(h, None)?,
+                        &PredefinedMenuItem::select_all(h, None)?,
+                    ],
+                )?;
+                let view_menu = Submenu::with_items(
+                    h,
+                    "View",
+                    true,
+                    &[&PredefinedMenuItem::fullscreen(h, None)?],
+                )?;
+                // Window submenu WITHOUT close_window — this frees ⌘W.
+                let window_menu = Submenu::with_items(
+                    h,
+                    "Window",
+                    true,
+                    &[
+                        &PredefinedMenuItem::minimize(h, None)?,
+                        &PredefinedMenuItem::maximize(h, None)?,
+                    ],
+                )?;
+                let menu = Menu::with_items(
+                    h,
+                    &[&app_menu, &edit_menu, &view_menu, &window_menu],
+                )?;
+                app.set_menu(menu)?;
+            }
             packages::start_package_watcher(app.handle().clone());
             // Warm the knowledge CLI (node resolution + cold-start + DB) in the
             // background so first entry into the Wiki isn't slow (perf).
