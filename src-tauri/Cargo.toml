@@ -1,6 +1,6 @@
 [package]
 name = "penguin"
-version = "1.13.10"
+version = "1.13.11"
 description = "gRPC/gRPC-Web API Client"
 authors = ["Penguin"]
 edition = "2021"
@@ -58,6 +58,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 fred = { version = "9", features = ["enable-rustls-ring", "i-memory"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 futures = "0.3"
+# Runtime Manager — async trait objects for the SleepController abstraction.
+async-trait = "0.1"
 
 # (REST module secrets now live in app_kv via SqliteKeychain — see
 # src/rest/keychain.rs. The old `keyring` dependency was removed because

@@ -83,6 +83,7 @@ const Welcome = lazy(() => import("@/components/onboarding/Welcome").then(m => (
 const DeveloperModeModal = lazy(() => import("@/components/settings/DeveloperModeModal").then(m => ({ default: m.DeveloperModeModal })));
 
 import { StatusBar } from "@/components/layout/StatusBar";
+import { Toaster } from "@/components/ui/toast";
 
 export default function App() {
   const {
@@ -132,7 +133,9 @@ export default function App() {
   const [browserOpen, setBrowserOpen] = useState(initialModule === "browser");
   const [databaseOpen, setDatabaseOpen] = useState(initialModule === "database");
   const [wikiOpen, setWikiOpen] = useState(initialModule === "wiki");
-  const openSettings = useCallback(() => setSettingsOpen(true), []);
+  const openSettings = useCallback(() => {
+    setSettingsOpen(true);
+  }, []);
   const closeVault = useCallback(() => setVaultOpen(false), []);
   const closeBrowser = useCallback(() => setBrowserOpen(false), []);
   const closeDatabase = useCallback(() => setDatabaseOpen(false), []);
@@ -741,6 +744,7 @@ export default function App() {
           onLater={appUpdate.dismiss}
           onUpdate={appUpdate.downloadInstallAndRestart}
         />
+        <Toaster />
         <div className="flex flex-1 min-h-0">
           <MainSidebar
             active={activeModule}

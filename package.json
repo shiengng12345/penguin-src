@@ -1,7 +1,7 @@
 {
   "name": "penguin",
   "private": true,
-  "version": "1.13.10",
+  "version": "1.13.11",
   "type": "module",
   "scripts": {
     "knowledge:benchmark:universal": "node scripts/knowledge-universal-retrieval-benchmark.mjs",
