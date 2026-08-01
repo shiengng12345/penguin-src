@@ -4,6 +4,12 @@ import { knowledgeContext, knowledgeEvidenceList, knowledgeExplore, knowledgeGet
 import { getPersistedValue, setPersistedValue } from "@/lib/app-persistence";
 import { APP_VALUE_KEYS } from "@/lib/persistence-keys";
 
+// Every result row is locked to this exact pixel height so the windowing math
+// (which slices the list by a fixed row height) stays aligned even when a hit
+// carries a multi-line code snippet. Taller content is clipped inside the row;
+// the full excerpt is shown in the preview panel on click.
+const ROW_HEIGHT = 154;
+
 function initialSearchState() {
   if (typeof window === "undefined") return { query: "", mode: "auto", repo: "", branch: "", snapshot: "", path: "", language: "", kind: "" };
   const params = new URLSearchParams(window.location.search);
@@ -183,7 +189,7 @@ export function WikiSearchPage() {
 
   const visibleHits = response?.hits.filter((hit) => (laneFilter === "all" || hit.lane === laneFilter) && (evidenceFilter === "all" || hit.evidence[0]?.status === evidenceFilter)) ?? [];
   const virtualWindow = useMemo(() => {
-    const rowEstimate = 154;
+    const rowEstimate = ROW_HEIGHT;
     const overscan = 6;
     const start = Math.max(0, Math.floor(resultScrollTop / rowEstimate) - overscan);
     const end = Math.min(visibleHits.length, start + 20 + overscan * 2);
@@ -273,14 +279,14 @@ export function WikiSearchPage() {
         <div className="mt-2 text-[11px] text-yellow-200/70">已搜索 {response.diagnostics.searchedLanes.join(", ")} · scope 覆盖 {response.diagnostics.coverage.admitted} admitted / {response.diagnostics.coverage.excluded} excluded / {response.diagnostics.coverage.failed} failed。</div>
         {response.diagnostics.exclusions.length > 0 && <div className="mt-1 text-[11px] text-amber-300/80">命中 excluded path metadata；内容因 secret policy 被隐藏。</div>}
         <button type="button" onClick={() => void reindexScope()} disabled={reindexBusy} className="mt-3 rounded border border-yellow-400/30 px-2.5 py-1 text-xs text-yellow-100 hover:bg-yellow-400/10 disabled:opacity-50">{reindexBusy ? "重新索引中…" : "确认后重新索引此范围"}</button>
-      </div> : <div className="space-y-2" style={{ contain: "layout paint", minHeight: `${visibleHits.length * 154}px` }}>
+      </div> : <div style={{ contain: "layout paint", minHeight: `${visibleHits.length * ROW_HEIGHT}px` }}>
         <div aria-hidden="true" style={{ height: `${virtualWindow.top}px` }} />
-        {visibleHits.slice(virtualWindow.start, virtualWindow.end).map((hit, offset) => { const index = virtualWindow.start + offset; return <article key={hit.hitId} role="button" tabIndex={0} aria-selected={selectedHitIndex === index} onClick={() => { setSelectedHitIndex(index); void openContext(hit); }} onFocus={() => setSelectedHitIndex(index)} onKeyDown={(event) => { if (event.key === "Enter" && event.metaKey) { event.preventDefault(); void openCodeLocation(hit); } else if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedHitIndex(index); void openContext(hit); } }} className={`cursor-pointer rounded-lg border bg-slate-950/35 p-3 ${selectedHitIndex === index ? "border-cyan-400/80 ring-1 ring-cyan-400/30" : hit.lane === "semantic" ? "border-violet-500/30" : "border-slate-800 hover:border-cyan-500/40"}`}>
-          <div className="flex items-center gap-2 text-xs"><span className="font-semibold text-cyan-200">{hit.title}</span><span className="rounded bg-slate-800 px-1.5 py-0.5 text-slate-400">{hit.lane}</span><span className="text-slate-600">{hit.evidence[0]?.status}</span></div>
-          <div className="mt-1 font-mono text-[11px] text-slate-400">{hit.locator.repoName} / {hit.locator.filePath}{hit.locator.startLine ? `:${hit.locator.startLine}` : ""} · {hit.locator.revisionId}</div>
-          {hit.snippet && <pre className="mt-2 overflow-x-auto whitespace-pre-wrap text-xs text-slate-300">{hit.snippet}</pre>}
-          <div className="mt-2 text-[10px] text-slate-600">{hit.rankReasons.join(" · ")}</div>
-        </article>; })}
+        {visibleHits.slice(virtualWindow.start, virtualWindow.end).map((hit, offset) => { const index = virtualWindow.start + offset; return <div key={hit.hitId} style={{ height: ROW_HEIGHT }} className="pb-2"><article role="button" tabIndex={0} aria-selected={selectedHitIndex === index} onClick={() => { setSelectedHitIndex(index); void openContext(hit); }} onFocus={() => setSelectedHitIndex(index)} onKeyDown={(event) => { if (event.key === "Enter" && event.metaKey) { event.preventDefault(); void openCodeLocation(hit); } else if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedHitIndex(index); void openContext(hit); } }} className={`flex h-full flex-col overflow-hidden cursor-pointer rounded-lg border bg-slate-950/35 p-3 ${selectedHitIndex === index ? "border-cyan-400/80 ring-1 ring-cyan-400/30" : hit.lane === "semantic" ? "border-violet-500/30" : "border-slate-800 hover:border-cyan-500/40"}`}>
+          <div className="flex shrink-0 items-center gap-2 text-xs"><span className="truncate font-semibold text-cyan-200">{hit.title}</span><span className="shrink-0 rounded bg-slate-800 px-1.5 py-0.5 text-slate-400">{hit.lane}</span><span className="shrink-0 text-slate-600">{hit.evidence[0]?.status}</span></div>
+          <div className="mt-1 shrink-0 truncate font-mono text-[11px] text-slate-400">{hit.locator.repoName} / {hit.locator.filePath}{hit.locator.startLine ? `:${hit.locator.startLine}` : ""} · {hit.locator.revisionId}</div>
+          {hit.snippet && <pre className="mt-2 min-h-0 flex-1 overflow-hidden whitespace-pre-wrap text-xs text-slate-300">{hit.snippet}</pre>}
+          <div className="mt-2 shrink-0 text-[10px] text-slate-600">{hit.rankReasons.join(" · ")}</div>
+        </article></div>; })}
         <div aria-hidden="true" style={{ height: `${virtualWindow.bottom}px` }} />
         </div>}
       {contextBusy && <div className="mt-4 text-xs text-slate-500">加载知识上下文…</div>}
