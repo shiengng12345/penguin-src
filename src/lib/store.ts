@@ -30,6 +30,12 @@ import {
   type TabOrigin,
 } from "./store-types";
 import {
+  closeOtherTabs as computeCloseOthers,
+  closeTabsToRight as computeCloseRight,
+  duplicateTab as computeDuplicate,
+  moveTab as computeMoveTab,
+} from "./tab-actions";
+import {
   DEFAULT_HEADERS_KEY,
   HISTORY_KEY,
   MAX_HISTORY_KEY,
@@ -181,6 +187,41 @@ export const useAppStore = create<AppState>((set, get) => {
             : s.activeTabId;
         saveTabs(next, nextActive);
         return { tabs: next, activeTabId: nextActive };
+      });
+    },
+    closeAllTabs: () => {
+      const fresh = createTab();
+      set({ tabs: [fresh], activeTabId: fresh.id });
+      saveTabs([fresh], fresh.id);
+    },
+    closeOtherTabs: (id) => {
+      set((s) => {
+        const next = computeCloseOthers(s.tabs, id, s.activeTabId);
+        saveTabs(next.tabs, next.activeTabId);
+        return next;
+      });
+    },
+    closeTabsToRight: (id) => {
+      set((s) => {
+        const next = computeCloseRight(s.tabs, id, s.activeTabId);
+        saveTabs(next.tabs, next.activeTabId);
+        return next;
+      });
+    },
+    duplicateTab: (id) => {
+      set((s) => {
+        const newId = `tab_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const next = computeDuplicate(s.tabs, id, newId);
+        saveTabs(next.tabs, next.activeTabId);
+        return next;
+      });
+    },
+    moveTab: (fromId, toId) => {
+      set((s) => {
+        const next = computeMoveTab(s.tabs, fromId, toId);
+        if (next === s.tabs) return {};
+        saveTabs(next, s.activeTabId);
+        return { tabs: next };
       });
     },
     resetActiveTab: () => {

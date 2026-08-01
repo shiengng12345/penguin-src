@@ -253,6 +253,11 @@ export interface AppState {
   activeTabId: string | null;
   addTab: (protocol?: ProtocolTab) => RequestTab;
   removeTab: (id: string) => void;
+  closeAllTabs: () => void;
+  closeOtherTabs: (id: string) => void;
+  closeTabsToRight: (id: string) => void;
+  duplicateTab: (id: string) => void;
+  moveTab: (fromId: string, toId: string) => void;
   resetActiveTab: () => void;
   resetPackageTabs: () => void;
   sanitizeHiddenRestTabs: () => void;
