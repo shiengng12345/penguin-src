@@ -10,6 +10,11 @@ import { APP_VALUE_KEYS } from "@/lib/persistence-keys";
 // the full excerpt is shown in the preview panel on click.
 const ROW_HEIGHT = 154;
 
+// Aborts are expected (a newer request superseded this one) — everything else
+// is a real failure worth surfacing instead of swallowing silently.
+const errText = (e: unknown) =>
+  (e as Error)?.name === "AbortError" ? null : String((e as Error)?.message ?? e);
+
 function initialSearchState() {
   if (typeof window === "undefined") return { query: "", mode: "auto", repo: "", branch: "", snapshot: "", path: "", language: "", kind: "" };
   const params = new URLSearchParams(window.location.search);
@@ -53,6 +58,7 @@ export function WikiSearchPage() {
   const [evidence, setEvidence] = useState<KnowledgeEvidenceNote[]>([]);
   const [contextBusy, setContextBusy] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [reindexBusy, setReindexBusy] = useState(false);
   const [reindexVersion, setReindexVersion] = useState(0);
   const [previewLines, setPreviewLines] = useState(() => {
@@ -155,7 +161,7 @@ export function WikiSearchPage() {
     try {
       const next = await knowledgeSearchV2(query.trim(), mode, { cursor: response.page.nextCursor, limit: response.page.limit, repo: repoFilter || undefined, branch: branchFilter || undefined, snapshot: snapshotFilter || undefined, path: pathFilter || undefined, language: languageFilter || undefined, kind: kindFilter || undefined, signal: controller.signal });
       setResponse({ ...next, hits: [...response.hits, ...next.hits.filter((hit) => !response.hits.some((existing) => existing.hitId === hit.hitId))] });
-    } finally { if (searchAbort.current === controller) setBusy(false); }
+    } catch (e) { const m = errText(e); if (m) setActionError(m); } finally { if (searchAbort.current === controller) setBusy(false); }
   };
 
   const openGraph = async () => {
@@ -165,7 +171,7 @@ export function WikiSearchPage() {
     const controller = new AbortController();
     contextAbort.current?.abort();
     contextAbort.current = controller;
-    try { const view = await knowledgeGraph(target, 1, { signal: controller.signal }); setGraphView(view); setSelectedGraphNode(view.nodes.find((node) => node.nodeId === target) ?? null); } finally { if (contextAbort.current === controller) setGraphBusy(false); }
+    try { const view = await knowledgeGraph(target, 1, { signal: controller.signal }); setGraphView(view); setSelectedGraphNode(view.nodes.find((node) => node.nodeId === target) ?? null); } catch (e) { const m = errText(e); if (m) setActionError(m); } finally { if (contextAbort.current === controller) setGraphBusy(false); }
   };
 
   const focusGraphNode = (node: KnowledgeGraphView["nodes"][number]) => {
@@ -175,7 +181,7 @@ export function WikiSearchPage() {
   const openGraphNodeContext = async () => {
     if (!selectedGraphNode) return;
     setContextBusy(true);
-    try { setContextPack(await knowledgeContext(selectedGraphNode.nodeId)); } finally { setContextBusy(false); }
+    try { setContextPack(await knowledgeContext(selectedGraphNode.nodeId)); } catch (e) { const m = errText(e); if (m) setActionError(m); } finally { setContextBusy(false); }
   };
   const exportGraphSelection = () => {
     if (!graphView) return;
@@ -207,20 +213,24 @@ export function WikiSearchPage() {
   const openCodeLocation = async (hit: KnowledgeSearchV2Response["hits"][number]) => {
     if (hit.locator.revisionKind !== "working_tree") return;
     if (hit.locator.filePath.split("/").some((part) => part === ".." || part === "")) return;
-    const status = await knowledgeIndexStatus();
-    const repo = status.repos.find((item) => item.name === hit.locator.repoName);
-    if (!repo) return;
-    const absolute = `${repo.rootPath.replace(/\/+$/, "")}/${hit.locator.filePath}`;
-    const { open } = await import("@tauri-apps/plugin-shell");
-    await open(`vscode://file${encodeURI(absolute)}${hit.locator.startLine ? `:${hit.locator.startLine}` : ""}`);
+    try {
+      const status = await knowledgeIndexStatus();
+      const repo = status.repos.find((item) => item.name === hit.locator.repoName);
+      if (!repo) return;
+      const absolute = `${repo.rootPath.replace(/\/+$/, "")}/${hit.locator.filePath}`;
+      const { open } = await import("@tauri-apps/plugin-shell");
+      await open(`vscode://file${encodeURI(absolute)}${hit.locator.startLine ? `:${hit.locator.startLine}` : ""}`);
+    } catch (e) { const m = errText(e); if (m) setActionError(m); }
   };
 
   const saveCurrentQuery = async () => {
     const name = savedName.trim();
     if (!name || !query.trim()) return;
-    const saved = await knowledgeSavedQueryWrite(name, { query: query.trim(), mode, scope: { paths: pathFilter ? [pathFilter] : [] }, page: { limit: 20 } });
-    setSavedQueries((items) => [...items.filter((item) => item.name !== saved.name), saved]);
-    setSavedName("");
+    try {
+      const saved = await knowledgeSavedQueryWrite(name, { query: query.trim(), mode, scope: { paths: pathFilter ? [pathFilter] : [] }, page: { limit: 20 } });
+      setSavedQueries((items) => [...items.filter((item) => item.name !== saved.name), saved]);
+      setSavedName("");
+    } catch (e) { const m = errText(e); if (m) setActionError(m); }
   };
 
   const reindexScope = async () => {
@@ -228,6 +238,7 @@ export function WikiSearchPage() {
     if (!window.confirm(`将重新索引 ${scope}。这是写操作，是否继续？`)) return;
     setReindexBusy(true);
     try { await knowledgeReindex(pathFilter || undefined); setReindexVersion((value) => value + 1); }
+    catch (e) { const m = errText(e); if (m) setActionError(m); }
     finally { setReindexBusy(false); }
   };
   const togglePinnedSavedQuery = (id: string) => {
@@ -261,6 +272,7 @@ export function WikiSearchPage() {
       <input aria-label="保存查询名称" value={savedName} onChange={(event) => setSavedName(event.target.value)} placeholder="保存名" className="w-20 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300" />
       <button type="button" aria-label="保存当前查询" disabled={!savedName.trim() || !query.trim()} onClick={() => void saveCurrentQuery()} className="rounded border border-slate-700 p-1 text-slate-400 disabled:opacity-40"><Bookmark className="h-3.5 w-3.5" /></button>
     </div>
+    {actionError && <div className="flex items-center justify-between gap-2 border-b border-red-500/30 bg-red-500/10 px-4 py-2 text-xs text-red-300"><span className="min-w-0 truncate">{actionError}</span><button type="button" aria-label="关闭错误" onClick={() => setActionError(null)} className="shrink-0 rounded px-1.5 py-0.5 hover:bg-white/10">✕</button></div>}
     {busy && <div className="flex items-center gap-2 px-4 py-3 text-xs text-slate-500"><Loader2 className="h-3.5 w-3.5 animate-spin" /> 搜索中…</div>}
     {!busy && response && <div ref={resultViewport} tabIndex={0} onScroll={(event) => setResultScrollTop(event.currentTarget.scrollTop)} onKeyDown={(event) => {
       if (!visibleHits.length) return;
