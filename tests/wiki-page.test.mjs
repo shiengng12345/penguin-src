@@ -54,11 +54,11 @@ test("knowledge-client routes through the Rust bridge commands", async () => {
 test("knowledge-client exposes index-browse + graph wrappers over the CLI verbs", async () => {
   const source = await readFile(new URL("../src/lib/knowledge-client.ts", import.meta.url), "utf8");
   // each wrapper maps to its CLI verb through the generic query() passthrough
-  assert.match(source, /query<KnowledgeIndexStatus>\(\["status"\]\)/);
-  assert.match(source, /query<KnowledgeFileRow\[\]>\(\["files", repoId, branchId\]\)/);
-  assert.match(source, /query<KnowledgeFileSymbol\[\]>\(\["filesymbols", branchId, filePath\]\)/);
-  assert.match(source, /query<KnowledgeGraphView>\(\["graph", node, String\(depth\)\]\)/);
-  assert.match(source, /query<KnowledgeGraphView>\(\["repograph", repoId, branchId\]\)/);
+  assert.match(source, /query<KnowledgeIndexStatus>\(\["status"\]/);
+  assert.match(source, /query<KnowledgeFileRow\[\]>\(\["files", repoId, branchId\]/);
+  assert.match(source, /query<KnowledgeFileSymbol\[\]>\(\["filesymbols", branchId, filePath\]/);
+  assert.match(source, /query<KnowledgeGraphView>\(\["graph", node, String\(depth\)\]/);
+  assert.match(source, /query<KnowledgeGraphView>\(\["repograph", repoId, branchId\]/);
 });
 
 test("WikiPage: single-pane centre (no explorer sidebar, no why rail)", async () => {

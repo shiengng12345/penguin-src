@@ -34,6 +34,11 @@ export const APP_VALUE_KEYS = {
   // interval it drives — survives a webview reload instead of silently
   // reverting to off, matching the installer's precedent above.
   wikiAutoRefresh: "penguin-wiki-auto-refresh",
+  // Wiki search-page preferences — SQLite-backed like the rest so product
+  // code never touches window.localStorage directly (see product-shell guard).
+  wikiPinnedSavedQueries: "penguin-wiki-pinned-saved-queries",
+  wikiPreviewLines: "penguin-wiki-preview-lines",
+  wikiRecentQueries: "penguin-wiki-recent-queries",
   devModeEnabled: "penguin-dev-mode-enabled",
   devModeToken: "penguin-dev-mode-token",
   devModeAdminToken: "penguin-dev-mode-admin-token",

@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, Search, Network, Bookmark, ClipboardList } from "lucide-react";
 import { knowledgeContext, knowledgeEvidenceList, knowledgeExplore, knowledgeGetHit, knowledgeGraph, knowledgeIndexStatus, knowledgeReindex, knowledgeSavedQueryList, knowledgeSavedQueryRun, knowledgeSavedQueryWrite, knowledgeSearchV2, type ContextPack, type KnowledgeEvidenceNote, type KnowledgeGraphResult, type KnowledgeGraphView, type KnowledgeHitDetail, type KnowledgeSavedQuery, type KnowledgeSearchV2Response } from "@/lib/knowledge-client";
+import { getPersistedValue, setPersistedValue } from "@/lib/app-persistence";
+import { APP_VALUE_KEYS } from "@/lib/persistence-keys";
 
 function initialSearchState() {
   if (typeof window === "undefined") return { query: "", mode: "auto", repo: "", branch: "", snapshot: "", path: "", language: "", kind: "" };
@@ -40,7 +42,7 @@ export function WikiSearchPage() {
   const [savedQueries, setSavedQueries] = useState<KnowledgeSavedQuery[]>([]);
   const [pinnedSavedQueries, setPinnedSavedQueries] = useState<string[]>(() => {
     if (typeof window === "undefined") return [];
-    try { return JSON.parse(window.localStorage.getItem("penguin.wiki.pinnedSavedQueries") ?? "[]") as string[]; } catch { return []; }
+    try { return JSON.parse(getPersistedValue(APP_VALUE_KEYS.wikiPinnedSavedQueries) ?? "[]") as string[]; } catch { return []; }
   });
   const [evidence, setEvidence] = useState<KnowledgeEvidenceNote[]>([]);
   const [contextBusy, setContextBusy] = useState(false);
@@ -49,12 +51,12 @@ export function WikiSearchPage() {
   const [reindexVersion, setReindexVersion] = useState(0);
   const [previewLines, setPreviewLines] = useState(() => {
     if (typeof window === "undefined") return 5;
-    const value = Number(window.localStorage.getItem("penguin.wiki.previewLines") ?? 5);
+    const value = Number(getPersistedValue(APP_VALUE_KEYS.wikiPreviewLines) ?? 5);
     return Number.isFinite(value) ? Math.max(0, Math.min(100, value)) : 5;
   });
   const [recentQueries, setRecentQueries] = useState<string[]>(() => {
     if (typeof window === "undefined") return [];
-    try { return JSON.parse(window.localStorage.getItem("penguin.wiki.recentQueries") ?? "[]") as string[]; } catch { return []; }
+    try { return JSON.parse(getPersistedValue(APP_VALUE_KEYS.wikiRecentQueries) ?? "[]") as string[]; } catch { return []; }
   });
   const [selectedHitIndex, setSelectedHitIndex] = useState(0);
   const [resultScrollTop, setResultScrollTop] = useState(0);
@@ -100,7 +102,7 @@ export function WikiSearchPage() {
         setResponse(result);
         setRecentQueries((items) => {
           const next = [text, ...items.filter((item) => item !== text)].slice(0, 8);
-          try { window.localStorage.setItem("penguin.wiki.recentQueries", JSON.stringify(next)); } catch { /* local-only preference is best effort */ }
+          try { setPersistedValue(APP_VALUE_KEYS.wikiRecentQueries, JSON.stringify(next)); } catch { /* local-only preference is best effort */ }
           return next;
         });
       }).catch((error) => { if ((error as Error).name !== "AbortError" && id === requestId.current) setResponse(null); }).finally(() => { if (id === requestId.current) setBusy(false); });
@@ -225,7 +227,7 @@ export function WikiSearchPage() {
   const togglePinnedSavedQuery = (id: string) => {
     setPinnedSavedQueries((current) => {
       const next = current.includes(id) ? current.filter((value) => value !== id) : [...current, id];
-      window.localStorage.setItem("penguin.wiki.pinnedSavedQueries", JSON.stringify(next));
+      setPersistedValue(APP_VALUE_KEYS.wikiPinnedSavedQueries, JSON.stringify(next));
       return next;
     });
   };
@@ -248,7 +250,7 @@ export function WikiSearchPage() {
       <input aria-label="筛选路径" value={pathFilter} onChange={(event) => setPathFilter(event.target.value)} placeholder="path" className="w-28 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300" />
       <input aria-label="筛选语言" value={languageFilter} onChange={(event) => setLanguageFilter(event.target.value)} placeholder="language" className="w-20 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300" />
       <input aria-label="筛选 kind" value={kindFilter} onChange={(event) => setKindFilter(event.target.value)} placeholder="kind" className="w-16 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300" />
-      <input aria-label="预览行数" type="number" min={0} max={100} value={previewLines} onChange={(event) => { const value = Math.max(0, Math.min(100, Number(event.target.value) || 0)); setPreviewLines(value); window.localStorage.setItem("penguin.wiki.previewLines", String(value)); }} className="w-14 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300" title="预览前后行数" />
+      <input aria-label="预览行数" type="number" min={0} max={100} value={previewLines} onChange={(event) => { const value = Math.max(0, Math.min(100, Number(event.target.value) || 0)); setPreviewLines(value); setPersistedValue(APP_VALUE_KEYS.wikiPreviewLines, String(value)); }} className="w-14 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300" title="预览前后行数" />
       <select aria-label="筛选 evidence 状态" value={evidenceFilter} onChange={(event) => setEvidenceFilter(event.target.value)} className="rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300"><option value="all">evidence</option><option value="verified">verified</option><option value="observed">observed</option><option value="inference">inference</option></select>
       <input aria-label="保存查询名称" value={savedName} onChange={(event) => setSavedName(event.target.value)} placeholder="保存名" className="w-20 rounded border border-slate-700 bg-slate-900 px-2 py-1 text-xs text-slate-300" />
       <button type="button" aria-label="保存当前查询" disabled={!savedName.trim() || !query.trim()} onClick={() => void saveCurrentQuery()} className="rounded border border-slate-700 p-1 text-slate-400 disabled:opacity-40"><Bookmark className="h-3.5 w-3.5" /></button>
