@@ -33,7 +33,7 @@ test("WikiPage is browse-only: no in-UI search, no why-layer rail", async () => 
     assert.match(source, new RegExp(fn), `WikiPage should use ${fn}`);
   }
   assert.match(source, /Copy for AI/); // context pack export for AI stays
-  assert.match(source, /Indexed repositories/); // home = repo datatable, nothing else
+  assert.match(source, /KnowledgeHomePanel/); // home = repo datatable, nothing else
   assert.ok(!/Flow<\/TabBtn>|Timeline<\/TabBtn>/.test(source), "only Context/Graph tabs");
   assert.match(source, /GraphStatsOverlay/);
   // Search is CLI/MCP-only — no UI search path remains.
@@ -70,7 +70,8 @@ test("WikiPage: single-pane centre (no explorer sidebar, no why rail)", async ()
   assert.match(source, /layout=\{graphLayout\}/);
   assert.match(source, /knowledgeRepoGraph/);
   assert.match(source, /knowledgeGraph/);
-  assert.match(source, /knowledgeRemoveRepo/, "repo delete wired in the datatable");
+  const homePanel = await readFile(new URL("../src/components/wiki/KnowledgeHomePanel.tsx", import.meta.url), "utf8");
+  assert.match(homePanel, /knowledgeRemoveRepo/, "repo delete wired in the datatable");
 });
 
 test("WikiBrowseTree lazy-loads repo→branch→file and can open a repo graph", async () => {
@@ -138,12 +139,13 @@ test("fresh (no repos) renders a full-screen onboarding page instead of the wiki
   const page = await readFile(new URL("../src/components/wiki/WikiPage.tsx", import.meta.url), "utf8");
   assert.match(page, /WikiOnboarding/, "dedicated onboarding component exists");
   assert.match(page, /!status\.exists \|\| status\.repos === 0/, "fresh state = missing db or zero repos");
-  assert.match(page, /penguin init/, "onboarding teaches the init command");
   assert.match(page, /setInterval\(refreshStatus/, "auto-detects when the first index lands");
+  const onboarding = await readFile(new URL("../src/components/wiki/WikiOnboarding.tsx", import.meta.url), "utf8");
+  assert.match(onboarding, /penguin init/, "onboarding teaches the init command");
 });
 
 test("onboarding offers one-click indexing (folder picker → in-app reindex → live progress)", async () => {
-  const page = await readFile(new URL("../src/components/wiki/WikiPage.tsx", import.meta.url), "utf8");
+  const page = await readFile(new URL("../src/components/wiki/WikiOnboarding.tsx", import.meta.url), "utf8");
   assert.match(page, /plugin-dialog/, "uses the official dialog plugin for folder pick");
   assert.match(page, /directory:\s*true/, "picks a directory, not a file");
   assert.match(page, /knowledgeReindex\(/, "runs the index through the app bridge");
@@ -152,10 +154,11 @@ test("onboarding offers one-click indexing (folder picker → in-app reindex →
 });
 
 test("Wiki home shows live indexing progress outside onboarding", async () => {
+  const banner = await readFile(new URL("../src/components/wiki/IndexProgressBanner.tsx", import.meta.url), "utf8");
+  assert.match(banner, /function IndexProgressBanner\(/);
+  assert.match(banner, /onIndexProgress/);
+  assert.match(banner, /phase === "complete"/);
   const page = await readFile(new URL("../src/components/wiki/WikiPage.tsx", import.meta.url), "utf8");
-  assert.match(page, /function IndexProgressBanner\(/);
-  assert.match(page, /onIndexProgress/);
-  assert.match(page, /phase === "complete"/);
   assert.match(page, /IndexProgressBanner/);
 });
 
@@ -166,7 +169,7 @@ test("onboarding one-click AI setup: penguin command + MCP clients + global agen
   assert.match(client, /mcp_install_to_local_clients/, "mcp install wrapper");
   assert.match(client, /knowledge_agent_guidance_setup/, "global guidance wrapper");
 
-  const page = await readFile(new URL("../src/components/wiki/WikiPage.tsx", import.meta.url), "utf8");
+  const page = await readFile(new URL("../src/components/wiki/WikiOnboarding.tsx", import.meta.url), "utf8");
   assert.match(page, /knowledgeCliStatus\(/, "onboarding checks CLI availability");
   assert.match(page, /knowledgeCliSetup\(/, "cli setup wired");
   assert.match(page, /mcpInstallToLocalClients\(/, "mcp setup wired");
@@ -182,7 +185,7 @@ test("agent integration exposes opt-in Claude hooks and keeps Codex on canonical
   const rust = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
   assert.match(rust, /knowledge::knowledge_agent_hook_setup/, "hook command registered");
 
-  const page = await readFile(new URL("../src/components/wiki/WikiPage.tsx", import.meta.url), "utf8");
+  const page = await readFile(new URL("../src/components/wiki/WikiOnboarding.tsx", import.meta.url), "utf8");
   assert.match(page, /SessionStart compact status/);
   assert.match(page, /UserPromptSubmit bounded context/);
   assert.match(page, /Codex.*MCP.*AGENTS\.md/s, "Codex capability is stated honestly");
@@ -191,7 +194,7 @@ test("agent integration exposes opt-in Claude hooks and keeps Codex on canonical
 });
 
 test("Claude hook settings have an explicit apply/remove action", async () => {
-  const page = await readFile(new URL("../src/components/wiki/WikiPage.tsx", import.meta.url), "utf8");
+  const page = await readFile(new URL("../src/components/wiki/WikiOnboarding.tsx", import.meta.url), "utf8");
   assert.match(page, /应用 Hook 设置/);
   assert.match(page, /两项均关闭时移除 Penguin hooks/);
   assert.match(page, /const applyHooks = useCallback/);
@@ -228,12 +231,12 @@ test("graph overlay offers node-type checkboxes wired to the filter", async () =
   const page = await readFile(new URL("../src/components/wiki/WikiPage.tsx", import.meta.url), "utf8");
   assert.match(page, /hiddenNodeTypes/, "filter state exists");
   assert.match(page, /filterGraphView\(/, "render uses the pure filter");
-  assert.match(page, /type="checkbox"/, "checkbox UI");
+  const overlay = await readFile(new URL("../src/components/wiki/GraphStatsOverlay.tsx", import.meta.url), "utf8");
+  assert.match(overlay, /type="checkbox"/, "checkbox UI");
 });
 
 test("GraphStatsOverlay is collapsible (collapsed to a pill, not fully hidden)", async () => {
-  const page = await readFile(new URL("../src/components/wiki/WikiPage.tsx", import.meta.url), "utf8");
-  const overlay = page.slice(page.indexOf("function GraphStatsOverlay"), page.indexOf("function WikiPage("));
+  const overlay = await readFile(new URL("../src/components/wiki/GraphStatsOverlay.tsx", import.meta.url), "utf8");
   assert.match(overlay, /const \[collapsed, setCollapsed\] = useState/, "has a collapsed toggle state");
   assert.match(overlay, /if \(collapsed\)/, "renders a distinct collapsed branch");
   assert.match(overlay, /setCollapsed\(false\)/, "collapsed pill can re-expand");
@@ -241,8 +244,7 @@ test("GraphStatsOverlay is collapsible (collapsed to a pill, not fully hidden)",
 });
 
 test("KnowledgeHomePanel (Indexed repositories) is collapsible and has a role-gated refresh", async () => {
-  const page = await readFile(new URL("../src/components/wiki/WikiPage.tsx", import.meta.url), "utf8");
-  const panel = page.slice(page.indexOf("function KnowledgeHomePanel"), page.indexOf("function GraphEmptyState"));
+  const panel = await readFile(new URL("../src/components/wiki/KnowledgeHomePanel.tsx", import.meta.url), "utf8");
   // collapsible, not fully removed from the tree
   assert.match(panel, /const \[collapsed, setCollapsed\] = useState/, "has a collapsed toggle state");
   assert.match(panel, /setCollapsed\(\(c\) => !c\)/, "toggle button flips collapsed state");
@@ -263,8 +265,7 @@ test("KnowledgeHomePanel (Indexed repositories) is collapsible and has a role-ga
 });
 
 test("KnowledgeHomePanel: per-repo live auto-index toggle (penguin watch wire-up)", async () => {
-  const page = await readFile(new URL("../src/components/wiki/WikiPage.tsx", import.meta.url), "utf8");
-  const panel = page.slice(page.indexOf("function KnowledgeHomePanel"), page.indexOf("function GraphEmptyState"));
+  const panel = await readFile(new URL("../src/components/wiki/KnowledgeHomePanel.tsx", import.meta.url), "utf8");
   assert.match(panel, /knowledgeWatchStatus/, "re-syncs from the Rust-side registry, not just local state");
   assert.match(panel, /knowledgeWatchToggle\(repo\.repoId, repo\.rootPath, enable\)/, "toggles by repoId + rootPath");
   assert.match(panel, /void toggleWatch\(repo\)/, "wired to a click handler on the repo row");
@@ -276,8 +277,7 @@ test("KnowledgeHomePanel: 自动刷新 preference survives a webview reload (per
   // toggle back to off, even though the user's whole point in turning it on
   // was to keep it running continuously in the background. Now persisted
   // the same way as the installer's registryAutoRefresh precedent.
-  const page = await readFile(new URL("../src/components/wiki/WikiPage.tsx", import.meta.url), "utf8");
-  const panel = page.slice(page.indexOf("function KnowledgeHomePanel"), page.indexOf("function GraphEmptyState"));
+  const panel = await readFile(new URL("../src/components/wiki/KnowledgeHomePanel.tsx", import.meta.url), "utf8");
   assert.match(panel, /useAppStore\(\(s\) => s\.wikiAutoRefresh\)/, "reads from the persisted store, not a local useState");
   assert.match(panel, /useAppStore\(\(s\) => s\.setWikiAutoRefresh\)/, "writes through the persisted store setter");
   assert.doesNotMatch(panel, /const \[autoRefresh, setAutoRefresh\] = useState/, "no longer a plain unpersisted useState");
@@ -297,8 +297,7 @@ test("KnowledgeHomePanel: bulk toggle turns watch on/off for every repo in one c
   // Toggling watch one repo at a time doesn't scale once there are a dozen+
   // indexed repos — one button flips them all to the opposite of whatever
   // the current majority state is.
-  const page = await readFile(new URL("../src/components/wiki/WikiPage.tsx", import.meta.url), "utf8");
-  const panel = page.slice(page.indexOf("function KnowledgeHomePanel"), page.indexOf("function GraphEmptyState"));
+  const panel = await readFile(new URL("../src/components/wiki/KnowledgeHomePanel.tsx", import.meta.url), "utf8");
   assert.match(
     panel,
     /indexRows!\.repos\.every\(\(r\) => watching\.has\(r\.repoId\)\)/,
