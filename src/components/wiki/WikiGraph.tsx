@@ -103,6 +103,10 @@ export function WikiGraph({
   const hiLinks = useRef<Set<string>>(new Set());
   // nodeId → connected nodeIds, and adjacency for link lookups.
   const adj = useRef<Map<string, Set<string>>>(new Map());
+  // Pending delayed-fit timer. Tracked so unmount (or a re-fit) clears it —
+  // otherwise a component torn down within the 90ms window fires safeFit on a
+  // destroyed graph instance.
+  const fitTimerRef = useRef<number | null>(null);
 
   const applyData = (graph: GNode, view: KnowledgeGraphView) => {
     // Degree per node → drives node radius (hubs bigger, like Obsidian).
@@ -149,7 +153,8 @@ export function WikiGraph({
     // tick and onEngineStop can fire before layout paints — a delayed fit is the
     // reliable one (the synchronous fit was zooming to an unpositioned graph →
     // focus stuck in a corner).
-    setTimeout(() => safeFit(graph, 400, 60), 90);
+    if (fitTimerRef.current != null) window.clearTimeout(fitTimerRef.current);
+    fitTimerRef.current = window.setTimeout(() => { fitTimerRef.current = null; safeFit(graph, 400, 60); }, 90);
   };
 
   const baseLinkColor = (l: GNode) => EDGE_COL[l.edgeType as string] ?? COL.link;
@@ -278,6 +283,7 @@ export function WikiGraph({
       });
     return () => {
       disposed = true;
+      if (fitTimerRef.current != null) { window.clearTimeout(fitTimerRef.current); fitTimerRef.current = null; }
       ro?.disconnect();
       graphRef.current?._destructor?.();
       graphRef.current = null;

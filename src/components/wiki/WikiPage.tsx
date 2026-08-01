@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
   ArrowRight,
@@ -911,16 +911,32 @@ export function WikiPage({ onClose }: WikiPageProps) {
 
   const err = (e: unknown) => setError(formatKnowledgeError(e));
 
+  // Guard against out-of-order async responses: when the user switches symbols
+  // or graphs quickly, only the most recent request is allowed to write state.
+  // Without this, a slow earlier response can land after a faster later one and
+  // clobber the view with stale data. Every graph-loading path shares one id so
+  // "last graph requested wins" holds across local/repo/service graphs too.
+  const packReqId = useRef(0);
+  const graphReqId = useRef(0);
+
   const loadPack = useCallback(async (id: string) => {
+    const reqId = ++packReqId.current;
     setPackBusy(true);
     try {
-      setPack(await knowledgeContext(id));
-    } catch (e) { err(e); } finally { setPackBusy(false); }
+      const p = await knowledgeContext(id);
+      if (reqId === packReqId.current) setPack(p);
+    } catch (e) { if (reqId === packReqId.current) err(e); }
+    finally { if (reqId === packReqId.current) setPackBusy(false); }
   }, []);
   const loadGraph = useCallback(async (id: string) => {
+    const reqId = ++graphReqId.current;
     setGraphBusy(true); setHiddenNodeIds(new Set());
     setGraphScope({ title: "Local graph", detail: "Focused symbol neighbourhood" });
-    try { setGraphData(await knowledgeGraph(id, 1)); } catch (e) { err(e); } finally { setGraphBusy(false); }
+    try {
+      const g = await knowledgeGraph(id, 1);
+      if (reqId === graphReqId.current) setGraphData(g);
+    } catch (e) { if (reqId === graphReqId.current) err(e); }
+    finally { if (reqId === graphReqId.current) setGraphBusy(false); }
   }, []);
 
   const selectSymbol = useCallback((id: string, record = true) => {
@@ -934,15 +950,17 @@ export function WikiPage({ onClose }: WikiPageProps) {
   }, [loadPack]);
 
   const openRepoGraph = useCallback(async (repoId: string, branchId: string) => {
+    const reqId = ++graphReqId.current;
     setError(null); setFocusId(null); setTab("graph"); setGraphBusy(true); setHiddenNodeIds(new Set());
     setGraphScope({ title: "Repo graph", detail: "Top connected symbols in this branch" });
-    try { setGraphData(await knowledgeRepoGraph(repoId, branchId)); } catch (e) { err(e); } finally { setGraphBusy(false); }
+    try { const g = await knowledgeRepoGraph(repoId, branchId); if (reqId === graphReqId.current) setGraphData(g); } catch (e) { if (reqId === graphReqId.current) err(e); } finally { if (reqId === graphReqId.current) setGraphBusy(false); }
   }, []);
 
   const openServiceGraph = useCallback(async () => {
+    const reqId = ++graphReqId.current;
     setError(null); setFocusId(null); setTab("graph"); setGraphBusy(true); setHiddenNodeIds(new Set());
     setGraphScope({ title: "Service map", detail: "Only cross-service invokes and package dependencies" });
-    try { setGraphData(await knowledgeServiceGraph()); } catch (e) { err(e); } finally { setGraphBusy(false); }
+    try { const g = await knowledgeServiceGraph(); if (reqId === graphReqId.current) setGraphData(g); } catch (e) { if (reqId === graphReqId.current) err(e); } finally { if (reqId === graphReqId.current) setGraphBusy(false); }
   }, []);
 
   // Graph node clicks: service-map nodes carry a repo id (not a graph node), so

@@ -120,11 +120,20 @@ export function WikiSearchPage() {
         knowledgeGetHit(hit.locator, { signal: controller.signal }, previewLines).catch(() => null),
         knowledgeContext(hit.locator.filePath, { signal: controller.signal }),
       ]);
+      // A newer openContext may have superseded this one while awaiting — never
+      // let a slow earlier response clobber the current selection's context.
+      if (contextAbort.current !== controller) return;
       setHitPreview(preview);
       setContextPack(context);
-      void knowledgeEvidenceList({ target: hit.title, limit: 20, signal: controller.signal }).then(setEvidence).catch(() => setEvidence([]));
-      if (hit.lane === "note") void knowledgeExplore("backlinks", hit.title, { signal: controller.signal }).then((result) => setNoteLinks(result.nodes ?? [])).catch(() => setNoteLinks([]));
+      void knowledgeEvidenceList({ target: hit.title, limit: 20, signal: controller.signal }).then((ev) => { if (contextAbort.current === controller) setEvidence(ev); }).catch(() => {});
+      if (hit.lane === "note") void knowledgeExplore("backlinks", hit.title, { signal: controller.signal }).then((result) => { if (contextAbort.current === controller) setNoteLinks(result.nodes ?? []); }).catch(() => {});
       else setNoteLinks([]);
+    } catch (error) {
+      // Aborted by a newer request, or the context load failed. Don't surface an
+      // unhandled rejection; only clear if this is still the active request.
+      if ((error as Error).name !== "AbortError" && contextAbort.current === controller) {
+        setHitPreview(null); setContextPack(null);
+      }
     }
     finally { if (contextAbort.current === controller) setContextBusy(false); }
   };
