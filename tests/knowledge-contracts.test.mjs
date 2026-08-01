@@ -79,6 +79,7 @@ test("SearchResponse validates locator/evidence shape and normalizes nondetermin
       evidence: [{ source: "source", locator, status: "verified" }],
     }],
     diagnostics: {
+      queryStatus: "MATCH",
       requestId: "request-1",
       contractVersion: "2",
       capabilityHash: "hash",
@@ -88,6 +89,7 @@ test("SearchResponse validates locator/evidence shape and normalizes nondetermin
       coverage: { discovered: 1, admitted: 1, excluded: 0, failed: 0, stale: 0 },
       exclusions: [],
       warnings: [],
+      nextActions: [],
       suggestions: [],
       timingsMs: { source: 12 },
       truncated: false,

@@ -1607,582 +1607,1429 @@
         "capabilityId": "knowledge.repository.register",
         "status": "implemented",
         "inputSchemaId": "knowledge.repository.register.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.repository.register.output.v2"
       },
       {
         "capabilityId": "knowledge.search",
         "status": "implemented",
         "inputSchemaId": "knowledge.search.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "Non-empty deterministic or semantic query"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "exact",
+                "phrase",
+                "substring",
+                "path",
+                "regex",
+                "lexical",
+                "semantic",
+                "structural"
+              ]
+            },
+            "scope": {
+              "type": "object"
+            },
+            "options": {
+              "type": "object"
+            },
+            "page": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.search.output.v2"
       },
       {
         "capabilityId": "knowledge.get_hit",
         "status": "implemented",
         "inputSchemaId": "knowledge.get_hit.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "snapshot_id": {
+              "type": "string"
+            },
+            "file_path": {
+              "type": "string"
+            },
+            "start_line": {
+              "type": "number"
+            },
+            "end_line": {
+              "type": "number"
+            },
+            "start_byte": {
+              "type": "number"
+            },
+            "context_lines": {
+              "type": "number"
+            },
+            "original_revision_id": {
+              "type": "string"
+            },
+            "caller_workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "snapshot_id",
+            "file_path"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.get_hit.output.v2"
       },
       {
         "capabilityId": "knowledge.coverage",
         "status": "implemented",
         "inputSchemaId": "knowledge.coverage.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.coverage.output.v2"
       },
       {
         "capabilityId": "knowledge.capabilities",
         "status": "implemented",
         "inputSchemaId": "knowledge.capabilities.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.capabilities.output.v2"
       },
       {
         "capabilityId": "knowledge.index",
         "status": "implemented",
         "inputSchemaId": "knowledge.index.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.index.output.v2"
       },
       {
         "capabilityId": "knowledge.rebuild",
         "status": "implemented",
         "inputSchemaId": "knowledge.rebuild.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.rebuild.output.v2"
       },
       {
         "capabilityId": "knowledge.snapshot.materialize",
         "status": "implemented",
         "inputSchemaId": "knowledge.snapshot.materialize.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.snapshot.materialize.output.v2"
       },
       {
         "capabilityId": "knowledge.watch",
         "status": "implemented",
         "inputSchemaId": "knowledge.watch.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.watch.output.v2"
       },
       {
         "capabilityId": "knowledge.repository.remove",
         "status": "implemented",
         "inputSchemaId": "knowledge.repository.remove.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.repository.remove.output.v2"
       },
       {
         "capabilityId": "knowledge.branch.pin",
         "status": "implemented",
         "inputSchemaId": "knowledge.branch.pin.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.branch.pin.output.v2"
       },
       {
         "capabilityId": "knowledge.index_status",
         "status": "implemented",
         "inputSchemaId": "knowledge.index_status.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "detailed",
+                "compact"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.index_status.output.v2"
       },
       {
         "capabilityId": "knowledge.set_master_branch",
         "status": "implemented",
         "inputSchemaId": "knowledge.set_master_branch.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "repo": {
+              "type": "string"
+            },
+            "branch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "repo",
+            "branch"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.set_master_branch.output.v2"
       },
       {
         "capabilityId": "knowledge.snapshot.list",
         "status": "implemented",
         "inputSchemaId": "knowledge.snapshot.list.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.snapshot.list.output.v2"
       },
       {
         "capabilityId": "knowledge.get_node",
         "status": "implemented",
         "inputSchemaId": "knowledge.get_node.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.get_node.output.v2"
       },
       {
         "capabilityId": "knowledge.callers",
         "status": "implemented",
         "inputSchemaId": "knowledge.callers.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.callers.output.v2"
       },
       {
         "capabilityId": "knowledge.callees",
         "status": "implemented",
         "inputSchemaId": "knowledge.callees.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.callees.output.v2"
       },
       {
         "capabilityId": "knowledge.impact",
         "status": "implemented",
         "inputSchemaId": "knowledge.impact.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.impact.output.v2"
       },
       {
         "capabilityId": "knowledge.context",
         "status": "implemented",
         "inputSchemaId": "knowledge.context.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "target": {
+              "type": "string"
+            },
+            "repo": {
+              "type": "string"
+            },
+            "branch": {
+              "type": "string"
+            },
+            "commit_sha": {
+              "type": "string"
+            },
+            "snapshot_id": {
+              "type": "string"
+            },
+            "depth": {
+              "type": "number"
+            },
+            "limit": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.context.output.v2"
       },
       {
         "capabilityId": "knowledge.explore",
         "status": "implemented",
         "inputSchemaId": "knowledge.explore.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "target": {
+              "type": "string"
+            },
+            "repo": {
+              "type": "string"
+            },
+            "branch": {
+              "type": "string"
+            },
+            "commit_sha": {
+              "type": "string"
+            },
+            "snapshot_id": {
+              "type": "string"
+            },
+            "depth": {
+              "type": "number"
+            },
+            "limit": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.explore.output.v2"
       },
       {
         "capabilityId": "knowledge.locate",
         "status": "implemented",
         "inputSchemaId": "knowledge.locate.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.locate.output.v2"
       },
       {
         "capabilityId": "knowledge.explain",
         "status": "implemented",
         "inputSchemaId": "knowledge.explain.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.explain.output.v2"
       },
       {
         "capabilityId": "knowledge.flow",
         "status": "implemented",
         "inputSchemaId": "knowledge.flow.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.flow.output.v2"
       },
       {
         "capabilityId": "knowledge.affected",
         "status": "implemented",
         "inputSchemaId": "knowledge.affected.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.affected.output.v2"
       },
       {
         "capabilityId": "knowledge.path",
         "status": "implemented",
         "inputSchemaId": "knowledge.path.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.path.output.v2"
       },
       {
         "capabilityId": "knowledge.architecture",
         "status": "implemented",
         "inputSchemaId": "knowledge.architecture.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.architecture.output.v2"
       },
       {
         "capabilityId": "knowledge.service_graph",
         "status": "implemented",
         "inputSchemaId": "knowledge.service_graph.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.service_graph.output.v2"
       },
       {
         "capabilityId": "knowledge.local_graph",
         "status": "implemented",
         "inputSchemaId": "knowledge.local_graph.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.local_graph.output.v2"
       },
       {
         "capabilityId": "knowledge.graph.query",
         "status": "implemented",
         "inputSchemaId": "knowledge.graph.query.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "request": {
+              "type": "object"
+            },
+            "start": {
+              "type": "object"
+            },
+            "traverse": {
+              "type": "array"
+            },
+            "project": {
+              "type": "array"
+            },
+            "limit": {
+              "type": "number"
+            },
+            "scope": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "start",
+            "traverse",
+            "project",
+            "limit"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.graph.query.output.v2"
       },
       {
         "capabilityId": "knowledge.repository_graph",
         "status": "implemented",
         "inputSchemaId": "knowledge.repository_graph.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.repository_graph.output.v2"
       },
       {
         "capabilityId": "knowledge.communities",
         "status": "implemented",
         "inputSchemaId": "knowledge.communities.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.communities.output.v2"
       },
       {
         "capabilityId": "knowledge.timeline",
         "status": "implemented",
         "inputSchemaId": "knowledge.timeline.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.timeline.output.v2"
       },
       {
         "capabilityId": "knowledge.recent",
         "status": "implemented",
         "inputSchemaId": "knowledge.recent.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.recent.output.v2"
       },
       {
         "capabilityId": "knowledge.compare_branches",
         "status": "implemented",
         "inputSchemaId": "knowledge.compare_branches.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.compare_branches.output.v2"
       },
       {
         "capabilityId": "knowledge.files",
         "status": "implemented",
         "inputSchemaId": "knowledge.files.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.files.output.v2"
       },
       {
         "capabilityId": "knowledge.file_symbols",
         "status": "implemented",
         "inputSchemaId": "knowledge.file_symbols.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.file_symbols.output.v2"
       },
       {
         "capabilityId": "knowledge.dead_code",
         "status": "implemented",
         "inputSchemaId": "knowledge.dead_code.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.dead_code.output.v2"
       },
       {
         "capabilityId": "knowledge.package_dependencies",
         "status": "implemented",
         "inputSchemaId": "knowledge.package_dependencies.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "subject": {
+              "type": "string"
+            },
+            "direction": {
+              "type": "string",
+              "enum": [
+                "dependencies",
+                "dependents",
+                "both"
+              ]
+            },
+            "transitive": {
+              "type": "boolean"
+            },
+            "max_depth": {
+              "type": "number"
+            },
+            "limit": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "subject"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.package_dependencies.output.v2"
       },
       {
         "capabilityId": "knowledge.dependency_path",
         "status": "implemented",
         "inputSchemaId": "knowledge.dependency_path.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            },
+            "max_depth": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.dependency_path.output.v2"
       },
       {
         "capabilityId": "knowledge.analyze_repository",
         "status": "implemented",
         "inputSchemaId": "knowledge.analyze_repository.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string"
+            },
+            "repo": {
+              "type": "string"
+            },
+            "focus": {
+              "type": "string"
+            },
+            "limit": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.analyze_repository.output.v2"
       },
       {
         "capabilityId": "knowledge.response_sample.capture",
         "status": "implemented",
         "inputSchemaId": "knowledge.response_sample.capture.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.response_sample.capture.output.v2"
       },
       {
         "capabilityId": "knowledge.response_sample.list",
         "status": "implemented",
         "inputSchemaId": "knowledge.response_sample.list.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.response_sample.list.output.v2"
       },
       {
         "capabilityId": "knowledge.incident.create",
         "status": "implemented",
         "inputSchemaId": "knowledge.incident.create.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.incident.create.output.v2"
       },
       {
         "capabilityId": "knowledge.note.create",
         "status": "implemented",
         "inputSchemaId": "knowledge.note.create.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.note.create.output.v2"
       },
       {
         "capabilityId": "knowledge.note.append",
         "status": "implemented",
         "inputSchemaId": "knowledge.note.append.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.note.append.output.v2"
       },
       {
         "capabilityId": "knowledge.note.list",
         "status": "implemented",
         "inputSchemaId": "knowledge.note.list.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.note.list.output.v2"
       },
       {
         "capabilityId": "knowledge.note.reindex",
         "status": "implemented",
         "inputSchemaId": "knowledge.note.reindex.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.note.reindex.output.v2"
       },
       {
         "capabilityId": "knowledge.note.write",
         "status": "implemented",
         "inputSchemaId": "knowledge.note.write.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "identity_key": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "src": {
+              "type": "string"
+            },
+            "dst": {
+              "type": "string"
+            },
+            "edge_type": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.note.write.output.v2"
       },
       {
         "capabilityId": "knowledge.note.backlinks",
         "status": "implemented",
         "inputSchemaId": "knowledge.note.backlinks.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.note.backlinks.output.v2"
       },
       {
         "capabilityId": "knowledge.tag.list",
         "status": "implemented",
         "inputSchemaId": "knowledge.tag.list.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.tag.list.output.v2"
       },
       {
         "capabilityId": "knowledge.link.create",
         "status": "implemented",
         "inputSchemaId": "knowledge.link.create.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.link.create.output.v2"
       },
       {
         "capabilityId": "knowledge.link.list",
         "status": "implemented",
         "inputSchemaId": "knowledge.link.list.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.link.list.output.v2"
       },
       {
         "capabilityId": "knowledge.link.delete",
         "status": "implemented",
         "inputSchemaId": "knowledge.link.delete.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.link.delete.output.v2"
       },
       {
         "capabilityId": "knowledge.source.register",
         "status": "implemented",
         "inputSchemaId": "knowledge.source.register.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string"
+            },
+            "location": {
+              "type": "string"
+            },
+            "config": {
+              "type": "object"
+            },
+            "allow_hosts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "type",
+            "location"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.source.register.output.v2"
       },
       {
         "capabilityId": "knowledge.source.sync",
         "status": "implemented",
         "inputSchemaId": "knowledge.source.sync.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.source.sync.output.v2"
       },
       {
         "capabilityId": "knowledge.source.list",
         "status": "implemented",
         "inputSchemaId": "knowledge.source.list.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.source.list.output.v2"
       },
       {
         "capabilityId": "knowledge.source.remove",
         "status": "implemented",
         "inputSchemaId": "knowledge.source.remove.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "confirmed": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.source.remove.output.v2"
       },
       {
         "capabilityId": "knowledge.memory.remember",
         "status": "implemented",
         "inputSchemaId": "knowledge.memory.remember.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "class": {
+              "type": "string"
+            },
+            "repo_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            },
+            "global": {
+              "type": "boolean"
+            },
+            "subject": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "source": {
+              "type": "array"
+            },
+            "confidence": {
+              "type": "number"
+            },
+            "retention": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "subject",
+            "body"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.memory.remember.output.v2"
       },
       {
         "capabilityId": "knowledge.memory.recall",
         "status": "implemented",
         "inputSchemaId": "knowledge.memory.recall.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "repo_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.memory.recall.output.v2"
       },
       {
         "capabilityId": "knowledge.memory.forget",
         "status": "implemented",
         "inputSchemaId": "knowledge.memory.forget.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "confirmed": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.memory.forget.output.v2"
       },
       {
         "capabilityId": "knowledge.memory.improve",
         "status": "implemented",
         "inputSchemaId": "knowledge.memory.improve.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.memory.improve.output.v2"
       },
       {
         "capabilityId": "knowledge.ontology.list",
         "status": "implemented",
         "inputSchemaId": "knowledge.ontology.list.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.ontology.list.output.v2"
       },
       {
         "capabilityId": "knowledge.ontology.upsert",
         "status": "implemented",
         "inputSchemaId": "knowledge.ontology.upsert.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.ontology.upsert.output.v2"
       },
       {
         "capabilityId": "knowledge.ontology.link",
         "status": "implemented",
         "inputSchemaId": "knowledge.ontology.link.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.ontology.link.output.v2"
       },
       {
         "capabilityId": "knowledge.suggestion.list",
         "status": "implemented",
         "inputSchemaId": "knowledge.suggestion.list.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.suggestion.list.output.v2"
       },
       {
         "capabilityId": "knowledge.suggestion.accept",
         "status": "implemented",
         "inputSchemaId": "knowledge.suggestion.accept.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.suggestion.accept.output.v2"
       },
       {
         "capabilityId": "knowledge.suggestion.reject",
         "status": "implemented",
         "inputSchemaId": "knowledge.suggestion.reject.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.suggestion.reject.output.v2"
       },
       {
         "capabilityId": "knowledge.evidence.target.list",
         "status": "implemented",
         "inputSchemaId": "knowledge.evidence.target.list.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.evidence.target.list.output.v2"
       },
       {
         "capabilityId": "knowledge.evidence.investigation.plan",
         "status": "implemented",
         "inputSchemaId": "knowledge.evidence.investigation.plan.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.evidence.investigation.plan.output.v2"
       },
       {
         "capabilityId": "knowledge.evidence.investigation.capture",
         "status": "implemented",
         "inputSchemaId": "knowledge.evidence.investigation.capture.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.evidence.investigation.capture.output.v2"
       },
       {
         "capabilityId": "knowledge.evidence.note.get",
         "status": "implemented",
         "inputSchemaId": "knowledge.evidence.note.get.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.evidence.note.get.output.v2"
       },
       {
         "capabilityId": "knowledge.evidence.note.list",
         "status": "implemented",
         "inputSchemaId": "knowledge.evidence.note.list.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.evidence.note.list.output.v2"
       },
       {
         "capabilityId": "knowledge.evidence.status.set",
         "status": "implemented",
         "inputSchemaId": "knowledge.evidence.status.set.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.evidence.status.set.output.v2"
       },
       {
         "capabilityId": "knowledge.evidence.doctor",
         "status": "implemented",
         "inputSchemaId": "knowledge.evidence.doctor.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.evidence.doctor.output.v2"
       },
       {
         "capabilityId": "knowledge.evidence.repair",
         "status": "implemented",
         "inputSchemaId": "knowledge.evidence.repair.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.evidence.repair.output.v2"
       },
       {
         "capabilityId": "knowledge.evidence.validate",
         "status": "implemented",
         "inputSchemaId": "knowledge.evidence.validate.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.evidence.validate.output.v2"
       },
       {
         "capabilityId": "knowledge.api_doc.generate",
         "status": "implemented",
         "inputSchemaId": "knowledge.api_doc.generate.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.api_doc.generate.output.v2"
       },
       {
         "capabilityId": "knowledge.api_doc.list",
         "status": "implemented",
         "inputSchemaId": "knowledge.api_doc.list.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.api_doc.list.output.v2"
       },
       {
         "capabilityId": "knowledge.api_doc.show",
         "status": "implemented",
         "inputSchemaId": "knowledge.api_doc.show.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.api_doc.show.output.v2"
       },
       {
         "capabilityId": "knowledge.api_doc.diff",
         "status": "implemented",
         "inputSchemaId": "knowledge.api_doc.diff.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.api_doc.diff.output.v2"
       },
       {
         "capabilityId": "knowledge.api_doc.bind",
         "status": "implemented",
         "inputSchemaId": "knowledge.api_doc.bind.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.api_doc.bind.output.v2"
       },
       {
         "capabilityId": "knowledge.api_doc.unbind",
         "status": "implemented",
         "inputSchemaId": "knowledge.api_doc.unbind.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.api_doc.unbind.output.v2"
       },
       {
         "capabilityId": "knowledge.api_doc.draft",
         "status": "implemented",
         "inputSchemaId": "knowledge.api_doc.draft.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.api_doc.draft.output.v2"
       },
       {
         "capabilityId": "knowledge.api_doc.sync",
         "status": "implemented",
         "inputSchemaId": "knowledge.api_doc.sync.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.api_doc.sync.output.v2"
       },
       {
         "capabilityId": "knowledge.api_doc.repair",
         "status": "implemented",
         "inputSchemaId": "knowledge.api_doc.repair.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.api_doc.repair.output.v2"
       },
       {
         "capabilityId": "knowledge.api_doc.export",
         "status": "implemented",
         "inputSchemaId": "knowledge.api_doc.export.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.api_doc.export.output.v2"
       },
       {
         "capabilityId": "knowledge.saved_query.list",
         "status": "implemented",
         "inputSchemaId": "knowledge.saved_query.list.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.saved_query.list.output.v2"
       },
       {
         "capabilityId": "knowledge.saved_query.run",
         "status": "implemented",
         "inputSchemaId": "knowledge.saved_query.run.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "cursor": {
+              "type": "string"
+            },
+            "limit": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.saved_query.run.output.v2"
       },
       {
         "capabilityId": "knowledge.saved_query.write",
         "status": "implemented",
         "inputSchemaId": "knowledge.saved_query.write.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "request": {
+              "type": "object"
+            },
+            "confirmed": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "name",
+            "request"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.saved_query.write.output.v2"
       },
       {
         "capabilityId": "knowledge.why.get",
         "status": "implemented",
         "inputSchemaId": "knowledge.why.get.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.why.get.output.v2"
       },
       {
         "capabilityId": "knowledge.domain.explain",
         "status": "implemented",
         "inputSchemaId": "knowledge.domain.explain.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.domain.explain.output.v2"
       },
       {
         "capabilityId": "knowledge.onboarding.generate",
         "status": "implemented",
         "inputSchemaId": "knowledge.onboarding.generate.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.onboarding.generate.output.v2"
       },
       {
         "capabilityId": "knowledge.artifact.export",
         "status": "implemented",
         "inputSchemaId": "knowledge.artifact.export.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.artifact.export.output.v2"
       },
       {
         "capabilityId": "knowledge.artifact.import",
         "status": "implemented",
         "inputSchemaId": "knowledge.artifact.import.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "artifact_base64": {
+              "type": "string"
+            },
+            "base_database_base64": {
+              "type": "string"
+            },
+            "capability_hash": {
+              "type": "string"
+            },
+            "confirmed": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "artifact_base64"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.artifact.import.output.v2"
       },
       {
         "capabilityId": "knowledge.agent_hook.invoke",
         "status": "implemented",
         "inputSchemaId": "knowledge.agent_hook.invoke.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.agent_hook.invoke.output.v2"
       },
       {
         "capabilityId": "knowledge.cli.install",
         "status": "implemented",
         "inputSchemaId": "knowledge.cli.install.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.cli.install.output.v2"
       },
       {
         "capabilityId": "knowledge.doctor",
         "status": "implemented",
         "inputSchemaId": "knowledge.doctor.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.doctor.output.v2"
       }
     ]
@@ -3797,582 +4644,1429 @@
         "capabilityId": "knowledge.repository.register",
         "status": "implemented",
         "inputSchemaId": "knowledge.repository.register.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.repository.register.output.v2"
       },
       {
         "capabilityId": "knowledge.search",
         "status": "implemented",
         "inputSchemaId": "knowledge.search.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "Non-empty deterministic or semantic query"
+            },
+            "mode": {
+              "type": "string",
+              "enum": [
+                "auto",
+                "exact",
+                "phrase",
+                "substring",
+                "path",
+                "regex",
+                "lexical",
+                "semantic",
+                "structural"
+              ]
+            },
+            "scope": {
+              "type": "object"
+            },
+            "options": {
+              "type": "object"
+            },
+            "page": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.search.output.v2"
       },
       {
         "capabilityId": "knowledge.get_hit",
         "status": "implemented",
         "inputSchemaId": "knowledge.get_hit.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "snapshot_id": {
+              "type": "string"
+            },
+            "file_path": {
+              "type": "string"
+            },
+            "start_line": {
+              "type": "number"
+            },
+            "end_line": {
+              "type": "number"
+            },
+            "start_byte": {
+              "type": "number"
+            },
+            "context_lines": {
+              "type": "number"
+            },
+            "original_revision_id": {
+              "type": "string"
+            },
+            "caller_workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "snapshot_id",
+            "file_path"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.get_hit.output.v2"
       },
       {
         "capabilityId": "knowledge.coverage",
         "status": "implemented",
         "inputSchemaId": "knowledge.coverage.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.coverage.output.v2"
       },
       {
         "capabilityId": "knowledge.capabilities",
         "status": "implemented",
         "inputSchemaId": "knowledge.capabilities.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.capabilities.output.v2"
       },
       {
         "capabilityId": "knowledge.index",
         "status": "implemented",
         "inputSchemaId": "knowledge.index.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.index.output.v2"
       },
       {
         "capabilityId": "knowledge.rebuild",
         "status": "implemented",
         "inputSchemaId": "knowledge.rebuild.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.rebuild.output.v2"
       },
       {
         "capabilityId": "knowledge.snapshot.materialize",
         "status": "implemented",
         "inputSchemaId": "knowledge.snapshot.materialize.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.snapshot.materialize.output.v2"
       },
       {
         "capabilityId": "knowledge.watch",
         "status": "implemented",
         "inputSchemaId": "knowledge.watch.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.watch.output.v2"
       },
       {
         "capabilityId": "knowledge.repository.remove",
         "status": "implemented",
         "inputSchemaId": "knowledge.repository.remove.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.repository.remove.output.v2"
       },
       {
         "capabilityId": "knowledge.branch.pin",
         "status": "implemented",
         "inputSchemaId": "knowledge.branch.pin.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.branch.pin.output.v2"
       },
       {
         "capabilityId": "knowledge.index_status",
         "status": "implemented",
         "inputSchemaId": "knowledge.index_status.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "detailed",
+                "compact"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.index_status.output.v2"
       },
       {
         "capabilityId": "knowledge.set_master_branch",
         "status": "implemented",
         "inputSchemaId": "knowledge.set_master_branch.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "repo": {
+              "type": "string"
+            },
+            "branch": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "repo",
+            "branch"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.set_master_branch.output.v2"
       },
       {
         "capabilityId": "knowledge.snapshot.list",
         "status": "implemented",
         "inputSchemaId": "knowledge.snapshot.list.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.snapshot.list.output.v2"
       },
       {
         "capabilityId": "knowledge.get_node",
         "status": "implemented",
         "inputSchemaId": "knowledge.get_node.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.get_node.output.v2"
       },
       {
         "capabilityId": "knowledge.callers",
         "status": "implemented",
         "inputSchemaId": "knowledge.callers.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.callers.output.v2"
       },
       {
         "capabilityId": "knowledge.callees",
         "status": "implemented",
         "inputSchemaId": "knowledge.callees.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.callees.output.v2"
       },
       {
         "capabilityId": "knowledge.impact",
         "status": "implemented",
         "inputSchemaId": "knowledge.impact.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.impact.output.v2"
       },
       {
         "capabilityId": "knowledge.context",
         "status": "implemented",
         "inputSchemaId": "knowledge.context.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "target": {
+              "type": "string"
+            },
+            "repo": {
+              "type": "string"
+            },
+            "branch": {
+              "type": "string"
+            },
+            "commit_sha": {
+              "type": "string"
+            },
+            "snapshot_id": {
+              "type": "string"
+            },
+            "depth": {
+              "type": "number"
+            },
+            "limit": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.context.output.v2"
       },
       {
         "capabilityId": "knowledge.explore",
         "status": "implemented",
         "inputSchemaId": "knowledge.explore.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "target": {
+              "type": "string"
+            },
+            "repo": {
+              "type": "string"
+            },
+            "branch": {
+              "type": "string"
+            },
+            "commit_sha": {
+              "type": "string"
+            },
+            "snapshot_id": {
+              "type": "string"
+            },
+            "depth": {
+              "type": "number"
+            },
+            "limit": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "target"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.explore.output.v2"
       },
       {
         "capabilityId": "knowledge.locate",
         "status": "implemented",
         "inputSchemaId": "knowledge.locate.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.locate.output.v2"
       },
       {
         "capabilityId": "knowledge.explain",
         "status": "implemented",
         "inputSchemaId": "knowledge.explain.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.explain.output.v2"
       },
       {
         "capabilityId": "knowledge.flow",
         "status": "implemented",
         "inputSchemaId": "knowledge.flow.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.flow.output.v2"
       },
       {
         "capabilityId": "knowledge.affected",
         "status": "implemented",
         "inputSchemaId": "knowledge.affected.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.affected.output.v2"
       },
       {
         "capabilityId": "knowledge.path",
         "status": "implemented",
         "inputSchemaId": "knowledge.path.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.path.output.v2"
       },
       {
         "capabilityId": "knowledge.architecture",
         "status": "implemented",
         "inputSchemaId": "knowledge.architecture.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.architecture.output.v2"
       },
       {
         "capabilityId": "knowledge.service_graph",
         "status": "implemented",
         "inputSchemaId": "knowledge.service_graph.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.service_graph.output.v2"
       },
       {
         "capabilityId": "knowledge.local_graph",
         "status": "implemented",
         "inputSchemaId": "knowledge.local_graph.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.local_graph.output.v2"
       },
       {
         "capabilityId": "knowledge.graph.query",
         "status": "implemented",
         "inputSchemaId": "knowledge.graph.query.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "request": {
+              "type": "object"
+            },
+            "start": {
+              "type": "object"
+            },
+            "traverse": {
+              "type": "array"
+            },
+            "project": {
+              "type": "array"
+            },
+            "limit": {
+              "type": "number"
+            },
+            "scope": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "start",
+            "traverse",
+            "project",
+            "limit"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.graph.query.output.v2"
       },
       {
         "capabilityId": "knowledge.repository_graph",
         "status": "implemented",
         "inputSchemaId": "knowledge.repository_graph.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.repository_graph.output.v2"
       },
       {
         "capabilityId": "knowledge.communities",
         "status": "implemented",
         "inputSchemaId": "knowledge.communities.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.communities.output.v2"
       },
       {
         "capabilityId": "knowledge.timeline",
         "status": "implemented",
         "inputSchemaId": "knowledge.timeline.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.timeline.output.v2"
       },
       {
         "capabilityId": "knowledge.recent",
         "status": "implemented",
         "inputSchemaId": "knowledge.recent.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.recent.output.v2"
       },
       {
         "capabilityId": "knowledge.compare_branches",
         "status": "implemented",
         "inputSchemaId": "knowledge.compare_branches.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.compare_branches.output.v2"
       },
       {
         "capabilityId": "knowledge.files",
         "status": "implemented",
         "inputSchemaId": "knowledge.files.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.files.output.v2"
       },
       {
         "capabilityId": "knowledge.file_symbols",
         "status": "implemented",
         "inputSchemaId": "knowledge.file_symbols.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.file_symbols.output.v2"
       },
       {
         "capabilityId": "knowledge.dead_code",
         "status": "implemented",
         "inputSchemaId": "knowledge.dead_code.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.dead_code.output.v2"
       },
       {
         "capabilityId": "knowledge.package_dependencies",
         "status": "implemented",
         "inputSchemaId": "knowledge.package_dependencies.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "subject": {
+              "type": "string"
+            },
+            "direction": {
+              "type": "string",
+              "enum": [
+                "dependencies",
+                "dependents",
+                "both"
+              ]
+            },
+            "transitive": {
+              "type": "boolean"
+            },
+            "max_depth": {
+              "type": "number"
+            },
+            "limit": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "subject"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.package_dependencies.output.v2"
       },
       {
         "capabilityId": "knowledge.dependency_path",
         "status": "implemented",
         "inputSchemaId": "knowledge.dependency_path.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "string"
+            },
+            "to": {
+              "type": "string"
+            },
+            "max_depth": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.dependency_path.output.v2"
       },
       {
         "capabilityId": "knowledge.analyze_repository",
         "status": "implemented",
         "inputSchemaId": "knowledge.analyze_repository.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string"
+            },
+            "repo": {
+              "type": "string"
+            },
+            "focus": {
+              "type": "string"
+            },
+            "limit": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "query"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.analyze_repository.output.v2"
       },
       {
         "capabilityId": "knowledge.response_sample.capture",
         "status": "implemented",
         "inputSchemaId": "knowledge.response_sample.capture.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.response_sample.capture.output.v2"
       },
       {
         "capabilityId": "knowledge.response_sample.list",
         "status": "implemented",
         "inputSchemaId": "knowledge.response_sample.list.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.response_sample.list.output.v2"
       },
       {
         "capabilityId": "knowledge.incident.create",
         "status": "implemented",
         "inputSchemaId": "knowledge.incident.create.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.incident.create.output.v2"
       },
       {
         "capabilityId": "knowledge.note.create",
         "status": "implemented",
         "inputSchemaId": "knowledge.note.create.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.note.create.output.v2"
       },
       {
         "capabilityId": "knowledge.note.append",
         "status": "implemented",
         "inputSchemaId": "knowledge.note.append.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.note.append.output.v2"
       },
       {
         "capabilityId": "knowledge.note.list",
         "status": "implemented",
         "inputSchemaId": "knowledge.note.list.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.note.list.output.v2"
       },
       {
         "capabilityId": "knowledge.note.reindex",
         "status": "implemented",
         "inputSchemaId": "knowledge.note.reindex.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.note.reindex.output.v2"
       },
       {
         "capabilityId": "knowledge.note.write",
         "status": "implemented",
         "inputSchemaId": "knowledge.note.write.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "action": {
+              "type": "string"
+            },
+            "title": {
+              "type": "string"
+            },
+            "identity_key": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "src": {
+              "type": "string"
+            },
+            "dst": {
+              "type": "string"
+            },
+            "edge_type": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "action"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.note.write.output.v2"
       },
       {
         "capabilityId": "knowledge.note.backlinks",
         "status": "implemented",
         "inputSchemaId": "knowledge.note.backlinks.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.note.backlinks.output.v2"
       },
       {
         "capabilityId": "knowledge.tag.list",
         "status": "implemented",
         "inputSchemaId": "knowledge.tag.list.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.tag.list.output.v2"
       },
       {
         "capabilityId": "knowledge.link.create",
         "status": "implemented",
         "inputSchemaId": "knowledge.link.create.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.link.create.output.v2"
       },
       {
         "capabilityId": "knowledge.link.list",
         "status": "implemented",
         "inputSchemaId": "knowledge.link.list.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.link.list.output.v2"
       },
       {
         "capabilityId": "knowledge.link.delete",
         "status": "implemented",
         "inputSchemaId": "knowledge.link.delete.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.link.delete.output.v2"
       },
       {
         "capabilityId": "knowledge.source.register",
         "status": "implemented",
         "inputSchemaId": "knowledge.source.register.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string"
+            },
+            "location": {
+              "type": "string"
+            },
+            "config": {
+              "type": "object"
+            },
+            "allow_hosts": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "required": [
+            "type",
+            "location"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.source.register.output.v2"
       },
       {
         "capabilityId": "knowledge.source.sync",
         "status": "implemented",
         "inputSchemaId": "knowledge.source.sync.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.source.sync.output.v2"
       },
       {
         "capabilityId": "knowledge.source.list",
         "status": "implemented",
         "inputSchemaId": "knowledge.source.list.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.source.list.output.v2"
       },
       {
         "capabilityId": "knowledge.source.remove",
         "status": "implemented",
         "inputSchemaId": "knowledge.source.remove.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "confirmed": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.source.remove.output.v2"
       },
       {
         "capabilityId": "knowledge.memory.remember",
         "status": "implemented",
         "inputSchemaId": "knowledge.memory.remember.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "class": {
+              "type": "string"
+            },
+            "repo_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            },
+            "global": {
+              "type": "boolean"
+            },
+            "subject": {
+              "type": "string"
+            },
+            "body": {
+              "type": "string"
+            },
+            "source": {
+              "type": "array"
+            },
+            "confidence": {
+              "type": "number"
+            },
+            "retention": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "subject",
+            "body"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.memory.remember.output.v2"
       },
       {
         "capabilityId": "knowledge.memory.recall",
         "status": "implemented",
         "inputSchemaId": "knowledge.memory.recall.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "repo_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.memory.recall.output.v2"
       },
       {
         "capabilityId": "knowledge.memory.forget",
         "status": "implemented",
         "inputSchemaId": "knowledge.memory.forget.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "confirmed": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.memory.forget.output.v2"
       },
       {
         "capabilityId": "knowledge.memory.improve",
         "status": "implemented",
         "inputSchemaId": "knowledge.memory.improve.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.memory.improve.output.v2"
       },
       {
         "capabilityId": "knowledge.ontology.list",
         "status": "implemented",
         "inputSchemaId": "knowledge.ontology.list.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.ontology.list.output.v2"
       },
       {
         "capabilityId": "knowledge.ontology.upsert",
         "status": "implemented",
         "inputSchemaId": "knowledge.ontology.upsert.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.ontology.upsert.output.v2"
       },
       {
         "capabilityId": "knowledge.ontology.link",
         "status": "implemented",
         "inputSchemaId": "knowledge.ontology.link.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.ontology.link.output.v2"
       },
       {
         "capabilityId": "knowledge.suggestion.list",
         "status": "implemented",
         "inputSchemaId": "knowledge.suggestion.list.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.suggestion.list.output.v2"
       },
       {
         "capabilityId": "knowledge.suggestion.accept",
         "status": "implemented",
         "inputSchemaId": "knowledge.suggestion.accept.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.suggestion.accept.output.v2"
       },
       {
         "capabilityId": "knowledge.suggestion.reject",
         "status": "implemented",
         "inputSchemaId": "knowledge.suggestion.reject.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.suggestion.reject.output.v2"
       },
       {
         "capabilityId": "knowledge.evidence.target.list",
         "status": "implemented",
         "inputSchemaId": "knowledge.evidence.target.list.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.evidence.target.list.output.v2"
       },
       {
         "capabilityId": "knowledge.evidence.investigation.plan",
         "status": "implemented",
         "inputSchemaId": "knowledge.evidence.investigation.plan.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.evidence.investigation.plan.output.v2"
       },
       {
         "capabilityId": "knowledge.evidence.investigation.capture",
         "status": "implemented",
         "inputSchemaId": "knowledge.evidence.investigation.capture.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.evidence.investigation.capture.output.v2"
       },
       {
         "capabilityId": "knowledge.evidence.note.get",
         "status": "implemented",
         "inputSchemaId": "knowledge.evidence.note.get.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.evidence.note.get.output.v2"
       },
       {
         "capabilityId": "knowledge.evidence.note.list",
         "status": "implemented",
         "inputSchemaId": "knowledge.evidence.note.list.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.evidence.note.list.output.v2"
       },
       {
         "capabilityId": "knowledge.evidence.status.set",
         "status": "implemented",
         "inputSchemaId": "knowledge.evidence.status.set.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.evidence.status.set.output.v2"
       },
       {
         "capabilityId": "knowledge.evidence.doctor",
         "status": "implemented",
         "inputSchemaId": "knowledge.evidence.doctor.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.evidence.doctor.output.v2"
       },
       {
         "capabilityId": "knowledge.evidence.repair",
         "status": "implemented",
         "inputSchemaId": "knowledge.evidence.repair.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.evidence.repair.output.v2"
       },
       {
         "capabilityId": "knowledge.evidence.validate",
         "status": "implemented",
         "inputSchemaId": "knowledge.evidence.validate.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.evidence.validate.output.v2"
       },
       {
         "capabilityId": "knowledge.api_doc.generate",
         "status": "implemented",
         "inputSchemaId": "knowledge.api_doc.generate.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.api_doc.generate.output.v2"
       },
       {
         "capabilityId": "knowledge.api_doc.list",
         "status": "implemented",
         "inputSchemaId": "knowledge.api_doc.list.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.api_doc.list.output.v2"
       },
       {
         "capabilityId": "knowledge.api_doc.show",
         "status": "implemented",
         "inputSchemaId": "knowledge.api_doc.show.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.api_doc.show.output.v2"
       },
       {
         "capabilityId": "knowledge.api_doc.diff",
         "status": "implemented",
         "inputSchemaId": "knowledge.api_doc.diff.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.api_doc.diff.output.v2"
       },
       {
         "capabilityId": "knowledge.api_doc.bind",
         "status": "implemented",
         "inputSchemaId": "knowledge.api_doc.bind.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.api_doc.bind.output.v2"
       },
       {
         "capabilityId": "knowledge.api_doc.unbind",
         "status": "implemented",
         "inputSchemaId": "knowledge.api_doc.unbind.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.api_doc.unbind.output.v2"
       },
       {
         "capabilityId": "knowledge.api_doc.draft",
         "status": "implemented",
         "inputSchemaId": "knowledge.api_doc.draft.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.api_doc.draft.output.v2"
       },
       {
         "capabilityId": "knowledge.api_doc.sync",
         "status": "implemented",
         "inputSchemaId": "knowledge.api_doc.sync.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.api_doc.sync.output.v2"
       },
       {
         "capabilityId": "knowledge.api_doc.repair",
         "status": "implemented",
         "inputSchemaId": "knowledge.api_doc.repair.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.api_doc.repair.output.v2"
       },
       {
         "capabilityId": "knowledge.api_doc.export",
         "status": "implemented",
         "inputSchemaId": "knowledge.api_doc.export.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.api_doc.export.output.v2"
       },
       {
         "capabilityId": "knowledge.saved_query.list",
         "status": "implemented",
         "inputSchemaId": "knowledge.saved_query.list.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.saved_query.list.output.v2"
       },
       {
         "capabilityId": "knowledge.saved_query.run",
         "status": "implemented",
         "inputSchemaId": "knowledge.saved_query.run.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "cursor": {
+              "type": "string"
+            },
+            "limit": {
+              "type": "number"
+            }
+          },
+          "required": [
+            "name"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.saved_query.run.output.v2"
       },
       {
         "capabilityId": "knowledge.saved_query.write",
         "status": "implemented",
         "inputSchemaId": "knowledge.saved_query.write.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "name": {
+              "type": "string"
+            },
+            "request": {
+              "type": "object"
+            },
+            "confirmed": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "name",
+            "request"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.saved_query.write.output.v2"
       },
       {
         "capabilityId": "knowledge.why.get",
         "status": "implemented",
         "inputSchemaId": "knowledge.why.get.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.why.get.output.v2"
       },
       {
         "capabilityId": "knowledge.domain.explain",
         "status": "implemented",
         "inputSchemaId": "knowledge.domain.explain.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.domain.explain.output.v2"
       },
       {
         "capabilityId": "knowledge.onboarding.generate",
         "status": "implemented",
         "inputSchemaId": "knowledge.onboarding.generate.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.onboarding.generate.output.v2"
       },
       {
         "capabilityId": "knowledge.artifact.export",
         "status": "implemented",
         "inputSchemaId": "knowledge.artifact.export.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.artifact.export.output.v2"
       },
       {
         "capabilityId": "knowledge.artifact.import",
         "status": "implemented",
         "inputSchemaId": "knowledge.artifact.import.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "artifact_base64": {
+              "type": "string"
+            },
+            "base_database_base64": {
+              "type": "string"
+            },
+            "capability_hash": {
+              "type": "string"
+            },
+            "confirmed": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "artifact_base64"
+          ],
+          "additionalProperties": false
+        },
         "outputSchemaId": "knowledge.artifact.import.output.v2"
       },
       {
         "capabilityId": "knowledge.agent_hook.invoke",
         "status": "implemented",
         "inputSchemaId": "knowledge.agent_hook.invoke.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.agent_hook.invoke.output.v2"
       },
       {
         "capabilityId": "knowledge.cli.install",
         "status": "implemented",
         "inputSchemaId": "knowledge.cli.install.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.cli.install.output.v2"
       },
       {
         "capabilityId": "knowledge.doctor",
         "status": "implemented",
         "inputSchemaId": "knowledge.doctor.input.v2",
+        "inputSchema": {
+          "type": "object",
+          "properties": {},
+          "additionalProperties": true
+        },
         "outputSchemaId": "knowledge.doctor.output.v2"
       }
     ]

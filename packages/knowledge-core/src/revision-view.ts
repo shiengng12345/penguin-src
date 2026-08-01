@@ -37,24 +37,12 @@ export function openRevisionView(store: KnowledgeStore, context: RevisionContext
         const rows = store.db.prepare(`SELECT sv.node_id,n.identity_key,n.title,sv.kind,sv.signature,sv.file_path,sv.start_line,sv.end_line,sv.content_hash FROM symbol_versions sv JOIN nodes n ON n.id=sv.node_id WHERE sv.branch_id=? AND sv.status='fresh'${filter} ORDER BY sv.file_path, n.identity_key`).all(context.branchId, ...(nodeIds ?? [])) as Array<Record<string, unknown>>;
         return rows.map((row) => ({ nodeId: String(row.node_id), identityKey: String(row.identity_key), title: String(row.title), kind: String(row.kind), ...(row.signature ? { signature: String(row.signature) } : {}), filePath: String(row.file_path), language: String(row.lang ?? ""), ...(row.start_line == null ? {} : { startLine: Number(row.start_line) }), ...(row.end_line == null ? {} : { endLine: Number(row.end_line) }), contentHash: String(row.content_hash) }));
       }
-      // When callers already have bounded FTS candidates, resolve only those
-      // symbols through the materialized snapshot manifest. The old path
-      // always expanded the entire manifest first, turning a lexical/auto
-      // query into an O(all files + all symbols) scan on large repositories.
-      if (nodeIds?.length) {
-        const placeholders = nodeIds.map(() => "?").join(",");
-        const rows = store.db.prepare(`
-          SELECT s.identity_key,s.title,s.kind,s.signature,s.start_line,s.end_line,s.content_hash,
-                 n.id AS node_id,e.file_path AS file_path,ff.language
-          FROM effective_snapshot_files e
-          JOIN file_fact_symbols s ON s.file_fact_id=e.file_fact_id
-          JOIN file_facts ff ON ff.id=e.file_fact_id
-          LEFT JOIN nodes n ON n.identity_key=s.identity_key
-          WHERE e.snapshot_id=? AND n.id IN (${placeholders})
-          ORDER BY e.file_path, s.identity_key
-        `).all(context.snapshotId, ...nodeIds) as Array<Record<string, unknown>>;
-        return rows.map((row) => ({ nodeId: String(row.node_id), identityKey: String(row.identity_key), title: String(row.title), kind: String(row.kind), ...(row.signature ? { signature: String(row.signature) } : {}), filePath: String(row.file_path), language: String(row.language ?? ""), ...(row.start_line == null ? {} : { startLine: Number(row.start_line) }), ...(row.end_line == null ? {} : { endLine: Number(row.end_line) }), contentHash: String(row.content_hash) }));
-      }
+      // Resolve symbols through the overlay-aware manifest below (filtered by
+      // nodeIds when bounded). A previous fast-path queried
+      // effective_snapshot_files directly, but that table is not
+      // overlay-corrected: after legacy rows are removed the symbol lives only
+      // in the manifest, so the fast-path returned nothing (COW facts were
+      // missed). The manifest loop already narrows to `ids` when nodeIds is set.
       const files = manifest(); const ids = new Set(nodeIds ?? []); const out: RevisionSymbolRow[] = [];
       for (const file of files) {
         const rows = store.db.prepare("SELECT s.identity_key,s.title,s.kind,s.signature,s.start_line,s.end_line,s.content_hash,n.id AS node_id FROM file_fact_symbols s LEFT JOIN nodes n ON n.identity_key=s.identity_key WHERE s.file_fact_id=? ORDER BY s.identity_key").all(file.fileFactId) as Array<Record<string, unknown>>;
