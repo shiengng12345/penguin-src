@@ -63,7 +63,7 @@ test("knowledge-client exposes index-browse + graph wrappers over the CLI verbs"
 
 test("WikiPage: single-pane centre (no explorer sidebar, no why rail)", async () => {
   const source = await readFile(new URL("../src/components/wiki/WikiPage.tsx", import.meta.url), "utf8");
-  assert.match(source, /type CenterTab = "context" \| "graph"/);
+  assert.match(source, /type CenterTab = "search" \| "context" \| "graph" \| "evidence"/);
   assert.ok(!source.includes("WikiBrowseTree"), "explorer sidebar removed");
   assert.ok(!source.includes("gridTemplateColumns"), "no multi-column grid");
   assert.match(source, /<WikiGraph/);
