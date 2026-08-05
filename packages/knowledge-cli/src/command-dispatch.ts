@@ -92,7 +92,9 @@ export interface CliDeps {
   progress?: (chunk: string) => void;
   // Opens the knowledge store (write verbs may create it). Kept a factory so
   // read verbs can refuse when none exists without creating a half-baked DB.
-  openStore: () => KnowledgeStore;
+  // `allowSchemaMutation: false` (passed for READ_VERBS) makes an outdated
+  // schema throw SCHEMA_OUTDATED instead of running DDL/migrations.
+  openStore: (opts?: { allowSchemaMutation?: boolean }) => KnowledgeStore;
   storeExists: () => boolean;
   // Optional install helper: (targetBinName) → creates the PATH symlink,
   // returns the linked path. Omitted in tests (install then prints guidance).
@@ -1231,13 +1233,22 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
     }
   }
 
-  // read verbs: never create a DB (§9)
+  // read verbs: never create a DB (§9), and never migrate an outdated one.
   if (READ_VERBS.has(verb)) {
     if (!deps.storeExists()) {
       deps.err("no knowledge database — run `penguin init` or open Penguin app first");
       return 3;
     }
-    const store = deps.openStore();
+    let store: KnowledgeStore;
+    try {
+      store = deps.openStore({ allowSchemaMutation: false });
+    } catch (error) {
+      if (error instanceof Error && (error as { code?: string }).code === "SCHEMA_OUTDATED") {
+        deps.err(error.message);
+        return 3;
+      }
+      throw error;
+    }
     try {
       switch (verb) {
         case "coverage": {

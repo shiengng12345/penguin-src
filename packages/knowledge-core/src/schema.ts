@@ -881,7 +881,10 @@ function isSchemaCurrent(db: Database.Database): boolean {
   return db.prepare("SELECT 1 FROM ledger_state WHERE id='main'").get() != null;
 }
 
-export function openDatabase(path: string): Database.Database {
+export function openDatabase(
+  path: string,
+  options?: { allowSchemaMutation?: boolean },
+): Database.Database {
   const db = new (loadDatabaseCtor())(path);
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
@@ -924,6 +927,19 @@ export function openDatabase(path: string): Database.Database {
   // busy_timeout — killing even pure read commands like `penguin status`.
   if (preexisting && storedVersion === SCHEMA_VERSION && isSchemaCurrent(db)) {
     return db;
+  }
+
+  // Read-only callers (CLI read verbs) must never take the write lock or run
+  // DDL/migrations against a stale DB — fail loud instead (Task 4, §9 绝不静默降级).
+  if (options?.allowSchemaMutation === false) {
+    db.close();
+    throw Object.assign(
+      new Error(
+        `knowledge database schema is outdated (stored=${storedVersion}, supported=${SCHEMA_VERSION}); ` +
+          "run `penguin index` (or any write command) to upgrade",
+      ),
+      { code: "SCHEMA_OUTDATED" },
+    );
   }
 
   db.exec(DDL);

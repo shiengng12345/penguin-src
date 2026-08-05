@@ -51,9 +51,13 @@ runCli(process.argv.slice(2), {
         }
       }
     : undefined,
-  openStore: () => {
+  openStore: (opts) => {
     mkdirSync(dirname(DB_PATH), { recursive: true });
-    return KnowledgeStore.open({ dbPath: DB_PATH, ledgerPath: LEDGER_PATH });
+    return KnowledgeStore.open({
+      dbPath: DB_PATH,
+      ledgerPath: LEDGER_PATH,
+      allowSchemaMutation: opts?.allowSchemaMutation,
+    });
   },
   installSelf: () => {
     const self = fileURLToPath(import.meta.url);

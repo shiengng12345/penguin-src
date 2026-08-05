@@ -185,8 +185,12 @@ export class KnowledgeStore {
     readonly ledgerPath: string,
   ) {}
 
-  static open(opts: { dbPath: string; ledgerPath: string }): KnowledgeStore {
-    const db = openDatabase(opts.dbPath);
+  static open(opts: {
+    dbPath: string;
+    ledgerPath: string;
+    allowSchemaMutation?: boolean;
+  }): KnowledgeStore {
+    const db = openDatabase(opts.dbPath, { allowSchemaMutation: opts.allowSchemaMutation });
     const { ledger, read } = Ledger.open(opts.ledgerPath);
     materialize(db, read.events); // 启动追平：账本领先则 replay
     return new KnowledgeStore(db, ledger, opts.ledgerPath);
