@@ -66,6 +66,7 @@ import {
   RevisionResolutionError,
   compileKnowledgeDsl,
   resolveQueryScope,
+  resolveRepoForPath,
   ScopeResolutionError,
   type GraphMode,
   type KnowledgeStore,
@@ -199,14 +200,38 @@ function reportScopeResolutionError(deps: CliDeps, error: unknown): number {
 // ScopeResolutionError (BRANCH_NOT_INDEXED, SCOPE_NOT_FOUND, REPO_AMBIGUOUS)
 // propagates to the caller, which reports it via reportScopeResolutionError
 // and exits 4.
+//
+// `preferCwd` (search verb ONLY — see the "search" case in dispatch below):
+// for context/flow/etc., `target` IS a symbol name, so a unique symbol match
+// is a trustworthy repo signal and is checked before cwd. For search,
+// `target` is free query text — running `penguin search Alpha` inside repo A
+// must not silently scope to repo B just because "Alpha" happens to match a
+// symbol there. With preferCwd, the order flips: cwd-prefix match first,
+// unique-symbol-match only as a fallback when cwd resolves to no repo at
+// all. When the fallback fires, it's disclosed via a REPO_INFERRED_FROM_QUERY
+// warning appended to the returned scope so the caller never silently
+// diverges from the working directory.
 function resolveCliRevision(
   store: KnowledgeStore,
   target: string,
   selector: { repo?: string; branch?: string; commitSha?: string; snapshotId?: string; allowFallback?: boolean },
   cwd: string,
+  options?: { preferCwd?: boolean },
 ): { revision: import("@penguin/knowledge-core").RevisionContext | undefined; scope: ScopeEnvelope | undefined } {
   let repoId = selector.repo ? resolveRepoId(store, selector.repo) ?? undefined : undefined;
-  if (!repoId && target) {
+  let inferredFromQuery = false;
+  if (!repoId && options?.preferCwd) {
+    const cwdRepo = cwd ? resolveRepoForPath(store, cwd) : null;
+    if (cwdRepo) {
+      repoId = cwdRepo.repoId;
+    } else if (target) {
+      const match = resolveSymbolMatches(store, target);
+      if (match.kind === "unique") {
+        repoId = store.getNode(match.nodeId)?.repo_id ?? undefined;
+        inferredFromQuery = Boolean(repoId);
+      }
+    }
+  } else if (!repoId && target) {
     const match = resolveSymbolMatches(store, target);
     if (match.kind === "unique") repoId = store.getNode(match.nodeId)?.repo_id ?? undefined;
   }
@@ -219,6 +244,21 @@ function resolveCliRevision(
       snapshotId: selector.snapshotId,
       allowFallback: selector.allowFallback,
     });
+    if (inferredFromQuery) {
+      return {
+        revision: scope.revision,
+        scope: {
+          ...scope,
+          warnings: [
+            ...scope.warnings,
+            warning(
+              "REPO_INFERRED_FROM_QUERY",
+              `search scope inferred from query text match in ${scope.locator.repoName}, not your working directory`,
+            ),
+          ],
+        },
+      };
+    }
     return { revision: scope.revision, scope };
   } catch (error) {
     if (error instanceof ScopeResolutionError && error.code === "REPO_REQUIRED") {
@@ -1417,7 +1457,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           let scope: ScopeEnvelope | undefined;
           if (repoSelectors.length <= 1) {
             try {
-              ({ revision, scope } = resolveCliRevision(store, queryText, { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd));
+              ({ revision, scope } = resolveCliRevision(store, queryText, { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd, { preferCwd: true }));
             } catch (error) {
               return reportScopeResolutionError(deps, error);
             }

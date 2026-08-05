@@ -20,7 +20,8 @@ export type WarningCode =
   | "WORKTREE_DRIFT"
   | "GIT_UNAVAILABLE"
   | "FALLBACK_LIVE_BRANCH"
-  | "SCOPE_UNRESOLVED";
+  | "SCOPE_UNRESOLVED"
+  | "REPO_INFERRED_FROM_QUERY";
 
 export interface StructuredWarning {
   code: WarningCode;

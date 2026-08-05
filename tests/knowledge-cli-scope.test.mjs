@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
@@ -138,4 +138,61 @@ test("query-server knowledge.cli bridge force-injects --allow-fallback so an un-
   assert.ok(response.result.warnings.some((w) => w.code === "BRANCH_NOT_INDEXED_FALLBACK"));
   assert.equal(response.result.locator.branchName, "main");
   // store.close() is called by runQueryServer itself.
+});
+
+// Phase 1B Task 2: for context/flow, `target` IS a symbol name, so a unique
+// symbol match is a trustworthy repo signal. For `search`, `target` is free
+// query text — a two-repo fixture where the query text uniquely matches a
+// symbol ONLY in repo B proves the search verb prefers cwd-prefix inference
+// over that query-text match, and discloses when it must fall back anyway.
+function twoRepoFixture() {
+  const dir = mkdtempSync(join(tmpdir(), "penguin-cli-scope-two-"));
+  const store = KnowledgeStore.open({ dbPath: join(dir, "knowledge.db"), ledgerPath: join(dir, "ledger.jsonl") });
+
+  const rootA = join(dir, "repoA");
+  mkdirSync(rootA, { recursive: true });
+  const repoIdA = store.registerRepo({ name: "A", rootPath: rootA });
+  const branchIdA = store.registerBranch({ repoId: repoIdA, name: "main", headCommit: "sha-a", status: "live" });
+  store.db.prepare("UPDATE branches SET last_indexed_commit='sha-a' WHERE id=?").run(branchIdA);
+  const nodeIdA = store.upsertNode({ nodeType: "symbol", identityKey: `${repoIdA}::Alpha`, repoId: repoIdA, title: "Alpha" });
+  store.upsertSymbolVersion({ nodeId: nodeIdA, branchId: branchIdA, commitSha: "sha-a", filePath: "src/a.ts", lang: "typescript", kind: "function", signature: "Alpha()", contentHash: "h1" });
+  store.indexSymbolText({ nodeId: nodeIdA, name: "Alpha", signature: "Alpha()" });
+
+  const rootB = join(dir, "repoB");
+  mkdirSync(rootB, { recursive: true });
+  const repoIdB = store.registerRepo({ name: "B", rootPath: rootB });
+  const branchIdB = store.registerBranch({ repoId: repoIdB, name: "main", headCommit: "sha-b", status: "live" });
+  store.db.prepare("UPDATE branches SET last_indexed_commit='sha-b' WHERE id=?").run(branchIdB);
+  const nodeIdB = store.upsertNode({ nodeType: "symbol", identityKey: `${repoIdB}::Beta`, repoId: repoIdB, title: "Beta" });
+  store.upsertSymbolVersion({ nodeId: nodeIdB, branchId: branchIdB, commitSha: "sha-b", filePath: "src/b.ts", lang: "typescript", kind: "function", signature: "Beta()", contentHash: "h2" });
+  store.indexSymbolText({ nodeId: nodeIdB, name: "Beta", signature: "Beta()" });
+
+  return { store, dir, rootA, rootB };
+}
+
+test("search with cwd inside repo A scopes to A even though the query text uniquely matches a symbol only in repo B", async () => {
+  const { store, rootA } = twoRepoFixture();
+  const { execFileSync } = await import("node:child_process");
+  execFileSync("git", ["init", "-b", "main", rootA]);
+  execFileSync("git", ["-C", rootA, "commit", "--allow-empty", "-m", "x"], { env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
+
+  const lines = [];
+  const code = await runCli(["search", "Beta", "--json"], cliDeps(store, rootA, lines));
+  assert.equal(code, 0);
+  const payload = JSON.parse(lines.at(-1));
+  assert.equal(payload.locator.repoName, "A");
+  store.close();
+});
+
+test("search with cwd outside any registered repo falls back to the query-text symbol match and discloses REPO_INFERRED_FROM_QUERY", async () => {
+  const { store, dir } = twoRepoFixture();
+  const outside = mkdtempSync(join(tmpdir(), "penguin-cli-scope-outside-"));
+  const lines = [];
+  const code = await runCli(["search", "Beta", "--json"], cliDeps(store, outside, lines));
+  assert.equal(code, 0);
+  const payload = JSON.parse(lines.at(-1));
+  assert.equal(payload.locator.repoName, "B");
+  assert.ok(payload.warnings.some((w) => w.code === "REPO_INFERRED_FROM_QUERY"));
+  assert.match(payload.warnings.find((w) => w.code === "REPO_INFERRED_FROM_QUERY").message, /query text match in B/);
+  store.close();
 });
