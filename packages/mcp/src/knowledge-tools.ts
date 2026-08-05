@@ -52,7 +52,6 @@ import {
   reflectSearchFeedback,
   packageDependencies,
   dependencyPath,
-  resolveRevisionContext,
   type RevisionContext,
   type GraphMode,
   parseWorkspaceRoots,
@@ -60,6 +59,9 @@ import {
   syncPostgresSchema,
   type PostgresSchemaClient,
   SCHEMA_VERSION,
+  resolveQueryScope,
+  ScopeResolutionError,
+  type ResolvedQueryScope,
 } from "@penguin/knowledge-core";
 import { CAPABILITIES, capabilityHash, listMcpRegistrations, CAPABILITY_ALIASES } from "@penguin/knowledge-contracts";
 import { analyzeRepository } from "./repository-analysis.js";
@@ -410,32 +412,64 @@ function isSensitive(store: KnowledgeStore, nodeId: string): boolean {
   return !!row && (row.sensitive === 1 || row.mcp_access === "denied");
 }
 
+// Converts a ScopeResolutionError into the MCP tool-error shape used
+// elsewhere in this module. BRANCH_NOT_INDEXED is the deliberate blocker
+// (§Task 6 CLI parity): the message keeps the `penguin index` hint from
+// query-scope.ts and additionally points the caller at `allow_fallback`,
+// since MCP clients read structured errors and retry rather than reading a
+// CLI --flag hint.
+function scopeResolutionErrorPayload(error: ScopeResolutionError): Record<string, unknown> {
+  const message = error.code === "BRANCH_NOT_INDEXED"
+    ? `${error.message} Pass allow_fallback: true to answer from another indexed branch instead.`
+    : error.message;
+  return { error: { code: error.code, message, candidates: error.candidates } };
+}
+
+// The shared scope chokepoint (§Phase 1a trust plumbing, Task 8). Delegates
+// to resolveQueryScope instead of duplicating repo/branch/commit resolution.
+// MCP has no meaningful cwd, so repo inference is explicit-arg → inferred
+// symbol repo only; git introspection then happens at that repo's
+// registered root_path inside resolveQueryScope itself. When no repoId can
+// be determined at all, ScopeResolutionError("REPO_REQUIRED") is swallowed
+// back into `{}` (unscoped) — the same pragmatic fallback every knowledge
+// tool used before this change whenever no repo/branch/commit/snapshot was
+// given. Every other ScopeResolutionError (notably BRANCH_NOT_INDEXED, the
+// deliberate blocker when the repo IS known) is converted to a tool error.
 function resolveMcpRevision(
   store: KnowledgeStore,
   args: Record<string, unknown>,
   inferredRepoId?: string | null,
-): { context?: RevisionContext; error?: Record<string, unknown> } {
-  const selectorPresent = ["repo", "branch", "commit_sha", "snapshot_id"].some((key) => args[key] != null);
-  if (!selectorPresent) return {};
-  const repoSelector = typeof args.repo === "string" ? args.repo : inferredRepoId;
-  if (!repoSelector) return { error: { error: "revision_repo_required", reason: "repo is required when selecting a branch, commit, or snapshot" } };
-  const repoIds = store.resolveRepoIds(String(repoSelector));
-  if (repoIds.length === 0) return { error: { error: "revision_repo_not_found", repo: repoSelector } };
-  if (repoIds.length > 1) return { error: { error: "revision_repo_ambiguous", repo: repoSelector, candidates: repoIds } };
-  const result = resolveRevisionContext(store, {
-    repoId: repoIds[0],
-    branch: args.branch as string | undefined,
-    commitSha: args.commit_sha as string | undefined,
-    snapshotId: args.snapshot_id as string | undefined,
-  });
-  if (result.status === "resolved") return { context: result.context };
-  return {
-    error: {
-      error: result.status === "ambiguous" ? "revision_ambiguous" : "revision_not_found",
-      reason: result.reason,
-      candidates: result.candidates.map(({ repoId, branch, commitSha, snapshotId, trust }) => ({ repoId, branch, commitSha, snapshotId, trust })),
-    },
-  };
+): { context?: RevisionContext; scope?: ResolvedQueryScope; error?: Record<string, unknown> } {
+  const repoSelector = typeof args.repo === "string" ? args.repo : inferredRepoId ?? undefined;
+  let repoId: string | undefined;
+  if (repoSelector) {
+    const repoIds = store.resolveRepoIds(String(repoSelector));
+    if (repoIds.length === 0) return { error: { error: "revision_repo_not_found", repo: repoSelector } };
+    if (repoIds.length > 1) return { error: { error: "revision_repo_ambiguous", repo: repoSelector, candidates: repoIds } };
+    repoId = repoIds[0];
+  }
+  try {
+    const scope = resolveQueryScope(store, {
+      ...(repoId ? { repoId } : {}),
+      branch: typeof args.branch === "string" ? args.branch : undefined,
+      commitSha: typeof args.commit_sha === "string" ? args.commit_sha : undefined,
+      snapshotId: typeof args.snapshot_id === "string" ? args.snapshot_id : undefined,
+      allowFallback: args.allow_fallback === true,
+    });
+    return { context: scope.revision, scope };
+  } catch (error) {
+    if (error instanceof ScopeResolutionError) {
+      if (error.code === "REPO_REQUIRED") return {};
+      return { error: scopeResolutionErrorPayload(error) };
+    }
+    throw error;
+  }
+}
+
+// Attaches the scope envelope (locator/alignment/warnings) to a scoped
+// tool's result object, matching the CLI's `emit()` envelope (Task 6).
+function scopeEnvelopeFields(scope?: ResolvedQueryScope): Record<string, unknown> {
+  return scope ? { locator: scope.locator, alignment: scope.alignment, warnings: scope.warnings } : {};
 }
 
 function nodeRepoId(store: KnowledgeStore, target: string): string | null {
@@ -672,7 +706,7 @@ export function handleKnowledgeTool(
         depth: a.depth as number | undefined,
         limit: a.limit as number | undefined,
       });
-      return { ...result, ...(revision.context ? { revision: revision.context } : {}) };
+      return { ...result, ...(revision.context ? { revision: revision.context } : {}), ...scopeEnvelopeFields(revision.scope) };
     }
     case "compare_branches": {
       const symbol = String(a.symbol ?? "");
@@ -733,38 +767,38 @@ export function handleKnowledgeTool(
       const target = String(a.target ?? a.node ?? a.symbol ?? "");
       const revision = resolveMcpRevision(store, a, nodeRepoId(store, target));
       if (revision.error) return revision.error;
-      return { ...exploreGraph(store, mode, target, { depth: a.depth as number | undefined, limit: a.limit as number | undefined, revision: revision.context }), ...(revision.context ? { revision: revision.context } : {}) };
+      return { ...exploreGraph(store, mode, target, { depth: a.depth as number | undefined, limit: a.limit as number | undefined, revision: revision.context }), ...(revision.context ? { revision: revision.context } : {}), ...scopeEnvelopeFields(revision.scope) };
     }
     case "knowledge_locate": {
       const target = String(a.target ?? "");
       const revision = resolveMcpRevision(store, a, nodeRepoId(store, target));
       if (revision.error) return revision.error;
-      return { ...buildExplorePack(store, target, { revision: revision.context, depth: a.depth as number | undefined, limit: a.limit as number | undefined }), ...(revision.context ? { revision: revision.context } : {}) };
+      return { ...buildExplorePack(store, target, { revision: revision.context, depth: a.depth as number | undefined, limit: a.limit as number | undefined }), ...(revision.context ? { revision: revision.context } : {}), ...scopeEnvelopeFields(revision.scope) };
     }
     case "knowledge_context": {
       const target = String(a.target ?? "");
       const revision = resolveMcpRevision(store, a, nodeRepoId(store, target));
       if (revision.error) return revision.error;
-      return { ...buildContextPack(store, target, { revision: revision.context }), ...(revision.context ? { revision: revision.context } : {}) };
+      return { ...buildContextPack(store, target, { revision: revision.context }), ...(revision.context ? { revision: revision.context } : {}), ...scopeEnvelopeFields(revision.scope) };
     }
     case "knowledge_flow": {
       const target = String(a.target ?? "");
       const revision = resolveMcpRevision(store, a, nodeRepoId(store, target));
       if (revision.error) return revision.error;
-      return { ...buildFlow(store, target, { revision: revision.context }), ...(revision.context ? { revision: revision.context } : {}) };
+      return { ...buildFlow(store, target, { revision: revision.context }), ...(revision.context ? { revision: revision.context } : {}), ...scopeEnvelopeFields(revision.scope) };
     }
     case "knowledge_affected": {
       const paths = Array.isArray(a.files) ? a.files.map(String) : [String(a.file ?? a.path ?? "")].filter(Boolean);
       const revision = resolveMcpRevision(store, a);
       if (revision.error) return revision.error;
-      return affectedByFiles(store, paths, { revision: revision.context });
+      return { ...affectedByFiles(store, paths, { revision: revision.context }), ...(revision.context ? { revision: revision.context } : {}), ...scopeEnvelopeFields(revision.scope) };
     }
     case "knowledge_path": {
       const from = String(a.from ?? a.source ?? "");
       const to = String(a.to ?? a.target ?? "");
       const revision = resolveMcpRevision(store, a, nodeRepoId(store, from));
       if (revision.error) return revision.error;
-      return exploreGraph(store, "path", from, { to, depth: a.depth as number | undefined, limit: a.limit as number | undefined, revision: revision.context });
+      return { ...exploreGraph(store, "path", from, { to, depth: a.depth as number | undefined, limit: a.limit as number | undefined, revision: revision.context }), ...(revision.context ? { revision: revision.context } : {}), ...scopeEnvelopeFields(revision.scope) };
     }
     case "knowledge_service_graph":
       return serviceGraph(store);
