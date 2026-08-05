@@ -39,7 +39,7 @@ function fixture() {
   execFileSync("git", ["-C", rootPath, "commit", "--allow-empty", "-m", "x"], {
     env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" },
   });
-  return { store, dir, rootPath };
+  return { store, dir, rootPath, nodeId };
 }
 
 test("knowledge_context on an un-indexed checked-out branch returns a BRANCH_NOT_INDEXED tool error", () => {
@@ -57,5 +57,27 @@ test("knowledge_context with allow_fallback:true answers from the live branch an
   assert.equal(result.locator?.branchName, "main");
   assert.equal(result.alignment, "fallback");
   assert.ok(result.warnings?.some((w) => w.code === "BRANCH_NOT_INDEXED_FALLBACK"), JSON.stringify(result.warnings));
+  store.close();
+});
+
+// get_node/explore_graph/compare_branches are selector-gated (see
+// legacyGatedRepoId in knowledge-tools.ts): they don't have allow_fallback in
+// their schemas or locator/warnings on their results, so unlike the 9 named
+// scoped tools above, routing their symbol-inferred repo through
+// resolveQueryScope unconditionally would newly hard-fail previously-answering
+// calls with BRANCH_NOT_INDEXED. These two cases pin that gate down.
+test("get_node with no selector against an un-indexed checked-out branch still answers (selector-gated, not scope-unified)", () => {
+  const { store, nodeId } = fixture();
+  const result = handleKnowledgeTool("get_node", { id: nodeId }, store);
+  const serialized = JSON.stringify(result);
+  assert.doesNotMatch(serialized, /BRANCH_NOT_INDEXED/);
+  assert.equal(result.node?.title, "Alpha");
+  store.close();
+});
+
+test("get_node with an explicit branch selector for a non-existent branch still errors (SCOPE_NOT_FOUND path unchanged)", () => {
+  const { store, nodeId } = fixture();
+  const result = handleKnowledgeTool("get_node", { id: nodeId, branch: "no-such-branch" }, store);
+  assert.equal(result.error?.code, "SCOPE_NOT_FOUND", JSON.stringify(result));
   store.close();
 });

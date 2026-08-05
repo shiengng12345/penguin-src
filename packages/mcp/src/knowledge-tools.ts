@@ -477,6 +477,27 @@ function nodeRepoId(store: KnowledgeStore, target: string): string | null {
   return resolution.kind === "unique" ? store.getNode(resolution.nodeId)?.repo_id ?? null : null;
 }
 
+// get_node / explore_graph / compare_branches are pre-canonical low-level
+// tools: unlike the nine named scoped tools (knowledge_context/flow/
+// affected/path/locate/explore/callers/callees/impact), their input schemas
+// don't carry allow_fallback (explore_graph's is even additionalProperties:
+// false) and their results don't carry locator/alignment/warnings. Routing
+// their symbol-inferred repoId through resolveQueryScope unconditionally
+// would make them newly hard-fail with BRANCH_NOT_INDEXED on calls that
+// previously always answered, with no schema-documented escape hatch. Full
+// scope unification for these three is deferred until their schemas/results
+// are upgraded (tracked in the plan ledger); until then, only resolve via
+// the inferred repo when the caller supplied an explicit selector
+// (repo/branch/commit_sha/snapshot_id) — preserving the pre-Task-8
+// selector-gated behavior for the no-selector case.
+function hasExplicitScopeSelector(args: Record<string, unknown>): boolean {
+  return ["repo", "branch", "commit_sha", "snapshot_id"].some((key) => args[key] != null);
+}
+
+function legacyGatedRepoId(store: KnowledgeStore, args: Record<string, unknown>, target: string): string | null {
+  return hasExplicitScopeSelector(args) ? nodeRepoId(store, target) : null;
+}
+
 // Dispatch a knowledge tool call. `store` may be null when the knowledge DB
 // hasn't been created yet (no `penguin init`) — read tools then return a hint
 // instead of crashing (§9).
@@ -680,14 +701,16 @@ export function handleKnowledgeTool(
     }
     case "get_node": {
       const key = (a.id ?? a.identity_key) as string | undefined;
-      const revision = resolveMcpRevision(store, a, nodeRepoId(store, key ?? ""));
+      // Selector-gated (see legacyGatedRepoId) — full unification deferred.
+      const revision = resolveMcpRevision(store, a, legacyGatedRepoId(store, a, key ?? ""));
       if (revision.error) return revision.error;
       const detail = getNodeDetail(store, key ?? "", revision.context ? { revision: revision.context } : undefined);
       return detail ? { ...detail, ...(revision.context ? { revision: revision.context } : {}) } : { error: "node not found" };
     }
     case "explore_graph": {
       const node = String(a.node ?? "");
-      const revision = resolveMcpRevision(store, a, nodeRepoId(store, node));
+      // Selector-gated (see legacyGatedRepoId) — full unification deferred.
+      const revision = resolveMcpRevision(store, a, legacyGatedRepoId(store, a, node));
       if (revision.error) return revision.error;
       const result = exploreGraph(store, a.mode as GraphMode, node, {
         depth: a.depth as number | undefined,
@@ -710,7 +733,8 @@ export function handleKnowledgeTool(
     }
     case "compare_branches": {
       const symbol = String(a.symbol ?? "");
-      const revision = resolveMcpRevision(store, a, nodeRepoId(store, symbol));
+      // Selector-gated (see legacyGatedRepoId) — full unification deferred.
+      const revision = resolveMcpRevision(store, a, legacyGatedRepoId(store, a, symbol));
       if (revision.error) return revision.error;
       return (
         compareBranches(store, symbol, String(a.branch_a ?? ""), String(a.branch_b ?? ""), { revision: revision.context }) ??
