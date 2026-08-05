@@ -52,6 +52,9 @@ export function readGitStateDefault(rootPath: string): GitState | null {
 // Errors
 // ---------------------------------------------------------------------------
 
+// REPO_AMBIGUOUS is reserved for repo-level ambiguity in multi-repo path
+// matching; it is currently unreachable because resolveRepoForPath's
+// longest-root_path-prefix match returns at most one repo.
 export type ScopeResolutionErrorCode = "BRANCH_NOT_INDEXED" | "REPO_REQUIRED" | "REPO_AMBIGUOUS" | "SCOPE_NOT_FOUND";
 
 export class ScopeResolutionError extends Error {
@@ -211,7 +214,7 @@ export function resolveQueryScope(store: KnowledgeStore, input: ResolveQueryScop
     });
 
     const warnings: StructuredWarning[] = [];
-    const gitState = input.readGitState ? input.readGitState(repoRow.rootPath) : null;
+    const gitState = input.readGitState ? input.readGitState(repoRow.rootPath) : readGitStateDefault(repoRow.rootPath);
     if (gitState?.branch && context.branch && gitState.branch !== context.branch) {
       warnings.push(
         warning(

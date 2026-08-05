@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 import { KnowledgeStore, resolveQueryScope, ScopeResolutionError } from "../packages/knowledge-core/dist/index.js";
 
 function fixture() {
@@ -81,5 +82,17 @@ test("cwd inside the repo root infers the repo", () => {
     readGitState: () => ({ branch: "main", headSha: "sha-main", dirty: false }),
   });
   assert.equal(scope.locator.repoName, "demo");
+  store.close();
+});
+
+test("explicit selector without readGitState defaults to real git and still warns SCOPE_DIFFERS_FROM_CHECKOUT", () => {
+  const { store, repoId, rootPath } = fixture();
+  execFileSync("git", ["init", "-b", "other-branch", rootPath]);
+  execFileSync("git", ["-C", rootPath, "commit", "--allow-empty", "-m", "x"], {
+    env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" },
+  });
+  const scope = resolveQueryScope(store, { repoId, branch: "main" });
+  assert.equal(scope.alignment, "explicit");
+  assert.ok(scope.warnings.some((w) => w.code === "SCOPE_DIFFERS_FROM_CHECKOUT"));
   store.close();
 });
