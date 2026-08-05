@@ -831,6 +831,17 @@ export function exploreGraph(
   // returns above call graphResult() before this fires (never a fallback,
   // since an explicit revision was supplied), the plain-SQL modes below call
   // it after (scopeFallback reflects whether liveBranchOf actually filled in).
+  //
+  // CAUTION — ordering-dependent: correctness relies on the revision-scoped
+  // early-return block (the `if (options?.revision?.snapshotId && ...)` block
+  // immediately below, covering who_calls/calls_of/backlinks/who_injects/
+  // impact/path) running and returning BEFORE the branch-scope fallback
+  // assignment (`scopeFallback = !explicitBranchId && branchId ? ... `)
+  // further down this function. If that assignment is ever hoisted above, or
+  // the revision-scoped block is reordered to run after it, an explicit
+  // revision would start getting marked as a live-branch fallback (or worse,
+  // a genuine fallback could go unmarked) — do not reorder without keeping
+  // this invariant true, and re-run tests/knowledge-fallback-honesty.test.mjs.
   let scopeFallback: { branchId: string } | undefined;
   const graphResult = (
     nodes: GraphResult["nodes"],
