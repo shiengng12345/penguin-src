@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
-import { knowledgeStatusPanel, type RepoStatusPanel, type StatusPanel } from "@/lib/knowledge-client";
+import { knowledgeStatusPanel, isSchemaOutdatedError, type RepoStatusPanel, type StatusPanel } from "@/lib/knowledge-client";
 
 interface WikiStatusFooterProps {
   // Which repo's row to render, when the caller knows the current repo
@@ -52,6 +52,11 @@ function pickRepo(repos: RepoStatusPanel[], repoId?: string): RepoStatusPanel | 
 export function WikiStatusFooter({ repoId }: WikiStatusFooterProps) {
   const [panel, setPanel] = useState<StatusPanel | null>(null);
   const [failed, setFailed] = useState(false);
+  // Distinguishes "the resident runtime refuses to migrate a stale schema"
+  // (Phase 1B Task 9) from a generic connectivity failure -- the former has
+  // an actionable fix (`penguin index`) and must not render as a bare
+  // "Unavailable" dot.
+  const [schemaOutdated, setSchemaOutdated] = useState(false);
   // Overlapping fetches (mount + interval + focus, all racing once the
   // client's 5s cache TTL lapses) issue independent IPC round-trips — a
   // later-dispatched call can resolve before an earlier one. A plain
@@ -70,10 +75,12 @@ export function WikiStatusFooter({ repoId }: WikiStatusFooterProps) {
           if (cancelled || generation !== generationRef.current) return;
           setPanel(p);
           setFailed(false);
+          setSchemaOutdated(false);
         })
-        .catch(() => {
+        .catch((error) => {
           if (cancelled || generation !== generationRef.current) return;
           setFailed(true);
+          setSchemaOutdated(isSchemaOutdatedError(error));
         });
     };
     fetchStatus();
@@ -104,6 +111,17 @@ export function WikiStatusFooter({ repoId }: WikiStatusFooterProps) {
   // failed || !panel: `!panel` is unreachable here (the branch above already
   // returned for it) — kept as a type guard so TS narrows `panel` to
   // non-null below without a non-null assertion.
+  if (schemaOutdated) {
+    return (
+      <footer className="flex h-7 shrink-0 items-center gap-3 border-t border-slate-800 bg-[#101826] px-3 text-[11px] text-amber-300">
+        <span className="flex items-center gap-1.5">
+          <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
+          Index upgrade required — run `penguin index`
+        </span>
+      </footer>
+    );
+  }
+
   if (failed || !panel) {
     return (
       <footer className="flex h-7 shrink-0 items-center gap-3 border-t border-slate-800 bg-[#101826] px-3 text-[11px] text-slate-400">

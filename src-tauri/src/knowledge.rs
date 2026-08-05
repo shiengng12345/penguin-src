@@ -163,8 +163,26 @@ fn note_runtime_crash(state: &QueryRuntimeState) -> Result<bool, String> {
 const EXPECTED_CAPABILITY_HASH: &str = "9bd579294b91fbe6397df3eb5045457858221dbaa922627c5b108f6cf24f5a55";
 
 fn validate_runtime_hello(frame: &serde_json::Value) -> Result<(), String> {
-    if frame.get("type").and_then(|v| v.as_str()) != Some("hello")
-        || frame.get("protocolVersion").and_then(|v| v.as_u64()) != Some(1)
+    if frame.get("type").and_then(|v| v.as_str()) != Some("hello") {
+        return Err("RUNTIME_CAPABILITY_MISMATCH: query runtime handshake mismatch".to_string());
+    }
+    // The resident query-server now refuses to migrate a stale on-disk schema
+    // (Phase 1B Task 9): when it can't open the store read-only, it has
+    // nothing else to hand back yet (no request/response frame exists this
+    // early), so it emits `{ type: "hello", error: { code, message } }`
+    // instead of the normal handshake fields. Surface that distinguishably
+    // rather than falling through to the generic capability-mismatch error
+    // below, which would hide the real (actionable: "run `penguin index`")
+    // reason behind every subsequent query failing the same way.
+    if let Some(error) = frame.get("error") {
+        let code = error.get("code").and_then(|v| v.as_str()).unwrap_or("UNKNOWN");
+        let message = error
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("query runtime reported an error during handshake");
+        return Err(format!("{code}: {message}"));
+    }
+    if frame.get("protocolVersion").and_then(|v| v.as_u64()) != Some(1)
         || frame.get("schemaVersion").and_then(|v| v.as_u64()).is_none()
         || frame.get("capabilityHash").and_then(|v| v.as_str()) != Some(EXPECTED_CAPABILITY_HASH) {
         return Err("RUNTIME_CAPABILITY_MISMATCH: query runtime handshake mismatch".to_string());
@@ -975,6 +993,23 @@ mod tests {
         ] {
             assert!(validate_runtime_hello(&invalid).unwrap_err().starts_with("RUNTIME_CAPABILITY_MISMATCH"));
         }
+    }
+
+    // Phase 1B Task 9: the resident query-server refuses to migrate a stale
+    // on-disk schema and emits `{ type: "hello", error: { code, message } }`
+    // instead of the normal handshake fields when it can't open the store.
+    // The bridge must surface that distinguishably (as `SCHEMA_OUTDATED: ...`)
+    // rather than the generic capability-mismatch error a missing
+    // schemaVersion/capabilityHash would otherwise trip.
+    #[test]
+    fn resident_runtime_surfaces_schema_outdated_hello_error_distinguishably() {
+        let error_hello = serde_json::json!({
+            "type": "hello",
+            "error": { "code": "SCHEMA_OUTDATED", "message": "knowledge database schema is outdated; run `penguin index` to upgrade" }
+        });
+        let err = validate_runtime_hello(&error_hello).unwrap_err();
+        assert!(err.starts_with("SCHEMA_OUTDATED:"), "{err}");
+        assert!(err.contains("penguin index"), "{err}");
     }
 
     #[test]

@@ -25,6 +25,22 @@ export function isNoDatabaseError(message: string): boolean {
   return message.includes("no knowledge database");
 }
 
+// Phase 1B Task 9: the resident query-server and the MCP server both now
+// refuse to migrate a stale on-disk schema (allowSchemaMutation:false) --
+// merely launching the app/MCP must never silently run DDL against the DB.
+// A call made while the DB is behind rejects with a `SCHEMA_OUTDATED: ...`
+// string: for the query-server this crosses the Tauri bridge as the
+// resident-worker handshake error (src-tauri/src/knowledge.rs's
+// validate_runtime_hello), for the MCP server it's the standard
+// `{ error: { code: "SCHEMA_OUTDATED", ... } }` tool result. Either shape
+// puts the literal code in the error text this checks against, so a Wiki
+// view can render "run `penguin index`" guidance instead of a generic
+// failure banner.
+export function isSchemaOutdatedError(error: unknown): boolean {
+  const raw = typeof error === "string" ? error : error instanceof Error ? error.message : undefined;
+  return typeof raw === "string" && raw.includes("SCHEMA_OUTDATED");
+}
+
 // Phase 1B Task 8: the query-server `knowledge.cli` compat bridge no longer
 // force-injects --allow-fallback, so a scoped verb (context/flow/...) run
 // against a checked-out branch that isn't indexed now reaches the UI as a

@@ -104,11 +104,20 @@ async function invokeLocalCli(args: string[]): Promise<Record<string, unknown>> 
 // knowledge-tool-defs.ts (no core import).
 
 // Open the shared knowledge store for one call (null if not yet initialized).
+// allowSchemaMutation:false: the MCP server is a long-lived (per-call, but
+// repeatedly re-opened over the process lifetime) reader -- it must never
+// silently run DDL/migrations against the on-disk DB just because a tool
+// call happened to be the first one after a build upgrade (Phase 1B Task 9,
+// mirroring the CLI's READ_VERBS gate and the resident query-server). This
+// only blocks the migration branch in openDatabase() (schema.ts): reads and
+// writes against an already-current schema are unaffected, so mutating MCP
+// tools keep working normally once the DB has been migrated by any other
+// write path (`penguin index`, etc.).
 function openKnowledgeStore(): KnowledgeStore | null {
   const dbPath = process.env.PENGUIN_KNOWLEDGE_DB ?? join(homedir(), ".penguin", "knowledge", "knowledge.db");
   const ledgerPath = process.env.PENGUIN_KNOWLEDGE_LEDGER ?? join(homedir(), ".penguin", "knowledge", "ledger.jsonl");
   if (!existsSync(dbPath)) return null;
-  return KnowledgeStore.open({ dbPath, ledgerPath });
+  return KnowledgeStore.open({ dbPath, ledgerPath, allowSchemaMutation: false });
 }
 
 // Entry point the server dynamically imports: open store → dispatch → close.
@@ -272,7 +281,15 @@ function knowledgePreflight(store: KnowledgeStore | null): KnowledgeEvidencePref
 export async function runKnowledgeTool(name: string, a: Record<string, unknown>, options: KnowledgeToolOptions = {}): Promise<unknown> {
   const mutation = mutationGuard(name, a);
   if (mutation && "error" in mutation) return mutation;
-  const store = openKnowledgeStore();
+  let store: KnowledgeStore | null;
+  try {
+    store = openKnowledgeStore();
+  } catch (error) {
+    if (error instanceof Error && (error as { code?: string }).code === "SCHEMA_OUTDATED") {
+      return { error: { code: "SCHEMA_OUTDATED", message: error.message, retryable: false } };
+    }
+    throw error;
+  }
   try {
     const routedName = handlerName(name);
     if (["knowledge_api_doc_bind", "knowledge_api_doc_unbind", "knowledge_api_doc_draft", "knowledge_api_doc_sync", "knowledge_api_doc_repair"].includes(routedName)) {

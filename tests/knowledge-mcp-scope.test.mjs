@@ -1,11 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, symlinkSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { build } from "esbuild";
 import { KnowledgeStore } from "../packages/knowledge-core/dist/index.js";
+
+const knowledgeCoreRequire = createRequire(new URL("../packages/knowledge-core/package.json", import.meta.url));
+const Database = knowledgeCoreRequire("better-sqlite3");
 
 // knowledge-tools.ts is bundled into the MCP server (esbuild → single file), so
 // it isn't separately importable as TS. Bundle it the same way
@@ -13,6 +17,16 @@ import { KnowledgeStore } from "../packages/knowledge-core/dist/index.js";
 // graph as the release server.
 async function loadTools() {
   const root = mkdtempSync(join(tmpdir(), `penguin-mcp-scope-tools-${process.pid}-`));
+  // openKnowledgeStore() (bundled inline via the @penguin/knowledge-core
+  // alias below) does a runtime `require("better-sqlite3")` for the native
+  // binding -- a real require, not something esbuild can bundle. Node
+  // resolves that from handler.mjs's own directory, which is outside the
+  // repo tree (OS tmpdir) and so has no ancestor node_modules of its own.
+  // Symlink one in from packages/mcp (a real workspace member that already
+  // resolves better-sqlite3) so any test that lets the bundled code open a
+  // real on-disk store (not just pass a pre-opened `store` in, like every
+  // other test in this file) still works.
+  try { symlinkSync(new URL("../packages/mcp/node_modules", import.meta.url).pathname, join(root, "node_modules")); } catch { /* best effort */ }
   const handler = join(root, "handler.mjs");
   const defs = join(root, "defs.mjs");
   const coreDist = new URL("../packages/knowledge-core/dist/index.js", import.meta.url).pathname;
@@ -20,7 +34,7 @@ async function loadTools() {
   await build({ entryPoints: [new URL("../packages/mcp/src/knowledge-tool-defs.ts", import.meta.url).pathname], bundle: true, format: "esm", platform: "node", outfile: defs });
   return { ...(await import(`file://${defs}`)), ...(await import(`file://${handler}`)) };
 }
-const { handleKnowledgeTool } = await loadTools();
+const { handleKnowledgeTool, runKnowledgeTool } = await loadTools();
 
 // Same fixture idiom as tests/knowledge-cli-scope.test.mjs: a real git repo
 // checked out on an un-indexed branch ("feature-x"), with only "main"
@@ -97,4 +111,40 @@ test("status_panel reports branch_not_indexed with a live fallback via the MCP h
   assert.equal(result.repos[0].revisionAlignment, "branch_not_indexed");
   assert.equal(result.repos[0].indexedBranch, "main");
   store.close();
+});
+
+// Phase 1B Task 9: the MCP server opens its own store (openKnowledgeStore(),
+// via PENGUIN_KNOWLEDGE_DB/PENGUIN_KNOWLEDGE_LEDGER) independently of any
+// caller-supplied `store` -- runKnowledgeTool (unlike handleKnowledgeTool
+// above, which always takes a pre-opened store) is the actual code path that
+// must refuse to migrate a stale on-disk schema.
+test("MCP tool call against a version-spoofed store returns the standard SCHEMA_OUTDATED error without migrating", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "penguin-mcp-schema-outdated-"));
+  const dbPath = join(dir, "knowledge.db");
+  const ledgerPath = join(dir, "ledger.jsonl");
+  const seed = KnowledgeStore.open({ dbPath, ledgerPath });
+  seed.db.prepare("UPDATE meta SET value='12' WHERE key='schema_version'").run();
+  seed.close();
+
+  const priorDb = process.env.PENGUIN_KNOWLEDGE_DB;
+  const priorLedger = process.env.PENGUIN_KNOWLEDGE_LEDGER;
+  process.env.PENGUIN_KNOWLEDGE_DB = dbPath;
+  process.env.PENGUIN_KNOWLEDGE_LEDGER = ledgerPath;
+  try {
+    const result = await runKnowledgeTool("knowledge_capabilities", {});
+    // knowledge_capabilities itself never touches the store, so this pins
+    // that the gate fires before any handler runs, not just for
+    // store-dependent tools.
+    assert.equal(result?.error?.code, "SCHEMA_OUTDATED", JSON.stringify(result));
+    assert.match(result.error.message, /penguin index/);
+  } finally {
+    if (priorDb === undefined) delete process.env.PENGUIN_KNOWLEDGE_DB; else process.env.PENGUIN_KNOWLEDGE_DB = priorDb;
+    if (priorLedger === undefined) delete process.env.PENGUIN_KNOWLEDGE_LEDGER; else process.env.PENGUIN_KNOWLEDGE_LEDGER = priorLedger;
+  }
+
+  // The failed read-only open must not have run DDL/migration.
+  const db = new Database(dbPath);
+  const stored = db.prepare("SELECT value FROM meta WHERE key='schema_version'").get();
+  assert.equal(Number(stored.value), 12);
+  db.close();
 });

@@ -4,8 +4,10 @@ import { mkdtempSync, existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import { KnowledgeStore } from "../packages/knowledge-core/dist/index.js";
 import { runCli } from "../packages/knowledge-cli/dist/index.js";
+import { runQueryServer } from "../packages/knowledge-cli/dist/query-server.js";
 
 const knowledgeCoreRequire = createRequire(new URL("../packages/knowledge-core/package.json", import.meta.url));
 const Database = knowledgeCoreRequire("better-sqlite3");
@@ -79,4 +81,57 @@ test("CLI read verb against a current-schema DB succeeds through the read-only g
 
   assert.equal(code, 0);
   assert.ok(lines.length > 0);
+});
+
+// The resident query-server (`__query-server`) is long-lived: two callers
+// (the Tauri app and, separately, this test) both used to be able to open it
+// with mutation allowed, so merely launching it silently migrated an
+// outdated on-disk schema (Phase 1B Task 9). It must refuse exactly like the
+// CLI's READ_VERBS gate above -- but it can't use the normal exit-3
+// stderr-message path (its whole protocol is newline-delimited JSON frames on
+// stdout), so it reports the failure as a hello-shaped error frame instead of
+// the normal `queryHello(...)` handshake.
+function queryServerHarness() {
+  const dir = mkdtempSync(join(tmpdir(), "penguin-readonly-qs-"));
+  const dbPath = join(dir, "knowledge.db");
+  const ledgerPath = join(dir, "ledger.jsonl");
+  const deps = {
+    cwd: dir,
+    out: () => {},
+    err: () => {},
+    storeExists: () => existsSync(dbPath),
+    openStore: (opts) => KnowledgeStore.open({ dbPath, ledgerPath, allowSchemaMutation: opts?.allowSchemaMutation }),
+  };
+  return { dbPath, ledgerPath, deps };
+}
+
+test("runQueryServer against a version-spoofed store emits an error hello frame instead of migrating", async () => {
+  const { dbPath, ledgerPath, deps } = queryServerHarness();
+  const seed = KnowledgeStore.open({ dbPath, ledgerPath });
+  seed.db.prepare("UPDATE meta SET value='12' WHERE key='schema_version'").run();
+  seed.close();
+
+  const input = new Readable({ read() {} });
+  const frames = [];
+  const output = { write: (chunk) => { frames.push(JSON.parse(chunk)); return true; } };
+  input.push(null); // the handshake open fails before any request frame would be read
+
+  const code = await runQueryServer(deps, input, output);
+
+  assert.equal(code, 3);
+  assert.equal(frames.length, 1, JSON.stringify(frames));
+  assert.equal(frames[0].type, "hello");
+  assert.equal(frames[0].error?.code, "SCHEMA_OUTDATED");
+  assert.match(frames[0].error?.message ?? "", /penguin index/);
+  // Must NOT also carry a real handshake's fields -- the Rust bridge treats
+  // an error hello and a normal hello as mutually exclusive shapes.
+  assert.equal(frames[0].schemaVersion, undefined);
+  assert.equal(frames[0].capabilityHash, undefined);
+
+  // The failed read-only open must not have run DDL/migration: read the raw
+  // file directly (bypassing openDatabase entirely).
+  const db = new Database(dbPath);
+  const stored = db.prepare("SELECT value FROM meta WHERE key='schema_version'").get();
+  assert.equal(Number(stored.value), 12);
+  db.close();
 });

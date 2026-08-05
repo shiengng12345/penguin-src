@@ -31,7 +31,32 @@ export class QueryServerCaches {
 
 export async function runQueryServer(deps: CliDeps, input = process.stdin, output = process.stdout): Promise<number> {
   if (!deps.storeExists()) { output.write(encodeFrame({ type: "hello", protocolVersion: 1, capabilityHash: capabilityHash(CAPABILITIES), schemaVersion: SCHEMA_VERSION })); return 3; }
-  const store = deps.openStore();
+  // The resident query-server is long-lived: opening it with default
+  // (mutation-allowed) semantics meant merely launching the app/MCP silently
+  // ran DDL/migrations against the on-disk DB the instant this process
+  // started, even though every other read path (CLI READ_VERBS,
+  // command-dispatch.ts) refuses to migrate (Phase 1A). Gate it the same way
+  // here: allowSchemaMutation:false only blocks the DDL/migration branch in
+  // openDatabase() (schema.ts) -- reads AND writes on an already-current
+  // schema still work unmodified, so this doesn't take away any capability
+  // the resident server actually needs; it only refuses to silently upgrade
+  // a stale on-disk schema out from under a caller that never asked for a
+  // migration. A SCHEMA_OUTDATED open failure can't use the normal
+  // request/response frame (nothing has subscribed to a request id yet --
+  // the process hasn't even sent its hello), so it's reported via a
+  // hello-shaped error frame the Rust bridge's handshake validator
+  // (src-tauri/src/knowledge.rs's validate_runtime_hello) recognizes and
+  // forwards distinguishably instead of a generic capability-mismatch error.
+  let store: ReturnType<CliDeps["openStore"]>;
+  try {
+    store = deps.openStore({ allowSchemaMutation: false });
+  } catch (error) {
+    if (error instanceof Error && (error as { code?: string }).code === "SCHEMA_OUTDATED") {
+      output.write(encodeFrame({ type: "hello", error: { code: "SCHEMA_OUTDATED", message: error.message } }));
+      return 3;
+    }
+    throw error;
+  }
   const cancelled = new Set<string>();
   const active = new Map<string, AbortController>();
   const executionQueue = new QueryExecutionQueue();
