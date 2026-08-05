@@ -4,7 +4,7 @@ import { EditorState } from "@codemirror/state";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { autocompletion, closeBrackets, type CompletionContext } from "@codemirror/autocomplete";
 import { noteCompletionTrigger } from "@/lib/note-autocomplete";
-import { knowledgeSearch, knowledgeTags } from "@/lib/knowledge-client";
+import { knowledgeSearchV2, knowledgeTags, type KnowledgeSearchV2Response } from "@/lib/knowledge-client";
 
 // Markdown note editor (Plan 8). CodeMirror with `[[` wikilink autocomplete:
 // typing `[[query` searches the graph and completes to `[[Title]]`. The trigger
@@ -30,16 +30,20 @@ export function WikiNoteEditor({ body, onChange }: { body: string; onChange: (v:
       if (trig.kind === "wikilink") {
         const q = trig.query.trim();
         if (!q) return null;
-        let hits: Awaited<ReturnType<typeof knowledgeSearch>> = [];
+        // knowledgeSearchV2 hits carry `kind` (nodeType for symbol/note lanes,
+        // lane-specific for path/source/semantic ones) instead of the legacy
+        // hit's `nodeType` field — the completion popup only ever showed
+        // title + a type label, so `kind` is a direct drop-in there.
+        let hits: KnowledgeSearchV2Response["hits"] = [];
         try {
-          hits = await knowledgeSearch(q);
+          hits = (await knowledgeSearchV2(q)).hits;
         } catch {
           return null;
         }
         if (hits.length === 0) return null;
         return {
           from: trig.from,
-          options: hits.slice(0, 20).map((h) => ({ label: h.title, detail: h.nodeType, apply: `${h.title}]]` })),
+          options: hits.slice(0, 20).map((h) => ({ label: h.title, detail: h.kind, apply: `${h.title}]]` })),
           validFor: /[^\]\n]*$/,
         };
       }
