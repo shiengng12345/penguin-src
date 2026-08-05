@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, Search, Network, Bookmark, ClipboardList } from "lucide-react";
-import { knowledgeContext, knowledgeEvidenceList, knowledgeExplore, knowledgeGetHit, knowledgeGraph, knowledgeIndexStatus, knowledgeReindex, knowledgeSavedQueryList, knowledgeSavedQueryRun, knowledgeSavedQueryWrite, knowledgeSearchV2, type ContextPack, type KnowledgeEvidenceNote, type KnowledgeGraphResult, type KnowledgeGraphView, type KnowledgeHitDetail, type KnowledgeSavedQuery, type KnowledgeSearchV2Response } from "@/lib/knowledge-client";
+import { knowledgeContext, knowledgeEvidenceList, knowledgeExplore, knowledgeGetHit, knowledgeGraph, knowledgeIndexStatus, knowledgeReindex, knowledgeSavedQueryList, knowledgeSavedQueryRun, knowledgeSavedQueryWrite, knowledgeSearchV2, ScopeBlockedError, type ContextPack, type KnowledgeEvidenceNote, type KnowledgeGraphResult, type KnowledgeGraphView, type KnowledgeHitDetail, type KnowledgeSavedQuery, type KnowledgeSearchV2Response } from "@/lib/knowledge-client";
 import { getPersistedValue, setPersistedValue } from "@/lib/app-persistence";
 import { APP_VALUE_KEYS } from "@/lib/persistence-keys";
 import { ScopeBadge } from "@/components/wiki/ScopeBadge";
+import { ScopeBlockerPanel } from "@/components/wiki/ScopeBlockerPanel";
 
 // Every result row is locked to this exact pixel height so the windowing math
 // (which slices the list by a fixed row height) stays aligned even when a hit
@@ -58,6 +59,16 @@ export function WikiSearchPage() {
   });
   const [evidence, setEvidence] = useState<KnowledgeEvidenceNote[]>([]);
   const [contextBusy, setContextBusy] = useState(false);
+  // Phase 1B Task 8: a context load (from a search hit or a graph node) can
+  // come back BRANCH_NOT_INDEXED/SCOPE_NOT_FOUND now that the bridge no
+  // longer auto-falls-back — render the actionable blocker in place of the
+  // Knowledge context card instead of silently discarding the request
+  // (openContext's catch used to just clear contextPack, showing nothing).
+  const [scopeBlock, setScopeBlock] = useState<ScopeBlockedError | null>(null);
+  const [scopeBlockRetrying, setScopeBlockRetrying] = useState(false);
+  // What the currently-shown context request actually asked for — enough to
+  // reissue it with --allow-fallback from the blocker's retry button.
+  const lastContextRequest = useRef<{ target: string; snapshotId?: string; repoId?: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [reindexBusy, setReindexBusy] = useState(false);
@@ -139,6 +150,8 @@ export function WikiSearchPage() {
     const controller = new AbortController();
     contextAbort.current = controller;
     setContextBusy(true);
+    setScopeBlock(null);
+    lastContextRequest.current = { target: hit.locator.filePath, snapshotId: hit.locator.revisionId, repoId: hit.locator.repoId };
     try {
       const [preview, context] = await Promise.all([
         knowledgeGetHit(hit.locator, { signal: controller.signal }, previewLines).catch(() => null),
@@ -152,6 +165,7 @@ export function WikiSearchPage() {
       if (contextAbort.current !== controller) return;
       setHitPreview(preview);
       setContextPack(context);
+      setScopeBlock(null);
       void knowledgeEvidenceList({ target: hit.title, limit: 20, signal: controller.signal }).then((ev) => { if (contextAbort.current === controller) setEvidence(ev); }).catch(() => {});
       if (hit.lane === "note") void knowledgeExplore("backlinks", hit.title, { signal: controller.signal }).then((result) => { if (contextAbort.current === controller) setNoteLinks(result.nodes ?? []); }).catch(() => {});
       else setNoteLinks([]);
@@ -160,9 +174,32 @@ export function WikiSearchPage() {
       // unhandled rejection; only clear if this is still the active request.
       if ((error as Error).name !== "AbortError" && contextAbort.current === controller) {
         setHitPreview(null); setContextPack(null);
+        if (error instanceof ScopeBlockedError) setScopeBlock(error);
       }
     }
     finally { if (contextAbort.current === controller) setContextBusy(false); }
+  };
+
+  // The blocker's "Answer from <branch> instead" button: reissues the exact
+  // same context request (search hit or graph node, whichever produced the
+  // block) with --allow-fallback, per Phase 1B Task 8.
+  const retryContextWithFallback = async () => {
+    const request = lastContextRequest.current;
+    if (!request) return;
+    contextAbort.current?.abort();
+    const controller = new AbortController();
+    contextAbort.current = controller;
+    setScopeBlockRetrying(true);
+    try {
+      const context = await knowledgeContext(request.target, { snapshotId: request.snapshotId, repoId: request.repoId, allowFallback: true, signal: controller.signal });
+      if (contextAbort.current !== controller) return;
+      setContextPack(context);
+      setScopeBlock(null);
+    } catch (error) {
+      if ((error as Error).name !== "AbortError" && contextAbort.current === controller && error instanceof ScopeBlockedError) setScopeBlock(error);
+    } finally {
+      if (contextAbort.current === controller) setScopeBlockRetrying(false);
+    }
   };
 
   const loadMore = async () => {
@@ -194,7 +231,14 @@ export function WikiSearchPage() {
   const openGraphNodeContext = async () => {
     if (!selectedGraphNode) return;
     setContextBusy(true);
-    try { setContextPack(await knowledgeContext(selectedGraphNode.nodeId)); } catch (e) { const m = errText(e); if (m) setActionError(m); } finally { setContextBusy(false); }
+    setScopeBlock(null);
+    lastContextRequest.current = { target: selectedGraphNode.nodeId };
+    try { setContextPack(await knowledgeContext(selectedGraphNode.nodeId)); setScopeBlock(null); }
+    catch (e) {
+      if (e instanceof ScopeBlockedError) setScopeBlock(e);
+      else { const m = errText(e); if (m) setActionError(m); }
+    }
+    finally { setContextBusy(false); }
   };
   const exportGraphSelection = () => {
     if (!graphView) return;
@@ -325,7 +369,8 @@ export function WikiSearchPage() {
         {hitPreview.snippet && <div className="mt-2 max-h-64 overflow-auto font-mono text-xs text-slate-300">{hitPreview.snippet.split("\n").map((line, index) => <div key={`${hitPreview.hitId}-line-${index}`} className="flex min-w-max"><button type="button" className="mr-3 w-10 shrink-0 select-none text-right text-slate-600 hover:text-cyan-300" onClick={() => { const hit = visibleHits.find((item) => item.hitId === hitPreview.hitId); if (hit) void openCodeLocation({ ...hit, locator: { ...hit.locator, startLine: (hitPreview.locator.startLine ?? 1) + index } }); }}>{(hitPreview.locator.startLine ?? 1) + index}</button><span className="whitespace-pre">{line}</span></div>)}</div>}
         {hitPreview.locator.revisionKind === "working_tree" && <button type="button" onClick={() => { const hit = visibleHits.find((item) => item.hitId === hitPreview.hitId); if (hit) void openCodeLocation(hit); }} className="mt-3 rounded border border-cyan-500/30 px-2 py-1 text-xs text-cyan-200">打开代码位置</button>}
       </section>}
-      {contextPack && <section className="mt-4 rounded-lg border border-cyan-500/30 bg-cyan-950/10 p-4">
+      {scopeBlock && <section className="mt-4"><ScopeBlockerPanel error={scopeBlock} onRetry={() => void retryContextWithFallback()} retrying={scopeBlockRetrying} /></section>}
+      {!scopeBlock && contextPack && <section className="mt-4 rounded-lg border border-cyan-500/30 bg-cyan-950/10 p-4">
         <div className="text-xs uppercase tracking-wide text-cyan-300">Knowledge context</div>
         {contextPack.focus ? <>
           <div className="mt-1 text-sm font-semibold text-slate-100">{contextPack.focus.title}</div>

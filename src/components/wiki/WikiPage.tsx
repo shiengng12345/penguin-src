@@ -13,6 +13,7 @@ import { TabBtn } from "@/components/wiki/WikiUIKit";
 import { WikiGraph, type GraphLayout } from "@/components/wiki/WikiGraph";
 import { WikiGraph3D } from "@/components/wiki/WikiGraph3D";
 import { WikiContextPane } from "@/components/wiki/WikiContextPane";
+import { ScopeBlockerPanel } from "@/components/wiki/ScopeBlockerPanel";
 import { BranchPickerPopover, type BranchPickerOption } from "@/components/wiki/BranchPickerPopover";
 import { EvidenceInbox } from "@/components/wiki/EvidenceInbox";
 import { WikiSearchPage } from "@/components/wiki/WikiSearchPage";
@@ -32,6 +33,7 @@ import {
   knowledgeRepoGraph,
   knowledgeServiceGraph,
   knowledgeContext,
+  ScopeBlockedError,
   type KnowledgeDbStatus,
   type KnowledgeGraphView,
   type ContextPack,
@@ -57,6 +59,19 @@ export function WikiPage({ onClose }: WikiPageProps) {
 
   const [pack, setPack] = useState<ContextPack | null>(null);
   const [packBusy, setPackBusy] = useState(false);
+  // Phase 1B Task 8: a Context load can come back BRANCH_NOT_INDEXED/
+  // SCOPE_NOT_FOUND now that the bridge no longer auto-falls-back — render
+  // the actionable blocker instead of the generic yellow error banner (which
+  // would otherwise just show raw JSON, since ScopeBlockedError's message is
+  // the CLI's structured payload text). `scopeBlockRetrying` only covers the
+  // explicit "answer anyway" retry, not the initial load (packBusy already
+  // covers that).
+  const [scopeBlock, setScopeBlock] = useState<ScopeBlockedError | null>(null);
+  const [scopeBlockRetrying, setScopeBlockRetrying] = useState(false);
+  // The last id `loadPack` was asked for — lets the blocker's retry button
+  // re-issue the SAME request with --allow-fallback without the caller
+  // having to thread the target through separately.
+  const lastContextTarget = useRef<string | null>(null);
   const [graphData, setGraphData] = useState<KnowledgeGraphView | null>(null);
   const [graphBusy, setGraphBusy] = useState(false);
   const [graphLayout, setGraphLayout] = useState<GraphLayout>("radial");
@@ -88,15 +103,26 @@ export function WikiPage({ onClose }: WikiPageProps) {
   const packReqId = useRef(0);
   const graphReqId = useRef(0);
 
-  const loadPack = useCallback(async (id: string) => {
+  const loadPack = useCallback(async (id: string, options: { allowFallback?: boolean } = {}) => {
     const reqId = ++packReqId.current;
+    lastContextTarget.current = id;
     setPackBusy(true);
+    if (!options.allowFallback) setScopeBlock(null);
     try {
-      const p = await knowledgeContext(id);
-      if (reqId === packReqId.current) setPack(p);
-    } catch (e) { if (reqId === packReqId.current) err(e); }
-    finally { if (reqId === packReqId.current) setPackBusy(false); }
+      const p = await knowledgeContext(id, { allowFallback: options.allowFallback });
+      if (reqId === packReqId.current) { setPack(p); setScopeBlock(null); }
+    } catch (e) {
+      if (reqId !== packReqId.current) return;
+      if (e instanceof ScopeBlockedError) setScopeBlock(e);
+      else err(e);
+    }
+    finally { if (reqId === packReqId.current) { setPackBusy(false); setScopeBlockRetrying(false); } }
   }, []);
+  const retryContextWithFallback = useCallback(() => {
+    if (!lastContextTarget.current) return;
+    setScopeBlockRetrying(true);
+    void loadPack(lastContextTarget.current, { allowFallback: true });
+  }, [loadPack]);
   const loadGraph = useCallback(async (id: string) => {
     const reqId = ++graphReqId.current;
     setGraphBusy(true); setHiddenNodeIds(new Set());
@@ -186,7 +212,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
   }, [tab, focusId, graphData, graphBusy, openServiceGraph]);
 
   const applyEntry = useCallback((e: NavEntry) => {
-    if (e.kind === "home") { setError(null); setFocusId(null); setPack(null); return; }
+    if (e.kind === "home") { setError(null); setFocusId(null); setPack(null); setScopeBlock(null); return; }
     selectSymbol(e.id, false);
   }, [selectSymbol]);
   const back = useCallback(() => {
@@ -263,6 +289,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
           </div>
 
           {tab === "search" ? <WikiSearchPage /> : tab === "context" ? (
+            scopeBlock ? <ScopeBlockerPanel error={scopeBlock} onRetry={retryContextWithFallback} retrying={scopeBlockRetrying} /> :
             f ? <WikiContextPane packBusy={packBusy} pack={pack} onSelectSymbol={selectSymbol} /> : (
               <KnowledgeHomePanel
                 onOpenRepoGraph={(r, b) => void openRepoGraph(r, b)}

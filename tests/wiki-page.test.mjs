@@ -325,7 +325,7 @@ test("返回 (back) is not permanently disabled for the first symbol opened this
   );
   assert.match(
     page,
-    /if \(e\.kind === "home"\) \{ setError\(null\); setFocusId\(null\); setPack\(null\); return; \}/,
+    /if \(e\.kind === "home"\) \{ setError\(null\); setFocusId\(null\); setPack\(null\); setScopeBlock\(null\); return; \}/,
     "applyEntry resets to the home view when navigating back onto the home entry",
   );
 });

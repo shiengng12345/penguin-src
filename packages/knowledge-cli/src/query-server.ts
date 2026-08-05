@@ -116,14 +116,47 @@ export async function runQueryServer(deps: CliDeps, input = process.stdin, outpu
       // repoId from a unique symbol match and then reads real git state at
       // that repo's registered rootPath (Task 6); if the dev has since
       // switched to a branch that isn't indexed yet (an everyday occurrence),
-      // that now exits 4 (BRANCH_NOT_INDEXED) instead of answering. The UI
-      // never sends --allow-fallback, so force it here: UI-originated calls
-      // get fallback-with-warnings until the Wiki learns to render scope
-      // blockers (Plan 1B will remove this and let the UI show the blocker).
-      // Direct CLI usage is unaffected — it doesn't go through this bridge.
-      if (!args.includes("--allow-fallback")) args.push("--allow-fallback");
+      // that exits 4 (BRANCH_NOT_INDEXED). Phase 1A force-injected
+      // --allow-fallback here so the UI (which couldn't render the blocker
+      // yet) always got an answer instead of a hard failure. Phase 1B's Wiki
+      // can now render a scope blocker, so the injection is gone: a caller
+      // that wants the fallback answer must ask for it explicitly via
+      // --allow-fallback in `args` (the client does this on the blocker
+      // panel's retry). Direct CLI usage is unaffected — it doesn't go
+      // through this bridge.
       const lines: string[] = [];
       const exitCode = await runCli(args, { ...deps, out: (line) => lines.push(line), err: (line) => lines.push(line) });
+      if (exitCode === 4) {
+        // reportScopeResolutionError (command-dispatch.ts), in --json mode
+        // (forced above), emits exactly one machine-parseable line:
+        // `{ scopeError: { code, message, candidates } }`. Parse it into a
+        // structured throw instead of the opaque last-stdout-line Error the
+        // bridge used to build, so dispatchQueryFrame's catch (which reads
+        // `error.code`/`error.message` into the response frame) surfaces
+        // BRANCH_NOT_INDEXED/SCOPE_NOT_FOUND with the candidate list intact.
+        //
+        // The Error's `.message` is set to the JSON-encoded `{ code, message,
+        // candidates }` payload itself (not just the prose message) — this
+        // duplicates `code` inside the string on purpose. The Tauri Rust
+        // bridge (src-tauri/src/knowledge.rs's resident-worker reader thread)
+        // only ever forwards the response frame's `error.message` string to
+        // the webview — the sibling `error.code` field is dropped in transit
+        // — so `code` has to survive inside the text that DOES cross that
+        // boundary. The client (knowledge-client.ts's ScopeBlockedError)
+        // JSON.parses whatever string it receives (whether from this
+        // in-process test harness or from the real Tauri IPC round trip) and
+        // reads `code`/`message`/`candidates` back out of it.
+        let parsed: { scopeError?: { code: string; message: string; candidates?: unknown } } | undefined;
+        for (let i = lines.length - 1; i >= 0 && !parsed; i -= 1) {
+          try { const candidate = JSON.parse(lines[i]); if (candidate && typeof candidate === "object" && "scopeError" in candidate) parsed = candidate; } catch { /* not JSON, keep scanning */ }
+        }
+        const scopeError = parsed?.scopeError;
+        if (scopeError) {
+          const payload = { code: scopeError.code, message: scopeError.message, candidates: scopeError.candidates ?? [] };
+          throw Object.assign(new Error(JSON.stringify(payload)), { code: scopeError.code });
+        }
+        throw Object.assign(new Error(lines.at(-1) ?? "CLI_EXIT_4"), { code: "CLI_EXIT_4" });
+      }
       if (exitCode !== 0) throw Object.assign(new Error(lines.at(-1) ?? `CLI_EXIT_${exitCode}`), { code: `CLI_EXIT_${exitCode}` });
       const result = lines.at(-1) ?? "null";
       try { return JSON.parse(result); } catch { return result; }

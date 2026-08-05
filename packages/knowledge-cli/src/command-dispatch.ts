@@ -179,8 +179,25 @@ function reportRevisionResolutionError(deps: CliDeps, error: unknown): void {
   ].filter(Boolean).join("\n"));
 }
 
-function reportScopeResolutionError(deps: CliDeps, error: unknown): number {
+// Reports a ScopeResolutionError (BRANCH_NOT_INDEXED, SCOPE_NOT_FOUND, ...)
+// and returns exit code 4. This is a usage/CLI-invocation failure, like the
+// "unknown repo: ..."/"unknown command" errors elsewhere in this file, so it
+// reports via deps.err (stdout is reserved for a successful --json result;
+// existing regression coverage in knowledge-cli.test.mjs asserts stdout stays
+// empty on this path even under --json). In --json mode the human-readable
+// prose is replaced by a single machine-parseable line — `{ scopeError:
+// { code, message, candidates } }` — so a caller never has to scrape prose
+// for the branch name / candidate list. The query-server `knowledge.cli`
+// compat bridge (query-server.ts) is the primary consumer: it always forces
+// --json and parses this line (from its merged out+err capture) into a
+// structured BRANCH_NOT_INDEXED/SCOPE_NOT_FOUND throw instead of the opaque
+// last-stdout-line Error it used to build (Phase 1B Task 8).
+function reportScopeResolutionError(deps: CliDeps, error: unknown, json: boolean): number {
   if (!(error instanceof ScopeResolutionError)) throw error;
+  if (json) {
+    deps.err(JSON.stringify({ scopeError: { code: error.code, message: error.message, candidates: error.candidates } }));
+    return 4;
+  }
   deps.err([
     error.message,
     error.candidates.length ? `Indexed branches:\n${error.candidates.map((c) => `  ${c.branchName} @ ${c.commitSha}`).join("\n")}` : "",
@@ -1499,7 +1516,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
             try {
               ({ revision, scope } = resolveCliRevision(store, queryText, { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd, { preferCwd: true }));
             } catch (error) {
-              return reportScopeResolutionError(deps, error);
+              return reportScopeResolutionError(deps, error, json);
             }
           }
           // repoId falls back to null (not undefined) when nothing was
@@ -1601,7 +1618,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
           let scope: ScopeEnvelope | undefined;
           try { ({ revision, scope } = resolveCliRevision(store, target, { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd)); }
-          catch (error) { return reportScopeResolutionError(deps, error); }
+          catch (error) { return reportScopeResolutionError(deps, error, json); }
           const pack = buildContextPack(store, target, { revision });
           if (!pack.focus) {
             emit(deps, json, renderContextPackMarkdown(pack), pack, scope);
@@ -1617,7 +1634,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
           let scope: ScopeEnvelope | undefined;
           try { ({ revision, scope } = resolveCliRevision(store, target, { repo: optionValue("repo"), branch: requestedBranch, commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd)); }
-          catch (error) { return reportScopeResolutionError(deps, error); }
+          catch (error) { return reportScopeResolutionError(deps, error, json); }
           let branchId: string | undefined;
           if (requestedBranch) {
             const exact = store.db.prepare("SELECT id FROM branches WHERE id=?").get(requestedBranch) as { id: string } | undefined;
@@ -1647,7 +1664,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
           let scope: ScopeEnvelope | undefined;
           try { ({ revision, scope } = resolveCliRevision(store, target, { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd)); }
-          catch (error) { return reportScopeResolutionError(deps, error); }
+          catch (error) { return reportScopeResolutionError(deps, error, json); }
           const flow = buildFlow(store, target, { revision });
           if (!flow.root) {
             emit(deps, json, renderFlowMarkdown(flow), flow, scope);
@@ -1662,7 +1679,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
           let scope: ScopeEnvelope | undefined;
           try { ({ revision, scope } = resolveCliRevision(store, "", { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd)); }
-          catch (error) { return reportScopeResolutionError(deps, error); }
+          catch (error) { return reportScopeResolutionError(deps, error, json); }
           const a = affectedByFiles(store, pos, { revision });
           const txt = pos.length === 0 ? "usage: penguin affected <file>…"
             : `changed ${a.changed.length} · impacted ${a.impacted.length} · tests ${a.tests.length} · routes ${a.routes.length}\n`
@@ -1699,7 +1716,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
           let scope: ScopeEnvelope | undefined;
           try { ({ revision, scope } = resolveCliRevision(store, "", { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd)); }
-          catch (error) { return reportScopeResolutionError(deps, error); }
+          catch (error) { return reportScopeResolutionError(deps, error, json); }
           const t = timeline(store, { limit: pos[0] ? Number(pos[0]) || 50 : 50, repoId: optionValue("repo"), revision });
           const txt = t.entries.map((e) => `${(e.date ?? "").slice(0, 10)}  ${e.repo ?? "?"}  ${e.merge ? "⑃ " : ""}${e.subject}${e.tags.length ? ` [${e.tags.join(",")}]` : ""}`).join("\n") || "(no commits indexed)";
           emit(deps, json, txt, t, scope);
@@ -1720,7 +1737,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
           let scope: ScopeEnvelope | undefined;
           try { ({ revision, scope } = resolveCliRevision(store, pos[0] ?? "", { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd)); }
-          catch (error) { return reportScopeResolutionError(deps, error); }
+          catch (error) { return reportScopeResolutionError(deps, error, json); }
           const diff = compareBranches(store, pos[0] ?? "", pos[1] ?? "", pos[2] ?? "", { revision });
           if (!diff) { deps.err("symbol not found"); return 1; }
           emit(deps, json, diff.identical ? "identical (no diff)" : "differs", diff, scope);
@@ -1765,7 +1782,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
           let scope: ScopeEnvelope | undefined;
           try { ({ revision, scope } = resolveCliRevision(store, pos[0] ?? "", { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd)); }
-          catch (error) { return reportScopeResolutionError(deps, error); }
+          catch (error) { return reportScopeResolutionError(deps, error, json); }
           const res = exploreGraph(store, "path", pos[0] ?? "", { to: pos[1], revision });
           emit(deps, json, res.nodes.map((n) => n.title).join(" → ") || "(no path)", res, scope);
           return 0;
@@ -1811,7 +1828,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
           let scope: ScopeEnvelope | undefined;
           try { ({ revision, scope } = resolveCliRevision(store, pos[0] ?? "", { repo: pos[0], branch: optionValue("branch") ?? pos[1], commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd)); }
-          catch (error) { return reportScopeResolutionError(deps, error); }
+          catch (error) { return reportScopeResolutionError(deps, error, json); }
           const files = listIndexedFiles(store, repoId, revision ? { revision } : branchId);
           emit(deps, json,
             files.map((f) => `${f.status === "indexed" ? " " : "·"} ${f.filePath}${f.lang ? `  [${f.lang}]` : ""}`).join("\n") || "(no files)",

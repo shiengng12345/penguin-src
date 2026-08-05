@@ -95,25 +95,29 @@ test("--allow-fallback is a recognized boolean flag (does not swallow the next p
 // meaningless for git-aware scope inference — but a scoped verb still infers
 // repoId from a unique symbol match, then resolveQueryScope reads real git
 // state at THAT repo's registered rootPath. If the dev has since switched to
-// a branch that isn't indexed yet (an everyday occurrence), the verb used to
-// exit 4 (BRANCH_NOT_INDEXED) and the bridge would throw an opaque
-// CLI_EXIT_4 Error — a hard failure for normal Wiki operation, since the
-// frontend never sends --allow-fallback. The bridge now force-injects
-// --allow-fallback (mirroring how it already force-injects --json), so this
-// must come back ok:true with a fallback envelope instead of an error.
-test("query-server knowledge.cli bridge force-injects --allow-fallback so an un-indexed checked-out branch answers instead of hard-failing", async () => {
-  const { store, rootPath } = fixture();
-  const { execFileSync } = await import("node:child_process");
-  execFileSync("git", ["init", "-b", "feature-x", rootPath]);
-  execFileSync("git", ["-C", rootPath, "commit", "--allow-empty", "-m", "x"], { env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
-
+// a branch that isn't indexed yet (an everyday occurrence), the verb exits 4
+// (BRANCH_NOT_INDEXED).
+//
+// Phase 1A force-injected --allow-fallback here (mirroring how it already
+// force-injects --json) so the UI — which couldn't render the blocker yet —
+// always got a fallback answer instead of a hard failure. Phase 1B Task 8
+// removes that injection now that the Wiki can render a scope blocker: the
+// bridge must surface the un-indexed-checkout case as a structured,
+// ok:false BRANCH_NOT_INDEXED error frame (not the opaque
+// CLI_EXIT_4/last-stdout-line Error it used to build), and a caller that
+// wants the fallback answer opts in per-request by passing --allow-fallback
+// itself.
+function harnessQueryServer(store) {
   const input = new Readable({ read() {} });
-  let resolveResponse;
-  const responseArrived = new Promise((resolve) => { resolveResponse = resolve; });
+  const responses = new Map();
+  const waiters = new Map();
   const output = {
     write: (chunk) => {
       const frame = JSON.parse(chunk);
-      if (frame.id === "compat") resolveResponse(frame);
+      if (frame.type !== "response") return true;
+      const waiter = waiters.get(frame.id);
+      if (waiter) { waiters.delete(frame.id); waiter(frame); }
+      else responses.set(frame.id, frame);
       return true;
     },
   };
@@ -126,14 +130,46 @@ test("query-server knowledge.cli bridge force-injects --allow-fallback so an un-
     openStore: () => store,
     storeExists: () => true,
   };
-
   const serverExit = runQueryServer(deps, input, output);
-  input.push(`${JSON.stringify({ type: "request", id: "compat", capabilityId: "knowledge.cli", input: { args: ["context", "Alpha"] } })}\n`);
-  const response = await responseArrived;
-  input.push(null);
-  await serverExit;
+  const send = (id, args) => {
+    const already = responses.get(id);
+    if (already) { responses.delete(id); return Promise.resolve(already); }
+    const promise = new Promise((resolve) => waiters.set(id, resolve));
+    input.push(`${JSON.stringify({ type: "request", id, capabilityId: "knowledge.cli", input: { args } })}\n`);
+    return promise;
+  };
+  const close = async () => { input.push(null); await serverExit; };
+  return { send, close };
+}
 
-  assert.equal(response.ok, true, `expected the bridge to answer instead of erroring: ${JSON.stringify(response)}`);
+test("query-server knowledge.cli bridge does NOT inject --allow-fallback: an un-indexed checked-out branch comes back as a structured BRANCH_NOT_INDEXED error frame", async () => {
+  const { store, rootPath } = fixture();
+  const { execFileSync } = await import("node:child_process");
+  execFileSync("git", ["init", "-b", "feature-x", rootPath]);
+  execFileSync("git", ["-C", rootPath, "commit", "--allow-empty", "-m", "x"], { env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
+
+  const { send, close } = harnessQueryServer(store);
+  const response = await send("compat", ["context", "Alpha"]);
+  await close();
+
+  assert.equal(response.ok, false, `expected the bridge to surface a structured error, not answer: ${JSON.stringify(response)}`);
+  assert.equal(response.error.code, "BRANCH_NOT_INDEXED");
+  assert.match(response.error.message, /feature-x/);
+  assert.match(response.error.message, /penguin index/);
+  // store.close() is called by runQueryServer itself.
+});
+
+test("query-server knowledge.cli bridge with explicit --allow-fallback in args succeeds with the fallback envelope", async () => {
+  const { store, rootPath } = fixture();
+  const { execFileSync } = await import("node:child_process");
+  execFileSync("git", ["init", "-b", "feature-x", rootPath]);
+  execFileSync("git", ["-C", rootPath, "commit", "--allow-empty", "-m", "x"], { env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
+
+  const { send, close } = harnessQueryServer(store);
+  const response = await send("compat", ["context", "Alpha", "--allow-fallback"]);
+  await close();
+
+  assert.equal(response.ok, true, `expected the explicit-opt-in retry to answer: ${JSON.stringify(response)}`);
   assert.equal(response.result.alignment, "fallback");
   assert.ok(response.result.warnings.some((w) => w.code === "BRANCH_NOT_INDEXED_FALLBACK"));
   assert.equal(response.result.locator.branchName, "main");

@@ -25,6 +25,42 @@ export function isNoDatabaseError(message: string): boolean {
   return message.includes("no knowledge database");
 }
 
+// Phase 1B Task 8: the query-server `knowledge.cli` compat bridge no longer
+// force-injects --allow-fallback, so a scoped verb (context/flow/...) run
+// against a checked-out branch that isn't indexed now reaches the UI as a
+// real error instead of a silent fallback answer. The bridge encodes it as
+// `{ code: "BRANCH_NOT_INDEXED" | "SCOPE_NOT_FOUND", message, candidates }`
+// JSON — this IS the string that crosses the Tauri IPC boundary (see
+// packages/knowledge-cli/src/query-server.ts's knowledge.cli bridge: the
+// Rust reader thread only ever forwards the response frame's error.message
+// text, so `code`/`candidates` are duplicated inside that string on purpose).
+// `query()` below parses it into this typed error so a Wiki view can render
+// an actionable blocker instead of a generic error banner.
+export type ScopeBlockedErrorCode = "BRANCH_NOT_INDEXED" | "SCOPE_NOT_FOUND";
+
+export class ScopeBlockedError extends Error {
+  readonly code: ScopeBlockedErrorCode;
+  readonly candidates: Array<{ branchName: string; commitSha: string }>;
+  constructor(code: ScopeBlockedErrorCode, message: string, candidates: Array<{ branchName: string; commitSha: string }> = []) {
+    super(message);
+    this.name = "ScopeBlockedError";
+    this.code = code;
+    this.candidates = candidates;
+  }
+}
+
+function parseScopeBlockedError(error: unknown): ScopeBlockedError | null {
+  const raw = typeof error === "string" ? error : error instanceof Error ? error.message : undefined;
+  if (!raw) return null;
+  let parsed: unknown;
+  try { parsed = JSON.parse(raw); } catch { return null; }
+  if (!parsed || typeof parsed !== "object") return null;
+  const { code, message, candidates } = parsed as { code?: unknown; message?: unknown; candidates?: unknown };
+  if (code !== "BRANCH_NOT_INDEXED" && code !== "SCOPE_NOT_FOUND") return null;
+  if (typeof message !== "string") return null;
+  return new ScopeBlockedError(code, message, Array.isArray(candidates) ? (candidates as Array<{ branchName: string; commitSha: string }>) : []);
+}
+
 // Terminal availability of the `penguin` CLI (launcher present + on PATH).
 // Backs onboarding's one-click "configure penguin command".
 export interface CliSetupStatus {
@@ -180,7 +216,12 @@ function abortable<T>(request: Promise<T>, signal?: AbortSignal, onAbort?: () =>
 async function query<T>(args: string[], signal?: AbortSignal): Promise<T> {
   if (signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
   const requestId = globalThis.crypto?.randomUUID?.() ?? `knowledge-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-  const raw = await abortable(invoke<string>("knowledge_query", { args: [...args, `--request-id=${requestId}`] }), signal, () => { void invoke("knowledge_query_cancel", { requestId }).catch(() => undefined); });
+  let raw: string;
+  try {
+    raw = await abortable(invoke<string>("knowledge_query", { args: [...args, `--request-id=${requestId}`] }), signal, () => { void invoke("knowledge_query_cancel", { requestId }).catch(() => undefined); });
+  } catch (error) {
+    throw parseScopeBlockedError(error) ?? error;
+  }
   if (signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
   return JSON.parse(raw) as T;
 }
@@ -477,18 +518,26 @@ export interface ContextPack extends ScopeEnvelopeFields {
 // (Phase 1A resolveCliRevision).
 export function knowledgeContext(
   target: string,
-  options: KnowledgeRequestOptions & { snapshotId?: string; repoId?: string } = {},
+  // allowFallback: the caller (a ScopeBlockerPanel's "Answer from <branch>
+  // instead" retry) is opting into the CLI's own --allow-fallback flag for
+  // THIS ONE request, per Phase 1B Task 8 — the bridge no longer injects it
+  // automatically, so a plain retry of the same request would just hit the
+  // same BRANCH_NOT_INDEXED/SCOPE_NOT_FOUND error again.
+  options: KnowledgeRequestOptions & { snapshotId?: string; repoId?: string; allowFallback?: boolean } = {},
 ): Promise<ContextPack> {
   const args = ["context", target];
   if (options.snapshotId) args.push("--snapshot", options.snapshotId);
   if (options.repoId) args.push("--repo", options.repoId);
+  if (options.allowFallback) args.push("--allow-fallback");
   return query<ContextPack>(args, options.signal);
 }
 
 export interface FlowStep { depth: number; nodeId: string; title: string; nodeType: string; via: string }
 export interface FlowResult extends ScopeEnvelopeFields { target: string; root: FlowStep | null; steps: FlowStep[] }
-export function knowledgeFlow(target: string, options: KnowledgeRequestOptions = {}): Promise<FlowResult> {
-  return query<FlowResult>(["flow", target], options.signal);
+export function knowledgeFlow(target: string, options: KnowledgeRequestOptions & { allowFallback?: boolean } = {}): Promise<FlowResult> {
+  const args = ["flow", target];
+  if (options.allowFallback) args.push("--allow-fallback");
+  return query<FlowResult>(args, options.signal);
 }
 
 // Repo/branch-scoped graph (top-degree hubs).

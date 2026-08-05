@@ -296,6 +296,18 @@ fn resident_query<R: tauri::Runtime>(app: &tauri::AppHandle<R>, capability_id: &
     let result = match worker.request(capability_id, input.clone(), request_id.clone()) {
         Ok(result) => Ok(result),
         Err(first) => {
+            // A live worker returning Err just means the query itself failed
+            // (an ordinary ok:false capability response — e.g. the
+            // `knowledge.cli` compat bridge's structured BRANCH_NOT_INDEXED/
+            // SCOPE_NOT_FOUND error, Phase 1B Task 8), not that the resident
+            // process died. Restarting-and-retrying in that case would send
+            // the SAME failing request again, and on the (deterministic)
+            // second failure `map_err(|second| format!("{first}; restart
+            // failed: {second}"))` below used to concatenate the two error
+            // strings — corrupting the JSON payload the client depends on to
+            // parse `{ code, message, candidates }` back out. Only tear the
+            // worker down and retry when it has actually exited.
+            if !worker.is_dead() { return Err(first); }
             let mut guard = state.worker.lock().map_err(|_| "query runtime lock poisoned".to_string())?;
             if guard.as_ref().map(|current| Arc::ptr_eq(current, &worker)).unwrap_or(false) { *guard = None; }
             drop(guard);
