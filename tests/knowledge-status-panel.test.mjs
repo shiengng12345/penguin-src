@@ -139,6 +139,25 @@ test("knowledge.status_panel: repo root with no git repo reports git_unavailable
   store.close();
 });
 
+test("knowledge.status_panel: detached HEAD reports git_unavailable, not branch_not_indexed", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "penguin-status-panel-"));
+  const store = KnowledgeStore.open({ dbPath: join(dir, "knowledge.db"), ledgerPath: join(dir, "ledger.jsonl") });
+  const rootPath = join(dir, "repo");
+  initGitRepo(rootPath, "main");
+  execFileSync("git", ["-C", rootPath, "checkout", "--detach"], { env: GIT_ENV });
+  const repoId = store.registerRepo({ name: "demo", rootPath });
+  const branchId = store.registerBranch({ repoId, name: "main", headCommit: "sha-main", status: "live" });
+  store.db.prepare("UPDATE branches SET last_indexed_commit=?, last_indexed_at=? WHERE id=?").run("sha-main", "2026-08-01T00:00:00.000Z", branchId);
+
+  const response = await sendStatusPanelRequest(store);
+  assert.equal(response.ok, true, `expected ok response: ${JSON.stringify(response)}`);
+  const repo = response.result.repos[0];
+  assert.equal(repo.branchName, null);
+  assert.equal(repo.revisionAlignment, "git_unavailable");
+  assert.equal(repo.indexedBranch, "main");
+  store.close();
+});
+
 test("knowledge.status_panel: no registered repos returns an empty repos array without throwing", async () => {
   const dir = mkdtempSync(join(tmpdir(), "penguin-status-panel-"));
   const store = KnowledgeStore.open({ dbPath: join(dir, "knowledge.db"), ledgerPath: join(dir, "ledger.jsonl") });

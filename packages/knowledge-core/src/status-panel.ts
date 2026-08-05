@@ -18,6 +18,12 @@ export interface RepoStatusPanel {
   indexedBranch: string | null; // best indexed branch for that checkout (or live fallback)
   lastIndexedAt: string | null;
   staleReason: string | null; // branches.stale_reason passthrough
+  // GROUP BY coverage_status counts; null only when the repo has zero
+  // coverage_records rows at all. A repo whose rows are all coverage_status
+  // 'stale' still has non-empty coverage_records, so this comes back as
+  // {admitted:0, excluded:0, failed:0}, not null -- a renderer that treats
+  // null as "not computed yet" must not conflate that with an all-zero
+  // result caused entirely by stale rows.
   coverage: { admitted: number; excluded: number; failed: number } | null;
 }
 
@@ -68,7 +74,12 @@ function buildRepoStatusPanel(
     const matched = branchName ? branchRows.find((row) => row.name === branchName) : undefined;
 
     let revisionAlignment: RepoStatusPanel["revisionAlignment"];
-    if (!gitState) {
+    if (!gitState || !gitState.branch) {
+      // No git state at all, OR git state present but branch is null --
+      // detached HEAD (mid-rebase, CI checkout, a pinned worktree). Neither
+      // case has a checked-out branch name to compare against `branches`,
+      // so both fold into the same "can't answer from git" bucket, matching
+      // query-scope.ts's GIT_UNAVAILABLE convention for a null branch.
       revisionAlignment = "git_unavailable";
     } else if (matched) {
       revisionAlignment = matched.lastIndexedCommit === gitState.headSha ? "aligned" : "behind";
