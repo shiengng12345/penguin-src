@@ -240,6 +240,7 @@ export async function knowledgeReindex(path?: string): Promise<KnowledgeIndexRep
   const raw = await invoke<string>("knowledge_reindex", { path: path ?? null });
   serviceGraphCache = null;
   evidenceCache.clear();
+  statusPanelCache = null;
   return JSON.parse(raw) as KnowledgeIndexReport;
 }
 
