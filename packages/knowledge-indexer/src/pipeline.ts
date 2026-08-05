@@ -624,6 +624,19 @@ export type IndexProgressEvent =
   | { phase: "metric"; symbols: number; edges: number; endpoints: number }
   | { phase: "discovery"; kind: "endpoint" | "service" | "link"; title: string; file?: string };
 
+export function resolveIndexMode(
+  mode: "rebuild" | "incremental",
+  prior: { parser_version?: string | null; indexed_schema_version?: number | null } | undefined,
+  parserVersion: string,
+  schemaVersion: number,
+): "rebuild" | "incremental" {
+  if (mode === "rebuild") return "rebuild";
+  if (!prior) return "incremental";
+  if (prior.parser_version !== parserVersion) return "rebuild";
+  if ((prior.indexed_schema_version ?? 0) !== schemaVersion) return "rebuild";
+  return "incremental";
+}
+
 // Index a whole repo (headless). incremental uses the files_index quick filter;
 // rebuild clears the branch's checkpoints so every file re-parses (§8.3).
 export async function indexRepo(input: {
@@ -648,9 +661,7 @@ export async function indexRepo(input: {
   // index SUCCEEDS (validation V1 — a failed run must not look trustworthy).
   // Existing branches keep their current status during the run.
   const prior = store.getBranch(repoId, git.branch);
-  const effectiveMode = mode === "rebuild" || prior?.parser_version !== KNOWLEDGE_PARSER_VERSION
-    ? "rebuild"
-    : "incremental";
+  const effectiveMode = resolveIndexMode(mode, prior ?? undefined, KNOWLEDGE_PARSER_VERSION, SCHEMA_VERSION);
   const branchId = store.registerBranch({
     repoId, name: git.branch, headCommit: git.commit, checkoutPath: git.checkoutPath,
     status: (prior?.status as "live" | "snapshot" | "gone" | undefined) ?? "snapshot",

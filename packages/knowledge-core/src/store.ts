@@ -125,6 +125,7 @@ export interface BranchRow {
   default_branch?: number;
   base_branch_name?: string | null;
   parser_version: string | null;
+  indexed_schema_version?: number | null;
   current_snapshot_id?: string | null;
 }
 
