@@ -3,7 +3,7 @@
 
 # Penguin Knowledge Schema Reference
 
-- **Current schema version:** 13
+- **Current schema version:** 14
 
 ## Migration metadata
 
@@ -13,6 +13,7 @@
 | 11 | `markdown-vault` | Markdown sections, properties, wikilinks, evidence and saved-query records |
 | 12 | `semantic-and-memory` | memory, ontology, semantic chunks, embeddings and reflection records |
 | 13 | `trust-and-external-sources` | validated findings, audit events, external sources and revision-safe evidence |
+| 14 | `coverage-layers-and-edge-boundaries` | coverage_layers table; edges.evidence_id + edges.boundary; forced rebuild on schema bump |
 
 ## Tables
 
@@ -27,6 +28,7 @@
 - `node_aliases`
 - `symbol_versions`
 - `edges`
+- `coverage_layers`
 - `files_index`
 - `events`
 - `ledger_state`

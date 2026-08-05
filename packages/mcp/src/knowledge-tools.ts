@@ -59,6 +59,7 @@ import {
   assertWorkspacePath,
   syncPostgresSchema,
   type PostgresSchemaClient,
+  SCHEMA_VERSION,
 } from "@penguin/knowledge-core";
 import { CAPABILITIES, capabilityHash, listMcpRegistrations, CAPABILITY_ALIASES } from "@penguin/knowledge-contracts";
 import { analyzeRepository } from "./repository-analysis.js";
@@ -469,7 +470,7 @@ export function handleKnowledgeTool(
     if (requestedContract && requestedContract.split(".")[0] !== "2") {
       return { error: { code: "CAPABILITY_MISMATCH", message: `unsupported knowledge contract major ${requestedContract}; upgrade Penguin or request contract 2`, retryable: false } };
     }
-    return { schemaVersion: "13", contractVersion: "2", buildId: process.env.PENGUIN_BUILD_ID ?? "local", capabilityHash: capabilityHash(CAPABILITIES), capabilities: CAPABILITIES, registrations: listMcpRegistrations() };
+    return { schemaVersion: String(SCHEMA_VERSION), contractVersion: "2", buildId: process.env.PENGUIN_BUILD_ID ?? "local", capabilityHash: capabilityHash(CAPABILITIES), capabilities: CAPABILITIES, registrations: listMcpRegistrations() };
   }
   if (!store) {
     return { error: "knowledge not initialized — run `penguin init` or open Penguin app" };

@@ -11,6 +11,6 @@ test("rollback artifact can be validated without mutating the active store", () 
   const artifact = exportKnowledgeArtifact(store, { signingKey: "rollback-sign", encryptionKey: "rollback-encrypt" });
   const restored = importKnowledgeArtifact(artifact.bytes, { signingKey: "rollback-sign", encryptionKey: "rollback-encrypt" });
   assert.equal(restored.manifest.formatVersion, 1);
-  assert.equal(store.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value, String(13));
+  assert.equal(store.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value, String(14));
   store.close();
 });

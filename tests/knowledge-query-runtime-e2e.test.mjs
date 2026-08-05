@@ -88,7 +88,7 @@ test("resident query runtime speaks JSONL and returns real source search results
     const hello = await reader.next((frame) => frame.type === "hello");
     assert.equal(hello.protocolVersion, 1);
     assert.equal(typeof hello.capabilityHash, "string");
-    assert.equal(hello.schemaVersion, 13);
+    assert.equal(hello.schemaVersion, 14);
 
     child.stdin.write(JSON.stringify({ type: "request", id: "caps", capabilityId: "knowledge.capabilities", input: {} }) + "\n");
     const capabilities = await reader.next((frame) => frame.id === "caps");

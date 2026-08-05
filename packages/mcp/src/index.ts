@@ -355,7 +355,12 @@ const server = new Server(
     // MCP initialize has no portable custom metadata field. Keep the
     // negotiation tuple in instructions so clients can inspect it before
     // calling a tool; knowledge_capabilities returns the same structured data.
-    instructions: JSON.stringify({ contractVersion: "2", schemaVersion: 13, capabilityHash: capabilityHash(CAPABILITIES) }),
+    // schemaVersion is a hand-maintained literal (not imported from
+    // @penguin/knowledge-core's SCHEMA_VERSION) because this file must stay
+    // free of knowledge-core/native deps so the release-bundled server
+    // initializes without workspace node_modules — keep it in sync with
+    // SCHEMA_VERSION in packages/knowledge-core/src/schema.ts by hand.
+    instructions: JSON.stringify({ contractVersion: "2", schemaVersion: 14, capabilityHash: capabilityHash(CAPABILITIES) }),
   },
 );
 

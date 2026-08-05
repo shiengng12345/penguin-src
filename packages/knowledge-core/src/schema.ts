@@ -170,7 +170,9 @@ CREATE TABLE IF NOT EXISTS edges (
   confidence REAL NOT NULL DEFAULT 1.0,
   provenance TEXT NOT NULL DEFAULT '{}',
   status TEXT NOT NULL DEFAULT 'active',  -- active | suggested (pending AI edge) | rejected
-  source_type TEXT                        -- e.g. frontend_web/frontend_mobile provenance tag
+  source_type TEXT,                       -- e.g. frontend_web/frontend_mobile provenance tag
+  evidence_id TEXT,                       -- links to trust_evidence backing this edge
+  boundary TEXT                           -- di | interface | callback | event, or NULL
 );
 CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src);
 CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst);
@@ -184,6 +186,18 @@ CREATE INDEX IF NOT EXISTS idx_edges_branch_status ON edges(branch_id, status);
 -- so they can't serve it — without this the query full-scans the whole edges
 -- table (~240k rows → the "服务图" froze for ~2.7s). Leads with edge_type.
 CREATE INDEX IF NOT EXISTS idx_edges_type_status ON edges(edge_type, status);
+
+-- Per-repo/branch coverage tallies by graph layer (file/symbol/edge/route/di/
+-- test): resolved-vs-total counts backing trust/coverage reporting.
+CREATE TABLE IF NOT EXISTS coverage_layers (
+  repo_id TEXT NOT NULL,
+  branch_id TEXT NOT NULL,
+  layer TEXT NOT NULL,
+  resolved INTEGER NOT NULL DEFAULT 0,
+  total INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (repo_id, branch_id, layer)
+);
 
 CREATE TABLE IF NOT EXISTS files_index (
   id TEXT PRIMARY KEY,
@@ -699,7 +713,7 @@ CREATE VIRTUAL TABLE IF NOT EXISTS source_lexical_fts USING fts5(content, tokeni
 CREATE VIRTUAL TABLE IF NOT EXISTS source_path_fts USING fts5(file_path, source_fact_id UNINDEXED, tokenize='unicode61');
 `;
 
-export const SCHEMA_VERSION = 13;
+export const SCHEMA_VERSION = 14;
 
 /** Canonical schema history consumed by generated operator documentation. */
 export const SCHEMA_MIGRATIONS = [
@@ -707,6 +721,7 @@ export const SCHEMA_MIGRATIONS = [
   { version: 11, name: "markdown-vault", summary: "Markdown sections, properties, wikilinks, evidence and saved-query records" },
   { version: 12, name: "semantic-and-memory", summary: "memory, ontology, semantic chunks, embeddings and reflection records" },
   { version: 13, name: "trust-and-external-sources", summary: "validated findings, audit events, external sources and revision-safe evidence" },
+  { version: 14, name: "coverage-layers-and-edge-boundaries", summary: "coverage_layers table; edges.evidence_id + edges.boundary; forced rebuild on schema bump" },
 ] as const;
 
 // Idempotent additive migrations for schemas that predate SCHEMA_VERSION.
@@ -737,6 +752,12 @@ function migrate(db: Database.Database, _from: number): void {
   if (!edgeCols.includes("source_type")) {
     db.exec("ALTER TABLE edges ADD COLUMN source_type TEXT");
   }
+  if (!edgeCols.includes("evidence_id")) db.exec("ALTER TABLE edges ADD COLUMN evidence_id TEXT");
+  if (!edgeCols.includes("boundary")) db.exec("ALTER TABLE edges ADD COLUMN boundary TEXT");
+  // coverage_layers is CREATE TABLE IF NOT EXISTS in the DDL, and openDatabase
+  // runs db.exec(DDL) BEFORE calling migrate() (see openDatabase below) — so
+  // the table already exists by the time this function runs on an upgrade.
+  // No CREATE TABLE needed here.
   const branchCols = (db.prepare("PRAGMA table_info(branches)").all() as { name: string }[]).map(
     (c) => c.name,
   );
@@ -823,7 +844,14 @@ function isSchemaCurrent(db: Database.Database): boolean {
   const edgeCols = (db.prepare("PRAGMA table_info(edges)").all() as { name: string }[]).map(
     (c) => c.name,
   );
-  if (!edgeCols.includes("status") || !edgeCols.includes("source_type")) return false;
+  if (
+    !edgeCols.includes("status") ||
+    !edgeCols.includes("source_type") ||
+    !edgeCols.includes("evidence_id") ||
+    !edgeCols.includes("boundary")
+  ) {
+    return false;
+  }
   const branchCols = (db.prepare("PRAGMA table_info(branches)").all() as { name: string }[]).map(
     (c) => c.name,
   );

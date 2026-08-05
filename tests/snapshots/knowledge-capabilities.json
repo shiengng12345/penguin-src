@@ -3035,7 +3035,7 @@
     ]
   },
   "mcp": {
-    "schemaVersion": "13",
+    "schemaVersion": "14",
     "contractVersion": "2",
     "buildId": "local",
     "capabilityHash": "9bd579294b91fbe6397df3eb5045457858221dbaa922627c5b108f6cf24f5a55",

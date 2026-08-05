@@ -229,7 +229,7 @@ test("null store → not-initialized hint (no crash)", () => {
 test("knowledge capability negotiation exposes the shared tuple and rejects incompatible majors", () => {
   const current = handleKnowledgeTool("knowledge_capabilities", { contract_version: "2" }, null);
   assert.equal(current.contractVersion, "2");
-  assert.equal(current.schemaVersion, "13");
+  assert.equal(current.schemaVersion, "14");
   assert.equal(typeof current.capabilityHash, "string");
   assert.equal(typeof current.buildId, "string");
   const incompatible = handleKnowledgeTool("knowledge_capabilities", { contract_version: "99" }, null);

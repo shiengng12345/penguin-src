@@ -12,8 +12,8 @@ function openStore() {
 
 test("fresh database creates schema v10 source corpus tables and indexes", () => {
   const { store } = openStore();
-  assert.equal(SCHEMA_VERSION, 13);
-  assert.equal(store.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value, "13");
+  assert.equal(SCHEMA_VERSION, 14);
+  assert.equal(store.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value, "14");
   for (const name of [
     "source_blobs",
     "source_blob_lines",
@@ -42,7 +42,7 @@ test("v9-labelled database migration preserves existing graph and is idempotent"
   const migrated = KnowledgeStore.open({ dbPath: join(dir, "knowledge.db"), ledgerPath: join(dir, "ledger.jsonl") });
   assert.ok(migrated.getNode(nodeId));
   assert.ok(migrated.db.prepare("SELECT 1 FROM file_facts WHERE id='legacy-fact'").get());
-  assert.equal(migrated.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value, "13");
+  assert.equal(migrated.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value, "14");
   migrated.close();
   const reopened = KnowledgeStore.open({ dbPath: join(dir, "knowledge.db"), ledgerPath: join(dir, "ledger.jsonl") });
   assert.ok(reopened.db.prepare("SELECT 1 FROM sqlite_master WHERE name='source_blobs'").get());
