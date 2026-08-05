@@ -282,16 +282,20 @@ test("help exposes every canonical capability ID", async () => {
   for (const capability of CAPABILITIES) assert.match(help, new RegExp(capability.id.replaceAll(".", "\\.")));
 });
 
-test("v2 JSON revision failures use one typed error envelope and exit 3", async () => {
-  const { deps, lines } = harness();
+test("v2 unresolvable revision selectors now raise a ScopeResolutionError and exit 4", async () => {
+  // Behavior change from Task 6 (CLI scope wiring): search's revision
+  // resolution runs through resolveCliRevision/resolveQueryScope like every
+  // other scoped verb now, replacing the old RevisionResolutionError-based
+  // JSON envelope (`{ ok: false, error: { code: "REVISION_NOT_FOUND" } }`,
+  // exit 3) with the same ScopeResolutionError reporting (deps.err + exit 4)
+  // used everywhere else. See reportScopeResolutionError in command-dispatch.ts.
+  const { deps, lines, errs } = harness();
   const store = deps.openStore();
   store.registerRepo({ name: "fixture", rootPath: deps.cwd });
   store.close();
-  assert.equal(await runCli(["search", "needle", "--mode", "exact", "--repo", "fixture", "--snapshot", "missing", "--json"], deps), 3);
-  assert.equal(lines.length, 1);
-  const result = JSON.parse(lines[0]);
-  assert.equal(result.ok, false);
-  assert.equal(result.error.code, "REVISION_NOT_FOUND");
+  assert.equal(await runCli(["search", "needle", "--mode", "exact", "--repo", "fixture", "--snapshot", "missing", "--json"], deps), 4);
+  assert.equal(lines.length, 0);
+  assert.match(errs.join("\n"), /repository not found/);
 });
 
 test("unscoped search outside an indexed repo reports its default workspace scope", async () => {

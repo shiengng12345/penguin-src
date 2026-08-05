@@ -65,6 +65,8 @@ import {
   canonicalPathForCheck,
   RevisionResolutionError,
   compileKnowledgeDsl,
+  resolveQueryScope,
+  ScopeResolutionError,
   type GraphMode,
   type KnowledgeStore,
 } from "@penguin/knowledge-core";
@@ -76,7 +78,7 @@ import { discoverSubRepos, isGitRepo, type RepoCandidate } from "./multi-repo.js
 import { runApiDocCommand } from "./api-doc-command.js";
 import { createKnowledgeApiDocAdapter } from "./api-doc-knowledge-adapter.js";
 import { createLarkProcessRunner, LarkCliDocumentClient, type LarkProcessRunner } from "./lark-document-client.js";
-import { CAPABILITIES, capabilityHash, listCliRegistrations } from "@penguin/knowledge-contracts";
+import { CAPABILITIES, capabilityHash, listCliRegistrations, type ScopeEnvelope } from "@penguin/knowledge-contracts";
 import { runQueryServer } from "./query-server.js";
 import { parseCliArguments } from "./args.js";
 export { listCliRegistrations } from "@penguin/knowledge-contracts";
@@ -154,14 +156,6 @@ function resolveRepoId(store: KnowledgeStore, s: string | undefined): string | n
   return pathRow?.id ?? null;
 }
 
-function resolveRepoForCwd(store: KnowledgeStore, cwd: string): string | null {
-  const normalized = canonicalPathForCheck(cwd);
-  const rows = store.db.prepare("SELECT id, root_path AS rootPath FROM repos ORDER BY length(root_path) DESC").all() as Array<{ id: string; rootPath: string }>;
-  return rows.find((row) => {
-    const root = canonicalPathForCheck(row.rootPath);
-    return normalized === root || normalized.startsWith(`${root}/`);
-  })?.id ?? null;
-}
 function resolveBranchId(store: KnowledgeStore, repoId: string, s: string | undefined): string | null {
   if (!s) {
     return requireRevisionContext(store, { repoId }).branchId ?? null;
@@ -184,15 +178,54 @@ function reportRevisionResolutionError(deps: CliDeps, error: unknown): void {
   ].filter(Boolean).join("\n"));
 }
 
-function resolveCliRevision(store: KnowledgeStore, target: string, selector: { repo?: string; branch?: string; commitSha?: string; snapshotId?: string }): import("@penguin/knowledge-core").RevisionContext | undefined {
-  if (!selector.repo && !selector.branch && !selector.commitSha && !selector.snapshotId) return undefined;
-  let repoId = selector.repo ? resolveRepoId(store, selector.repo) : undefined;
-  if (!repoId) {
+function reportScopeResolutionError(deps: CliDeps, error: unknown): number {
+  if (!(error instanceof ScopeResolutionError)) throw error;
+  deps.err([
+    error.message,
+    error.candidates.length ? `Indexed branches:\n${error.candidates.map((c) => `  ${c.branchName} @ ${c.commitSha}`).join("\n")}` : "",
+    error.code === "BRANCH_NOT_INDEXED" ? "Pass --allow-fallback to query another indexed branch instead." : "",
+  ].filter(Boolean).join("\n"));
+  return 4;
+}
+
+// Git-aware scope resolution for every scoped read verb. `cwd` is CliDeps.cwd
+// (a plain string in this codebase, not a factory — see the CliDeps
+// interface above). repoId is inferred, in order: an explicit --repo flag; a
+// unique symbol match for `target`; resolveQueryScope's own cwd→repo-root
+// inference. REPO_REQUIRED (repo genuinely undeterminable) is swallowed here
+// and softened to "no scope" — the pragmatic fallback every non-search verb
+// used before this change (they previously ran fully unscoped whenever no
+// --repo/--branch/--commit/--snapshot flag was given at all). Every other
+// ScopeResolutionError (BRANCH_NOT_INDEXED, SCOPE_NOT_FOUND, REPO_AMBIGUOUS)
+// propagates to the caller, which reports it via reportScopeResolutionError
+// and exits 4.
+function resolveCliRevision(
+  store: KnowledgeStore,
+  target: string,
+  selector: { repo?: string; branch?: string; commitSha?: string; snapshotId?: string; allowFallback?: boolean },
+  cwd: string,
+): { revision: import("@penguin/knowledge-core").RevisionContext | undefined; scope: ScopeEnvelope | undefined } {
+  let repoId = selector.repo ? resolveRepoId(store, selector.repo) ?? undefined : undefined;
+  if (!repoId && target) {
     const match = resolveSymbolMatches(store, target);
     if (match.kind === "unique") repoId = store.getNode(match.nodeId)?.repo_id ?? undefined;
   }
-  if (!repoId) throw new Error("--repo is required when selecting --branch, --commit, or --snapshot");
-  return requireRevisionContext(store, { repoId, branch: selector.branch, commitSha: selector.commitSha, snapshotId: selector.snapshotId });
+  try {
+    const scope = resolveQueryScope(store, {
+      ...(repoId ? { repoId } : {}),
+      cwd,
+      branch: selector.branch,
+      commitSha: selector.commitSha,
+      snapshotId: selector.snapshotId,
+      allowFallback: selector.allowFallback,
+    });
+    return { revision: scope.revision, scope };
+  } catch (error) {
+    if (error instanceof ScopeResolutionError && error.code === "REPO_REQUIRED") {
+      return { revision: undefined, scope: undefined };
+    }
+    throw error;
+  }
 }
 const GRAPH_VERB_MODE: Record<string, GraphMode> = {
   callers: "who_calls", calls: "calls_of", impact: "impact",
@@ -201,12 +234,25 @@ const GRAPH_VERB_MODE: Record<string, GraphMode> = {
 
 const EVENT_OUTPUT = new WeakMap<object, boolean>();
 
-function emit(deps: CliDeps, json: boolean, human: string, data: unknown): void {
+function emit(deps: CliDeps, json: boolean, human: string, data: unknown, scope?: ScopeEnvelope): void {
+  const payload = scope && data && typeof data === "object" && !Array.isArray(data)
+    ? { ...(data as Record<string, unknown>), locator: scope.locator, alignment: scope.alignment, warnings: scope.warnings }
+    : data;
   if (EVENT_OUTPUT.get(deps)) {
-    deps.out(JSON.stringify({ type: "result", result: data }));
+    deps.out(JSON.stringify({ type: "result", result: payload }));
     return;
   }
-  deps.out(json ? JSON.stringify(data) : human);
+  if (json) {
+    deps.out(JSON.stringify(payload));
+    return;
+  }
+  const footer = scope
+    ? [
+        `scope: ${scope.locator.repoName}@${scope.locator.branchName ?? "(unknown)"} ${(scope.locator.commitSha ?? "").slice(0, 7) || "(none)"} (${scope.alignment})`,
+        ...scope.warnings.map((w) => `warning: ${w.message}`),
+      ].join("\n")
+    : "";
+  deps.out(footer ? `${human}\n${footer}` : human);
 }
 
 function emitProgress(deps: CliDeps, payload: unknown): void {
@@ -309,7 +355,7 @@ const HELP = `penguin — Penguin Knowledge CLI
   penguin install               symlink penguin onto PATH
   penguin help                  this help
 
-Global: --json (machine-readable), --branch <b>`;
+Global: --json (machine-readable), --repo/--branch/--commit/--snapshot (scope selectors), --allow-fallback (answer from another indexed branch when the checked-out one isn't indexed)`;
 
 const CANONICAL_HELP = `${HELP}\nCanonical capability IDs (use \'penguin capabilities --json\' for schemas and status):\n${CAPABILITIES.map((capability) => `  ${capability.id}`).join("\n")}\n`;
 
@@ -1327,30 +1373,24 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           }
           const selectedRepoIds = resolvedRepoIds.filter((repoId): repoId is string => Boolean(repoId));
           let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
-          try {
-            if (repoSelectors.length <= 1 && (optionValue("repo") || optionValue("branch") || optionValue("commit") || optionValue("snapshot"))) {
-              revision = resolveCliRevision(store, queryText, { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot") });
+          let scope: ScopeEnvelope | undefined;
+          if (repoSelectors.length <= 1) {
+            try {
+              ({ revision, scope } = resolveCliRevision(store, queryText, { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd));
+            } catch (error) {
+              return reportScopeResolutionError(deps, error);
             }
-          } catch (error) {
-            if (json && error instanceof RevisionResolutionError) {
-              deps.out(JSON.stringify({ ok: false, error: { code: "REVISION_NOT_FOUND", message: error.message, details: { candidates: error.candidates }, retryable: false } }));
-            } else {
-              reportRevisionResolutionError(deps, error);
-            }
-            return json ? 3 : 2;
           }
-          const defaultRepoId = selectedRepoIds.length === 0 && !revision && revisionKinds.length === 0
-            ? resolveRepoForCwd(store, deps.cwd)
-            : null;
-          const repoId = selectedRepoIds[0] ?? revision?.repoId ?? defaultRepoId;
+          // repoId falls back to null (not undefined) when nothing was
+          // resolvable — search is the one verb allowed to go workspace-wide
+          // (see the DEFAULT_WORKSPACE_SCOPE warning below); every other
+          // scoped verb hard-errors instead via resolveCliRevision's throw.
+          const repoId = selectedRepoIds[0] ?? revision?.repoId ?? null;
           const sourceSnapshotId = revision && !revision.snapshotId.startsWith("legacy:")
             ? revision.snapshotId
             : (revision?.branchId
               ? (store.db.prepare("SELECT current_snapshot_id FROM branches WHERE id=?").get(revision.branchId) as { current_snapshot_id: string | null } | undefined)?.current_snapshot_id ?? null
-              : (store.db.prepare(repoId
-                ? "SELECT current_snapshot_id FROM branches WHERE repo_id=? AND status='live' AND current_snapshot_id IS NOT NULL ORDER BY default_branch DESC, name LIMIT 1"
-                : "SELECT current_snapshot_id FROM branches WHERE status='live' AND current_snapshot_id IS NOT NULL ORDER BY default_branch DESC, name LIMIT 1")
-                .get(...(repoId ? [repoId] : [])) as { current_snapshot_id: string | null } | undefined)?.current_snapshot_id ?? null);
+              : null);
           const useV2Search = !flags.includes("--legacy-search");
           if (useV2Search || optionValue("mode") || flags.includes("--compact") || optionValue("cursor")) {
             const revisions = sourceSnapshotId
@@ -1366,7 +1406,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
             if (markdownPredicates.length) response = { ...response, hits: filterHitsByMarkdownPredicates(store, response.hits, markdownPredicates), page: { ...response.page, totalIsExact: false }, diagnostics: { ...response.diagnostics, warnings: [...response.diagnostics.warnings, { code: "MARKDOWN_LOCATOR_FILTER_APPLIED", message: "line/section/block/task predicates were applied with exact Markdown locators" }] } };
             if (response.error) {
               const envelope = { ok: false, error: response.error, response };
-              emit(deps, json, `${response.error.code}: ${response.error.message}`, envelope);
+              emit(deps, json, `${response.error.code}: ${response.error.message}`, envelope, scope);
               return 3;
             }
             const human = [
@@ -1375,13 +1415,13 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
               ...(response.diagnostics.warnings.length ? [`warnings: ${response.diagnostics.warnings.map((warning) => warning.code).join(", ")}`] : []),
               ...response.diagnostics.nextActions.map((action) => `next: ${action.command} — ${action.reason}`),
             ].join("\n");
-            emit(deps, json, human, response);
+            emit(deps, json, human, response, scope);
             return 0;
           }
           const regexResult = sourceSnapshotId && mode === "regex"
             ? searchRegex(store, { snapshotId: sourceSnapshotId, repoId }, queryText, { flags: optionValue("regex-flags") ?? "g", maxScannedBytes: numberOption("max-scanned-bytes"), allowPartial: flags.includes("--allow-partial") })
             : null;
-          if (regexResult?.status === "error") { emit(deps, json, `${regexResult.code}: ${regexResult.message}`, regexResult); return 1; }
+          if (regexResult?.status === "error") { emit(deps, json, `${regexResult.code}: ${regexResult.message}`, regexResult, scope); return 1; }
           const sourceHits = sourceSnapshotId && ["auto", "exact", "phrase", "substring"].includes(mode)
             ? searchSource(store, { snapshotId: sourceSnapshotId, repoId }, { query: queryText, mode: mode as "auto" | "exact" | "phrase" | "substring", options: { caseSensitive: true, wholeWord: false, includeGenerated: true, includeVendor: true, includeExcludedMetadata: false, semantic: "off", compact: false, explain: false } }).map((hit) => ({ ...hit, lane: "source" as const }))
             : [];
@@ -1397,7 +1437,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           const table = hits
             .map((h) => "lane" in h ? (h.lane === "path" ? `path\t${h.filePath}\t${h.coverageStatus}\t${h.metadataOnly ? "metadata-only" : "content"}` : `source\t${h.filePath}\t${h.startLine}\t${h.endLine}`) : `${h.nodeType}\t${h.identityKey}\t${h.filePath ?? "-"}\t${h.branch ?? "-"}\t${h.rank ?? "-"}`)
             .join("\n");
-          emit(deps, json, table || "(no results)", hits);
+          emit(deps, json, table || "(no results)", hits, scope);
           return 0;
         }
         case "graph-query": {
@@ -1438,14 +1478,15 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           // AI Context Pack: --json → structured; default → Markdown for an agent.
           const target = pos.join(" ");
           let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
-          try { revision = resolveCliRevision(store, target, { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot") }); }
-          catch (error) { reportRevisionResolutionError(deps, error); return 2; }
+          let scope: ScopeEnvelope | undefined;
+          try { ({ revision, scope } = resolveCliRevision(store, target, { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd)); }
+          catch (error) { return reportScopeResolutionError(deps, error); }
           const pack = buildContextPack(store, target, { revision });
           if (!pack.focus) {
-            emit(deps, json, renderContextPackMarkdown(pack), pack);
+            emit(deps, json, renderContextPackMarkdown(pack), pack, scope);
             return 1;
           }
-          emit(deps, json, renderContextPackMarkdown(pack), pack);
+          emit(deps, json, renderContextPackMarkdown(pack), pack, scope);
           return 0;
         }
         case "locate":
@@ -1453,8 +1494,9 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           const target = pos.join(" ");
           const requestedBranch = optionValue("branch");
           let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
-          try { revision = resolveCliRevision(store, target, { repo: optionValue("repo"), branch: requestedBranch, commitSha: optionValue("commit"), snapshotId: optionValue("snapshot") }); }
-          catch (error) { reportRevisionResolutionError(deps, error); return 2; }
+          let scope: ScopeEnvelope | undefined;
+          try { ({ revision, scope } = resolveCliRevision(store, target, { repo: optionValue("repo"), branch: requestedBranch, commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd)); }
+          catch (error) { return reportScopeResolutionError(deps, error); }
           let branchId: string | undefined;
           if (requestedBranch) {
             const exact = store.db.prepare("SELECT id FROM branches WHERE id=?").get(requestedBranch) as { id: string } | undefined;
@@ -1475,34 +1517,36 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
             depth: numberOption("depth"),
             limit: numberOption("limit"),
           });
-          emit(deps, json, JSON.stringify(pack, null, 2), pack);
+          emit(deps, json, JSON.stringify(pack, null, 2), pack, scope);
           return pack.focus || pack.callPath.length > 0 ? 0 : 1;
         }
         case "flow": {
           // Flow Explorer: linear execution chain from an endpoint/symbol.
           const target = pos.join(" ");
           let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
-          try { revision = resolveCliRevision(store, target, { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot") }); }
-          catch (error) { reportRevisionResolutionError(deps, error); return 2; }
+          let scope: ScopeEnvelope | undefined;
+          try { ({ revision, scope } = resolveCliRevision(store, target, { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd)); }
+          catch (error) { return reportScopeResolutionError(deps, error); }
           const flow = buildFlow(store, target, { revision });
           if (!flow.root) {
-            emit(deps, json, renderFlowMarkdown(flow), flow);
+            emit(deps, json, renderFlowMarkdown(flow), flow, scope);
             return 1;
           }
-          emit(deps, json, renderFlowMarkdown(flow), flow);
+          emit(deps, json, renderFlowMarkdown(flow), flow, scope);
           if (flow.diagnostic) return 1; // resolved, but a dead end — signal via exit code, still print the (partial) flow
           return 0;
         }
         case "affected": {
           // Blast radius of changed files (pass paths, or a git diff piped in).
           let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
-          try { revision = resolveCliRevision(store, "", { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot") }); }
-          catch (error) { reportRevisionResolutionError(deps, error); return 2; }
+          let scope: ScopeEnvelope | undefined;
+          try { ({ revision, scope } = resolveCliRevision(store, "", { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd)); }
+          catch (error) { return reportScopeResolutionError(deps, error); }
           const a = affectedByFiles(store, pos, { revision });
           const txt = pos.length === 0 ? "usage: penguin affected <file>…"
             : `changed ${a.changed.length} · impacted ${a.impacted.length} · tests ${a.tests.length} · routes ${a.routes.length}\n`
               + a.routes.map((r) => `  route: ${r}`).join("\n");
-          emit(deps, json, txt, a);
+          emit(deps, json, txt, a, scope);
           return 0;
         }
         case "architecture": {
@@ -1531,9 +1575,13 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           return 0;
         }
         case "timeline": {
-          const t = timeline(store, { limit: pos[0] ? Number(pos[0]) || 50 : 50, repoId: optionValue("repo"), revision: (() => { try { return resolveCliRevision(store, "", { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot") }); } catch { return undefined; } })() });
+          let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
+          let scope: ScopeEnvelope | undefined;
+          try { ({ revision, scope } = resolveCliRevision(store, "", { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd)); }
+          catch (error) { return reportScopeResolutionError(deps, error); }
+          const t = timeline(store, { limit: pos[0] ? Number(pos[0]) || 50 : 50, repoId: optionValue("repo"), revision });
           const txt = t.entries.map((e) => `${(e.date ?? "").slice(0, 10)}  ${e.repo ?? "?"}  ${e.merge ? "⑃ " : ""}${e.subject}${e.tags.length ? ` [${e.tags.join(",")}]` : ""}`).join("\n") || "(no commits indexed)";
-          emit(deps, json, txt, t);
+          emit(deps, json, txt, t, scope);
           return 0;
         }
         case "samples": {
@@ -1549,11 +1597,12 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
         }
         case "compare": {
           let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
-          try { revision = resolveCliRevision(store, pos[0] ?? "", { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot") }); }
-          catch (error) { reportRevisionResolutionError(deps, error); return 2; }
+          let scope: ScopeEnvelope | undefined;
+          try { ({ revision, scope } = resolveCliRevision(store, pos[0] ?? "", { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd)); }
+          catch (error) { return reportScopeResolutionError(deps, error); }
           const diff = compareBranches(store, pos[0] ?? "", pos[1] ?? "", pos[2] ?? "", { revision });
           if (!diff) { deps.err("symbol not found"); return 1; }
-          emit(deps, json, diff.identical ? "identical (no diff)" : "differs", diff);
+          emit(deps, json, diff.identical ? "identical (no diff)" : "differs", diff, scope);
           return 0;
         }
         case "status": {
@@ -1593,10 +1642,11 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
         }
         case "path": {
           let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
-          try { revision = resolveCliRevision(store, pos[0] ?? "", { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot") }); }
-          catch (error) { reportRevisionResolutionError(deps, error); return 2; }
+          let scope: ScopeEnvelope | undefined;
+          try { ({ revision, scope } = resolveCliRevision(store, pos[0] ?? "", { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd)); }
+          catch (error) { return reportScopeResolutionError(deps, error); }
           const res = exploreGraph(store, "path", pos[0] ?? "", { to: pos[1], revision });
-          emit(deps, json, res.nodes.map((n) => n.title).join(" → ") || "(no path)", res);
+          emit(deps, json, res.nodes.map((n) => n.title).join(" → ") || "(no path)", res, scope);
           return 0;
         }
         case "suggestions": {
@@ -1638,12 +1688,13 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           }
           if (!branchId) { deps.err("branch not found for that repo"); return 1; }
           let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
-          try { revision = resolveCliRevision(store, pos[0] ?? "", { repo: pos[0], branch: optionValue("branch") ?? pos[1], commitSha: optionValue("commit"), snapshotId: optionValue("snapshot") }); }
-          catch (error) { reportRevisionResolutionError(deps, error); return 2; }
+          let scope: ScopeEnvelope | undefined;
+          try { ({ revision, scope } = resolveCliRevision(store, pos[0] ?? "", { repo: pos[0], branch: optionValue("branch") ?? pos[1], commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd)); }
+          catch (error) { return reportScopeResolutionError(deps, error); }
           const files = listIndexedFiles(store, repoId, revision ? { revision } : branchId);
           emit(deps, json,
             files.map((f) => `${f.status === "indexed" ? " " : "·"} ${f.filePath}${f.lang ? `  [${f.lang}]` : ""}`).join("\n") || "(no files)",
-            files);
+            files, scope);
           return 0;
         }
         case "filesymbols": {
