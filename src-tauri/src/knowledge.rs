@@ -1427,7 +1427,7 @@ pub(crate) async fn knowledge_query_canonical<R: tauri::Runtime>(
     input: serde_json::Value,
     request_id: Option<String>,
 ) -> Result<String, String> {
-    if !matches!(capability_id.as_str(), "knowledge.search" | "knowledge.get_hit") {
+    if !matches!(capability_id.as_str(), "knowledge.search" | "knowledge.get_hit" | "knowledge.status_panel") {
         return Err("CANONICAL_CAPABILITY_NOT_ALLOWED".to_string());
     }
     tauri::async_runtime::spawn_blocking(move || resident_query(&app, &capability_id, input, request_id).map(|result| result.to_string()))

@@ -189,6 +189,43 @@ export function knowledgeGetHit(locator: KnowledgeSearchV2Response["hits"][numbe
   return canonicalQuery<KnowledgeHitDetail>("knowledge.get_hit", { filePath: locator.filePath, snapshotId: locator.revisionId, contextLines: Math.max(0, Math.min(100, contextLines)), ...(locator.startLine ? { startLine: locator.startLine } : {}), ...(locator.startByte !== undefined ? { startByte: locator.startByte } : {}) }, options.signal);
 }
 
+// Repo trust snapshot for the Wiki footer (§ knowledge.status_panel): which
+// branch git has checked out, whether the index is caught up, and how much of
+// the repo the index actually covers. Mirrors packages/knowledge-core/src/status-panel.ts EXACTLY.
+export interface RepoStatusPanel {
+  repoId: string;
+  repoName: string;
+  rootPath: string;
+  branchName: string | null;
+  revisionAlignment: "aligned" | "behind" | "branch_not_indexed" | "git_unavailable";
+  indexedBranch: string | null;
+  lastIndexedAt: string | null;
+  staleReason: string | null;
+  coverage: { admitted: number; excluded: number; failed: number } | null;
+}
+
+export interface StatusPanel {
+  db: { connected: true; schemaVersion: number };
+  repos: RepoStatusPanel[];
+}
+
+// Short TTL: the footer polls this repeatedly, so a longer cache (matching
+// knowledgeServiceGraph/knowledgeEvidenceList's CACHE_TTL_MS) would make the
+// footer look frozen across a poll interval.
+const STATUS_PANEL_CACHE_TTL_MS = 5_000;
+let statusPanelCache: { expiresAt: number; promise: Promise<StatusPanel> } | null = null;
+
+export function knowledgeStatusPanel(options: KnowledgeRequestOptions = {}): Promise<StatusPanel> {
+  const now = Date.now();
+  if (statusPanelCache && statusPanelCache.expiresAt > now) return statusPanelCache.promise;
+  const promise = canonicalQuery<StatusPanel>("knowledge.status_panel", {}, options.signal).catch((error) => {
+    statusPanelCache = null;
+    throw error;
+  });
+  statusPanelCache = { expiresAt: now + STATUS_PANEL_CACHE_TTL_MS, promise };
+  return promise;
+}
+
 export function knowledgeNode(idOrName: string, options: KnowledgeRequestOptions = {}): Promise<KnowledgeNodeDetail> {
   return query<KnowledgeNodeDetail>(["node", idOrName], options.signal);
 }
