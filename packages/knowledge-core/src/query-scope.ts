@@ -48,6 +48,37 @@ export function readGitStateDefault(rootPath: string): GitState | null {
   }
 }
 
+/**
+ * Wraps a GitStateReader with a per-rootPath TTL memoizing cache. Git state
+ * (branch/HEAD/dirty) rarely changes within the span of a few seconds, but
+ * `readGitStateDefault` shells out 3 git subprocesses per call — expensive
+ * when a long-lived server resolves scope on every query. `null` results
+ * (git-unavailable) are cached too, since re-probing an unavailable repo on
+ * every call is just as wasteful.
+ *
+ * Only used as the module-level default reader; callers that inject
+ * `input.readGitState` bypass this cache entirely.
+ */
+export function cachedGitStateReader(
+  ttlMs = 2000,
+  now: () => number = Date.now,
+  read: GitStateReader = readGitStateDefault,
+): GitStateReader {
+  const cache = new Map<string, { state: GitState | null; at: number }>();
+  return (rootPath: string) => {
+    const cached = cache.get(rootPath);
+    const nowMs = now();
+    if (cached && nowMs - cached.at < ttlMs) {
+      return cached.state;
+    }
+    const state = read(rootPath);
+    cache.set(rootPath, { state, at: nowMs });
+    return state;
+  };
+}
+
+const defaultGitReader = cachedGitStateReader();
+
 // ---------------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------------
@@ -214,7 +245,7 @@ export function resolveQueryScope(store: KnowledgeStore, input: ResolveQueryScop
     });
 
     const warnings: StructuredWarning[] = [];
-    const gitState = input.readGitState ? input.readGitState(repoRow.rootPath) : readGitStateDefault(repoRow.rootPath);
+    const gitState = input.readGitState ? input.readGitState(repoRow.rootPath) : defaultGitReader(repoRow.rootPath);
     if (gitState?.branch && context.branch && gitState.branch !== context.branch) {
       warnings.push(
         warning(
@@ -229,7 +260,7 @@ export function resolveQueryScope(store: KnowledgeStore, input: ResolveQueryScop
   }
 
   // --- 3. No selector — read git state at the repo root --------------------
-  const gitState = input.readGitState ? input.readGitState(repoRow.rootPath) : readGitStateDefault(repoRow.rootPath);
+  const gitState = input.readGitState ? input.readGitState(repoRow.rootPath) : defaultGitReader(repoRow.rootPath);
 
   if (!gitState || !gitState.branch) {
     // git unavailable or detached HEAD → sole-live-branch fallback rule.

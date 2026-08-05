@@ -4,7 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { KnowledgeStore, resolveQueryScope, ScopeResolutionError } from "../packages/knowledge-core/dist/index.js";
+import { KnowledgeStore, resolveQueryScope, ScopeResolutionError, cachedGitStateReader } from "../packages/knowledge-core/dist/index.js";
 
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), "penguin-query-scope-"));
@@ -95,4 +95,18 @@ test("explicit selector without readGitState defaults to real git and still warn
   assert.equal(scope.alignment, "explicit");
   assert.ok(scope.warnings.some((w) => w.code === "SCOPE_DIFFERS_FROM_CHECKOUT"));
   store.close();
+});
+
+test("cachedGitStateReader memoizes per rootPath within TTL and refreshes after", () => {
+  let calls = 0;
+  let clock = 0;
+  const inner = () => { calls += 1; return { branch: "main", headSha: `sha-${calls}`, dirty: false }; };
+  const reader = cachedGitStateReader(2000, () => clock, inner);
+  assert.equal(reader("/repo-a").headSha, "sha-1");
+  clock = 1000;
+  assert.equal(reader("/repo-a").headSha, "sha-1"); // cached
+  assert.equal(reader("/repo-b").headSha, "sha-2"); // different root, separate entry
+  clock = 3001;
+  assert.equal(reader("/repo-a").headSha, "sha-3"); // TTL expired, re-read
+  assert.equal(calls, 3);
 });

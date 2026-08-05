@@ -43,6 +43,7 @@ export {
   resolveQueryScope,
   resolveRepoForPath,
   readGitStateDefault,
+  cachedGitStateReader,
   ScopeResolutionError,
   type GitState,
   type GitStateReader,
