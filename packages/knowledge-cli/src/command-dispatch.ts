@@ -219,7 +219,9 @@ function reportScopeResolutionError(deps: CliDeps, error: unknown): number {
 function resolveRepoIdFromSnapshot(store: KnowledgeStore, snapshotId: string): string | undefined {
   if (snapshotId.startsWith("legacy:")) {
     const branchId = snapshotId.slice("legacy:".length);
-    const row = store.db.prepare("SELECT repo_id AS repoId FROM branches WHERE id=?").get(branchId) as { repoId: string } | undefined;
+    // status <> 'gone' mirrors search-engine.ts's revisionContext() guard —
+    // a removed branch's id must not resurrect as a usable repo signal.
+    const row = store.db.prepare("SELECT repo_id AS repoId FROM branches WHERE id=? AND status <> 'gone'").get(branchId) as { repoId: string } | undefined;
     return row?.repoId;
   }
   const row = store.db.prepare("SELECT repo_id AS repoId FROM revision_snapshots WHERE id=?").get(snapshotId) as { repoId: string } | undefined;
@@ -258,7 +260,20 @@ function resolveCliRevision(
   // indexed repo root). Only consulted once every other signal has failed —
   // an explicit --repo, or a unique symbol match, still wins.
   if (!repoId && selector.snapshotId) {
-    repoId = resolveRepoIdFromSnapshot(store, selector.snapshotId) ?? undefined;
+    const inferred = resolveRepoIdFromSnapshot(store, selector.snapshotId);
+    if (inferred) {
+      repoId = inferred;
+    } else {
+      // The caller explicitly named a snapshot and it genuinely doesn't
+      // exist (e.g. a Wiki search hit whose snapshot was since GC'd). Fail
+      // loudly here — if this fell through to resolveQueryScope with repoId
+      // still undefined, a cwd that happens to resolve to SOME repo would
+      // either answer from that unrelated repo (silently wrong) or, if cwd
+      // resolves to nothing, hit REPO_REQUIRED, which is swallowed below
+      // into a fully unscoped answer. Both discard the caller's stated
+      // intent instead of reporting it as broken.
+      throw new ScopeResolutionError("SCOPE_NOT_FOUND", `snapshot not found: ${selector.snapshotId}`);
+    }
   }
   try {
     const scope = resolveQueryScope(store, {

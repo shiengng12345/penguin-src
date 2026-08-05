@@ -227,3 +227,22 @@ test("context with --snapshot alone (no --repo) resolves that snapshot's repo ev
   assert.equal(payload.alignment, "explicit");
   store.close();
 });
+
+// Review follow-up: an explicit --snapshot that doesn't exist at all (e.g. a
+// Wiki search hit whose cached revisionId points at a snapshot since GC'd),
+// with no other repo signal available (target matches nothing, cwd is
+// outside every registered repo), must fail loudly — not fall through to
+// REPO_REQUIRED's unscoped softening. That softening exists for the "no
+// scope selector given at all" case, not for "a scope selector was given and
+// it's bogus". Silently answering unscoped (or, worse, from whatever repo
+// cwd happens to resolve to) would hide that the caller's stated revision
+// doesn't exist.
+test("context with a --snapshot that doesn't exist anywhere exits 4 naming the snapshot, instead of silently answering unscoped", async () => {
+  const { store } = twoRepoFixture();
+  const outside = mkdtempSync(join(tmpdir(), "penguin-cli-scope-outside-"));
+  const lines = [];
+  const code = await runCli(["context", "NoSuchSymbol", "--snapshot", "no-such-snapshot", "--json"], cliDeps(store, outside, lines));
+  assert.equal(code, 4);
+  assert.match(lines.join("\n"), /no-such-snapshot/);
+  store.close();
+});

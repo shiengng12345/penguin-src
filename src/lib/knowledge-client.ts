@@ -209,12 +209,18 @@ export interface SearchHitLocator {
   repoId: string;
   repoName: string;
   revisionId: string;
-  revisionKind?: "commit" | "working_tree";
+  revisionKind: "commit" | "working_tree";
+  branch?: string;
   commitSha?: string;
+  worktreeFingerprint?: string;
   filePath: string;
   startLine?: number;
   endLine?: number;
+  startColumn?: number;
+  endColumn?: number;
   startByte?: number;
+  endByte?: number;
+  offsetEncoding?: "utf8_normalized";
   nodeId?: string;
 }
 
