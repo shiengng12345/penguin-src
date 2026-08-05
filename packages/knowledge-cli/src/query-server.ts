@@ -1,6 +1,6 @@
 import { createInterface } from "node:readline";
-import { CAPABILITIES, capabilityHash } from "@penguin/knowledge-contracts";
-import { searchKnowledge, getSourceHit, compactIndexStatus, SCHEMA_VERSION } from "@penguin/knowledge-core";
+import { CAPABILITIES, capabilityHash, type SearchResponse } from "@penguin/knowledge-contracts";
+import { searchKnowledge, getSourceHit, compactIndexStatus, resolveRevisionContext, SCHEMA_VERSION } from "@penguin/knowledge-core";
 import { runCli, type CliDeps } from "./index.js";
 import { dispatchQueryFrame, encodeFrame, parseFrame, queryHello } from "./query-protocol.js";
 
@@ -51,10 +51,51 @@ export async function runQueryServer(deps: CliDeps, input = process.stdin, outpu
       return getSourceHit(store, { snapshotId: request.snapshotId, filePath: request.filePath, ...(request.repoId ? { repoId: request.repoId } : {}), ...(Number.isInteger(request.startLine) ? { startLine: request.startLine } : {}), ...(Number.isInteger(request.endLine) ? { endLine: request.endLine } : {}), ...(Number.isInteger(request.startByte) ? { startByte: request.startByte } : {}), ...(Number.isInteger(request.contextLines) ? { contextLines: request.contextLines } : {}) });
     }
     if (capabilityId === "knowledge.search") {
-      const request = value as { scope?: { revisions?: Array<{ repoId?: string; snapshotId?: string }> } };
-      const scopes = request.scope?.revisions?.filter((revision): revision is { repoId?: string; snapshotId: string } => typeof revision.snapshotId === "string")
-        .map((revision) => ({ ...(revision.repoId ? { repoId: revision.repoId } : {}), snapshotId: revision.snapshotId }));
-      return searchKnowledge(value as never, { store, ...(scopes?.length ? { scopes } : {}), signal });
+      const request = value as { scope?: { revisions?: Array<{ repoId?: string; repoName?: string; branch?: string; snapshotId?: string }> } };
+      const requested = request.scope?.revisions ?? [];
+      const scopes: Array<{ repoId?: string; snapshotId: string }> = [];
+      const scopeWarnings: Array<{ code: string; message: string }> = [];
+      for (const rev of requested) {
+        if (typeof rev.snapshotId === "string") { scopes.push({ ...(rev.repoId ? { repoId: rev.repoId } : {}), snapshotId: rev.snapshotId }); continue; }
+        const repoRow = rev.repoId ?? rev.repoName
+          ? (store.db.prepare("SELECT id FROM repos WHERE id=? OR name=? LIMIT 1").get(rev.repoId ?? rev.repoName, rev.repoName ?? rev.repoId) as { id: string } | undefined)
+          : undefined;
+        if (!repoRow) { scopeWarnings.push({ code: "SCOPE_UNRESOLVED", message: `scope entry did not match a repo: ${JSON.stringify(rev)}` }); continue; }
+        const resolution = resolveRevisionContext(store, { repoId: repoRow.id, ...(rev.branch ? { branch: rev.branch } : {}) });
+        if (resolution.status !== "resolved") { scopeWarnings.push({ code: "SCOPE_UNRESOLVED", message: resolution.reason }); continue; }
+        // resolveRevisionContext's branch/live-fallback paths always mint a
+        // `legacy:<branchId>` snapshotId (revision.ts contextOf() never reads
+        // current_snapshot_id). search-engine's own scope machinery
+        // (scopeRows()/revisionContext() in search-engine.ts) prefers the
+        // branch's real revision_snapshots id whenever one exists, falling
+        // back to the legacy form only when current_snapshot_id is still
+        // null. Re-derive here so a branch that has been promoted to a real
+        // snapshot is scoped to it, not silently downgraded to the legacy
+        // branch-id form that source/path lane lookups can't resolve.
+        const branchRow = resolution.context.branchId
+          ? (store.db.prepare("SELECT current_snapshot_id AS currentSnapshotId FROM branches WHERE id=?").get(resolution.context.branchId) as { currentSnapshotId: string | null } | undefined)
+          : undefined;
+        scopes.push({ repoId: repoRow.id, snapshotId: branchRow?.currentSnapshotId ?? resolution.context.snapshotId });
+      }
+      // searchKnowledge re-derives its own scope filter from
+      // request.scope.revisions on top of whatever `scopes` we pass as
+      // context.scopes (see search-engine.ts): its repoName check
+      // short-circuits before ever consulting branch, and its branch check
+      // requires exact current_snapshot_id equality that a resolved `legacy:`
+      // snapshotId cannot satisfy. Rewriting the outgoing revisions to plain
+      // resolved snapshotId entries keeps that inner filter exact. Dropping
+      // unresolved entries here (rather than forwarding them unresolved)
+      // means a wholly-unresolvable request degrades to the default scope
+      // with a warning instead of tripping searchKnowledge's own
+      // REPOSITORY_NOT_FOUND error.
+      const { revisions: _rawRevisions, ...restScope } = (request.scope ?? {}) as Record<string, unknown>;
+      const requestForSearch = requested.length
+        ? { ...(value as Record<string, unknown>), scope: scopes.length ? { ...restScope, revisions: scopes } : restScope }
+        : value;
+      const response = searchKnowledge(requestForSearch as never, { store, ...(scopes.length ? { scopes } : {}), signal }) as SearchResponse;
+      return scopeWarnings.length
+        ? { ...response, diagnostics: { ...response.diagnostics, warnings: [...response.diagnostics.warnings, ...scopeWarnings] } }
+        : response;
     }
     // Compatibility bridge for the existing Tauri query surface. It keeps the
     // CLI parser/core implementation as the semantic authority while avoiding
