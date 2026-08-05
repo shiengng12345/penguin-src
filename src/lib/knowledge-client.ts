@@ -201,9 +201,26 @@ export function knowledgeSearch(q: string, options: KnowledgeRequestOptions = {}
   return query<KnowledgeSearchHit[]>(["search", q], options.signal);
 }
 
+// Mirrors @penguin/knowledge-contracts's SearchLocator (the wire shape the CLI
+// bridge actually emits) — repoId/nodeId used to be missing here even though
+// the backend always sends them, silently discarding a search hit's exact
+// repo+revision the moment it crossed into the Wiki (Phase 1B Task 7).
+export interface SearchHitLocator {
+  repoId: string;
+  repoName: string;
+  revisionId: string;
+  revisionKind?: "commit" | "working_tree";
+  commitSha?: string;
+  filePath: string;
+  startLine?: number;
+  endLine?: number;
+  startByte?: number;
+  nodeId?: string;
+}
+
 export interface KnowledgeSearchV2Response {
   schemaVersion: "2";
-  hits: Array<{ hitId: string; kind: string; lane: string; title: string; locator: { repoName: string; revisionId: string; revisionKind?: "commit" | "working_tree"; commitSha?: string; filePath: string; startLine?: number; endLine?: number; startByte?: number }; snippet?: string; score: number; rankReasons: string[]; evidence: Array<{ status: string }> }>;
+  hits: Array<{ hitId: string; kind: string; lane: string; title: string; locator: SearchHitLocator; snippet?: string; score: number; rankReasons: string[]; evidence: Array<{ status: string }> }>;
   diagnostics: { searchedLanes: string[]; resolvedScopes: Array<{ repoId: string; snapshotId: string; branch: string }>; coverage: { discovered: number; admitted: number; excluded: number; failed: number; stale: number }; warnings: Array<{ code: string; message: string }>; exclusions: Array<{ filePath: string; code: string; reason: string }> };
   page: { limit: number; nextCursor?: string; totalIsExact: boolean };
 }
@@ -446,8 +463,20 @@ export interface ContextPack extends ScopeEnvelopeFields {
   importers: ContextBrief[];
   signals: string[];
 }
-export function knowledgeContext(target: string, options: KnowledgeRequestOptions = {}): Promise<ContextPack> {
-  return query<ContextPack>(["context", target], options.signal);
+// snapshotId/repoId let a caller pin a Context pack to an exact revision —
+// notably a Wiki search hit's locator (hit.locator.revisionId is the hit's
+// snapshotId; hit.locator.repoId is its repo) — instead of re-resolving
+// `target` by name, which can silently land on a different branch (Phase 1B
+// Task 7). Maps to the CLI's existing --snapshot/--repo scope selectors
+// (Phase 1A resolveCliRevision).
+export function knowledgeContext(
+  target: string,
+  options: KnowledgeRequestOptions & { snapshotId?: string; repoId?: string } = {},
+): Promise<ContextPack> {
+  const args = ["context", target];
+  if (options.snapshotId) args.push("--snapshot", options.snapshotId);
+  if (options.repoId) args.push("--repo", options.repoId);
+  return query<ContextPack>(args, options.signal);
 }
 
 export interface FlowStep { depth: number; nodeId: string; title: string; nodeType: string; via: string }

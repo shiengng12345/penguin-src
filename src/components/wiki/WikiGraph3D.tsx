@@ -16,7 +16,7 @@ const EDGE_COLOR: Record<string, string> = {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type G = any;
 
-export function WikiGraph3D({ data, onNodeClick }: { data: KnowledgeGraphView; onNodeClick: (id: string) => void }) {
+export function WikiGraph3D({ data, onNodeClick }: { data: KnowledgeGraphView; onNodeClick: (id: string, event?: MouseEvent) => void }) {
   const ref = useRef<HTMLDivElement>(null);
   const gRef = useRef<G>(null);
   const dataRef = useRef(data);
@@ -49,7 +49,7 @@ export function WikiGraph3D({ data, onNodeClick }: { data: KnowledgeGraphView; o
           .linkDirectionalParticles(2)
           .linkDirectionalParticleWidth(1.4)
           .linkDirectionalParticleSpeed(0.006)
-          .onNodeClick((n: G) => clickRef.current(String(n.id)))
+          .onNodeClick((n: G, event: MouseEvent) => clickRef.current(String(n.id), event))
           .width(el.clientWidth)
           .height(el.clientHeight);
         // gentle auto-orbit (地球仪); stops while the user drags.

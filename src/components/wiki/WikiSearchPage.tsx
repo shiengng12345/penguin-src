@@ -142,7 +142,10 @@ export function WikiSearchPage() {
     try {
       const [preview, context] = await Promise.all([
         knowledgeGetHit(hit.locator, { signal: controller.signal }, previewLines).catch(() => null),
-        knowledgeContext(hit.locator.filePath, { signal: controller.signal }),
+        // Pin to the hit's exact revision (snapshotId + repo) so re-opening a
+        // search result as a Context pack can't silently re-resolve to a
+        // different branch than the one the hit actually came from.
+        knowledgeContext(hit.locator.filePath, { snapshotId: hit.locator.revisionId, repoId: hit.locator.repoId, signal: controller.signal }),
       ]);
       // A newer openContext may have superseded this one while awaiting — never
       // let a slow earlier response clobber the current selection's context.

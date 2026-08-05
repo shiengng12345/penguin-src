@@ -211,6 +211,21 @@ function reportScopeResolutionError(deps: CliDeps, error: unknown): number {
 // all. When the fallback fires, it's disclosed via a REPO_INFERRED_FROM_QUERY
 // warning appended to the returned scope so the caller never silently
 // diverges from the working directory.
+// Snapshot ids come in two forms (see revision.ts contextOf() / search-engine.ts
+// revisionContext()): `legacy:<branchId>` for branches indexed before immutable
+// snapshot storage existed, or a real `revision_snapshots.id`. Either form
+// belongs to exactly one repo, so a bare --snapshot flag is enough to infer
+// repoId without needing --repo too.
+function resolveRepoIdFromSnapshot(store: KnowledgeStore, snapshotId: string): string | undefined {
+  if (snapshotId.startsWith("legacy:")) {
+    const branchId = snapshotId.slice("legacy:".length);
+    const row = store.db.prepare("SELECT repo_id AS repoId FROM branches WHERE id=?").get(branchId) as { repoId: string } | undefined;
+    return row?.repoId;
+  }
+  const row = store.db.prepare("SELECT repo_id AS repoId FROM revision_snapshots WHERE id=?").get(snapshotId) as { repoId: string } | undefined;
+  return row?.repoId;
+}
+
 function resolveCliRevision(
   store: KnowledgeStore,
   target: string,
@@ -234,6 +249,16 @@ function resolveCliRevision(
   } else if (!repoId && target) {
     const match = resolveSymbolMatches(store, target);
     if (match.kind === "unique") repoId = store.getNode(match.nodeId)?.repo_id ?? undefined;
+  }
+  // An explicit --snapshot selector is itself an unambiguous repo signal
+  // (Phase 1B Task 7): a search hit's locator carries `revisionId` for a
+  // specific repo, and re-opening it as a Context pack must not lose that
+  // scope just because the symbol name is ambiguous across repos or cwd
+  // can't disambiguate (the Wiki's cwd is the app's launch dir, not any
+  // indexed repo root). Only consulted once every other signal has failed —
+  // an explicit --repo, or a unique symbol match, still wins.
+  if (!repoId && selector.snapshotId) {
+    repoId = resolveRepoIdFromSnapshot(store, selector.snapshotId) ?? undefined;
   }
   try {
     const scope = resolveQueryScope(store, {

@@ -167,7 +167,7 @@ function twoRepoFixture() {
   store.upsertSymbolVersion({ nodeId: nodeIdB, branchId: branchIdB, commitSha: "sha-b", filePath: "src/b.ts", lang: "typescript", kind: "function", signature: "Beta()", contentHash: "h2" });
   store.indexSymbolText({ nodeId: nodeIdB, name: "Beta", signature: "Beta()" });
 
-  return { store, dir, rootA, rootB };
+  return { store, dir, rootA, rootB, repoIdA, repoIdB, branchIdA, branchIdB };
 }
 
 test("search with cwd inside repo A scopes to A even though the query text uniquely matches a symbol only in repo B", async () => {
@@ -194,5 +194,36 @@ test("search with cwd outside any registered repo falls back to the query-text s
   assert.equal(payload.locator.repoName, "B");
   assert.ok(payload.warnings.some((w) => w.code === "REPO_INFERRED_FROM_QUERY"));
   assert.match(payload.warnings.find((w) => w.code === "REPO_INFERRED_FROM_QUERY").message, /query text match in B/);
+  store.close();
+});
+
+// Phase 1B Task 7: a Wiki search hit carries `locator.revisionId` (the hit's
+// snapshotId) plus repoId/repoName, so re-opening it as a Context pack must
+// pin to that exact revision instead of discarding it — the frontend's cwd is
+// the Tauri app's launch dir, not any indexed repo root (see the query-server
+// bridge test above), and the target it passes (a file path from the hit) is
+// under no obligation to name-match anything in that repo, so target-based
+// repo inference can't be relied on either. This is the same gap `search`
+// already closed for query text: here `--snapshot` alone (no `--repo`) must
+// be enough to infer the repo, because the snapshot itself uniquely
+// identifies it. Before this fix, resolveCliRevision swallowed the
+// undeterminable-repo case as REPO_REQUIRED and silently answered fully
+// unscoped (see the "softens REPO_REQUIRED back to unscoped" test above) —
+// dropping the caller's --snapshot on the floor entirely, no locator at all.
+test("context with --snapshot alone (no --repo) resolves that snapshot's repo even when the target name doesn't exist there", async () => {
+  const { store, branchIdB } = twoRepoFixture();
+  const outside = mkdtempSync(join(tmpdir(), "penguin-cli-scope-outside-"));
+  const lines = [];
+  // Branches created via registerBranch (no revision_snapshots row published)
+  // surface as `legacy:<branchId>` snapshot ids — the form this fixture
+  // naturally produces, mirroring knowledge-revision-isolation.test.mjs.
+  // "NoSuchSymbol" deliberately matches nothing, so repoId cannot come from
+  // target-based inference either — only the --snapshot selector can supply it.
+  const code = await runCli(["context", "NoSuchSymbol", "--snapshot", `legacy:${branchIdB}`, "--json"], cliDeps(store, outside, lines));
+  assert.equal(code, 1); // not found — but the scope must still resolve and be disclosed
+  const payload = JSON.parse(lines.at(-1));
+  assert.equal(payload.locator.repoName, "B");
+  assert.equal(payload.locator.snapshotId, `legacy:${branchIdB}`);
+  assert.equal(payload.alignment, "explicit");
   store.close();
 });

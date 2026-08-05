@@ -13,6 +13,7 @@ import { TabBtn } from "@/components/wiki/WikiUIKit";
 import { WikiGraph, type GraphLayout } from "@/components/wiki/WikiGraph";
 import { WikiGraph3D } from "@/components/wiki/WikiGraph3D";
 import { WikiContextPane } from "@/components/wiki/WikiContextPane";
+import { BranchPickerPopover, type BranchPickerOption } from "@/components/wiki/BranchPickerPopover";
 import { EvidenceInbox } from "@/components/wiki/EvidenceInbox";
 import { WikiSearchPage } from "@/components/wiki/WikiSearchPage";
 import { IndexProgressBanner } from "@/components/wiki/IndexProgressBanner";
@@ -68,6 +69,11 @@ export function WikiPage({ onClose }: WikiPageProps) {
   const [hiddenNodeIds, setHiddenNodeIds] = useState<Set<string>>(new Set());
 
   const [trail, setTrail] = useState<NavEntry[]>([]);
+  // Service-graph node click when its repo has 2+ live branches: Core refuses
+  // to guess (resolveRevisionContext's "multiple live branches" ambiguity),
+  // so the UI stops silently doing `find(live) ?? [0]` too — this holds the
+  // popover's anchor + candidate branches until the user explicitly picks one.
+  const [branchPicker, setBranchPicker] = useState<{ repoId: string; anchor: { x: number; y: number }; branches: BranchPickerOption[] } | null>(null);
 
   const refreshStatus = useCallback(() => { knowledgeDbStatus().then(setStatus).catch(() => setStatus(null)); }, []);
   useEffect(refreshStatus, [refreshStatus]);
@@ -129,13 +135,30 @@ export function WikiPage({ onClose }: WikiPageProps) {
   // Graph node clicks: service-map nodes carry a repo id (not a graph node), so
   // focusing them as a symbol would fail ("node not found"). Route service nodes
   // to their repo graph; symbols/endpoints resolve normally.
-  const onGraphNodeClick = useCallback((id: string) => {
+  //
+  // Multiple live branches on that repo is a genuine ambiguity Core itself
+  // refuses to silently resolve (see resolveRevisionContext's "multiple live
+  // branches; pass --branch, --commit, or --snapshot" error) — so instead of
+  // `find(live) ?? [0]`, show a popover anchored at the click and require an
+  // explicit pick. Exactly one live branch (the common case) still opens
+  // directly, unchanged.
+  const onGraphNodeClick = useCallback((id: string, event?: MouseEvent) => {
     const node = graphData?.nodes.find((n) => n.nodeId === id);
     if (node?.nodeType === "service") {
       void knowledgeIndexStatus()
         .then((s) => {
           const repo = s.repos.find((r) => r.repoId === id);
-          const branch = repo?.branches.find((b) => b.status === "live") ?? repo?.branches[0];
+          if (!repo) return;
+          const live = repo.branches.filter((b) => b.status === "live");
+          if (live.length > 1) {
+            setBranchPicker({
+              repoId: id,
+              anchor: { x: event?.clientX ?? window.innerWidth / 2, y: event?.clientY ?? window.innerHeight / 2 },
+              branches: repo.branches.map((b) => ({ branchId: b.branchId, name: b.name, status: b.status, lastIndexedAt: b.lastIndexedAt })),
+            });
+            return;
+          }
+          const branch = live[0] ?? repo.branches[0];
           if (branch) return openRepoGraph(id, branch.branchId);
         })
         .catch(err);
@@ -143,6 +166,13 @@ export function WikiPage({ onClose }: WikiPageProps) {
     }
     selectSymbol(id);
   }, [graphData, openRepoGraph, selectSymbol]);
+
+  const pickBranch = useCallback((branchId: string) => {
+    if (!branchPicker) return;
+    const { repoId } = branchPicker;
+    setBranchPicker(null);
+    void openRepoGraph(repoId, branchId);
+  }, [branchPicker, openRepoGraph]);
 
   useEffect(() => {
     if (!focusId) return;
@@ -279,6 +309,14 @@ export function WikiPage({ onClose }: WikiPageProps) {
       </div>
 
       <WikiStatusFooter />
+      {branchPicker && (
+        <BranchPickerPopover
+          branches={branchPicker.branches}
+          anchor={branchPicker.anchor}
+          onPick={pickBranch}
+          onClose={() => setBranchPicker(null)}
+        />
+      )}
     </div>
   );
 }

@@ -81,7 +81,10 @@ export function WikiGraph({
   layout = "radial",
 }: {
   data: KnowledgeGraphView;
-  onNodeClick: (nodeId: string) => void;
+  // event is the underlying MouseEvent from force-graph's onNodeClick(node,
+  // event) — forwarded so a caller can anchor a follow-up popover (branch
+  // picker) at the click point instead of guessing a position.
+  onNodeClick: (nodeId: string, event?: MouseEvent) => void;
   // "radial" = the clean, intentional layout (focus centered, neighbours on a
   // ring); "force" = the Obsidian-style force-directed sim. Toggleable in the UI.
   layout?: GraphLayout;
@@ -256,7 +259,7 @@ export function WikiGraph({
             recomputeHighlight(n ? n.id : null);
             if (el) el.style.cursor = n ? "pointer" : "default";
           })
-          .onNodeClick((n: GNode) => onClickRef.current(String(n.id)))
+          .onNodeClick((n: GNode, event: MouseEvent) => onClickRef.current(String(n.id), event))
           .onEngineStop(() => safeFit(graph, 400, 40))
           // Stop the sim once it settles. Default cooldownTime is 15s, so a dense
           // repo graph (200 nodes / 2000 edges) churned the CPU — repainting every
