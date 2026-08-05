@@ -424,6 +424,11 @@ export interface GraphResult {
   events?: Array<{ eventType: string; ts: string; origin: string; method: string; nodeId: string | null }>;
   diagnostics?: QueryDiagnostics;
   revision?: RevisionContext;
+  // Set ONLY when no revision/branchId was supplied by the caller and the
+  // traversal silently answered against the repo's live branch instead (see
+  // FlowResult.scopeFallback). Matters most for the legacy graph verbs
+  // (callers/calls/impact/backlinks/recent) that stay unscoped by design.
+  scopeFallback?: { branchId: string };
 }
 
 function nodeBrief(store: KnowledgeStore, id: string) {
@@ -821,6 +826,12 @@ export function exploreGraph(
       }),
     };
   }
+  // Set below (after the branch-scope fallback below fires) so the closure
+  // sees the up-to-date value at call time — the revision-scoped early
+  // returns above call graphResult() before this fires (never a fallback,
+  // since an explicit revision was supplied), the plain-SQL modes below call
+  // it after (scopeFallback reflects whether liveBranchOf actually filled in).
+  let scopeFallback: { branchId: string } | undefined;
   const graphResult = (
     nodes: GraphResult["nodes"],
     events?: GraphResult["events"],
@@ -832,6 +843,7 @@ export function exploreGraph(
       branchId: options?.branchId,
     }),
     revision: options?.revision,
+    ...(scopeFallback ? { scopeFallback } : {}),
   });
 
   // Trust filter (§3.3/§11): default traversal only follows confirmed edges —
@@ -878,7 +890,9 @@ export function exploreGraph(
   // Branch-scope (correctness): when a branch is given, only follow edges on that
   // branch (plus branch-less edges like git topology / cross-repo endpoints).
   // Without it, a repo indexed on multiple branches would silently mix branches.
-  const branchId = revisionBranchId(options) ?? liveBranchOf(store, nodeId);
+  const explicitBranchId = revisionBranchId(options);
+  const branchId = explicitBranchId ?? liveBranchOf(store, nodeId);
+  scopeFallback = !explicitBranchId && branchId ? { branchId } : undefined;
   const bx = branchId ? " AND (branch_id = ? OR branch_id IS NULL)" : "";
   const P = (nid: string) => (branchId ? [nid, branchId, limit] : [nid, limit]);
   const Pd = (nid: string) => (branchId ? [nid, branchId] : [nid]); // no LIMIT (impact/path)
@@ -1404,6 +1418,10 @@ export interface ContextPack {
   // so reporting this as "no context" would be misleading (looks like a typo
   // when it's actually an internal failure worth investigating/reporting).
   assemblyError: string | null;
+  // Set ONLY when no revision/branchId was supplied by the caller and the
+  // query silently answered against the repo's live branch instead (see
+  // FlowResult.scopeFallback).
+  scopeFallback?: { branchId: string };
 }
 
 function briefsFrom(store: KnowledgeStore, rows: Array<{ id: string }>): ContextBrief[] {
@@ -1458,7 +1476,9 @@ function buildContextPackBody(
   // Branch-scope to the focus's live branch (or an explicit one) so a repo indexed
   // on multiple branches doesn't mix them. branch-less edges (git / global gRPC
   // endpoints) always pass so cross-repo links aren't dropped.
-  const branchId = revisionBranchId(options) ?? liveBranchOf(store, focusId);
+  const explicitBranchId = revisionBranchId(options);
+  const branchId = explicitBranchId ?? liveBranchOf(store, focusId);
+  const scopeFallback = !explicitBranchId && branchId ? { branchId } : undefined;
   const bx = branchId ? " AND (branch_id = ? OR branch_id IS NULL)" : "";
   const snapshotPairs = options?.revision && !options.revision.snapshotId.startsWith("legacy:") ? snapshotEdgePairs(store, options.revision) : null;
   const snapshotIds = (pairs: Array<{ src: string; dst: string | null; edgeType: string }>, type: string, direction: "in" | "out") => pairs
@@ -1572,6 +1592,7 @@ function buildContextPackBody(
     signals,
     ambiguous: null,
     assemblyError: null,
+    ...(scopeFallback ? { scopeFallback } : {}),
   };
 }
 
@@ -1672,6 +1693,11 @@ export interface FlowResult {
   steps: FlowStep[];
   diagnostic?: FlowDiagnostic;
   ambiguous?: SymbolCandidate[]; // populated only when diagnostic.reason === "ambiguous"
+  // Set ONLY when no revision/branchId was supplied by the caller and the
+  // query silently answered against the repo's live branch instead — an AI
+  // consumer should know it got an implicit "whatever's live" answer, not a
+  // revision it asked for (§ Phase 1 trust plumbing).
+  scopeFallback?: { branchId: string };
 }
 
 const DOWNSTREAM = ["calls", "invokes", "references", "reads", "writes", "throws", "uses", "handles"];
@@ -1800,7 +1826,9 @@ export function buildFlow(
     visit(focus, 0);
     return { target, trust: options.revision.branchId ? trustEnvelopeForBranch(store, options.revision.branchId) : null, root, steps, ...(steps.length === 1 ? { diagnostic: { reason: "no_outgoing_edges" as const, message: `"${root.title}" is indexed but has no outgoing edges in the selected revision.` } } : {}) };
   }
-  const branchId = revisionBranchId(options) ?? liveBranchOf(store, focus);
+  const explicitBranchId = revisionBranchId(options);
+  const branchId = explicitBranchId ?? liveBranchOf(store, focus);
+  const scopeFallback = !explicitBranchId && branchId ? { branchId } : undefined;
   const bx = branchId ? " AND (branch_id = ? OR branch_id IS NULL)" : "";
   const ph = DOWNSTREAM.map(() => "?").join(",");
 
@@ -1843,9 +1871,10 @@ export function buildFlow(
           ? `Endpoint "${root.title}" is indexed but has no \`handles\` edge to a handler yet — the provider service may not be indexed, or its @GrpcMethod handler wasn't recognized.`
           : `"${root.title}" is indexed but has no outgoing calls/references — it may be a terminal/leaf symbol, or its callees aren't indexed.`,
       },
+      ...(scopeFallback ? { scopeFallback } : {}),
     };
   }
-  return { target, trust: trustEnvelopeForBranch(store, branchId), root, steps };
+  return { target, trust: trustEnvelopeForBranch(store, branchId), root, steps, ...(scopeFallback ? { scopeFallback } : {}) };
 }
 
 function nodeBriefStep(store: KnowledgeStore, id: string, revisionId = "live") {
@@ -1891,6 +1920,12 @@ export interface ExplorePack {
   };
   diagnostics: string[];
   queryDiagnostics: QueryDiagnostics;
+  // Set ONLY when no revision/branchId was supplied by the caller and the
+  // underlying context/flow queries silently answered against the repo's live
+  // branch instead (see FlowResult.scopeFallback). Sourced from whichever of
+  // context/flow actually hit the fallback (buildQueryDiagnostics deliberately
+  // does NOT carry its own copy of this — see its call site for why).
+  scopeFallback?: { branchId: string };
 }
 
 // One editing-oriented result shared by CLI and MCP. It composes the existing
@@ -1909,6 +1944,10 @@ export function buildExplorePack(
   const implementationContext = handler ? buildContextPack(store, handler.nodeId, options) : null;
   const effectiveContext = implementationContext ?? context;
   const trust = context.trust ?? implementationContext?.trust ?? flow.trust;
+  // Whichever underlying query actually hit the live-branch fallback (context
+  // wins over flow since effectiveContext is what the rest of the pack is
+  // built from) — see ExplorePack.scopeFallback.
+  const scopeFallback = effectiveContext.scopeFallback ?? flow.scopeFallback;
   const blastRadius = focusId
     ? exploreGraph(store, "impact", focusId, { depth: options?.depth, limit: options?.limit, revision: options?.revision, branchId: options?.branchId }).nodes
     : [];
@@ -1971,6 +2010,7 @@ export function buildExplorePack(
     provenance: rows,
     confidence: { level, minimum, inferredEdges, totalEdges },
     diagnostics: [...new Set(diagnostics)],
+    ...(scopeFallback ? { scopeFallback } : {}),
     queryDiagnostics: buildQueryDiagnostics(
       store,
       target,

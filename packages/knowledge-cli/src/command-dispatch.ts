@@ -78,7 +78,7 @@ import { discoverSubRepos, isGitRepo, type RepoCandidate } from "./multi-repo.js
 import { runApiDocCommand } from "./api-doc-command.js";
 import { createKnowledgeApiDocAdapter } from "./api-doc-knowledge-adapter.js";
 import { createLarkProcessRunner, LarkCliDocumentClient, type LarkProcessRunner } from "./lark-document-client.js";
-import { CAPABILITIES, capabilityHash, listCliRegistrations, type ScopeEnvelope } from "@penguin/knowledge-contracts";
+import { CAPABILITIES, capabilityHash, listCliRegistrations, warning, type ScopeEnvelope } from "@penguin/knowledge-contracts";
 import { runQueryServer } from "./query-server.js";
 import { parseCliArguments } from "./args.js";
 export { listCliRegistrations } from "@penguin/knowledge-contracts";
@@ -234,10 +234,48 @@ const GRAPH_VERB_MODE: Record<string, GraphMode> = {
 
 const EVENT_OUTPUT = new WeakMap<object, boolean>();
 
+// Core query functions (buildFlow/buildContextPack/exploreGraph/buildExplorePack)
+// mark their own result with `scopeFallback: { branchId }` whenever no
+// revision/branchId was supplied and they silently answered against the
+// repo's live branch instead (Phase 1a trust plumbing, Task 7). After Task
+// 6's CLI rewiring, scoped verbs always resolve a revision up front, so this
+// fires in practice only for direct library consumers and the legacy graph
+// verbs (callers/calls/impact/backlinks/recent) that stay unscoped by
+// design — those call exploreGraph() without a scope at all, so `scope` is
+// undefined below and the envelope-wrapper branch never runs; the fallback
+// warning still needs to land in the JSON, so it's added directly to the
+// plain payload in that case.
+function fallbackWarningFor(data: unknown, scope: ScopeEnvelope | undefined) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return undefined;
+  const scopeFallback = (data as Record<string, unknown>).scopeFallback as { branchId: string } | undefined;
+  if (!scopeFallback?.branchId) return undefined;
+  if (scope?.alignment === "fallback") return undefined; // already flagged via the scope envelope
+  return warning(
+    "FALLBACK_LIVE_BRANCH",
+    `no revision was resolved for this query; answered against the live branch (${scopeFallback.branchId}) instead of an explicit revision`,
+    { branchId: scopeFallback.branchId },
+  );
+}
+
 function emit(deps: CliDeps, json: boolean, human: string, data: unknown, scope?: ScopeEnvelope): void {
-  const payload = scope && data && typeof data === "object" && !Array.isArray(data)
-    ? { ...(data as Record<string, unknown>), locator: scope.locator, alignment: scope.alignment, warnings: scope.warnings }
-    : data;
+  const isPlainObject = Boolean(data) && typeof data === "object" && !Array.isArray(data);
+  const fallbackWarning = fallbackWarningFor(data, scope);
+  const payload = scope && isPlainObject
+    ? {
+        ...(data as Record<string, unknown>),
+        locator: scope.locator,
+        alignment: scope.alignment,
+        warnings: fallbackWarning ? [...scope.warnings, fallbackWarning] : scope.warnings,
+      }
+    : fallbackWarning && isPlainObject
+      ? {
+          ...(data as Record<string, unknown>),
+          warnings: [
+            ...(Array.isArray((data as Record<string, unknown>).warnings) ? (data as Record<string, unknown>).warnings as unknown[] : []),
+            fallbackWarning,
+          ],
+        }
+      : data;
   if (EVENT_OUTPUT.get(deps)) {
     deps.out(JSON.stringify({ type: "result", result: payload }));
     return;
@@ -250,8 +288,11 @@ function emit(deps: CliDeps, json: boolean, human: string, data: unknown, scope?
     ? [
         `scope: ${scope.locator.repoName}@${scope.locator.branchName ?? "(unknown)"} ${(scope.locator.commitSha ?? "").slice(0, 7) || "(none)"} (${scope.alignment})`,
         ...scope.warnings.map((w) => `warning: ${w.message}`),
+        ...(fallbackWarning ? [`warning: ${fallbackWarning.message}`] : []),
       ].join("\n")
-    : "";
+    : fallbackWarning
+      ? `warning: ${fallbackWarning.message}`
+      : "";
   deps.out(footer ? `${human}\n${footer}` : human);
 }
 
