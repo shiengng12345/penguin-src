@@ -113,6 +113,17 @@ async function invokeLocalCli(args: string[]): Promise<Record<string, unknown>> 
 // writes against an already-current schema are unaffected, so mutating MCP
 // tools keep working normally once the DB has been migrated by any other
 // write path (`penguin index`, etc.).
+//
+// Deliberate asymmetry: MCP write tools (knowledge_index, knowledge_rebuild,
+// knowledge_repository_register, ...) share this SAME gated handle, so an MCP
+// client cannot self-heal a stale schema by calling knowledge_index -- unlike
+// the resident query-server's `knowledge.cli` bridge, which opens write verbs
+// through a separate mutation-allowed handle (runCli's own openStore()) and
+// so CAN self-heal via that path. This is intentional, not an oversight: the
+// SCHEMA_OUTDATED error message points the caller at the CLI (`penguin
+// index`) for remediation. If MCP-side self-healing is ever wanted, give
+// index/rebuild/register their own mutation-allowed store open instead of
+// loosening this one.
 function openKnowledgeStore(): KnowledgeStore | null {
   const dbPath = process.env.PENGUIN_KNOWLEDGE_DB ?? join(homedir(), ".penguin", "knowledge", "knowledge.db");
   const ledgerPath = process.env.PENGUIN_KNOWLEDGE_LEDGER ?? join(homedir(), ".penguin", "knowledge", "ledger.jsonl");
