@@ -114,7 +114,42 @@ export interface KnowledgeNodeDetail {
   note: { type: string; status: string | null; owner: string | null } | null;
 }
 
-export interface KnowledgeGraphResult {
+// Trust envelope carried by every CLI-bridge JSON response since Phase 1A
+// (context packs, flow, graph, explore) — which repo/branch/commit actually
+// produced the answer, whether it lines up with the caller's intended scope,
+// and any structured warnings explaining a fallback. Not every verb emits
+// every field (legacy verbs may only send `scopeFallback`), so all optional;
+// UIs must render nothing when `locator` itself is absent.
+export interface KnowledgeLocator {
+  repoId: string;
+  repoName: string;
+  rootPath: string;
+  branchId?: string;
+  branchName?: string;
+  commitSha?: string;
+  snapshotId: string;
+  worktreeState: "clean" | "dirty" | "snapshot" | "unknown";
+  indexedAt?: string;
+}
+
+export type ScopeAlignment = "aligned" | "revision_behind" | "fallback" | "explicit";
+
+export interface StructuredWarning {
+  code: string;
+  message: string;
+  data?: Record<string, unknown>;
+}
+
+export interface ScopeEnvelopeFields {
+  locator?: KnowledgeLocator;
+  alignment?: ScopeAlignment;
+  warnings?: StructuredWarning[];
+  // Legacy verbs that don't emit the full envelope may still report a bare
+  // branch fallback.
+  scopeFallback?: { branchId: string };
+}
+
+export interface KnowledgeGraphResult extends ScopeEnvelopeFields {
   mode: string;
   nodes: Array<{ nodeId: string; title: string; nodeType: string }>;
   events?: Array<{ eventType: string; ts: string; origin: string; method: string; nodeId: string | null }>;
@@ -272,7 +307,7 @@ export interface KnowledgeFileSymbol {
   status: string; // fresh | stale
 }
 
-export interface KnowledgeGraphView {
+export interface KnowledgeGraphView extends ScopeEnvelopeFields {
   focus: string | null;
   nodes: Array<{ nodeId: string; title: string; nodeType: string }>;
   edges: Array<{ src: string; dst: string; edgeType: string }>;
@@ -390,7 +425,7 @@ export function knowledgeGraph(node: string, depth = 1, options: KnowledgeReques
 // —— AI Context Pack + Flow (the hero views) ——
 
 export interface ContextBrief { nodeId: string; title: string; nodeType: string }
-export interface ContextPack {
+export interface ContextPack extends ScopeEnvelopeFields {
   target: string;
   focus: {
     nodeId: string; title: string; nodeType: string; kind: string | null;
@@ -416,7 +451,7 @@ export function knowledgeContext(target: string, options: KnowledgeRequestOption
 }
 
 export interface FlowStep { depth: number; nodeId: string; title: string; nodeType: string; via: string }
-export interface FlowResult { target: string; root: FlowStep | null; steps: FlowStep[] }
+export interface FlowResult extends ScopeEnvelopeFields { target: string; root: FlowStep | null; steps: FlowStep[] }
 export function knowledgeFlow(target: string, options: KnowledgeRequestOptions = {}): Promise<FlowResult> {
   return query<FlowResult>(["flow", target], options.signal);
 }

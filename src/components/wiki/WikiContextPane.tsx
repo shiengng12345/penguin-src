@@ -1,5 +1,6 @@
 import { AlertTriangle, Loader2, Search, Sparkles } from "lucide-react";
 import { Center, Dot } from "@/components/wiki/WikiUIKit";
+import { ScopeBadge } from "@/components/wiki/ScopeBadge";
 import type { ContextPack } from "@/lib/knowledge-client";
 
 // NestJS built-in exceptions → the HTTP status they produce, so "会抛出" reads as
@@ -69,19 +70,24 @@ export function WikiContextPane({
   pack: ContextPack | null;
   onSelectSymbol: (id: string) => void;
 }) {
-  if (packBusy) return <Center><Loader2 className="h-4 w-4 animate-spin text-cyan-300" /> 生成 Context Pack…</Center>;
+  const badge = <ScopeBadge locator={pack?.locator} alignment={pack?.alignment} warnings={pack?.warnings} />;
+  const paddedBadge = <ScopeBadge locator={pack?.locator} alignment={pack?.alignment} warnings={pack?.warnings} className="px-5 pt-3" />;
+  if (packBusy) return <div className="flex flex-1 flex-col">{paddedBadge}<Center><Loader2 className="h-4 w-4 animate-spin text-cyan-300" /> 生成 Context Pack…</Center></div>;
   const f = pack?.focus;
   if (!f) {
     return (
-      <div className="flex flex-1 items-center justify-center p-8">
-        <div className="max-w-md rounded-2xl border border-slate-800 bg-[#0d1420]/85 p-6 text-center">
-          <div className="mx-auto mb-4 flex h-10 w-10 items-center justify-center rounded-xl border border-cyan-500/20 bg-cyan-500/10 text-cyan-200">
-            <Search className="h-5 w-5" />
+      <div className="flex flex-1 flex-col">
+        {paddedBadge}
+        <div className="flex flex-1 items-center justify-center p-8">
+          <div className="max-w-md rounded-2xl border border-slate-800 bg-[#0d1420]/85 p-6 text-center">
+            <div className="mx-auto mb-4 flex h-10 w-10 items-center justify-center rounded-xl border border-cyan-500/20 bg-cyan-500/10 text-cyan-200">
+              <Search className="h-5 w-5" />
+            </div>
+            <div className="text-base font-semibold text-slate-100">Search or pick a symbol</div>
+            <p className="mt-2 text-sm leading-relaxed text-slate-500">
+              Context Pack 会汇总源码、调用关系、入口、错误、env、测试和关联笔记。
+            </p>
           </div>
-          <div className="text-base font-semibold text-slate-100">Search or pick a symbol</div>
-          <p className="mt-2 text-sm leading-relaxed text-slate-500">
-            Context Pack 会汇总源码、调用关系、入口、错误、env、测试和关联笔记。
-          </p>
         </div>
       </div>
     );
@@ -89,6 +95,7 @@ export function WikiContextPane({
 
   return (
     <div className="flex-1 space-y-4 overflow-auto p-5">
+      {badge}
       <div className="rounded-2xl border border-slate-800 bg-[#0d1420]/85 p-4">
         <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-cyan-300">
           <Sparkles className="h-3.5 w-3.5" />Context Pack

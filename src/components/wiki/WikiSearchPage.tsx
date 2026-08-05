@@ -3,6 +3,7 @@ import { Loader2, Search, Network, Bookmark, ClipboardList } from "lucide-react"
 import { knowledgeContext, knowledgeEvidenceList, knowledgeExplore, knowledgeGetHit, knowledgeGraph, knowledgeIndexStatus, knowledgeReindex, knowledgeSavedQueryList, knowledgeSavedQueryRun, knowledgeSavedQueryWrite, knowledgeSearchV2, type ContextPack, type KnowledgeEvidenceNote, type KnowledgeGraphResult, type KnowledgeGraphView, type KnowledgeHitDetail, type KnowledgeSavedQuery, type KnowledgeSearchV2Response } from "@/lib/knowledge-client";
 import { getPersistedValue, setPersistedValue } from "@/lib/app-persistence";
 import { APP_VALUE_KEYS } from "@/lib/persistence-keys";
+import { ScopeBadge } from "@/components/wiki/ScopeBadge";
 
 // Every result row is locked to this exact pixel height so the windowing math
 // (which slices the list by a fixed row height) stays aligned even when a hit
@@ -285,6 +286,7 @@ export function WikiSearchPage() {
       <div className="mb-3 rounded border border-slate-800 bg-slate-950/40 px-3 py-2 text-xs text-slate-400">
         已搜索：{response.diagnostics.searchedLanes.join(", ")} · 覆盖 {response.diagnostics.coverage.admitted} admitted / {response.diagnostics.coverage.excluded} excluded / {response.diagnostics.coverage.failed} failed
         {response.diagnostics.resolvedScopes[0] && <span className="ml-2 rounded border border-cyan-500/20 px-1.5 py-0.5 text-cyan-300">revision: {response.diagnostics.resolvedScopes[0].branch} · {response.diagnostics.resolvedScopes[0].snapshotId}</span>}
+        <ScopeBadge locator={contextPack?.locator} alignment={contextPack?.alignment} warnings={contextPack?.warnings} className="mt-1" />
       </div>
       {visibleHits.length === 0 ? <div className="rounded border border-yellow-500/20 bg-yellow-500/5 p-4 text-sm text-yellow-200">
         <div>没有结果。{response.diagnostics.warnings.map((warning) => warning.message).join(" ")}</div>
