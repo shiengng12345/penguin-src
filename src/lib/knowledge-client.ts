@@ -141,17 +141,6 @@ export interface KnowledgeDbStatus {
   notes: number;
 }
 
-export interface KnowledgeSearchHit {
-  nodeId: string;
-  nodeType: string;
-  title: string;
-  snippet: string | null;
-  identityKey: string;
-  filePath: string | null;
-  branch: string | null;
-  rank: number | null;
-}
-
 export interface KnowledgeNodeDetail {
   node: { id: string; nodeType: string; identityKey: string; title: string; repoId: string | null };
   versions: Array<{
@@ -236,7 +225,14 @@ async function query<T>(args: string[], signal?: AbortSignal): Promise<T> {
   try {
     raw = await abortable(invoke<string>("knowledge_query", { args: [...args, `--request-id=${requestId}`] }), signal, () => { void invoke("knowledge_query_cancel", { requestId }).catch(() => undefined); });
   } catch (error) {
-    throw parseScopeBlockedError(error) ?? error;
+    const scopeBlocked = parseScopeBlockedError(error);
+    // A scope blocker (BRANCH_NOT_INDEXED/SCOPE_NOT_FOUND) means the checked-out
+    // branch/scope just changed under the caller — the cached status panel
+    // (repo/branch alignment) is now stale too, so drop it here rather than
+    // waiting out its TTL, letting the footer refresh promptly alongside the
+    // blocker instead of showing a "still aligned" footer next to it.
+    if (scopeBlocked) statusPanelCache = null;
+    throw scopeBlocked ?? error;
   }
   if (signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
   return JSON.parse(raw) as T;
@@ -252,10 +248,6 @@ async function canonicalQuery<T>(capabilityId: string, input: Record<string, unk
 
 export function knowledgeDbStatus(options: KnowledgeRequestOptions = {}): Promise<KnowledgeDbStatus> {
   return abortable(invoke<KnowledgeDbStatus>("knowledge_db_status"), options.signal);
-}
-
-export function knowledgeSearch(q: string, options: KnowledgeRequestOptions = {}): Promise<KnowledgeSearchHit[]> {
-  return query<KnowledgeSearchHit[]>(["search", q], options.signal);
 }
 
 // Mirrors @penguin/knowledge-contracts's SearchLocator (the wire shape the CLI
@@ -550,11 +542,6 @@ export function knowledgeContext(
 
 export interface FlowStep { depth: number; nodeId: string; title: string; nodeType: string; via: string }
 export interface FlowResult extends ScopeEnvelopeFields { target: string; root: FlowStep | null; steps: FlowStep[] }
-export function knowledgeFlow(target: string, options: KnowledgeRequestOptions & { allowFallback?: boolean } = {}): Promise<FlowResult> {
-  const args = ["flow", target];
-  if (options.allowFallback) args.push("--allow-fallback");
-  return query<FlowResult>(args, options.signal);
-}
 
 // Repo/branch-scoped graph (top-degree hubs).
 export function knowledgeRepoGraph(repoId: string, branchId: string, options: KnowledgeRequestOptions = {}): Promise<KnowledgeGraphView> {

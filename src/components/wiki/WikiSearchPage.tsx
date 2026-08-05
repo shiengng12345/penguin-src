@@ -120,10 +120,17 @@ export function WikiSearchPage() {
     // not only when the query goes empty, so the ScopeBadge and preview
     // panel never linger next to a fresh, unrelated result set. Abort any
     // in-flight openContext too, otherwise its late resolution could write
-    // the stale pack/preview right back in after this clears them.
+    // the stale pack/preview right back in after this clears them. The
+    // previous hit's scope blocker (and its retry button, which re-sends
+    // lastContextRequest) is just as stale as contextPack/hitPreview — clear
+    // both here too, or a fresh result set renders under an old blocker whose
+    // retry would reissue a request that no longer corresponds to anything
+    // visible.
     contextAbort.current?.abort();
     setContextPack(null);
     setHitPreview(null);
+    setScopeBlock(null);
+    lastContextRequest.current = null;
     if (!text) { setResponse(null); setGraphView(null); return; }
     const id = ++requestId.current;
     const controller = new AbortController();

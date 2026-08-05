@@ -1,6 +1,6 @@
 import type { KnowledgeStore } from "./store.js";
 import { SCHEMA_VERSION } from "./schema.js";
-import { cachedGitStateReader } from "./query-scope.js";
+import { defaultGitReader } from "./query-scope.js";
 
 // The Wiki footer needs a single, never-throwing snapshot of "is what I'm
 // looking at trustworthy": which branch git has checked out, whether the
@@ -32,10 +32,11 @@ export interface StatusPanel {
   repos: RepoStatusPanel[];
 }
 
-// Module-level cached reader: git state (branch/HEAD) rarely changes within
-// the span of a status-panel poll, and a fresh reader per call would defeat
-// the TTL memoization cachedGitStateReader provides (see query-scope.ts).
-const gitReader = cachedGitStateReader();
+// Reuse query-scope.ts's shared module-level cached reader rather than
+// spinning up a second cachedGitStateReader() instance here — otherwise the
+// same rootPath gets introspected twice per window (once per instance's TTL),
+// even though both readers would return the same answer.
+const gitReader = defaultGitReader;
 
 interface BranchRow {
   name: string;

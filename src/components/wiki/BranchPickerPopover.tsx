@@ -75,11 +75,11 @@ export function BranchPickerPopover({ branches, anchor, onPick, onClose }: Branc
     <div
       ref={ref}
       role="menu"
-      aria-label="选择分支"
+      aria-label="Select a branch"
       style={{ left, top, width: POPOVER_WIDTH, maxHeight: POPOVER_MAX_HEIGHT }}
       className="fixed z-50 overflow-auto rounded-lg border border-slate-700 bg-slate-950/95 p-1 text-sm text-slate-200 shadow-2xl backdrop-blur"
     >
-      <div className="px-2 py-1.5 text-[11px] uppercase tracking-wide text-slate-500">此仓库有多个活跃分支，请选择</div>
+      <div className="px-2 py-1.5 text-[11px] uppercase tracking-wide text-slate-500">This repository has multiple live branches — pick one</div>
       {branches.map((branch) => (
         <button
           key={branch.branchId}

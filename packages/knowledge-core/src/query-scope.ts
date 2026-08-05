@@ -77,7 +77,12 @@ export function cachedGitStateReader(
   };
 }
 
-const defaultGitReader = cachedGitStateReader();
+// Shared module-level cached reader: git state (branch/HEAD) rarely changes
+// within the span of a scope resolution or a status-panel poll, and a fresh
+// reader per call/module would defeat the TTL memoization cachedGitStateReader
+// provides — and would mean the same rootPath gets introspected twice per
+// window (once here, once in status-panel.ts) instead of sharing one cache.
+export const defaultGitReader = cachedGitStateReader();
 
 // ---------------------------------------------------------------------------
 // Errors
