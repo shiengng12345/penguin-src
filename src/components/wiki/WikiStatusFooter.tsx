@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
 import { knowledgeStatusPanel, type RepoStatusPanel, type StatusPanel } from "@/lib/knowledge-client";
 
@@ -52,18 +52,27 @@ function pickRepo(repos: RepoStatusPanel[], repoId?: string): RepoStatusPanel | 
 export function WikiStatusFooter({ repoId }: WikiStatusFooterProps) {
   const [panel, setPanel] = useState<StatusPanel | null>(null);
   const [failed, setFailed] = useState(false);
+  // Overlapping fetches (mount + interval + focus, all racing once the
+  // client's 5s cache TTL lapses) issue independent IPC round-trips — a
+  // later-dispatched call can resolve before an earlier one. A plain
+  // `cancelled` bool only guards unmount, not this in-flight ordering, so a
+  // stale response arriving late would silently revert the footer to older
+  // data. Guard with a generation counter instead: only the call whose
+  // generation still matches the ref when it resolves gets to write state.
+  const generationRef = useRef(0);
 
   useEffect(() => {
     let cancelled = false;
     const fetchStatus = () => {
+      const generation = ++generationRef.current;
       knowledgeStatusPanel()
         .then((p) => {
-          if (cancelled) return;
+          if (cancelled || generation !== generationRef.current) return;
           setPanel(p);
           setFailed(false);
         })
         .catch(() => {
-          if (cancelled) return;
+          if (cancelled || generation !== generationRef.current) return;
           setFailed(true);
         });
     };
@@ -77,6 +86,24 @@ export function WikiStatusFooter({ repoId }: WikiStatusFooterProps) {
     };
   }, []);
 
+  // Pre-first-fetch (no request has ever settled yet): neutral "checking"
+  // state, not a failure claim. Every settled fetch writes either panel or
+  // failed, so `!panel && !failed` can only be true before the first one
+  // has resolved — never conflate with a real failure.
+  if (!panel && !failed) {
+    return (
+      <footer className="flex h-7 shrink-0 items-center gap-3 border-t border-slate-800 bg-[#101826] px-3 text-[11px] text-slate-400">
+        <span className="flex items-center gap-1.5">
+          <span className="h-1.5 w-1.5 rounded-full bg-slate-600" />
+          DB: …
+        </span>
+      </footer>
+    );
+  }
+
+  // failed || !panel: `!panel` is unreachable here (the branch above already
+  // returned for it) — kept as a type guard so TS narrows `panel` to
+  // non-null below without a non-null assertion.
   if (failed || !panel) {
     return (
       <footer className="flex h-7 shrink-0 items-center gap-3 border-t border-slate-800 bg-[#101826] px-3 text-[11px] text-slate-400">
