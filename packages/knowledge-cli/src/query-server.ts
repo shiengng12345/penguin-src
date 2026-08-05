@@ -53,10 +53,13 @@ export async function runQueryServer(deps: CliDeps, input = process.stdin, outpu
     if (capabilityId === "knowledge.search") {
       const request = value as { scope?: { revisions?: Array<{ repoId?: string; repoName?: string; branch?: string; snapshotId?: string }> } };
       const requested = request.scope?.revisions ?? [];
-      const scopes: Array<{ repoId?: string; snapshotId: string }> = [];
+      const scopes: Array<{ repoId?: string; repoName?: string; branch?: string; snapshotId: string }> = [];
       const scopeWarnings: Array<{ code: string; message: string }> = [];
       for (const rev of requested) {
-        if (typeof rev.snapshotId === "string") { scopes.push({ ...(rev.repoId ? { repoId: rev.repoId } : {}), snapshotId: rev.snapshotId }); continue; }
+        // A caller-supplied snapshotId is an explicit override -- pass the
+        // entry through as-is (preserving any other fields it carried)
+        // rather than reconstructing a stripped-down {repoId, snapshotId}.
+        if (typeof rev.snapshotId === "string") { scopes.push({ ...rev, snapshotId: rev.snapshotId }); continue; }
         const repoRow = rev.repoId ?? rev.repoName
           ? (store.db.prepare("SELECT id FROM repos WHERE id=? OR name=? LIMIT 1").get(rev.repoId ?? rev.repoName, rev.repoName ?? rev.repoId) as { id: string } | undefined)
           : undefined;
