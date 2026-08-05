@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Readable } from "node:stream";
 import { KnowledgeStore } from "../packages/knowledge-core/dist/index.js";
 import { runCli } from "../packages/knowledge-cli/dist/index.js";
+import { runQueryServer } from "../packages/knowledge-cli/dist/query-server.js";
 
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), "penguin-cli-scope-"));
@@ -86,4 +88,54 @@ test("--allow-fallback is a recognized boolean flag (does not swallow the next p
   const payload = JSON.parse(lines.at(-1));
   assert.equal(payload.focus?.title, "Alpha");
   store.close();
+});
+
+// Regression for the query-server `knowledge.cli` compat bridge (Wiki/Tauri
+// resident worker): the bridge's own `cwd` is the app's launch directory —
+// meaningless for git-aware scope inference — but a scoped verb still infers
+// repoId from a unique symbol match, then resolveQueryScope reads real git
+// state at THAT repo's registered rootPath. If the dev has since switched to
+// a branch that isn't indexed yet (an everyday occurrence), the verb used to
+// exit 4 (BRANCH_NOT_INDEXED) and the bridge would throw an opaque
+// CLI_EXIT_4 Error — a hard failure for normal Wiki operation, since the
+// frontend never sends --allow-fallback. The bridge now force-injects
+// --allow-fallback (mirroring how it already force-injects --json), so this
+// must come back ok:true with a fallback envelope instead of an error.
+test("query-server knowledge.cli bridge force-injects --allow-fallback so an un-indexed checked-out branch answers instead of hard-failing", async () => {
+  const { store, rootPath } = fixture();
+  const { execFileSync } = await import("node:child_process");
+  execFileSync("git", ["init", "-b", "feature-x", rootPath]);
+  execFileSync("git", ["-C", rootPath, "commit", "--allow-empty", "-m", "x"], { env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
+
+  const input = new Readable({ read() {} });
+  let resolveResponse;
+  const responseArrived = new Promise((resolve) => { resolveResponse = resolve; });
+  const output = {
+    write: (chunk) => {
+      const frame = JSON.parse(chunk);
+      if (frame.id === "compat") resolveResponse(frame);
+      return true;
+    },
+  };
+  const deps = {
+    // The bridge's real-world cwd is the app's launch dir — deliberately
+    // unrelated to the fixture repo's rootPath, to prove cwd plays no part
+    // in this recovering: repoId comes from the unique "Alpha" symbol match.
+    cwd: "/nowhere/the/tauri/app/happened/to/launch/from",
+    out: () => {}, err: () => {},
+    openStore: () => store,
+    storeExists: () => true,
+  };
+
+  const serverExit = runQueryServer(deps, input, output);
+  input.push(`${JSON.stringify({ type: "request", id: "compat", capabilityId: "knowledge.cli", input: { args: ["context", "Alpha"] } })}\n`);
+  const response = await responseArrived;
+  input.push(null);
+  await serverExit;
+
+  assert.equal(response.ok, true, `expected the bridge to answer instead of erroring: ${JSON.stringify(response)}`);
+  assert.equal(response.result.alignment, "fallback");
+  assert.ok(response.result.warnings.some((w) => w.code === "BRANCH_NOT_INDEXED_FALLBACK"));
+  assert.equal(response.result.locator.branchName, "main");
+  // store.close() is called by runQueryServer itself.
 });

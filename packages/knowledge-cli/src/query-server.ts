@@ -66,6 +66,17 @@ export async function runQueryServer(deps: CliDeps, input = process.stdin, outpu
       if (rawArgs.length === 0) throw Object.assign(new Error("CLI_COMPAT_ARGS_REQUIRED"), { code: "CLI_COMPAT_ARGS_REQUIRED" });
       const args = rawArgs.filter((arg) => !arg.startsWith("--request-id="));
       if (!args.includes("--json")) args.push("--json");
+      // The bridge's cwd is the app's launch directory, not a repo checkout —
+      // meaningless for git-aware scope inference. A scoped verb still infers
+      // repoId from a unique symbol match and then reads real git state at
+      // that repo's registered rootPath (Task 6); if the dev has since
+      // switched to a branch that isn't indexed yet (an everyday occurrence),
+      // that now exits 4 (BRANCH_NOT_INDEXED) instead of answering. The UI
+      // never sends --allow-fallback, so force it here: UI-originated calls
+      // get fallback-with-warnings until the Wiki learns to render scope
+      // blockers (Plan 1B will remove this and let the UI show the blocker).
+      // Direct CLI usage is unaffected — it doesn't go through this bridge.
+      if (!args.includes("--allow-fallback")) args.push("--allow-fallback");
       const lines: string[] = [];
       const exitCode = await runCli(args, { ...deps, out: (line) => lines.push(line), err: (line) => lines.push(line) });
       if (exitCode !== 0) throw Object.assign(new Error(lines.at(-1) ?? `CLI_EXIT_${exitCode}`), { code: `CLI_EXIT_${exitCode}` });
