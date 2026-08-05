@@ -72,7 +72,10 @@ export function WikiContextPane({
 }) {
   const badge = <ScopeBadge locator={pack?.locator} alignment={pack?.alignment} warnings={pack?.warnings} />;
   const paddedBadge = <ScopeBadge locator={pack?.locator} alignment={pack?.alignment} warnings={pack?.warnings} className="px-5 pt-3" />;
-  if (packBusy) return <div className="flex flex-1 flex-col">{paddedBadge}<Center><Loader2 className="h-4 w-4 animate-spin text-cyan-300" /> 生成 Context Pack…</Center></div>;
+  // Suppress the badge entirely while a new pack is loading — pack still
+  // holds the previous target here, so showing its badge next to the
+  // spinner would read as trust info for the (not-yet-loaded) new target.
+  if (packBusy) return <Center><Loader2 className="h-4 w-4 animate-spin text-cyan-300" /> 生成 Context Pack…</Center>;
   const f = pack?.focus;
   if (!f) {
     return (

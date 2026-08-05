@@ -104,7 +104,16 @@ export function WikiSearchPage() {
   useEffect(() => {
     const text = query.trim();
     searchAbort.current?.abort();
-    if (!text) { setResponse(null); setContextPack(null); setHitPreview(null); setGraphView(null); return; }
+    // A new search (whether the query text or any scope filter changed)
+    // obsoletes whatever hit's context/preview was open — clear them here,
+    // not only when the query goes empty, so the ScopeBadge and preview
+    // panel never linger next to a fresh, unrelated result set. Abort any
+    // in-flight openContext too, otherwise its late resolution could write
+    // the stale pack/preview right back in after this clears them.
+    contextAbort.current?.abort();
+    setContextPack(null);
+    setHitPreview(null);
+    if (!text) { setResponse(null); setGraphView(null); return; }
     const id = ++requestId.current;
     const controller = new AbortController();
     searchAbort.current = controller;
@@ -286,6 +295,10 @@ export function WikiSearchPage() {
       <div className="mb-3 rounded border border-slate-800 bg-slate-950/40 px-3 py-2 text-xs text-slate-400">
         已搜索：{response.diagnostics.searchedLanes.join(", ")} · 覆盖 {response.diagnostics.coverage.admitted} admitted / {response.diagnostics.coverage.excluded} excluded / {response.diagnostics.coverage.failed} failed
         {response.diagnostics.resolvedScopes[0] && <span className="ml-2 rounded border border-cyan-500/20 px-1.5 py-0.5 text-cyan-300">revision: {response.diagnostics.resolvedScopes[0].branch} · {response.diagnostics.resolvedScopes[0].snapshotId}</span>}
+        {/* Sourced from the opened hit's Context Pack, not the raw search response —
+            KnowledgeSearchV2Response doesn't carry its own locator/alignment/warnings
+            envelope yet (would need CLI-bridge verification; deferred as a follow-up).
+            resolvedScopes above already covers the result set's scope. */}
         <ScopeBadge locator={contextPack?.locator} alignment={contextPack?.alignment} warnings={contextPack?.warnings} className="mt-1" />
       </div>
       {visibleHits.length === 0 ? <div className="rounded border border-yellow-500/20 bg-yellow-500/5 p-4 text-sm text-yellow-200">
