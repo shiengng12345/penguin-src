@@ -52,6 +52,11 @@ export {
   type ScopeResolutionErrorCode,
 } from "./query-scope.js";
 export {
+  buildStatusPanel,
+  type StatusPanel,
+  type RepoStatusPanel,
+} from "./status-panel.js";
+export {
   GitTopologyStore,
   type GitCommitRecord,
   type CreateSnapshotInput,

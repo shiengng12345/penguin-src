@@ -17,7 +17,7 @@ export type RegistrationStatus = "implemented" | "not_implemented";
 export const CLI_IMPLEMENTED_CAPABILITIES = new Set<string>([
   "knowledge.repository.register", "knowledge.search", "knowledge.get_hit", "knowledge.coverage", "knowledge.capabilities",
   "knowledge.index", "knowledge.rebuild", "knowledge.snapshot.materialize", "knowledge.watch", "knowledge.repository.remove",
-  "knowledge.branch.pin", "knowledge.index_status", "knowledge.set_master_branch", "knowledge.snapshot.list", "knowledge.get_node",
+  "knowledge.branch.pin", "knowledge.index_status", "knowledge.status_panel", "knowledge.set_master_branch", "knowledge.snapshot.list", "knowledge.get_node",
   "knowledge.callers", "knowledge.callees", "knowledge.impact", "knowledge.context", "knowledge.explore", "knowledge.locate",
   "knowledge.explain", "knowledge.flow", "knowledge.affected", "knowledge.path", "knowledge.architecture", "knowledge.service_graph",
   "knowledge.local_graph", "knowledge.repository_graph", "knowledge.communities", "knowledge.timeline", "knowledge.recent",

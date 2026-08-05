@@ -8,7 +8,7 @@ import {
 
 test("canonical capability manifest is complete, unique, and CLI/MCP required", () => {
   const ids = CAPABILITIES.map((capability) => capability.id);
-  assert.equal(ids.length, 97);
+  assert.equal(ids.length, 98);
   assert.equal(new Set(ids).size, ids.length);
   assert.ok(ids.includes("knowledge.search"));
   assert.ok(ids.includes("knowledge.graph.query"));

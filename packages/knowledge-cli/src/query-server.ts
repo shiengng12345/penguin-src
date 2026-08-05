@@ -1,6 +1,6 @@
 import { createInterface } from "node:readline";
 import { CAPABILITIES, capabilityHash, type SearchResponse } from "@penguin/knowledge-contracts";
-import { searchKnowledge, getSourceHit, compactIndexStatus, resolveRevisionContext, SCHEMA_VERSION } from "@penguin/knowledge-core";
+import { searchKnowledge, getSourceHit, compactIndexStatus, buildStatusPanel, resolveRevisionContext, SCHEMA_VERSION } from "@penguin/knowledge-core";
 import { runCli, type CliDeps } from "./index.js";
 import { dispatchQueryFrame, encodeFrame, parseFrame, queryHello } from "./query-protocol.js";
 
@@ -45,6 +45,7 @@ export async function runQueryServer(deps: CliDeps, input = process.stdin, outpu
   const invoke = async (capabilityId: string, value: unknown, signal?: AbortSignal): Promise<unknown> => {
     if (capabilityId === "knowledge.capabilities") return { schemaVersion: "1", capabilityHash: capabilityHash(CAPABILITIES), capabilities: caches.capabilityRegistry };
     if (capabilityId === "knowledge.index_status") return compactIndexStatus(store);
+    if (capabilityId === "knowledge.status_panel") return buildStatusPanel(store);
     if (capabilityId === "knowledge.get_hit") {
       const request = value as { snapshotId: string; filePath: string; repoId?: string; startLine?: number; endLine?: number; startByte?: number; contextLines?: number };
       if (!request.snapshotId || !request.filePath) throw Object.assign(new Error("HIT_LOCATOR_REQUIRED"), { code: "HIT_LOCATOR_REQUIRED" });
