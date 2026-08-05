@@ -27,6 +27,12 @@ test("migration upgrades a v13 store idempotently", () => {
   const store = freshStore();
   // Simulate a pre-bump database: strip the new objects and mark it v13.
   store.db.exec("DROP TABLE coverage_layers");
+  // Also strip the two new edges columns so the reopen genuinely exercises
+  // the `ALTER TABLE edges ADD COLUMN` guards in migrate(), not just the
+  // CREATE TABLE IF NOT EXISTS path (a v14-built store already has both
+  // columns, so without this the ADD COLUMN branches never run).
+  store.db.exec("ALTER TABLE edges DROP COLUMN evidence_id");
+  store.db.exec("ALTER TABLE edges DROP COLUMN boundary");
   store.db.prepare("UPDATE meta SET value='13' WHERE key='schema_version'").run();
   const dbPath = store.db.name;
   store.close();
@@ -34,5 +40,8 @@ test("migration upgrades a v13 store idempotently", () => {
   const stored = reopened.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get();
   assert.equal(Number(stored.value), 14);
   assert.ok(reopened.db.prepare("SELECT name FROM sqlite_master WHERE name='coverage_layers'").get());
+  const cols = reopened.db.prepare("PRAGMA table_info(edges)").all().map((c) => c.name);
+  assert.ok(cols.includes("evidence_id"), "edges.evidence_id missing after migration");
+  assert.ok(cols.includes("boundary"), "edges.boundary missing after migration");
   reopened.close();
 });
