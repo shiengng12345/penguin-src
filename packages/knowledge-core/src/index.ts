@@ -40,6 +40,17 @@ export {
 } from "./revision.js";
 export { legacyRevisionScope, type RevisionReadScope } from "./revision-scope.js";
 export {
+  resolveQueryScope,
+  resolveRepoForPath,
+  readGitStateDefault,
+  ScopeResolutionError,
+  type GitState,
+  type GitStateReader,
+  type ResolveQueryScopeInput,
+  type ResolvedQueryScope,
+  type ScopeResolutionErrorCode,
+} from "./query-scope.js";
+export {
   GitTopologyStore,
   type GitCommitRecord,
   type CreateSnapshotInput,
