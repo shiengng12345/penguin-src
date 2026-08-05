@@ -19,6 +19,7 @@ import { IndexProgressBanner } from "@/components/wiki/IndexProgressBanner";
 import { WikiOnboarding } from "@/components/wiki/WikiOnboarding";
 import { KnowledgeHomePanel } from "@/components/wiki/KnowledgeHomePanel";
 import { GraphEmptyState, GraphStatsOverlay, type GraphScope } from "@/components/wiki/GraphStatsOverlay";
+import { WikiStatusFooter } from "@/components/wiki/WikiStatusFooter";
 import {
   filterGraphView,
   formatKnowledgeError,
@@ -277,11 +278,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
 
       </div>
 
-      <footer className="flex h-7 shrink-0 items-center gap-3 border-t border-slate-800 bg-[#101826] px-3 text-[11px] text-slate-400">
-        <span className="flex items-center gap-1.5"><span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />Connected</span>
-        <span className="text-slate-600">SQLite</span>
-        <span className="ml-auto text-slate-600">Workspace <b className="text-slate-300">Penguin</b></span>
-      </footer>
+      <WikiStatusFooter />
     </div>
   );
 }
