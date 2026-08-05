@@ -17,7 +17,7 @@
 | `knowledge.repository.remove` | available | implemented | implemented | — | yes | required |
 | `knowledge.branch.pin` | available | implemented | implemented | — | yes | required |
 | `knowledge.index_status` | available | implemented | implemented | required | no | not_required |
-| `knowledge.status_panel` | degraded | implemented | not_implemented | required | no | not_required |
+| `knowledge.status_panel` | available | implemented | implemented | required | no | not_required |
 | `knowledge.set_master_branch` | available | implemented | implemented | — | yes | required |
 | `knowledge.snapshot.list` | available | implemented | implemented | — | no | not_required |
 | `knowledge.get_node` | available | implemented | implemented | required | no | not_required |

@@ -40,7 +40,7 @@ export const CLI_IMPLEMENTED_CAPABILITIES = new Set<string>([
 
 export const MCP_IMPLEMENTED_CAPABILITIES = new Set<string>([
   "knowledge.search", "knowledge.get_hit", "knowledge.coverage", "knowledge.capabilities", "knowledge.get_node", "knowledge.context",
-  "knowledge.explore", "knowledge.compare_branches", "knowledge.index_status", "knowledge.set_master_branch", "knowledge.suggestion.list",
+  "knowledge.explore", "knowledge.compare_branches", "knowledge.index_status", "knowledge.status_panel", "knowledge.set_master_branch", "knowledge.suggestion.list",
   "knowledge.suggestion.accept", "knowledge.suggestion.reject", "knowledge.architecture", "knowledge.communities", "knowledge.dead_code",
   "knowledge.graph.query", "knowledge.package_dependencies", "knowledge.dependency_path", "knowledge.analyze_repository",
   "knowledge.note.write", "knowledge.source.register", "knowledge.source.sync", "knowledge.source.list", "knowledge.source.remove",
@@ -69,6 +69,7 @@ export const CAPABILITY_ALIASES = Object.freeze({
   get_node: "knowledge.get_node",
   explore_graph: "knowledge.graph.query",
   index_status: "knowledge.index_status",
+  status_panel: "knowledge.status_panel",
   set_master_branch: "knowledge.set_master_branch",
   get_architecture: "knowledge.architecture",
   find_communities: "knowledge.communities",

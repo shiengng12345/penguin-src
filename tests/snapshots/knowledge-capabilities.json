@@ -5102,7 +5102,7 @@
       },
       {
         "capabilityId": "knowledge.status_panel",
-        "status": "not_implemented",
+        "status": "implemented",
         "inputSchemaId": "knowledge.status_panel.input.v2",
         "inputSchema": {
           "type": "object",

@@ -11,6 +11,7 @@ import {
   getNodeDetail,
   indexStatus,
   compactIndexStatus,
+  buildStatusPanel,
   resolveSymbolMatches,
   search,
   searchSource,
@@ -141,6 +142,7 @@ const CANONICAL_HANDLER_ALIASES: Record<string, string> = {
   knowledge_note_write: "write_note",
   knowledge_link_create: "suggest_links",
   knowledge_index_status: "index_status",
+  knowledge_status_panel: "status_panel",
   knowledge_set_master_branch: "set_master_branch",
   knowledge_suggestion_list: "list_suggestions",
   knowledge_suggestion_accept: "accept_suggestion",
@@ -743,6 +745,8 @@ export function handleKnowledgeTool(
     }
     case "index_status":
       return a.mode === "compact" ? compactIndexStatus(store) : indexStatus(store);
+    case "status_panel":
+      return buildStatusPanel(store);
     case "set_master_branch": {
       const repoSelector = String(a.repo ?? "").trim();
       const branchName = String(a.branch ?? "");

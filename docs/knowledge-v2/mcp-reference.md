@@ -17,7 +17,7 @@
 | `knowledge.repository.remove` | implemented | knowledge_repository_remove |
 | `knowledge.branch.pin` | implemented | knowledge_branch_pin |
 | `knowledge.index_status` | implemented | knowledge_index_status |
-| `knowledge.status_panel` | not_implemented | knowledge_status_panel |
+| `knowledge.status_panel` | implemented | knowledge_status_panel |
 | `knowledge.set_master_branch` | implemented | knowledge_set_master_branch |
 | `knowledge.snapshot.list` | implemented | knowledge_snapshot_list |
 | `knowledge.get_node` | implemented | knowledge_get_node |

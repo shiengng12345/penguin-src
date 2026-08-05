@@ -81,3 +81,20 @@ test("get_node with an explicit branch selector for a non-existent branch still 
   assert.equal(result.error?.code, "SCOPE_NOT_FOUND", JSON.stringify(result));
   store.close();
 });
+
+// status_panel is the MCP-side wiring for knowledge.status_panel (Task 3):
+// same fixture as above (git checked out on un-indexed "feature-x", only
+// "main" registered/indexed) exercises the same branch_not_indexed +
+// live-fallback path already covered end-to-end for the native query-server
+// runtime in tests/knowledge-status-panel.test.mjs.
+test("status_panel reports branch_not_indexed with a live fallback via the MCP handler", () => {
+  const { store, rootPath } = fixture();
+  const result = handleKnowledgeTool("status_panel", {}, store);
+  assert.equal(result.db.schemaVersion, 14);
+  assert.equal(result.repos.length, 1);
+  assert.equal(result.repos[0].rootPath, rootPath);
+  assert.equal(result.repos[0].branchName, "feature-x");
+  assert.equal(result.repos[0].revisionAlignment, "branch_not_indexed");
+  assert.equal(result.repos[0].indexedBranch, "main");
+  store.close();
+});

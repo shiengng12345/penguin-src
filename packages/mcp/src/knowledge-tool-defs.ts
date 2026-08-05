@@ -225,6 +225,13 @@ export const KNOWLEDGE_TOOL_DEFS = [
     },
   },
   {
+    name: "status_panel",
+    description:
+      "Read-only trust snapshot per registered repo: checked-out git branch, whether the index is aligned/behind/not-indexed for it " +
+      "(or git itself is unavailable), the best indexed branch as an informational fallback, and coverage_records counts. Never throws.",
+    inputSchema: { type: "object", properties: {} },
+  },
+  {
     name: "set_master_branch",
     description: "Explicitly select one indexed Git branch as the repository canonical master. Metadata-only: never checks out Git or starts indexing.",
     inputSchema: {
