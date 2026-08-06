@@ -7,6 +7,7 @@ export const RUNTIME_PREVENT_SLEEP_KEY = "runtime.preventSleep";
 
 export const APP_VALUE_KEYS = {
   theme: "penguin-theme",
+  themeDefaultOnboarded: "penguin-theme-default-onboarded",
   tutorialSeen: "penguin-tutorial-seen",
   userName: "penguin-username",
   tabs: "penguin-tabs",

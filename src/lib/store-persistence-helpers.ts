@@ -190,10 +190,21 @@ export function loadSavedRequests(): SavedRequest[] {
   return [];
 }
 
+// One-shot default-theme switch shipped with v1.15.0: every user (new or
+// upgrading) lands on the Penguin theme exactly once; any theme they pick
+// afterwards is never overridden by later updates.
+const THEME_ONBOARD_KEY = APP_VALUE_KEYS.themeDefaultOnboarded;
+const THEME_ONBOARD_STAMP = "penguin-1.15.0";
+
 export function loadTheme(): AppTheme {
+  if (getPersistedValue(THEME_ONBOARD_KEY) !== THEME_ONBOARD_STAMP) {
+    setPersistedValue(THEME_ONBOARD_KEY, THEME_ONBOARD_STAMP);
+    setPersistedValue(THEME_KEY, "penguin");
+    return "penguin";
+  }
   const stored = getPersistedValue(THEME_KEY);
   if (stored && isAppTheme(stored)) return stored;
-  return "dark";
+  return "penguin";
 }
 
 export function loadShowTutorial(): boolean {
