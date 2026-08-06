@@ -145,10 +145,28 @@ function langLabel(lang: string): string {
   return LANG_LABEL[lang] ?? lang.charAt(0).toUpperCase() + lang.slice(1);
 }
 
-const LANG_COLOR: Record<string, string> = {
-  TypeScript: "34", JavaScript: "33", Rust: "91", Go: "36", Java: "35",
-  PHP: "35", Python: "32", JSON: "33", Proto: "35", Other: "36",
+// Truecolor language palette (validated categorical set for dark terminals:
+// distinct hues, CVD-separated, ≥3:1 on dark surfaces). Basic ANSI codes get
+// remapped by terminal themes into near-identical pastels — 24-bit doesn't.
+// PHP and Proto share violet: they never co-occur in practice, and the bar's
+// language label is the primary identity anyway.
+const TRUECOLOR = typeof process !== "undefined" && /truecolor|24bit/i.test(process.env.COLORTERM ?? "");
+const LANG_RGB: Record<string, [string, string]> = {
+  // [truecolor SGR, 256-color fallback SGR]
+  TypeScript: ["38;2;57;135;229", "38;5;68"],
+  JavaScript: ["38;2;201;133;0", "38;5;172"],
+  JSON: ["38;2;25;158;112", "38;5;36"],
+  Rust: ["38;2;217;89;38", "38;5;166"],
+  Go: ["38;2;0;131;0", "38;5;28"],
+  Java: ["38;2;230;103;103", "38;5;167"],
+  Python: ["38;2;213;81;129", "38;5;168"],
+  PHP: ["38;2;144;133;233", "38;5;104"],
+  Proto: ["38;2;144;133;233", "38;5;104"],
 };
+const LANG_FALLBACK: [string, string] = ["38;2;143;143;143", "38;5;245"]; // neutral gray: Other + unknown
+function langColor(label: string): string {
+  return (LANG_RGB[label] ?? LANG_FALLBACK)[TRUECOLOR ? 0 : 1];
+}
 
 // Group per-language counts by display label (ts+tsx merge), largest first.
 // More than 5 groups: keep the top 4 and fold the tail into "Other".
@@ -199,7 +217,7 @@ export function renderRegionLines(state: RenderState, width: number, color: bool
           lines.push(`  ${spin} ${name} ${tail}`);
           for (const g of groups) {
             const count = `${g.done}/${g.total}`;
-            lines.push(`      ${c("2", g.label.padEnd(12))} [${bar(g.done, g.total, 14, c, LANG_COLOR[g.label] ?? "36")}] ${count.padStart(9)}`);
+            lines.push(`      ${c("2", g.label.padEnd(12))} [${bar(g.done, g.total, 14, c, langColor(g.label))}] ${count.padStart(9)}`);
           }
         } else {
           lines.push(`  ${spin} ${name} [${bar(state.done, state.total, 20, c)}] ${tail}`);

@@ -81,11 +81,12 @@ test("colored multi-language progress uses semantic colors instead of one cyan b
     { phase: "index", done: 1, total: 5, file: "a.ts", lang: "ts" },
   ]);
   const text = renderRegionLines(state, 100, true, T0 + 5000).join("\n");
-  assert.match(text, /\x1b\[34m█/, "TypeScript bar is blue");
-  assert.match(text, /\x1b\[33m/, "JavaScript bar is yellow");
-  assert.match(text, /\x1b\[91m/, "Rust bar is bright red/orange");
-  assert.match(text, /\x1b\[35m/, "Java bar is magenta");
-  assert.match(text, /\x1b\[32m/, "Python bar is green");
+  // Truecolor palette with 256-color fallback (validated categorical set).
+  assert.match(text, /\x1b\[38;(2;57;135;229|5;68)m█/, "TypeScript bar is blue");
+  assert.match(text, /\x1b\[38;(2;201;133;0|5;172)m/, "JavaScript bar is gold");
+  assert.match(text, /\x1b\[38;(2;217;89;38|5;166)m/, "Rust bar is orange");
+  assert.match(text, /\x1b\[38;(2;230;103;103|5;167)m/, "Java bar is red");
+  assert.match(text, /\x1b\[38;(2;213;81;129|5;168)m/, "Python bar is magenta");
   assert.ok(new Set([...text.matchAll(/\x1b\[([0-9;]+)m/g)].map((m) => m[1])).size >= 6);
 });
 
