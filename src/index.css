@@ -179,6 +179,31 @@
   --color-warning: oklch(0.68 0.14 85);
 }
 
+/* ── Penguin ── mascot palette: cream canvas, charcoal ink, orange feet, blush cheeks */
+[data-theme="penguin"] {
+  --color-background: oklch(0.96 0.014 80);
+  --color-foreground: oklch(0.3 0.012 280);
+  --color-card: oklch(0.985 0.008 85);
+  --color-card-foreground: oklch(0.3 0.012 280);
+  --color-popover: oklch(0.985 0.008 85);
+  --color-popover-foreground: oklch(0.3 0.012 280);
+  --color-primary: oklch(0.72 0.15 65);
+  --color-primary-foreground: oklch(0.99 0.005 85);
+  --color-secondary: oklch(0.92 0.02 80);
+  --color-secondary-foreground: oklch(0.3 0.012 280);
+  --color-muted: oklch(0.92 0.018 80);
+  --color-muted-foreground: oklch(0.5 0.015 75);
+  --color-accent: oklch(0.9 0.04 30);
+  --color-accent-foreground: oklch(0.3 0.012 280);
+  --color-destructive: oklch(0.56 0.2 25);
+  --color-destructive-foreground: oklch(0.985 0.01 20);
+  --color-border: oklch(0.85 0.02 80);
+  --color-input: oklch(0.83 0.022 80);
+  --color-ring: oklch(0.72 0.15 65);
+  --color-success: oklch(0.6 0.15 155);
+  --color-warning: oklch(0.7 0.14 80);
+}
+
 * {
   border-color: var(--color-border);
 }
