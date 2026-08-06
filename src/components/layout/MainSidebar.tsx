@@ -9,7 +9,6 @@
 //   "super-admin" — needs Dev Mode + super-admin token (Home / REST / Docs / Database)
 // Super-admin implies token, so super-admin users see everything.
 
-import { BookOpen, Compass, Database, Globe, Home, Lock, Network, Zap } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export type MainModule = "client" | "rest" | "vault" | "docs" | "browser" | "database" | "wiki";
@@ -27,29 +26,31 @@ type GateTier = "none" | "token" | "super-admin";
 
 interface RailItem {
   kind: MainModule;
-  icon: typeof Home;
+  // Mascot tile in /public/nav — full-color illustration, so active state is
+  // shown with a ring + saturation instead of a currentColor tint.
+  img: string;
   label: string;
   longLabel: string;
   requires: GateTier;
 }
 
 const ITEMS: RailItem[] = [
-  { kind: "client", icon: Zap, label: "Client", longLabel: "API Client / 客户端", requires: "none" },
-  { kind: "vault", icon: Lock, label: "Vault", longLabel: "Vault / 凭据库", requires: "token" },
+  { kind: "client", img: "/nav/client.png", label: "Client", longLabel: "API Client / 客户端", requires: "none" },
+  { kind: "vault", img: "/nav/vault.png", label: "Vault", longLabel: "Vault / 凭据库", requires: "token" },
   // In-app browser for embedded Vault UI / ArgoCD / Grafana etc. Cookies
   // persist via Tauri's filesystem-backed WKWebSiteDataStore, so logging
   // in once carries across sessions. Pinned shortcuts kept in app_kv —
   // see lib/store BrowserState slice. Super-admin only — normal admins
   // (dev token, not super) can't access it.
-  { kind: "browser", icon: Compass, label: "Browser", longLabel: "In-App Browser / 内嵌浏览器 (Super Admin)", requires: "super-admin" },
+  { kind: "browser", img: "/nav/browser.png", label: "Browser", longLabel: "In-App Browser / 内嵌浏览器 (Super Admin)", requires: "super-admin" },
   // REST / Docs / Database are super-admin only — not part of the
   // Vault + Browser release. Normal admins (token, not super) see only
   // Client + Vault + Browser.
-  { kind: "rest", icon: Globe, label: "REST", longLabel: "REST API / 接口客户端", requires: "none" },
-  { kind: "docs", icon: BookOpen, label: "Docs", longLabel: "Knowledge Base / 知识库 (Super Admin)", requires: "super-admin" },
-  { kind: "database", icon: Database, label: "Database", longLabel: "Database / 数据库 (Super Admin)", requires: "super-admin" },
+  { kind: "rest", img: "/nav/rest.png", label: "REST", longLabel: "REST API / 接口客户端", requires: "none" },
+  { kind: "docs", img: "/nav/docs.png", label: "Docs", longLabel: "Knowledge Base / 知识库 (Super Admin)", requires: "super-admin" },
+  { kind: "database", img: "/nav/database.png", label: "Database", longLabel: "Database / 数据库 (Super Admin)", requires: "super-admin" },
   // Penguin Knowledge Wiki — notes + code graph. Super-admin (dev-token) tier.
-  { kind: "wiki", icon: Network, label: "Wiki", longLabel: "Knowledge Wiki / 知识图谱 (Super Admin)", requires: "super-admin" },
+  { kind: "wiki", img: "/nav/wiki.png", label: "Wiki", longLabel: "Knowledge Wiki / 知识图谱 (Super Admin)", requires: "super-admin" },
 ];
 
 export function MainSidebar({ active, onSelect, hasValidToken, isSuperAdmin }: MainSidebarProps) {
@@ -65,7 +66,6 @@ export function MainSidebar({ active, onSelect, hasValidToken, isSuperAdmin }: M
       aria-label="Module navigation"
     >
       {visibleItems.map((item) => {
-        const Icon = item.icon;
         const isActive = active === item.kind;
         return (
           <button
@@ -82,7 +82,17 @@ export function MainSidebar({ active, onSelect, hasValidToken, isSuperAdmin }: M
                 : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
             )}
           >
-            <Icon className="h-5 w-5" />
+            <img
+              src={item.img}
+              alt=""
+              draggable={false}
+              className={cn(
+                "h-8 w-8 rounded-[22%] transition-all",
+                isActive
+                  ? "ring-2 ring-primary shadow-sm"
+                  : "opacity-75 saturate-[0.6] hover:opacity-100 hover:saturate-100",
+              )}
+            />
             <span className="text-[10px] font-medium leading-tight">{item.label}</span>
           </button>
         );
