@@ -60,7 +60,7 @@ const PenguinBrand = memo(function PenguinBrand() {
       <img
         src="/penguin.png"
         alt="Penguin"
-        className={cn("h-6 shrink-0 object-contain", isLunch && "animate-bounce")}
+        className={cn("h-8 shrink-0 object-contain", isLunch && "animate-bounce")}
         draggable={false}
       />
       <span
