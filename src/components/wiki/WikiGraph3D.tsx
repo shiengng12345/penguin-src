@@ -16,6 +16,17 @@ const EDGE_COLOR: Record<string, string> = {
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type G = any;
 
+// 3d-force-graph needs a concrete canvas fill color (no CSS var support), so
+// the page background token is resolved at read time via getComputedStyle.
+// Kept local rather than shared with WikiGraph's identical helper — same
+// precedent as WikiStatusFooter/BranchPickerPopover's duplicated
+// formatRelativeTime: three lines, not worth the coupling.
+function resolveBg(fallback: string): string {
+  if (typeof window === "undefined") return fallback;
+  const value = getComputedStyle(document.documentElement).getPropertyValue("--color-background").trim();
+  return value || fallback;
+}
+
 export function WikiGraph3D({ data, onNodeClick }: { data: KnowledgeGraphView; onNodeClick: (id: string, event?: MouseEvent) => void }) {
   const ref = useRef<HTMLDivElement>(null);
   const gRef = useRef<G>(null);
@@ -37,7 +48,7 @@ export function WikiGraph3D({ data, onNodeClick }: { data: KnowledgeGraphView; o
         const el = ref.current;
         if (disposed || !el) return;
         const g: G = new (ForceGraph3D as unknown as new (el: HTMLElement) => G)(el)
-          .backgroundColor("#080b11")
+          .backgroundColor(resolveBg("#080b11"))
           .nodeRelSize(4)
           .nodeColor((n: G) => (n.isFocus ? "#22d3ee" : NODE_COLOR[n.type] ?? NODE_COLOR.symbol))
           .nodeVal((n: G) => (n.isFocus ? 6 : 2))
@@ -70,6 +81,20 @@ export function WikiGraph3D({ data, onNodeClick }: { data: KnowledgeGraphView; o
   }, []);
 
   useEffect(() => { if (gRef.current) gRef.current.graphData(toGraph(data)); }, [data]);
+
+  // Same non-CSS-var canvas fill as WikiGraph — re-read + repaint on theme
+  // switch (data-theme attribute flip, see store.ts setTheme).
+  useEffect(() => {
+    const observer = new MutationObserver(() => {
+      const g = gRef.current;
+      if (!g) return;
+      g.backgroundColor(resolveBg("#080b11"));
+      const el = ref.current;
+      if (el) g.width(el.clientWidth).height(el.clientHeight);
+    });
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => observer.disconnect();
+  }, []);
 
   return <div ref={ref} className="h-full w-full" />;
 }

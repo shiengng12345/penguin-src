@@ -11,10 +11,10 @@ export function GraphEmptyState({
 }) {
   return (
     <div className="flex flex-1 items-center justify-center p-8">
-      <div className="max-w-md rounded-2xl border border-slate-800 bg-[#0d1420]/85 p-6 text-center">
+      <div className="max-w-md rounded-2xl border border-border bg-card/85 p-6 text-center">
         <Network className="mx-auto mb-4 h-8 w-8 text-cyan-300" />
-        <div className="text-base font-semibold text-slate-100">图谱需要一个焦点。</div>
-        <p className="mt-2 text-sm leading-relaxed text-slate-500">
+        <div className="text-base font-semibold text-foreground">图谱需要一个焦点。</div>
+        <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
           搜索并打开一个符号，或先看服务图了解 repo 之间的连接。
         </p>
         <button
@@ -83,50 +83,50 @@ export function GraphStatsOverlay({
         type="button"
         onClick={() => setCollapsed(false)}
         title="展开图谱统计面板"
-        className="absolute right-3 top-3 flex items-center gap-2 rounded-xl border border-slate-800 bg-[#0d1420]/90 px-3 py-2 text-xs shadow-[0_18px_50px_rgba(0,0,0,0.28)] backdrop-blur hover:border-cyan-500/40"
+        className="absolute right-3 top-3 flex items-center gap-2 rounded-xl border border-border bg-popover/90 px-3 py-2 text-xs shadow-[0_18px_50px_rgba(0,0,0,0.28)] backdrop-blur hover:border-cyan-500/40"
       >
         <Network className="h-3.5 w-3.5 text-cyan-300" />
-        <span className="max-w-[140px] truncate font-semibold text-slate-100">{scope?.title ?? "Graph view"}</span>
-        <ChevronRight className="h-3.5 w-3.5 text-slate-500" />
+        <span className="max-w-[140px] truncate font-semibold text-foreground">{scope?.title ?? "Graph view"}</span>
+        <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
       </button>
     );
   }
   return (
     // Fixed width + tabular digits: toggling types must not resize the panel.
-    <div className="absolute right-3 top-3 w-[320px] rounded-xl border border-slate-800 bg-[#0d1420]/90 p-3 text-xs tabular-nums shadow-[0_18px_50px_rgba(0,0,0,0.28)] backdrop-blur">
+    <div className="absolute right-3 top-3 w-[320px] rounded-xl border border-border bg-popover/90 p-3 text-xs tabular-nums shadow-[0_18px_50px_rgba(0,0,0,0.28)] backdrop-blur">
       <div className="mb-2 flex items-center gap-2">
         <Network className="h-3.5 w-3.5 shrink-0 text-cyan-300" />
         <div className="min-w-0 flex-1">
-          <div className="truncate font-semibold text-slate-100">{scope?.title ?? "Graph view"}</div>
-          <div className="truncate text-[11px] text-slate-500">{scope?.detail ?? "Current graph data"}</div>
+          <div className="truncate font-semibold text-foreground">{scope?.title ?? "Graph view"}</div>
+          <div className="truncate text-[11px] text-muted-foreground">{scope?.detail ?? "Current graph data"}</div>
         </div>
         <button
           type="button"
           onClick={() => setCollapsed(true)}
           title="收起面板"
-          className="shrink-0 rounded p-1 text-slate-500 hover:bg-white/5 hover:text-slate-200"
+          className="shrink-0 rounded p-1 text-muted-foreground hover:bg-accent hover:text-foreground"
         >
           <ChevronRight className="h-3.5 w-3.5" />
         </button>
       </div>
       <div className="grid grid-cols-2 gap-2">
-        <div className="rounded-lg border border-slate-800 bg-slate-950/45 px-2 py-1.5">
-          <div className="text-[9px] font-semibold uppercase tracking-wide text-slate-600">Nodes</div>
-          <div className="font-mono text-base font-semibold text-slate-100">{shown.nodes.length}</div>
+        <div className="rounded-lg border border-border bg-muted/45 px-2 py-1.5">
+          <div className="text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">Nodes</div>
+          <div className="font-mono text-base font-semibold text-foreground">{shown.nodes.length}</div>
         </div>
-        <div className="rounded-lg border border-slate-800 bg-slate-950/45 px-2 py-1.5">
-          <div className="text-[9px] font-semibold uppercase tracking-wide text-slate-600">Links</div>
+        <div className="rounded-lg border border-border bg-muted/45 px-2 py-1.5">
+          <div className="text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">Links</div>
           <div className="font-mono text-base font-semibold text-cyan-100">{shown.edges.length}</div>
         </div>
       </div>
       {raw.nodes.length > 0 && raw.nodes.length <= NODE_PICK_LIMIT && (
         <div className="mt-2">
-          <div className="mb-1 text-[9px] font-semibold uppercase tracking-wide text-slate-600">
+          <div className="mb-1 text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">
             {scope?.title === "Service map" ? "Repos" : "Nodes"}
           </div>
           <div className="max-h-44 overflow-auto pr-1">
             {[...raw.nodes].sort((a, b) => a.title.localeCompare(b.title)).map((n) => (
-              <label key={n.nodeId} className="flex cursor-pointer items-center gap-1.5 py-0.5 font-mono text-[11px] text-slate-300 hover:text-cyan-200">
+              <label key={n.nodeId} className="flex cursor-pointer items-center gap-1.5 py-0.5 font-mono text-[11px] text-foreground hover:text-cyan-200">
                 <input
                   type="checkbox"
                   checked={!hiddenIds.has(n.nodeId)}
@@ -141,17 +141,17 @@ export function GraphStatsOverlay({
       )}
       {nodeTypes.length > 1 && (
         <div className="mt-2">
-          <div className="mb-1 text-[9px] font-semibold uppercase tracking-wide text-slate-600">Node types</div>
+          <div className="mb-1 text-[9px] font-semibold uppercase tracking-wide text-muted-foreground">Node types</div>
           <div className="flex flex-wrap gap-x-3 gap-y-1">
             {nodeTypes.map(([type, count]) => (
-              <label key={type} className="flex cursor-pointer items-center gap-1.5 font-mono text-[11px] text-slate-300 hover:text-cyan-200">
+              <label key={type} className="flex cursor-pointer items-center gap-1.5 font-mono text-[11px] text-foreground hover:text-cyan-200">
                 <input
                   type="checkbox"
                   checked={!hidden.has(type)}
                   onChange={() => onToggleType(type)}
                   className="h-3 w-3 accent-cyan-400"
                 />
-                {type} <span className="text-slate-600">{count}</span>
+                {type} <span className="text-muted-foreground">{count}</span>
               </label>
             ))}
           </div>
@@ -160,7 +160,7 @@ export function GraphStatsOverlay({
       {edgeTypes.length > 0 && (
         <div className="mt-2 flex flex-wrap gap-1.5">
           {edgeTypes.map(([type, count]) => (
-            <span key={type} className="rounded-md border border-slate-800 bg-slate-950/45 px-2 py-0.5 font-mono text-[10px] text-slate-300">
+            <span key={type} className="rounded-md border border-border bg-muted/45 px-2 py-0.5 font-mono text-[10px] text-foreground">
               {type} {count}
             </span>
           ))}

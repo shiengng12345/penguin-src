@@ -77,9 +77,9 @@ export function BranchPickerPopover({ branches, anchor, onPick, onClose }: Branc
       role="menu"
       aria-label="Select a branch"
       style={{ left, top, width: POPOVER_WIDTH, maxHeight: POPOVER_MAX_HEIGHT }}
-      className="fixed z-50 overflow-auto rounded-lg border border-slate-700 bg-slate-950/95 p-1 text-sm text-slate-200 shadow-2xl backdrop-blur"
+      className="fixed z-50 overflow-auto rounded-lg border border-border bg-popover/95 p-1 text-sm text-foreground shadow-2xl backdrop-blur"
     >
-      <div className="px-2 py-1.5 text-[11px] uppercase tracking-wide text-slate-500">This repository has multiple live branches — pick one</div>
+      <div className="px-2 py-1.5 text-[11px] uppercase tracking-wide text-muted-foreground">This repository has multiple live branches — pick one</div>
       {branches.map((branch) => (
         <button
           key={branch.branchId}
@@ -90,12 +90,12 @@ export function BranchPickerPopover({ branches, anchor, onPick, onClose }: Branc
         >
           <span className="min-w-0 truncate">{branch.name}</span>
           <span className="flex shrink-0 items-center gap-1.5">
-            <span className="text-[11px] text-slate-500">{formatRelativeTime(branch.lastIndexedAt)}</span>
+            <span className="text-[11px] text-muted-foreground">{formatRelativeTime(branch.lastIndexedAt)}</span>
             <span
               className={
                 branch.status === "live"
                   ? "rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] text-emerald-300"
-                  : "rounded bg-slate-700/40 px-1.5 py-0.5 text-[10px] text-slate-400"
+                  : "rounded bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground"
               }
             >
               {branch.status === "live" ? "live" : "stale"}

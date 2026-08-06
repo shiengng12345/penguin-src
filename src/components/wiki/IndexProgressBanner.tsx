@@ -38,7 +38,7 @@ export function IndexProgressBanner() {
           {total > 0 ? `${pct}% · ${done}/${total}` : "starting…"}
         </span>
       </div>
-      <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-slate-800">
+      <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-muted">
         <div className="h-full rounded-full bg-cyan-400 transition-[width] duration-200" style={{ width: `${pct}%` }} />
       </div>
       {progress.file && <div className="mt-1 truncate font-mono text-[10px] text-cyan-200/60">{progress.file}</div>}

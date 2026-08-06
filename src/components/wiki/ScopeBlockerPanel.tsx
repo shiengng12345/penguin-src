@@ -40,24 +40,24 @@ export function ScopeBlockerPanel({ error, onRetry, retrying, className }: Scope
 
   return (
     <div className={`flex flex-1 items-center justify-center p-8 ${className ?? ""}`}>
-      <div className="max-w-lg rounded-2xl border border-amber-500/30 bg-[#0d1420]/85 p-6 text-center">
+      <div className="max-w-lg rounded-2xl border border-amber-500/30 bg-card/85 p-6 text-center">
         <GitBranch className="mx-auto mb-4 h-8 w-8 text-amber-300" />
-        <div className="text-base font-semibold text-slate-100">
+        <div className="text-base font-semibold text-foreground">
           {branchName ? <>Branch <span className="font-mono text-amber-200">{branchName}</span> is not indexed</> : "Scope not found"}
         </div>
-        <p className="mt-2 text-sm leading-relaxed text-slate-500">
+        <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
           {branchName
             ? "This checkout has switched to a branch Penguin hasn't indexed yet, so an answer scoped to it would be a guess."
             : error.message}
         </p>
         {branchNotIndexed && (
-          <p className="mt-3 text-sm text-slate-400">
-            Run <code className="rounded bg-slate-950 px-1.5 py-0.5 font-mono text-[13px] text-cyan-200">penguin index</code> in this repo to index it, then retry —
+          <p className="mt-3 text-sm text-muted-foreground">
+            Run <code className="rounded bg-background px-1.5 py-0.5 font-mono text-[13px] text-cyan-200">penguin index</code> in this repo to index it, then retry —
             or answer from an already-indexed branch right now:
           </p>
         )}
         {error.candidates.length > 0 && (
-          <ul className="mx-auto mt-3 max-w-sm space-y-1 text-left font-mono text-[11px] text-slate-500">
+          <ul className="mx-auto mt-3 max-w-sm space-y-1 text-left font-mono text-[11px] text-muted-foreground">
             {error.candidates.slice(0, 5).map((candidate) => (
               <li key={candidate.branchName} className="truncate">
                 {candidate.branchName} @ {candidate.commitSha.slice(0, 7)}

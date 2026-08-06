@@ -57,6 +57,17 @@ const EDGE_LEGEND: Array<{ label: string; color: string }> = [
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type GNode = any;
 
+// force-graph needs a concrete canvas fill color (no CSS var support), so the
+// page background token is resolved at read time via getComputedStyle. Kept
+// local rather than shared with WikiGraph3D's identical helper — same
+// precedent as WikiStatusFooter/BranchPickerPopover's duplicated
+// formatRelativeTime: three lines, not worth the coupling.
+function resolveBg(fallback: string): string {
+  if (typeof window === "undefined") return fallback;
+  const value = getComputedStyle(document.documentElement).getPropertyValue("--color-background").trim();
+  return value || fallback;
+}
+
 // zoomToFit on a 0/1-node graph computes a degenerate (point) bounding box and
 // zooms to the library maximum — the lone node's disc fills the whole canvas
 // as a solid color (real case: service map with a single indexed repo). Fit
@@ -196,7 +207,7 @@ export function WikiGraph({
         const dimmed = () => hoverRef.current != null;
 
         graph
-          .backgroundColor("#0b111a")
+          .backgroundColor(resolveBg("#0b111a"))
           .nodeId("id")
           .nodeRelSize(1)
           .linkColor((l: GNode) =>
@@ -309,6 +320,22 @@ export function WikiGraph({
     }
   }, [layout]);
 
+  // The canvas fill is a concrete color force-graph paints internally — not a
+  // CSS var, so a theme switch (which just flips the data-theme attribute,
+  // see store.ts setTheme) needs an explicit re-read + repaint here, or the
+  // canvas keeps whatever color was resolved at mount.
+  useEffect(() => {
+    const observer = new MutationObserver(() => {
+      const graph = graphRef.current;
+      if (!graph) return;
+      graph.backgroundColor(resolveBg("#0b111a"));
+      const el = containerRef.current;
+      if (el) graph.width(el.clientWidth).height(el.clientHeight);
+    });
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => observer.disconnect();
+  }, []);
+
   const zoomBy = (f: number) => {
     const g = graphRef.current;
     if (g?.zoom) g.zoom(Math.max(0.2, g.zoom() * f), 200);
@@ -324,12 +351,12 @@ export function WikiGraph({
           { t: "适配", on: () => graphRef.current && safeFit(graphRef.current, 400, 60), d: "M4 9V5h4M20 9V5h-4M4 15v4h4M20 15v4h-4" },
         ].map((b) => (
           <button key={b.t} type="button" title={b.t} onClick={b.on}
-            className="grid h-7 w-7 place-items-center rounded-md border border-slate-700 bg-slate-950/70 text-slate-300 backdrop-blur hover:bg-white/5">
+            className="grid h-7 w-7 place-items-center rounded-md border border-border bg-background/70 text-foreground backdrop-blur hover:bg-accent">
             <svg viewBox="0 0 24 24" className="h-3.5 w-3.5" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d={b.d} /></svg>
           </button>
         ))}
       </div>
-      <div className="pointer-events-none absolute bottom-3 left-3 flex flex-wrap gap-x-3 gap-y-1 rounded-md bg-black/30 px-2.5 py-1.5 text-[10px] text-slate-300 backdrop-blur-sm">
+      <div className="pointer-events-none absolute bottom-3 left-3 flex flex-wrap gap-x-3 gap-y-1 rounded-md bg-background/30 px-2.5 py-1.5 text-[10px] text-foreground backdrop-blur-sm">
         {EDGE_LEGEND.map((e) => (
           <span key={e.label} className="flex items-center gap-1">
             <span className="inline-block h-0.5 w-3 rounded" style={{ backgroundColor: e.color }} />

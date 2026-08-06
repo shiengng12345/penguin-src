@@ -17,14 +17,14 @@ const withStatus = (exc: string) => (EXC_STATUS[exc] ? `${EXC_STATUS[exc]} · ${
 
 const briefCard = (label: string, items: { nodeId: string; title: string; nodeType: string }[], onSelectSymbol: (id: string) => void) =>
   items.length === 0 ? null : (
-    <div className="rounded-xl border border-slate-800 bg-slate-900/40">
-      <div className="flex items-center gap-2 border-b border-slate-800 px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-slate-400">
-        {label}<span className="ml-auto rounded-full bg-slate-800 px-1.5 font-mono text-[10px] text-slate-500">{items.length}</span>
+    <div className="rounded-xl border border-border bg-card/40">
+      <div className="flex items-center gap-2 border-b border-border px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-muted-foreground">
+        {label}<span className="ml-auto rounded-full bg-muted px-1.5 font-mono text-[10px] text-muted-foreground">{items.length}</span>
       </div>
       <div className="p-2">
         {items.slice(0, 14).map((n) => (
           <button key={n.nodeId} type="button" onClick={() => onSelectSymbol(n.nodeId)}
-            className="flex w-full items-center gap-2 rounded px-1.5 py-1 text-left font-mono text-xs text-slate-200 hover:bg-white/5">
+            className="flex w-full items-center gap-2 rounded px-1.5 py-1 text-left font-mono text-xs text-foreground hover:bg-accent">
             <Dot t={n.nodeType} /><span className="min-w-0 flex-1 truncate">{n.title}</span>
           </button>
         ))}
@@ -53,10 +53,10 @@ const xServiceCard = (label: string, items: { nodeId: string; title: string; nod
 
 const chipList = (label: string, items: string[], color: string) =>
   items.length === 0 ? null : (
-    <div className="rounded-xl border border-slate-800 bg-slate-900/40">
-      <div className="border-b border-slate-800 px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-slate-400">{label}</div>
+    <div className="rounded-xl border border-border bg-card/40">
+      <div className="border-b border-border px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-muted-foreground">{label}</div>
       <div className="flex flex-wrap gap-1.5 p-2.5">
-        {items.map((s) => <span key={s} className="rounded-md border border-slate-700 bg-slate-800/50 px-2 py-1 font-mono text-[11px]" style={{ color }}>{s}</span>)}
+        {items.map((s) => <span key={s} className="rounded-md border border-border bg-muted/50 px-2 py-1 font-mono text-[11px]" style={{ color }}>{s}</span>)}
       </div>
     </div>
   );
@@ -82,12 +82,12 @@ export function WikiContextPane({
       <div className="flex flex-1 flex-col">
         {paddedBadge}
         <div className="flex flex-1 items-center justify-center p-8">
-          <div className="max-w-md rounded-2xl border border-slate-800 bg-[#0d1420]/85 p-6 text-center">
+          <div className="max-w-md rounded-2xl border border-border bg-card/85 p-6 text-center">
             <div className="mx-auto mb-4 flex h-10 w-10 items-center justify-center rounded-xl border border-cyan-500/20 bg-cyan-500/10 text-cyan-200">
               <Search className="h-5 w-5" />
             </div>
-            <div className="text-base font-semibold text-slate-100">Search or pick a symbol</div>
-            <p className="mt-2 text-sm leading-relaxed text-slate-500">
+            <div className="text-base font-semibold text-foreground">Search or pick a symbol</div>
+            <p className="mt-2 text-sm leading-relaxed text-muted-foreground">
               Context Pack 会汇总源码、调用关系、入口、错误、env、测试和关联笔记。
             </p>
           </div>
@@ -99,16 +99,16 @@ export function WikiContextPane({
   return (
     <div className="flex-1 space-y-4 overflow-auto p-5">
       {badge}
-      <div className="rounded-2xl border border-slate-800 bg-[#0d1420]/85 p-4">
+      <div className="rounded-2xl border border-border bg-card/85 p-4">
         <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-cyan-300">
           <Sparkles className="h-3.5 w-3.5" />Context Pack
         </div>
-        <div className="font-mono text-sm font-semibold text-slate-100">{f.title}</div>
-        {f.filePath && <div className="mt-1 truncate font-mono text-xs text-slate-500">{f.filePath}</div>}
+        <div className="font-mono text-sm font-semibold text-foreground">{f.title}</div>
+        {f.filePath && <div className="mt-1 truncate font-mono text-xs text-muted-foreground">{f.filePath}</div>}
         {f.branches.length > 0 && (
           <div className="mt-3 flex flex-wrap gap-1.5">
             {f.branches.map((b) => (
-              <span key={`${b.branch}:${b.status}`} className="rounded-md border border-slate-800 bg-slate-950/50 px-2 py-1 font-mono text-[11px] text-slate-400">
+              <span key={`${b.branch}:${b.status}`} className="rounded-md border border-border bg-background/50 px-2 py-1 font-mono text-[11px] text-muted-foreground">
                 {b.branch} · {b.status}
               </span>
             ))}
@@ -117,13 +117,13 @@ export function WikiContextPane({
       </div>
       {pack!.signals.length > 0 && (
         <div className="space-y-1.5 rounded-xl border border-amber-500/20 bg-amber-500/[0.04] p-3">
-          {pack!.signals.map((s, i) => <div key={i} className="flex items-start gap-2 text-xs text-slate-300"><AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" />{s}</div>)}
+          {pack!.signals.map((s, i) => <div key={i} className="flex items-start gap-2 text-xs text-foreground"><AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" />{s}</div>)}
         </div>
       )}
       {f.source && (
-        <div className="overflow-hidden rounded-xl border border-slate-800 bg-[#0d1420]/85">
-          <div className="border-b border-slate-800 bg-slate-900/60 px-3 py-1.5 text-[10px] font-bold uppercase text-slate-400">源码 · {(f.filePath?.split(".").pop() ?? "ts")}</div>
-          <pre className="max-h-80 overflow-auto bg-slate-950/70 p-3 text-xs leading-relaxed text-slate-200"><code className="font-mono">{f.source}</code></pre>
+        <div className="overflow-hidden rounded-xl border border-border bg-card/85">
+          <div className="border-b border-border bg-card/60 px-3 py-1.5 text-[10px] font-bold uppercase text-muted-foreground">源码 · {(f.filePath?.split(".").pop() ?? "ts")}</div>
+          <pre className="max-h-80 overflow-auto bg-background/70 p-3 text-xs leading-relaxed text-foreground"><code className="font-mono">{f.source}</code></pre>
         </div>
       )}
       {(pack!.remoteCalls.length > 0 || pack!.invokedBy.length > 0) && (

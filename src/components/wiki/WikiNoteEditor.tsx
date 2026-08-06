@@ -77,7 +77,7 @@ export function WikiNoteEditor({ body, onChange }: { body: string; onChange: (v:
         cmPlaceholder("写点什么… 用 [[ 链接到符号/笔记,用 # 加标签"),
         EditorView.theme(
           {
-            "&": { fontSize: "13px", height: "100%", backgroundColor: "transparent", color: "#e2e8f0" },
+            "&": { fontSize: "13px", height: "100%", backgroundColor: "transparent", color: "var(--color-foreground)" },
             ".cm-content": { fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", padding: "10px" },
             "&.cm-focused": { outline: "none" },
             ".cm-cursor": { borderLeftColor: "#22d3ee" },
@@ -106,5 +106,5 @@ export function WikiNoteEditor({ body, onChange }: { body: string; onChange: (v:
     if (cur !== body) v.dispatch({ changes: { from: 0, to: cur.length, insert: body } });
   }, [body]);
 
-  return <div ref={ref} className="h-full w-full overflow-auto rounded-md border border-slate-800 bg-slate-950/40" />;
+  return <div ref={ref} className="h-full w-full overflow-auto rounded-md border border-border bg-background/40" />;
 }

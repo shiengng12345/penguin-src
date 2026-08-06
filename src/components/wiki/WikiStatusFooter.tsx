@@ -99,9 +99,9 @@ export function WikiStatusFooter({ repoId }: WikiStatusFooterProps) {
   // has resolved — never conflate with a real failure.
   if (!panel && !failed) {
     return (
-      <footer className="flex h-7 shrink-0 items-center gap-3 border-t border-slate-800 bg-[#101826] px-3 text-[11px] text-slate-400">
+      <footer className="flex h-7 shrink-0 items-center gap-3 border-t border-border bg-card px-3 text-[11px] text-muted-foreground">
         <span className="flex items-center gap-1.5">
-          <span className="h-1.5 w-1.5 rounded-full bg-slate-600" />
+          <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground" />
           DB: …
         </span>
       </footer>
@@ -113,7 +113,7 @@ export function WikiStatusFooter({ repoId }: WikiStatusFooterProps) {
   // non-null below without a non-null assertion.
   if (schemaOutdated) {
     return (
-      <footer className="flex h-7 shrink-0 items-center gap-3 border-t border-slate-800 bg-[#101826] px-3 text-[11px] text-amber-300">
+      <footer className="flex h-7 shrink-0 items-center gap-3 border-t border-border bg-card px-3 text-[11px] text-amber-300">
         <span className="flex items-center gap-1.5">
           <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
           Index upgrade required — run `penguin index`
@@ -124,9 +124,9 @@ export function WikiStatusFooter({ repoId }: WikiStatusFooterProps) {
 
   if (failed || !panel) {
     return (
-      <footer className="flex h-7 shrink-0 items-center gap-3 border-t border-slate-800 bg-[#101826] px-3 text-[11px] text-slate-400">
+      <footer className="flex h-7 shrink-0 items-center gap-3 border-t border-border bg-card px-3 text-[11px] text-muted-foreground">
         <span className="flex items-center gap-1.5">
-          <span className="h-1.5 w-1.5 rounded-full bg-slate-600" />
+          <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground" />
           DB: Unavailable
         </span>
       </footer>
@@ -145,7 +145,7 @@ export function WikiStatusFooter({ repoId }: WikiStatusFooterProps) {
 
   return (
     <footer
-      className="flex h-7 shrink-0 items-center gap-3 border-t border-slate-800 bg-[#101826] px-3 text-[11px] text-slate-400"
+      className="flex h-7 shrink-0 items-center gap-3 border-t border-border bg-card px-3 text-[11px] text-muted-foreground"
       title={repo ? `${repo.repoName} — ${repo.rootPath}` : undefined}
     >
       <span className="flex items-center gap-1.5">
@@ -154,20 +154,20 @@ export function WikiStatusFooter({ repoId }: WikiStatusFooterProps) {
       </span>
       {repo ? (
         <>
-          <span className="text-slate-600">·</span>
-          <span className={cn(branchNotIndexed ? "text-amber-300" : "text-slate-400")}>
+          <span className="text-muted-foreground">·</span>
+          <span className={cn(branchNotIndexed ? "text-amber-300" : "text-muted-foreground")}>
             Revision: {REVISION_LABEL[repo.revisionAlignment]}
             {branchNotIndexed ? " — run penguin index" : null}
           </span>
-          <span className="text-slate-600">·</span>
-          <span className="text-slate-400">Index: {formatRelativeTime(repo.lastIndexedAt)}</span>
-          <span className="text-slate-600">·</span>
-          <span className={cn(coverageIsLow ? "text-amber-300" : "text-slate-400")}>
+          <span className="text-muted-foreground">·</span>
+          <span className="text-muted-foreground">Index: {formatRelativeTime(repo.lastIndexedAt)}</span>
+          <span className="text-muted-foreground">·</span>
+          <span className={cn(coverageIsLow ? "text-amber-300" : "text-muted-foreground")}>
             {coverage ? `Coverage: ${coverage.admitted}/${total} files` : "Coverage: not computed"}
           </span>
         </>
       ) : (
-        <span className="text-slate-600">No repo indexed</span>
+        <span className="text-muted-foreground">No repo indexed</span>
       )}
     </footer>
   );

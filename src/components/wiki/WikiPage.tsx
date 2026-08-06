@@ -258,33 +258,33 @@ export function WikiPage({ onClose }: WikiPageProps) {
   }
 
   return (
-    <div className="flex h-full flex-col bg-[#070b11] text-slate-100">
+    <div className="flex h-full flex-col bg-background text-foreground">
       {error && !isNoDatabaseError(error) && <div className="mx-6 mt-3 rounded-md border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-sm text-yellow-200">{error}</div>}
       <IndexProgressBanner />
 
       <div className="flex min-h-0 flex-1 flex-col">
-        <section className="flex min-h-0 min-w-0 flex-col bg-[#080d14]">
-          <div className="flex h-12 shrink-0 items-center gap-1 border-b border-slate-800 bg-[#0d1420] px-3">
+        <section className="flex min-h-0 min-w-0 flex-col bg-background">
+          <div className="flex h-12 shrink-0 items-center gap-1 border-b border-border bg-card px-3">
             <TabBtn on={tab === "search"} onClick={() => setTab("search")} icon={<Search className="h-3.5 w-3.5" />}>Search</TabBtn>
             <TabBtn on={tab === "context"} onClick={() => setTab("context")} icon={<Sparkles className="h-3.5 w-3.5" />}>Context</TabBtn>
             <TabBtn on={tab === "graph"} onClick={() => setTab("graph")} icon={<Network className="h-3.5 w-3.5" />}>Graph</TabBtn>
             <TabBtn on={tab === "evidence"} onClick={() => setTab("evidence")} icon={<ClipboardList className="h-3.5 w-3.5" />}>SLS Evidence</TabBtn>
             <div className="ml-auto flex items-center gap-2">
               {tab === "graph" && graphData && (
-                <div className="flex shrink-0 items-center gap-1 rounded-md border border-slate-800 bg-slate-950/40 p-0.5 text-xs">
-                  <button type="button" onClick={() => setGraphLayout("radial")} className={cn("whitespace-nowrap rounded px-2 py-0.5", graphLayout === "radial" ? "bg-cyan-500/15 text-cyan-200" : "text-slate-400 hover:bg-white/5")}>整洁</button>
-                  <button type="button" onClick={() => setGraphLayout("force")} className={cn("whitespace-nowrap rounded px-2 py-0.5", graphLayout === "force" ? "bg-cyan-500/15 text-cyan-200" : "text-slate-400 hover:bg-white/5")}>力导向</button>
-                  <button type="button" onClick={() => setGraphLayout("3d")} className={cn("whitespace-nowrap rounded px-2 py-0.5", graphLayout === "3d" ? "bg-cyan-500/15 text-cyan-200" : "text-slate-400 hover:bg-white/5")}>3D</button>
+                <div className="flex shrink-0 items-center gap-1 rounded-md border border-border bg-background/40 p-0.5 text-xs">
+                  <button type="button" onClick={() => setGraphLayout("radial")} className={cn("whitespace-nowrap rounded px-2 py-0.5", graphLayout === "radial" ? "bg-cyan-500/15 text-cyan-200" : "text-muted-foreground hover:bg-accent")}>整洁</button>
+                  <button type="button" onClick={() => setGraphLayout("force")} className={cn("whitespace-nowrap rounded px-2 py-0.5", graphLayout === "force" ? "bg-cyan-500/15 text-cyan-200" : "text-muted-foreground hover:bg-accent")}>力导向</button>
+                  <button type="button" onClick={() => setGraphLayout("3d")} className={cn("whitespace-nowrap rounded px-2 py-0.5", graphLayout === "3d" ? "bg-cyan-500/15 text-cyan-200" : "text-muted-foreground hover:bg-accent")}>3D</button>
                 </div>
               )}
               {tab === "context" && f && (
                 <button type="button" onClick={copyPack} className="flex h-8 items-center gap-1.5 rounded-lg bg-cyan-400 px-2.5 text-xs font-bold text-[#04121a] hover:bg-cyan-300"><Sparkles className="h-3.5 w-3.5" />Copy for AI</button>
               )}
               <button type="button" onClick={back} disabled={trail.length <= 1} title="返回上一步"
-                className="flex h-7 items-center gap-1 rounded-md border border-slate-800 px-2 text-xs text-slate-300 hover:bg-white/5 disabled:opacity-30">
+                className="flex h-7 items-center gap-1 rounded-md border border-border px-2 text-xs text-foreground hover:bg-accent disabled:opacity-30">
                 <ArrowLeft className="h-3.5 w-3.5" /> 返回
               </button>
-              <button type="button" onClick={onClose} className="rounded p-1.5 text-slate-400 hover:bg-white/5 hover:text-slate-100" aria-label="关闭"><X className="h-4 w-4" /></button>
+              <button type="button" onClick={onClose} className="rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground" aria-label="关闭"><X className="h-4 w-4" /></button>
             </div>
           </div>
 
@@ -297,7 +297,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
             )
           ) : tab === "graph" ? (
             <div className="relative flex min-h-0 flex-1">
-              {graphBusy ? <div className="flex flex-1 items-center justify-center gap-2 text-sm text-slate-500"><Loader2 className="h-4 w-4 animate-spin" /> 加载图谱…</div>
+              {graphBusy ? <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" /> 加载图谱…</div>
                 : graphData && graphData.nodes.length > 0
                   ? (() => {
                       const shown = filterGraphView(graphData, hiddenNodeTypes, hiddenNodeIds);

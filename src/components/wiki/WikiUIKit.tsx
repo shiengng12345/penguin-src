@@ -6,20 +6,20 @@ export const KIND_COLOR: Record<string, string> = {
 };
 
 export function Center({ children }: { children: ReactNode }) {
-  return <div className="flex flex-1 items-center justify-center gap-2 text-sm text-slate-500">{children}</div>;
+  return <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground">{children}</div>;
 }
 
 export function TabBtn({ on, onClick, icon, children }: { on: boolean; onClick: () => void; icon: ReactNode; children: ReactNode }) {
   return (
     <button type="button" onClick={onClick}
-      className={cn("flex h-8 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold transition", on ? "bg-cyan-500/12 text-cyan-100 shadow-[inset_0_0_0_1px_rgba(34,211,238,0.35)]" : "text-slate-500 hover:bg-white/5 hover:text-slate-200")}>
+      className={cn("flex h-8 items-center gap-1.5 rounded-lg px-3 text-xs font-semibold transition", on ? "bg-cyan-500/12 text-cyan-100 shadow-[inset_0_0_0_1px_rgba(34,211,238,0.35)]" : "text-muted-foreground hover:bg-accent hover:text-foreground")}>
       {icon}{children}
     </button>
   );
 }
 
 export function RelChip({ n, label }: { n: number; label: string }) {
-  return <span className="rounded-md border border-slate-700 bg-slate-950/45 px-2 py-1 text-slate-300"><b className="font-mono text-slate-100">{n}</b> {label}</span>;
+  return <span className="rounded-md border border-border bg-background/45 px-2 py-1 text-foreground"><b className="font-mono text-foreground">{n}</b> {label}</span>;
 }
 
 export function Dot({ t }: { t: string }) {

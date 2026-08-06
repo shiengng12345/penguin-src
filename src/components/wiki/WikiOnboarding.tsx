@@ -132,13 +132,13 @@ export function WikiOnboarding({ onRefresh, onClose }: { onRefresh: () => void; 
     }
   }, [onRefresh]);
 
-  const step = "flex gap-3 rounded-xl border border-slate-800 bg-slate-950/50 p-4";
+  const step = "flex gap-3 rounded-xl border border-border bg-background/50 p-4";
   const num = "flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-cyan-500/15 text-xs font-bold text-cyan-300";
   const pct = indexing && indexing.total > 0 ? Math.round((indexing.done / indexing.total) * 100) : 0;
   return (
-    <div className="relative flex h-full flex-col items-center justify-center bg-[#070b11] px-8 text-slate-100">
+    <div className="relative flex h-full flex-col items-center justify-center bg-background px-8 text-foreground">
       <button type="button" onClick={onClose} aria-label="关闭"
-        className="absolute right-4 top-4 rounded p-1.5 text-slate-400 hover:bg-white/5 hover:text-slate-100">
+        className="absolute right-4 top-4 rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground">
         <X className="h-4 w-4" />
       </button>
       <div className="w-full max-w-xl">
@@ -148,7 +148,7 @@ export function WikiOnboarding({ onRefresh, onClose }: { onRefresh: () => void; 
           </div>
           <div>
             <h1 className="text-xl font-semibold">建立你的知识库</h1>
-            <p className="mt-0.5 text-sm text-slate-400">Penguin 会把代码仓库解析成可搜索的知识图谱。</p>
+            <p className="mt-0.5 text-sm text-muted-foreground">Penguin 会把代码仓库解析成可搜索的知识图谱。</p>
           </div>
         </div>
 
@@ -159,16 +159,16 @@ export function WikiOnboarding({ onRefresh, onClose }: { onRefresh: () => void; 
               <div className="text-sm font-semibold">选择第一个仓库</div>
               {indexing ? (
                 <div className="mt-3">
-                  <div className="flex items-center justify-between text-xs text-slate-400">
+                  <div className="flex items-center justify-between text-xs text-muted-foreground">
                     <span className="min-w-0 truncate font-mono">{indexing.dir.split("/").pop()}</span>
                     <span className="ml-2 shrink-0 font-bold text-cyan-300">
                       {indexing.total > 0 ? `${pct}% · ${indexing.done}/${indexing.total}` : "扫描中…"}
                     </span>
                   </div>
-                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-800">
+                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-muted">
                     <div className="h-full rounded-full bg-cyan-400 transition-[width] duration-200" style={{ width: `${pct}%` }} />
                   </div>
-                  {indexing.file && <p className="mt-2 truncate font-mono text-[11px] text-slate-600">{indexing.file}</p>}
+                  {indexing.file && <p className="mt-2 truncate font-mono text-[11px] text-muted-foreground">{indexing.file}</p>}
                 </div>
               ) : (
                 <>
@@ -176,8 +176,8 @@ export function WikiOnboarding({ onRefresh, onClose }: { onRefresh: () => void; 
                     className="mt-3 flex items-center gap-2 rounded-lg bg-cyan-400 px-4 py-2 text-sm font-bold text-[#04121a] hover:bg-cyan-300">
                     <FolderOpen className="h-4 w-4" /> 选择仓库并索引
                   </button>
-                  <p className="mt-2 text-xs leading-relaxed text-slate-500">
-                    也可以在终端运行 <code className="rounded bg-slate-950 px-1.5 py-0.5 font-mono text-[11px] text-cyan-200/80">penguin init /path/to/repo</code>,每个仓库一次。
+                  <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                    也可以在终端运行 <code className="rounded bg-background px-1.5 py-0.5 font-mono text-[11px] text-cyan-200/80">penguin init /path/to/repo</code>,每个仓库一次。
                   </p>
                 </>
               )}
@@ -188,14 +188,14 @@ export function WikiOnboarding({ onRefresh, onClose }: { onRefresh: () => void; 
             <span className={num}>2</span>
             <div>
               <div className="text-sm font-semibold">等待索引完成</div>
-              <p className="mt-1 text-xs leading-relaxed text-slate-500">解析符号、调用关系、API 端点和跨服务连接;大仓库需要几分钟。</p>
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">解析符号、调用关系、API 端点和跨服务连接;大仓库需要几分钟。</p>
             </div>
           </div>
           <div className={step}>
             <span className={num}>3</span>
             <div>
               <div className="text-sm font-semibold">自动进入 Wiki</div>
-              <p className="mt-1 text-xs leading-relaxed text-slate-500">索引就绪后本页自动切换:符号搜索、跨服务地图、调用链、事故笔记。</p>
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">索引就绪后本页自动切换:符号搜索、跨服务地图、调用链、事故笔记。</p>
             </div>
           </div>
         </div>
@@ -203,14 +203,14 @@ export function WikiOnboarding({ onRefresh, onClose }: { onRefresh: () => void; 
         {/* AI integration: one click sets up the terminal command, the MCP
             server for Claude Desktop/Claude Code/Codex, and the global
             CLAUDE.md / AGENTS.md guidance blocks. */}
-        <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950/50 p-4">
+        <div className="mt-4 rounded-xl border border-border bg-background/50 p-4">
           <div className="flex items-center gap-3">
             <div className="min-w-0 flex-1">
               <div className="text-sm font-semibold">AI 集成</div>
-              <p className="mt-1 text-xs leading-relaxed text-slate-500">
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
                 penguin 终端命令 · Claude / Codex 的 MCP 接入 · 全局 CLAUDE.md / AGENTS.md 指引
               </p>
-              <p className="mt-1 text-[11px] leading-relaxed text-slate-600">
+              <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">
                 Claude Code 可选原生 hooks；Codex 使用 canonical MCP + AGENTS.md，不伪装成相同的事件 hook。
               </p>
             </div>
@@ -220,7 +220,7 @@ export function WikiOnboarding({ onRefresh, onClose }: { onRefresh: () => void; 
               {aiResults ? "重新配置" : "一键配置 AI 集成"}
             </button>
           </div>
-          <div className="mt-3 flex flex-wrap gap-x-4 gap-y-2 text-xs text-slate-400">
+          <div className="mt-3 flex flex-wrap gap-x-4 gap-y-2 text-xs text-muted-foreground">
             <label className="flex items-center gap-2">
               <input
                 type="checkbox"
@@ -238,12 +238,12 @@ export function WikiOnboarding({ onRefresh, onClose }: { onRefresh: () => void; 
               UserPromptSubmit bounded context
             </label>
             <button type="button" disabled={hookBusy} onClick={() => void applyHooks()}
-              className="flex items-center gap-1.5 rounded-md border border-slate-700 px-2.5 py-1 text-xs font-semibold text-slate-300 hover:bg-white/5 disabled:opacity-50">
+              className="flex items-center gap-1.5 rounded-md border border-border px-2.5 py-1 text-xs font-semibold text-foreground hover:bg-accent disabled:opacity-50">
               {hookBusy && <Loader2 className="h-3 w-3 animate-spin" />}
               应用 Hook 设置
             </button>
           </div>
-          <p className="mt-1.5 text-[11px] text-slate-600">两项均关闭时移除 Penguin hooks；其他工具管理的 hooks 不受影响。</p>
+          <p className="mt-1.5 text-[11px] text-muted-foreground">两项均关闭时移除 Penguin hooks；其他工具管理的 hooks 不受影响。</p>
           {hookResult && (
             <p className={cn("mt-2 text-xs", hookResult.state === "ok" ? "text-emerald-300/90" : hookResult.state === "warn" ? "text-amber-300/90" : "text-red-300/90")}>
               {hookResult.state === "ok" ? "✓" : hookResult.state === "warn" ? "⚠" : "✗"} {hookResult.text}
@@ -265,10 +265,10 @@ export function WikiOnboarding({ onRefresh, onClose }: { onRefresh: () => void; 
 
         <div className="mt-6 flex items-center gap-3">
           <button type="button" onClick={onRefresh}
-            className="rounded-lg border border-slate-700 px-4 py-1.5 text-xs font-semibold text-slate-300 hover:bg-white/5">
+            className="rounded-lg border border-border px-4 py-1.5 text-xs font-semibold text-foreground hover:bg-accent">
             立即检测
           </button>
-          <span className="text-xs text-slate-600">每 5 秒自动检测一次</span>
+          <span className="text-xs text-muted-foreground">每 5 秒自动检测一次</span>
         </div>
       </div>
     </div>

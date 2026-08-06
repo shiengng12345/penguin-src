@@ -162,10 +162,10 @@ export function KnowledgeHomePanel({
   const fmtWhen = (iso: string | null) =>
     iso ? new Date(iso).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }) : "—";
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-auto bg-[radial-gradient(circle_at_20%_0%,rgba(34,211,238,0.08),transparent_34%),linear-gradient(180deg,#070c13_0%,#0a0f17_100%)] p-6">
+    <div className="flex min-h-0 flex-1 flex-col overflow-auto bg-[radial-gradient(circle_at_20%_0%,rgba(34,211,238,0.08),transparent_34%),linear-gradient(180deg,var(--color-background)_0%,var(--color-card)_100%)] p-6">
       {statusLoading && !indexRows && (
-        <section className="flex min-h-[220px] flex-1 items-center justify-center rounded-2xl border border-slate-800 bg-[#0d1420]/85">
-          <div className="flex items-center gap-2 text-sm text-slate-400">
+        <section className="flex min-h-[220px] flex-1 items-center justify-center rounded-2xl border border-border bg-card/85">
+          <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin text-cyan-300" />
             Loading Knowledge status…
           </div>
@@ -173,11 +173,11 @@ export function KnowledgeHomePanel({
       )}
       {indexRows && indexRows.repos.length > 0 && (
         <>
-        <section className={cn("flex flex-col overflow-hidden rounded-2xl border border-slate-800 bg-[#0d1420]/85", collapsed ? "shrink-0" : "min-h-0 flex-1")}>
-          <div className="flex shrink-0 items-center gap-2 border-b border-slate-800 px-4 py-3">
+        <section className={cn("flex flex-col overflow-hidden rounded-2xl border border-border bg-card/85", collapsed ? "shrink-0" : "min-h-0 flex-1")}>
+          <div className="flex shrink-0 items-center gap-2 border-b border-border px-4 py-3">
             <Boxes className="h-4 w-4 text-cyan-300" />
-            <span className="text-sm font-semibold text-slate-100">Indexed repositories</span>
-            <span className="text-xs text-slate-500">点仓库展开分支,点分支进图谱</span>
+            <span className="text-sm font-semibold text-foreground">Indexed repositories</span>
+            <span className="text-xs text-muted-foreground">点仓库展开分支,点分支进图谱</span>
             <div className="ml-auto flex items-center gap-2">
               <button
                 type="button"
@@ -185,14 +185,14 @@ export function KnowledgeHomePanel({
                 onClick={() => void bulkToggleWatch()}
                 className={cn(
                   "flex items-center gap-1 rounded px-1.5 py-1 text-[11px]",
-                  allWatching ? "text-cyan-300" : "text-slate-500 hover:text-cyan-200",
+                  allWatching ? "text-cyan-300" : "text-muted-foreground hover:text-cyan-200",
                 )}
               >
                 <Radio className={cn("h-3.5 w-3.5", allWatching && "animate-pulse")} />
                 全部同步
               </button>
               {isSuperAdmin && (
-                <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-slate-400 hover:text-slate-200">
+                <label className="flex cursor-pointer items-center gap-1.5 text-[11px] text-muted-foreground hover:text-foreground">
                   <input
                     type="checkbox"
                     checked={autoRefresh}
@@ -207,7 +207,7 @@ export function KnowledgeHomePanel({
                 title={isSuperAdmin && autoRefresh ? "自动刷新中(点击立即刷新一次)" : "刷新"}
                 onClick={() => void manualRefresh()}
                 disabled={refreshing}
-                className="rounded p-1.5 text-slate-500 hover:bg-white/5 hover:text-slate-200 disabled:opacity-50"
+                className="rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground disabled:opacity-50"
               >
                 {/* Same convention as PackageInstaller's refresh icon: spinning
                     ambiently means "auto-refresh is active", not just "a fetch
@@ -219,7 +219,7 @@ export function KnowledgeHomePanel({
                 type="button"
                 title={collapsed ? "展开" : "收起"}
                 onClick={() => setCollapsed((c) => !c)}
-                className="rounded p-1.5 text-slate-500 hover:bg-white/5 hover:text-slate-200"
+                className="rounded p-1.5 text-muted-foreground hover:bg-accent hover:text-foreground"
               >
                 {collapsed ? <ChevronRight className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
               </button>
@@ -229,7 +229,7 @@ export function KnowledgeHomePanel({
           <div className="min-h-0 flex-1 overflow-auto">
             <table className="w-full text-left text-sm">
               <thead>
-                <tr className="border-b border-slate-800/70 text-[10px] uppercase tracking-wide text-slate-500">
+                <tr className="border-b border-border/70 text-[10px] uppercase tracking-wide text-muted-foreground">
                   <th className="px-4 py-2 font-semibold">Repo</th>
                   <th className="px-3 py-2 font-semibold">Branches</th>
                   <th className="px-3 py-2 font-semibold">状态</th>
@@ -249,20 +249,20 @@ export function KnowledgeHomePanel({
                     <tr
                       key={repo.repoId}
                       onClick={() => toggleRepo(repo.repoId)}
-                      className="cursor-pointer border-b border-slate-800/40 hover:bg-white/[0.03]"
+                      className="cursor-pointer border-b border-border/40 hover:bg-accent"
                     >
-                      <td className="px-4 py-3 font-mono font-semibold text-slate-200">
+                      <td className="px-4 py-3 font-mono font-semibold text-foreground">
                         <span className="flex items-center gap-2">
-                          {open ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-slate-500" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-slate-500" />}
+                          {open ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />}
                           {repo.name}
                           {repo.defaultBranch && <span className="rounded bg-cyan-500/10 px-1.5 py-0.5 text-[9px] text-cyan-300">master: {repo.defaultBranch}</span>}
                         </span>
                       </td>
-                      <td className="px-3 py-3 text-slate-400">{repo.branches.length}</td>
+                      <td className="px-3 py-3 text-muted-foreground">{repo.branches.length}</td>
                       <td className="px-3 py-3">
                         <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-bold text-emerald-300">{live} live</span>
                       </td>
-                      <td className="px-3 py-3 text-slate-500">{fmtWhen(latest)}</td>
+                      <td className="px-3 py-3 text-muted-foreground">{fmtWhen(latest)}</td>
                       <td className="px-3 py-3 text-right">
                         <div className="flex items-center justify-end gap-1.5">
                           <button
@@ -271,7 +271,7 @@ export function KnowledgeHomePanel({
                             onClick={(e) => { e.stopPropagation(); void toggleWatch(repo); }}
                             className={cn(
                               "rounded p-1",
-                              watching.has(repo.repoId) ? "text-cyan-300" : "text-slate-600 hover:text-cyan-200",
+                              watching.has(repo.repoId) ? "text-cyan-300" : "text-muted-foreground hover:text-cyan-200",
                             )}
                           >
                             <Radio className={cn("h-3.5 w-3.5", watching.has(repo.repoId) && "animate-pulse")} />
@@ -280,7 +280,7 @@ export function KnowledgeHomePanel({
                             type="button"
                             title={`删除 ${repo.name} 的索引`}
                             onClick={(e) => { e.stopPropagation(); void removeRepo(repo.name); }}
-                            className="rounded p-1 text-slate-600 hover:bg-red-500/10 hover:text-red-300"
+                            className="rounded p-1 text-muted-foreground hover:bg-red-500/10 hover:text-red-300"
                           >
                             <Trash2 className="h-3.5 w-3.5" />
                           </button>
@@ -292,11 +292,11 @@ export function KnowledgeHomePanel({
                           <tr
                             key={`${repo.repoId}:${br.branchId}`}
                             onClick={() => onOpenRepoGraph(repo.repoId, br.branchId)}
-                            className="cursor-pointer border-b border-slate-800/30 bg-slate-950/30 hover:bg-cyan-500/[0.07]"
+                            className="cursor-pointer border-b border-border/30 bg-background/30 hover:bg-cyan-500/[0.07]"
                           >
-                            <td className="py-2.5 pl-12 pr-4 font-mono text-xs text-slate-300">
+                            <td className="py-2.5 pl-12 pr-4 font-mono text-xs text-foreground">
                               <span className="flex items-center gap-2">
-                                <GitBranch className="h-3 w-3 shrink-0 text-slate-600" />
+                                <GitBranch className="h-3 w-3 shrink-0 text-muted-foreground" />
                                 {br.name}{br.defaultBranch && <span className="rounded bg-cyan-500/10 px-1 py-0.5 text-[9px] text-cyan-300">master</span>}
                               </span>
                             </td>
@@ -307,13 +307,13 @@ export function KnowledgeHomePanel({
                               ) : br.status === "live" ? (
                                 <span className="rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-bold text-emerald-300">live</span>
                               ) : (
-                                <span className="rounded bg-slate-700/40 px-1.5 py-0.5 text-[10px] font-bold text-slate-400">{br.status}</span>
+                                <span className="rounded bg-muted px-1.5 py-0.5 text-[10px] font-bold text-muted-foreground">{br.status}</span>
                               )}
                             </td>
-                            <td className="px-3 py-2.5 text-xs text-slate-500">
+                            <td className="px-3 py-2.5 text-xs text-muted-foreground">
                               <div>{fmtWhen(br.lastIndexedAt)}</div>
                               {br.trust?.snapshotId && <div className="mt-0.5 text-[10px] text-cyan-300/70">snapshot {br.trust.snapshotId.slice(0, 12)} · {br.trust.cacheState ?? "legacy"}</div>}
-                              {br.trust?.reusePercent != null && <div className="text-[10px] text-slate-600">base {br.trust.baseCommit?.slice(0, 8) ?? "—"} · head {br.trust.headCommit?.slice(0, 8) ?? "—"} · {Math.round(br.trust.reusePercent)}% reused</div>}
+                              {br.trust?.reusePercent != null && <div className="text-[10px] text-muted-foreground">base {br.trust.baseCommit?.slice(0, 8) ?? "—"} · head {br.trust.headCommit?.slice(0, 8) ?? "—"} · {Math.round(br.trust.reusePercent)}% reused</div>}
                             </td>
                             <td className="px-3 py-2.5">
                               <div className="flex items-center justify-end gap-1.5">
@@ -322,7 +322,7 @@ export function KnowledgeHomePanel({
                                     type="button"
                                     title="设为 canonical master"
                                     onClick={(e) => { e.stopPropagation(); void setMaster(repo.name, br.name); }}
-                                    className="rounded p-1 text-slate-600 hover:text-cyan-200"
+                                    className="rounded p-1 text-muted-foreground hover:text-cyan-200"
                                   >
                                     master
                                   </button>
@@ -331,7 +331,7 @@ export function KnowledgeHomePanel({
                                   type="button"
                                   title={br.pinned ? "取消固定" : "固定(不被自动清理)"}
                                   onClick={(e) => { e.stopPropagation(); void pinBranch(repo.name, br.name); }}
-                                  className={cn("rounded p-1", br.pinned ? "text-cyan-300" : "text-slate-600 hover:text-cyan-200")}
+                                  className={cn("rounded p-1", br.pinned ? "text-cyan-300" : "text-muted-foreground hover:text-cyan-200")}
                                 >
                                   <Pin className={cn("h-3.5 w-3.5", br.pinned && "fill-current")} />
                                 </button>
@@ -340,11 +340,11 @@ export function KnowledgeHomePanel({
                                   title={br.pinned ? "已固定 — 先取消固定" : `删除分支 ${br.name} 的索引`}
                                   disabled={br.pinned}
                                   onClick={(e) => { e.stopPropagation(); void removeBranch(repo.name, br.name); }}
-                                  className="rounded p-1 text-slate-600 hover:bg-red-500/10 hover:text-red-300 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-slate-600"
+                                  className="rounded p-1 text-muted-foreground hover:bg-red-500/10 hover:text-red-300 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-muted-foreground"
                                 >
                                   <Trash2 className="h-3.5 w-3.5" />
                                 </button>
-                                <ArrowRight className="h-3.5 w-3.5 text-slate-600" />
+                                <ArrowRight className="h-3.5 w-3.5 text-muted-foreground" />
                               </div>
                             </td>
                           </tr>
