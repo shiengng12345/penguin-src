@@ -204,6 +204,19 @@
   --color-warning: oklch(0.7 0.14 80);
 }
 
+/* Editor syntax palette for light themes — deep hues readable on pale
+   backgrounds. Dark themes use the fallbacks baked into json-editor.tsx. */
+[data-theme="light"],
+[data-theme="antarctic-snow"],
+[data-theme="penguin"] {
+  --syntax-property: oklch(0.45 0.11 245);
+  --syntax-string: oklch(0.5 0.11 145);
+  --syntax-number: oklch(0.55 0.16 30);
+  --syntax-bool: oklch(0.5 0.15 300);
+  --syntax-null: oklch(0.55 0.02 260);
+  --syntax-punct: oklch(0.5 0.02 260);
+}
+
 * {
   border-color: var(--color-border);
 }

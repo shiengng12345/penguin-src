@@ -111,13 +111,15 @@ function buildTheme(isDark: boolean) {
   );
 }
 
+// Colors resolve through CSS variables so every theme (incl. light ones) can
+// supply a readable palette; the var() fallbacks are the original dark values.
 const syntaxColors = HighlightStyle.define([
-  { tag: tags.propertyName, color: "#7dd3fc" },
-  { tag: tags.string, color: "#86efac" },
-  { tag: tags.number, color: "#fda4af" },
-  { tag: tags.bool, color: "#c4b5fd" },
-  { tag: tags.null, color: "#94a3b8" },
-  { tag: tags.punctuation, color: "#94a3b8" },
+  { tag: tags.propertyName, color: "var(--syntax-property, #7dd3fc)" },
+  { tag: tags.string, color: "var(--syntax-string, #86efac)" },
+  { tag: tags.number, color: "var(--syntax-number, #fda4af)" },
+  { tag: tags.bool, color: "var(--syntax-bool, #c4b5fd)" },
+  { tag: tags.null, color: "var(--syntax-null, #94a3b8)" },
+  { tag: tags.punctuation, color: "var(--syntax-punct, #94a3b8)" },
 ]);
 
 function typeToDefault(type: string, repeated: boolean): string {
