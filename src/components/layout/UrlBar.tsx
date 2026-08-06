@@ -1,7 +1,7 @@
 import { useAppStore, useActiveTab } from "@/lib/store";
 import { EnvInput } from "@/components/ui/env-input";
 import { Badge } from "@/components/ui/badge";
-import { Send, Globe, Server, RotateCcw, Pencil } from "lucide-react";
+import { Globe, Server, RotateCcw, Pencil } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { cn, ensureProtocol } from "@/lib/utils";
@@ -84,7 +84,12 @@ export function UrlBar({ resolvedUrl }: UrlBarProps) {
           size="default"
           data-tour="send-btn"
         >
-          <Send className="mr-1.5 h-4 w-4" />
+          <img
+            src="/mascot/penguin/send.png"
+            alt=""
+            draggable={false}
+            className={cn("mr-1.5 h-6 w-auto", tab.isLoading && "animate-bounce")}
+          />
           {tab.isLoading ? "Sending..." : "Send"}
         </Button>
       </div>

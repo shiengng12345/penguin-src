@@ -7,7 +7,7 @@ import { isEmptyAuthHeader } from "@/lib/header-utils";
 import { computeServicePath } from "@penguin/core";
 import { generatePenguinRequestId, PENGUIN_REQUEST_ID_HEADER } from "@/lib/penguin-request-id";
 import { Button } from "@/components/ui/button";
-import { Send, Plus, X, RotateCcw, Copy, Braces, Bookmark, Check, FileText, Terminal, Ban, Code2 } from "lucide-react";
+import { Plus, X, RotateCcw, Copy, Braces, Bookmark, Check, FileText, Terminal, Ban, Code2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { buildRestCurl, REST_BODY_MODES, resolveRestUrl } from "@/lib/rest";
 import { writeClipboard } from "@/lib/clipboard";
@@ -557,7 +557,7 @@ export function RequestPanel() {
             className="flex-1 h-8"
             size="sm"
           >
-            <Send className="mr-1.5 h-3.5 w-3.5" />
+            <img src="/mascot/penguin/send.png" alt="" draggable={false} className="mr-1.5 h-5 w-auto" />
             {configSynced ? "Send" : "Loading…"}
           </Button>
         )}
