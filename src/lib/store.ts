@@ -1,5 +1,4 @@
 import { create } from "zustand";
-import { invoke } from "@tauri-apps/api/core";
 import {
   clearHistoryInDatabase,
   countHistoryInDatabase,
@@ -22,8 +21,6 @@ import { THEMES, type AppTheme } from "./theme";
 import {
   visibleProtocolForTab,
   type AppState,
-  type BrowserDeeplinkRequest,
-  type BrowserShortcut,
   type MetadataEntry,
   type ProtocolTab,
   type RequestTab,
@@ -43,11 +40,7 @@ import {
   THEME_KEY,
   TUTORIAL_KEY,
   USERNAME_KEY,
-  loadBrowserAutoSubmit,
-  loadBrowserAutoSubmitGlobal,
-  loadBrowserShortcuts,
   loadDefaultHeaders,
-  loadJenkinsData,
   loadLegacyHistoryBlob,
   loadMaxHistorySize,
   loadSavedRequests,
@@ -55,10 +48,6 @@ import {
   loadTabs,
   loadTheme,
   loadUserName,
-  persistJenkinsData,
-  persistBrowserAutoSubmit,
-  persistBrowserAutoSubmitGlobal,
-  persistBrowserShortcuts,
   saveTabs,
 } from "./store-persistence-helpers";
 
@@ -458,250 +447,6 @@ export const useAppStore = create<AppState>((set, get) => {
     },
     setRestWorkspace: (patch) =>
       set((s) => ({ restWorkspace: { ...s.restWorkspace, ...patch } })),
-
-    // -- In-app Browser module --
-    // Pinned shortcuts hydrated from app_kv on startup; the rest of
-    // the state (activeShortcutId, pendingDeeplink) is session-only.
-    // See loadBrowserShortcuts below for the hydrate path.
-    browser: {
-      shortcuts: loadBrowserShortcuts(),
-      activeShortcutId: null,
-      pendingDeeplink: null,
-      autoSubmitByShortcutId: loadBrowserAutoSubmit(),
-      autoSubmitGlobalEnabled: loadBrowserAutoSubmitGlobal(),
-    },
-    addOrPromoteBrowserShortcut: (shortcut) => {
-      // De-dupe by URL — if the user already has this URL pinned,
-      // promote it (update label / token / baseKind) and return its
-      // existing id. Avoids 4 "Vault QAT" pins after 4 deeplinks.
-      const existing = get().browser.shortcuts.find((s) => s.url === shortcut.url);
-      if (existing !== undefined) {
-        const merged: BrowserShortcut = {
-          ...existing,
-          label: shortcut.label,
-          prefillToken: shortcut.prefillToken ?? existing.prefillToken,
-          prefillUsername: shortcut.prefillUsername ?? existing.prefillUsername,
-          prefillPassword: shortcut.prefillPassword ?? existing.prefillPassword,
-          baseKind: shortcut.baseKind ?? existing.baseKind,
-          projectId: shortcut.projectId ?? existing.projectId,
-          envId: shortcut.envId ?? existing.envId,
-        };
-        const next = get().browser.shortcuts.map((s) => (s.id === existing.id ? merged : s));
-        set((s) => ({ browser: { ...s.browser, shortcuts: next, activeShortcutId: existing.id } }));
-        persistBrowserShortcuts(next);
-        return existing.id;
-      }
-      const newShortcut: BrowserShortcut = {
-        id: `shortcut-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-        label: shortcut.label,
-        url: shortcut.url,
-        prefillToken: shortcut.prefillToken,
-        prefillUsername: shortcut.prefillUsername,
-        prefillPassword: shortcut.prefillPassword,
-        baseKind: shortcut.baseKind,
-        projectId: shortcut.projectId,
-        envId: shortcut.envId,
-        parentId: shortcut.parentId,
-        createdAt: Date.now(),
-      };
-      const next = [...get().browser.shortcuts, newShortcut];
-      set((s) => ({ browser: { ...s.browser, shortcuts: next, activeShortcutId: newShortcut.id } }));
-      persistBrowserShortcuts(next);
-      return newShortcut.id;
-    },
-    duplicateBrowserShortcut: (source) => {
-      // Resolve to the top-level ancestor — duplicating a duplicate
-      // produces another sibling, not a grandchild (depth capped at 1
-      // for visual clarity). For vault-derived sources (synthetic id
-      // starting with "vault-"), use the synthetic id as parent so
-      // refreshes that recreate the parent don't orphan the branch.
-      const all = get().browser.shortcuts;
-      let topLevelId = source.parentId;
-      if (topLevelId === undefined) {
-        topLevelId = source.id;
-      }
-      // Pick the next free suffix among existing siblings sharing this
-      // parent. Existing labels like "QAT", "QAT (2)", "QAT (3)" →
-      // next is "QAT (4)". The base name is the source's current
-      // label minus any " (N)" tail.
-      const baseLabel = source.label.replace(/ \(\d+\)$/, "");
-      const siblings = all.filter((s) => s.parentId === topLevelId);
-      let nextN = 2;
-      while (
-        siblings.some((s) => s.label === `${baseLabel} (${nextN})`) ||
-        baseLabel === `${baseLabel} (${nextN})`
-      ) {
-        nextN += 1;
-      }
-      const newShortcut: BrowserShortcut = {
-        id: `shortcut-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-        label: `${baseLabel} (${nextN})`,
-        url: source.url,
-        prefillToken: source.prefillToken,
-        prefillUsername: source.prefillUsername,
-        prefillPassword: source.prefillPassword,
-        baseKind: source.baseKind,
-        projectId: source.projectId,
-        envId: source.envId,
-        parentId: topLevelId,
-        createdAt: Date.now(),
-      };
-      const next = [...all, newShortcut];
-      set((s) => ({
-        browser: { ...s.browser, shortcuts: next, activeShortcutId: newShortcut.id },
-      }));
-      persistBrowserShortcuts(next);
-      return newShortcut.id;
-    },
-    removeBrowserShortcut: (id) => {
-      const next = get().browser.shortcuts.filter((s) => s.id !== id);
-      const wasActive = get().browser.activeShortcutId === id;
-      // Drop any autoSubmit opt-in for the removed id so stale entries
-      // don't accumulate forever in app_kv.
-      const prevMap = get().browser.autoSubmitByShortcutId;
-      let nextMap = prevMap;
-      if (prevMap[id] !== undefined) {
-        nextMap = { ...prevMap };
-        delete nextMap[id];
-      }
-      set((s) => ({
-        browser: {
-          ...s.browser,
-          shortcuts: next,
-          activeShortcutId: wasActive ? null : s.browser.activeShortcutId,
-          autoSubmitByShortcutId: nextMap,
-        },
-      }));
-      persistBrowserShortcuts(next);
-      if (nextMap !== prevMap) persistBrowserAutoSubmit(nextMap);
-      // Close the underlying webview and delete its on-disk data store
-      // (cookies + IndexedDB + cache). The data dir is keyed by the
-      // shortcut's own id (see BrowserPage dataKey resolution).
-      void invoke("inline_webview_close", { label: `inline-browser-${id}` }).catch(() => {});
-      void invoke("inline_webview_close", { label: `browser-${id}` }).catch(() => {});
-      void invoke("inline_webview_delete_data_dir", { dataKey: id }).catch(() => {});
-    },
-    renameBrowserShortcut: (id, label) => {
-      const trimmed = label.trim();
-      if (trimmed.length === 0) return;
-      const next = get().browser.shortcuts.map((s) =>
-        s.id === id ? { ...s, label: trimmed } : s,
-      );
-      set((s) => ({ browser: { ...s.browser, shortcuts: next } }));
-      persistBrowserShortcuts(next);
-    },
-    reorderBrowserShortcuts: (orderedIds) => {
-      const byId = new Map(get().browser.shortcuts.map((s) => [s.id, s] as const));
-      const reordered: BrowserShortcut[] = [];
-      for (const id of orderedIds) {
-        const s = byId.get(id);
-        if (s !== undefined) {
-          reordered.push(s);
-          byId.delete(id);
-        }
-      }
-      for (const leftover of byId.values()) reordered.push(leftover);
-      set((s) => ({ browser: { ...s.browser, shortcuts: reordered } }));
-      persistBrowserShortcuts(reordered);
-    },
-    setActiveBrowserShortcut: (id) =>
-      set((s) => ({ browser: { ...s.browser, activeShortcutId: id } })),
-    requestBrowserDeeplink: (request: BrowserDeeplinkRequest) =>
-      set((s) => ({ browser: { ...s.browser, pendingDeeplink: request } })),
-    consumeBrowserDeeplink: () => {
-      const current = get().browser.pendingDeeplink;
-      if (current === null) return null;
-      set((s) => ({ browser: { ...s.browser, pendingDeeplink: null } }));
-      return current;
-    },
-    setBrowserAutoSubmitGlobal: (enabled) => {
-      if (get().browser.autoSubmitGlobalEnabled === enabled) return;
-      set((s) => ({ browser: { ...s.browser, autoSubmitGlobalEnabled: enabled } }));
-      persistBrowserAutoSubmitGlobal(enabled);
-    },
-    setBrowserShortcutAutoSubmit: (id, enabled) => {
-      const prev = get().browser.autoSubmitByShortcutId;
-      // BOTH true and false are stored explicitly. The map is now a
-      // user-override layer over the new default (prefill-bearing
-      // shortcuts default ON) — without persisting `false` an opt-out
-      // would silently flip back to ON on next launch.
-      if (prev[id] === enabled) return;
-      const next: Record<string, boolean> = { ...prev, [id]: enabled };
-      set((s) => ({ browser: { ...s.browser, autoSubmitByShortcutId: next } }));
-      persistBrowserAutoSubmit(next);
-    },
-
-    // -- Jenkins tab CRUD --
-    // Independent from Vault. The persistence layer collapses both
-    // arrays into a single app_kv blob, so every action persists the
-    // FULL current jenkins state.
-    jenkins: loadJenkinsData(),
-    addJenkinsAccount: (payload) => {
-      const newAccount = {
-        id: `jenkins-acc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-        label: payload.label,
-        username: payload.username,
-        password: payload.password,
-        totpSecret: payload.totpSecret,
-        createdAt: Date.now(),
-      };
-      const next = { ...get().jenkins, accounts: [...get().jenkins.accounts, newAccount] };
-      set({ jenkins: next });
-      persistJenkinsData(next);
-      return newAccount.id;
-    },
-    updateJenkinsAccount: (id, patch) => {
-      const accounts = get().jenkins.accounts.map((a) =>
-        a.id === id ? { ...a, ...patch } : a,
-      );
-      const next = { ...get().jenkins, accounts };
-      set({ jenkins: next });
-      persistJenkinsData(next);
-    },
-    removeJenkinsAccount: (id) => {
-      const accounts = get().jenkins.accounts.filter((a) => a.id !== id);
-      const orphanedLinks = get().jenkins.links.filter((l) => l.accountId === id);
-      const links = get().jenkins.links.filter((l) => l.accountId !== id);
-      for (const link of orphanedLinks) {
-        void invoke("inline_webview_close", {
-          label: `inline-browser-${link.id}`,
-        }).catch(() => {});
-      }
-      void invoke("inline_webview_delete_data_dir", { dataKey: id }).catch(() => {});
-      const next = { accounts, links };
-      set({ jenkins: next });
-      persistJenkinsData(next);
-    },
-    addJenkinsLink: (payload) => {
-      const newLink = {
-        id: `jenkins-link-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-        label: payload.label,
-        url: payload.url,
-        accountId: payload.accountId,
-        createdAt: Date.now(),
-      };
-      const next = { ...get().jenkins, links: [...get().jenkins.links, newLink] };
-      set({ jenkins: next });
-      persistJenkinsData(next);
-      return newLink.id;
-    },
-    updateJenkinsLink: (id, patch) => {
-      const links = get().jenkins.links.map((l) =>
-        l.id === id ? { ...l, ...patch } : l,
-      );
-      const next = { ...get().jenkins, links };
-      set({ jenkins: next });
-      persistJenkinsData(next);
-    },
-    removeJenkinsLink: (id) => {
-      const links = get().jenkins.links.filter((l) => l.id !== id);
-      const next = { ...get().jenkins, links };
-      set({ jenkins: next });
-      persistJenkinsData(next);
-      void invoke("inline_webview_close", {
-        label: `inline-browser-${id}`,
-      }).catch(() => {});
-    },
 
     theme: initialTheme,
     setTheme: (theme) => {

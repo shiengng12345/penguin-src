@@ -11,7 +11,7 @@
 
 import { cn } from "@/lib/utils";
 
-export type MainModule = "client" | "rest" | "vault" | "docs" | "browser" | "database" | "wiki";
+export type MainModule = "client" | "rest" | "vault" | "docs" | "database" | "wiki";
 
 export interface MainSidebarProps {
   active: MainModule;
@@ -37,15 +37,6 @@ interface RailItem {
 const ITEMS: RailItem[] = [
   { kind: "client", img: "/nav/client.png", label: "Client", longLabel: "API Client / 客户端", requires: "none" },
   { kind: "vault", img: "/nav/vault.png", label: "Vault", longLabel: "Vault / 凭据库", requires: "token" },
-  // In-app browser for embedded Vault UI / ArgoCD / Grafana etc. Cookies
-  // persist via Tauri's filesystem-backed WKWebSiteDataStore, so logging
-  // in once carries across sessions. Pinned shortcuts kept in app_kv —
-  // see lib/store BrowserState slice. Super-admin only — normal admins
-  // (dev token, not super) can't access it.
-  { kind: "browser", img: "/nav/browser.png", label: "Browser", longLabel: "In-App Browser / 内嵌浏览器 (Super Admin)", requires: "super-admin" },
-  // REST / Docs / Database are super-admin only — not part of the
-  // Vault + Browser release. Normal admins (token, not super) see only
-  // Client + Vault + Browser.
   { kind: "rest", img: "/nav/rest.png", label: "REST", longLabel: "REST API / 接口客户端", requires: "none" },
   { kind: "docs", img: "/nav/docs.png", label: "Docs", longLabel: "Knowledge Base / 知识库 (Super Admin)", requires: "super-admin" },
   { kind: "database", img: "/nav/database.png", label: "Database", longLabel: "Database / 数据库 (Super Admin)", requires: "super-admin" },

@@ -22,29 +22,6 @@ import { setPreventSleep, setRuntimeMode, type PreventSleepPolicy } from "./lib/
 // future version that truly needs a wipe should ship a one-shot targeted
 // migration instead.
 
-// Hash-routed mini-apps (popovers spawned in their own Tauri window).
-// Each runs in a fresh OS window with the same Vite bundle, so we
-// branch BEFORE hydrating + before loading the main App tree — that
-// keeps cold-start fast and avoids spinning up the full Zustand
-// store / Vault / REST modules for a 360px popover.
-function popoverModeFromHash(): "auth" | null {
-  if (typeof window === "undefined") return null;
-  const hash = window.location.hash.replace(/^#/, "");
-  if (hash === "popover=auth") return "auth";
-  return null;
-}
-
-async function bootstrapAuthPopover(): Promise<void> {
-  // Reset default body margin — Tauri's borderless window is opaque
-  // (transparent NSWindow needs macOSPrivateApi which we removed for
-  // stability), so the popover panel just fills the OS window
-  // edge-to-edge. No rounded corners until we revisit the private-
-  // API path.
-  document.body.style.margin = "0";
-  const { AuthPopoverApp } = await import("./components/browser/AuthPopoverApp");
-  ReactDOM.createRoot(document.getElementById("root")!).render(<AuthPopoverApp />);
-}
-
 // Runtime Manager — Task 13: re-apply the user's saved Prevent Sleep policy
 // on every launch. Runs exactly once, right after hydration populates the
 // persistence cache, so it never fires mid-session or on every render.
@@ -89,9 +66,4 @@ async function bootstrap(): Promise<void> {
   );
 }
 
-const mode = popoverModeFromHash();
-if (mode === "auth") {
-  void bootstrapAuthPopover();
-} else {
-  void bootstrap();
-}
+void bootstrap();

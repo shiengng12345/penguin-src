@@ -13,7 +13,6 @@ import { TabBar } from "@/components/layout/TabBar";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { UrlBar } from "@/components/layout/UrlBar";
 import { VaultPage } from "@/components/vault/VaultPage";
-import { BrowserPage } from "@/components/browser/BrowserPage";
 import { ApiDocsPage } from "@/components/docs/ApiDocsPage";
 import { RestPage } from "@/components/rest/RestPage";
 import { DatabasePage } from "@/components/database/DatabasePage";
@@ -26,13 +25,12 @@ import { fetchRegistryPackages } from "@/lib/registry-search";
 // Restore activeModule across main-webview reloads. The OS context
 // menu "Reload" entry refreshes Penguin itself — every module's
 // useState(false) flag resets, and the user lands on Client even if
-// they were in Browser. Persisting + restoring fixes that.
+// they were in another module. Persisting + restoring fixes that.
 const VALID_MODULES: ReadonlySet<MainModule> = new Set([
   "client",
   "vault",
   "rest",
   "docs",
-  "browser",
   "database",
   "wiki",
 ]);
@@ -130,34 +128,14 @@ export default function App() {
   const [vaultOpen, setVaultOpen] = useState(initialModule === "vault");
   const [docsOpen, setDocsOpen] = useState(initialModule === "docs");
   const [restOpen, setRestOpen] = useState(initialModule === "rest");
-  const [browserOpen, setBrowserOpen] = useState(initialModule === "browser");
   const [databaseOpen, setDatabaseOpen] = useState(initialModule === "database");
   const [wikiOpen, setWikiOpen] = useState(initialModule === "wiki");
   const openSettings = useCallback(() => {
     setSettingsOpen(true);
   }, []);
   const closeVault = useCallback(() => setVaultOpen(false), []);
-  const closeBrowser = useCallback(() => setBrowserOpen(false), []);
   const closeDatabase = useCallback(() => setDatabaseOpen(false), []);
   const closeWiki = useCallback(() => setWikiOpen(false), []);
-  // Vault → Browser deeplink dispatcher. Vault cards call this when
-  // the user clicks the "Open in Browser" button; we push the deeplink
-  // into the store (so BrowserPage's mount-effect consumes it) and
-  // switch the active module — single source of truth without prop
-  // drilling state ownership.
-  const requestBrowserDeeplink = useAppStore((s) => s.requestBrowserDeeplink);
-  const handleOpenInBrowser = useCallback(
-    (deeplink: { url: string; label: string; prefillToken?: string; baseKind?: string; projectId?: string; envId?: string }) => {
-      requestBrowserDeeplink(deeplink);
-      setBrowserOpen(true);
-      setVaultOpen(false);
-      setDocsOpen(false);
-      setRestOpen(false);
-      setDatabaseOpen(false);
-      setWikiOpen(false);
-    },
-    [requestBrowserDeeplink],
-  );
   // Returns to the API Client — the default module now that the Home hub
   // is gone. Used by the rail's fallback, the "go home" event, and the
   // back/close buttons in Docs / REST.
@@ -165,14 +143,12 @@ export default function App() {
     setVaultOpen(false);
     setDocsOpen(false);
     setRestOpen(false);
-    setBrowserOpen(false);
     setDatabaseOpen(false);
     setWikiOpen(false);
   }, []);
   const selectVaultFromHome = useCallback(() => {
     setDocsOpen(false);
     setRestOpen(false);
-    setBrowserOpen(false);
     setDatabaseOpen(false);
     setWikiOpen(false);
     setVaultOpen(true);
@@ -180,7 +156,6 @@ export default function App() {
   const selectDocsFromHome = useCallback(() => {
     setVaultOpen(false);
     setRestOpen(false);
-    setBrowserOpen(false);
     setDatabaseOpen(false);
     setWikiOpen(false);
     setDocsOpen(true);
@@ -189,24 +164,14 @@ export default function App() {
   const selectRest = useCallback(() => {
     setVaultOpen(false);
     setDocsOpen(false);
-    setBrowserOpen(false);
     setDatabaseOpen(false);
     setWikiOpen(false);
     setRestOpen(true);
-  }, []);
-  const selectBrowser = useCallback(() => {
-    setVaultOpen(false);
-    setDocsOpen(false);
-    setRestOpen(false);
-    setDatabaseOpen(false);
-    setWikiOpen(false);
-    setBrowserOpen(true);
   }, []);
   const selectDatabase = useCallback(() => {
     setVaultOpen(false);
     setDocsOpen(false);
     setRestOpen(false);
-    setBrowserOpen(false);
     setWikiOpen(false);
     setDatabaseOpen(true);
   }, []);
@@ -214,7 +179,6 @@ export default function App() {
     setVaultOpen(false);
     setDocsOpen(false);
     setRestOpen(false);
-    setBrowserOpen(false);
     setDatabaseOpen(false);
     setWikiOpen(true);
   }, []);
@@ -226,8 +190,6 @@ export default function App() {
     ? "docs"
     : restOpen
     ? "rest"
-    : browserOpen
-    ? "browser"
     : databaseOpen
     ? "database"
     : wikiOpen
@@ -251,10 +213,7 @@ export default function App() {
   // they're not stuck on a "please validate token" gate. Each module checks
   // its own gate so revoking super-admin but keeping dev token leaves the
   // user inside Vault but kicks them out of Docs.
-  // Browser is super-admin-only (matches the MainSidebar `super-admin`
-  // gate) — normal admins (dev token but not super) can't access it.
   // Only Vault stays at the token tier.
-  const canAccessBrowser = devModeEnabled && isSuperAdmin;
   const canAccessDatabase = devModeEnabled && isSuperAdmin;
   const canAccessWiki = devModeEnabled && isSuperAdmin;
   useEffect(() => {
@@ -266,22 +225,20 @@ export default function App() {
     if (vaultOpen && !canAccessVault) setVaultOpen(false);
     if (docsOpen && !canAccessDocs) setDocsOpen(false);
     if (restOpen && !canAccessRest) setRestOpen(false);
-    if (browserOpen && !canAccessBrowser) setBrowserOpen(false);
     if (databaseOpen && !canAccessDatabase) setDatabaseOpen(false);
     if (wikiOpen && !canAccessWiki) setWikiOpen(false);
-  }, [devModeHydrated, canAccessVault, canAccessDocs, canAccessRest, canAccessBrowser, canAccessDatabase, canAccessWiki, vaultOpen, docsOpen, restOpen, browserOpen, databaseOpen, wikiOpen]);
+  }, [devModeHydrated, canAccessVault, canAccessDocs, canAccessRest, canAccessDatabase, canAccessWiki, vaultOpen, docsOpen, restOpen, databaseOpen, wikiOpen]);
   const handleModuleSelect = useCallback(
     (m: MainModule) => {
       if (m === "client") selectApiClient();
       else if (m === "vault") selectVaultFromHome();
       else if (m === "docs") selectDocsFromHome();
       else if (m === "rest") selectRest();
-      else if (m === "browser") selectBrowser();
       else if (m === "database") selectDatabase();
       else if (m === "wiki") selectWiki();
       else selectApiClient();
     },
-    [selectApiClient, selectVaultFromHome, selectDocsFromHome, selectRest, selectBrowser, selectDatabase, selectWiki],
+    [selectApiClient, selectVaultFromHome, selectDocsFromHome, selectRest, selectDatabase, selectWiki],
   );
   const appUpdate = useAppUpdateScheduler(openSettings);
   // Background registry refresh for admins/super-admins — keeps the cache warm
@@ -304,9 +261,8 @@ export default function App() {
   }, []);
 
   // Hydrate vault data into the store at App mount, not only when the
-  // user opens the Vault module. The In-App Browser module's "From
-  // Vault" picker + paste-URL auto-match both read `vaultProjects` —
-  // they'd see an empty array if VaultPage was never visited this
+  // user opens the Vault module — other surfaces read `vaultProjects`
+  // and would see an empty array if VaultPage was never visited this
   // session. Lifting the load to App-level fixes that. Idempotent if
   // VaultPage's own mount-effect also runs.
   useEffect(() => {
@@ -603,12 +559,12 @@ export default function App() {
   // page painted over the gRPC-Web view after switching.
   //
   // We HIDE rather than CLOSE: closing would destroy the WKWebView and
-  // force a URL reload (white-screen flash) every time the user comes
-  // back to the Browser. Hidden webviews don't paint anything, so the
+  // force a URL reload (white-screen flash) every time the user returns
+  // to Vault. Hidden webviews don't paint anything, so the
   // bleed-prevention still holds, and session + cookies + scroll
   // position all survive the trip.
   useEffect(() => {
-    if (activeModule === "vault" || activeModule === "browser") return;
+    if (activeModule === "vault") return;
     hideAllInlineWebviews().catch(() => {
       // best-effort — the next module is what matters, not the IPC log
     });
@@ -664,7 +620,6 @@ export default function App() {
       setVaultOpen(false);
       setDocsOpen(false);
       setRestOpen(false);
-      setBrowserOpen(false);
       setDatabaseOpen(false);
     };
     document.addEventListener(PENGUIN_GO_HOME_EVENT, handleGoHome);
@@ -750,17 +705,15 @@ export default function App() {
             active={activeModule}
             onSelect={handleModuleSelect}
             hasValidToken={canAccessVault}
-            isSuperAdmin={canAccessDocs || canAccessDatabase || canAccessBrowser}
+            isSuperAdmin={canAccessDocs || canAccessDatabase}
           />
           <div className="flex flex-1 flex-col min-w-0">
             {vaultOpen ? (
-              <VaultPage onClose={closeVault} onOpenInBrowser={handleOpenInBrowser} />
+              <VaultPage onClose={closeVault} />
             ) : docsOpen ? (
               <ApiDocsPage onClose={selectApiClient} />
             ) : restOpen ? (
               <RestPage onClose={selectApiClient} />
-            ) : browserOpen ? (
-              <BrowserPage onClose={closeBrowser} />
             ) : databaseOpen ? (
               <DatabasePage onClose={closeDatabase} />
             ) : wikiOpen ? (

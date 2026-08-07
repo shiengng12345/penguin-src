@@ -44,16 +44,6 @@ const ESCAPE_KEY = "Escape";
 
 interface VaultPageProps {
   onClose: () => void;
-  // Called when the user wants to open a credential's URL in the
-  // in-app Browser module — fires both a deeplink request and a
-  // module switch. App.tsx owns the implementation; we just thread
-  // the callback down to the credential cards.
-  onOpenInBrowser?: (deeplink: {
-    url: string;
-    label: string;
-    prefillToken?: string;
-    baseKind?: string;
-  }) => void;
 }
 
 type CredentialModalState =
@@ -65,7 +55,7 @@ type CredentialModalState =
 
 // Vault shell (DEC #52 + #54 + #56 + Sprint 3 #92 + Sprint 4 redesign).
 // Sprint 4 flattens credentials onto the project — categories removed.
-export function VaultPage({ onClose, onOpenInBrowser }: VaultPageProps) {
+export function VaultPage({ onClose }: VaultPageProps) {
   const { enabled, hasValidToken, isSuperAdmin } = useDeveloperMode();
   const vaultProjects = useAppStore((state) => state.vaultProjects);
   const setVaultProjects = useAppStore((state) => state.setVaultProjects);
@@ -833,7 +823,6 @@ export function VaultPage({ onClose, onOpenInBrowser }: VaultPageProps) {
             onRenameKind={isSuperAdmin ? handleRenameKind : undefined}
             onDeleteKind={isSuperAdmin ? handleDeleteKind : undefined}
             onReorderKinds={isSuperAdmin ? handleReorderKinds : undefined}
-            onOpenInBrowser={onOpenInBrowser}
           />
         </>
       ) : (

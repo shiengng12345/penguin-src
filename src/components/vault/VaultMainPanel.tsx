@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronRight,
-  Compass,
   RefreshCw,
   Pencil,
   Plus,
@@ -95,20 +94,6 @@ interface VaultMainPanelProps {
   onRenameKind?: (id: string, label: string) => void;
   onDeleteKind?: (id: string) => void;
   onReorderKinds?: (orderedIds: string[]) => void;
-  // Vault → in-app Browser deeplink. Threaded from App.tsx through
-  // VaultPage so credential cards can offer an "Open in Browser"
-  // affordance for vault / argocd / web / monitoring URLs. The card
-  // computes URL + paired token + project + env metadata and calls
-  // this; the parent does the actual store.requestBrowserDeeplink +
-  // module switch.
-  onOpenInBrowser?: (deeplink: {
-    url: string;
-    label: string;
-    prefillToken?: string;
-    baseKind?: string;
-    projectId?: string;
-    envId?: string;
-  }) => void;
 }
 
 // Right pane of the Vault page. Sprint 4 flat list view + All/Favorites tabs
@@ -240,49 +225,6 @@ export function VaultMainPanel(props: VaultMainPanelProps) {
   }, [allGroups, activeTab, searchQuery, selectedEnvId, selectedKind]);
 
   const canReorder = isSuperAdmin && props.onReorderCredentials !== undefined;
-
-  // Per-credential "Open in Browser" dispatcher. Receives a credential
-  // id, resolves its URL + paired-token + kind metadata, then calls
-  // the parent's onOpenInBrowser. The Vault card displays the button
-  // only when this returns a usable URL — we don't surface the action
-  // for credentials whose env-value isn't an http(s) URL.
-  const handleCredentialOpenInBrowser = useCallback(
-    (credentialId: string): void => {
-      if (props.onOpenInBrowser === undefined) return;
-      const cred = project.credentials.find((c) => c.id === credentialId);
-      if (cred === undefined) return;
-      const url = (cred.valueByEnv[selectedEnvId] ?? "").trim();
-      if (!/^https?:\/\//i.test(url)) return;
-      const def = project.kinds?.find((k) => k.id === cred.kind);
-      // Paired-token lookup (both link directions) — same algorithm
-      // we used pre-revert when the webview lived inside Vault. Only
-      // actually attached when baseKind === "vault" so we don't ship
-      // tokens to Argo SSO / generic web shortcuts.
-      let prefillToken: string | undefined;
-      if (def?.baseKind === "vault") {
-        let paired: VaultCredential | undefined;
-        if (cred.pairedWith !== undefined) {
-          paired = project.credentials.find((c) => c.id === cred.pairedWith);
-        }
-        if (paired === undefined) {
-          paired = project.credentials.find((c) => c.pairedWith === cred.id);
-        }
-        const token = paired === undefined ? "" : (paired.valueByEnv[selectedEnvId] ?? "").trim();
-        if (token.length > 0) prefillToken = token;
-      }
-      const env = project.environments.find((e) => e.id === selectedEnvId);
-      const envName = env?.name ?? selectedEnvId;
-      props.onOpenInBrowser({
-        url,
-        label: `${cred.name} · ${project.name} / ${envName}`,
-        prefillToken,
-        baseKind: def?.baseKind,
-        projectId: project.id,
-        envId: selectedEnvId,
-      });
-    },
-    [props.onOpenInBrowser, project, selectedEnvId],
-  );
 
   // dnd-kit sensors — 8px activation distance so casual clicks on the row
   // body / favorite star / value buttons don't kick off a drag.
@@ -460,10 +402,6 @@ export function VaultMainPanel(props: VaultMainPanelProps) {
                     onToggleFavorite={onToggleFavorite}
                     onCopyAt={handleCopyAt}
                     canReorder={canReorder}
-                    onOpenInBrowser={
-                      props.onOpenInBrowser !== undefined ? handleCredentialOpenInBrowser : undefined
-                    }
-                    kindBaseKind={project.kinds?.find((k) => k.id === group[0].kind)?.baseKind}
                   />
                 ))}
               </div>
@@ -641,15 +579,6 @@ interface CredentialRowProps {
   onDelete?: (credentialId: string) => void;
   onToggleFavorite: (credentialId: string) => void;
   onCopyAt: (payload: { value: string; x: number; y: number }) => void;
-  // Open the credential's URL in the in-app Browser module. Only
-  // rendered when the kind's baseKind is one of the web-renderable
-  // built-ins (vault / argocd / monitoring / web) AND the parent has
-  // wired the action.
-  onOpenInBrowser?: (credentialId: string) => void;
-  // baseKind of the credential's kind (looked up by parent) — gates
-  // whether the "Open in Browser" button shows. Vault / Argo /
-  // monitoring / web get the button; database / cache / token don't.
-  kindBaseKind?: string;
 }
 
 interface SortableCredentialRowProps extends CredentialRowProps {
@@ -778,20 +707,6 @@ function CredentialRow(props: CredentialRowFullProps) {
           {primary.kind}
         </span>
         <div className="flex-1" />
-        {props.onOpenInBrowser !== undefined &&
-        props.kindBaseKind !== undefined &&
-        ["vault", "argocd", "monitoring", "web"].includes(props.kindBaseKind) &&
-        /^https?:\/\//i.test((primary.valueByEnv[selectedEnvId] ?? "").trim()) ? (
-          <button
-            type="button"
-            onClick={() => props.onOpenInBrowser?.(primary.id)}
-            className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground/70 transition-colors hover:bg-primary/10 hover:text-primary"
-            title="Open in Browser (auto-fills token if available)"
-            aria-label="Open in Browser"
-          >
-            <Compass className="h-3.5 w-3.5" />
-          </button>
-        ) : null}
         {showAdminMenu ? (
           <div className="relative" ref={menuRef}>
             <Button

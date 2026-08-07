@@ -2,7 +2,6 @@ use std::fs;
 use std::path::PathBuf;
 use tauri::Manager;
 
-mod auth_popover;
 mod db;
 mod inline_webview;
 mod knowledge;
@@ -141,7 +140,6 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .manage(auth_popover::AuthPopoverState::default())
         .manage(redis::RedisState::default())
         .manage(redis::RedisRegistry::default())
         .manage(knowledge::WatchRegistry::default())
@@ -368,12 +366,6 @@ pub fn run() {
             redis::keys::reg_cli_exec,
             redis::keys::reg_slowlog,
             redis::keys::reg_publish,
-            auth_popover::auth_popover_open,
-            auth_popover::auth_popover_get_snapshot,
-            auth_popover::auth_popover_close,
-            auth_popover::auth_load_standalone,
-            auth_popover::auth_save_standalone,
-            auth_popover::auth_capture_qr,
             runtime::commands::runtime_get_status,
             runtime::commands::runtime_set_prevent_sleep,
             runtime::commands::runtime_set_mode,
