@@ -85,12 +85,19 @@ export function UrlBar({ resolvedUrl }: UrlBarProps) {
           size="default"
           data-tour="send-btn"
         >
-          <ThemedMascotImg
-            base="/mascot/penguin/send.png"
-            alt=""
-            draggable={false}
-            className={cn("mr-1.5 h-6 w-auto drop-shadow-sm", tab.isLoading && "animate-bounce")}
-          />
+          <span
+            className={cn(
+              "mr-1.5 inline-flex items-center justify-center rounded-full bg-white/90 p-1 ring-1 ring-black/10",
+              tab.isLoading && "animate-bounce",
+            )}
+          >
+            <ThemedMascotImg
+              base="/mascot/penguin/send.png"
+              alt=""
+              draggable={false}
+              className="h-6 w-auto"
+            />
+          </span>
           {tab.isLoading ? "Sending..." : "Send"}
         </Button>
       </div>
