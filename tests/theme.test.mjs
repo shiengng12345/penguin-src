@@ -15,30 +15,29 @@ async function loadThemeModule() {
   return import(`data:text/javascript;base64,${encoded}`);
 }
 
-test("includes Antarctic Snow as a valid app theme", async () => {
+test("includes the mascot themes and drops the removed color themes", async () => {
   const { THEMES, isAppTheme } = await loadThemeModule();
 
-  assert.equal(isAppTheme("antarctic-snow"), true);
-  assert.ok(THEMES.some((theme) => theme.id === "antarctic-snow" && theme.label === "Antarctic Snow"));
+  for (const id of ["dark", "light", "penguin", "duck", "cat", "black-cat", "hamster", "rabbit"]) {
+    assert.equal(isAppTheme(id), true, `${id} should be a valid theme`);
+    assert.ok(THEMES.some((t) => t.id === id), `${id} should be in THEMES`);
+  }
+  // Nord / Emerald / Rose / Violet / Antarctic Snow were removed.
+  for (const id of ["nord", "emerald", "rose", "violet", "antarctic-snow"]) {
+    assert.equal(isAppTheme(id), false, `${id} should be removed`);
+    assert.ok(!THEMES.some((t) => t.id === id), `${id} should be gone from THEMES`);
+  }
 });
 
-test("treats Antarctic Snow as a light visual theme", async () => {
+test("treats the pale mascot themes as light visual themes", async () => {
   const { isLightAppTheme } = await loadThemeModule();
 
   assert.equal(isLightAppTheme("light"), true);
-  assert.equal(isLightAppTheme("antarctic-snow"), true);
+  assert.equal(isLightAppTheme("penguin"), true);
+  assert.equal(isLightAppTheme("duck"), true);
+  assert.equal(isLightAppTheme("rabbit"), true);
   assert.equal(isLightAppTheme("dark"), false);
-});
-
-test("Antarctic Snow background covers html and body", async () => {
-  // Tightened: a single comma-joined regex broke on any reformatting
-  // (e.g. each selector on its own line). Assert each selector
-  // independently — the meaningful invariant is that BOTH html[data-
-  // theme] and [data-theme] body receive an antarctic-snow background.
-  const source = await readFile(new URL("../src/index.css", import.meta.url), "utf8");
-
-  assert.match(source, /html\[data-theme="antarctic-snow"\]/);
-  assert.match(source, /\[data-theme="antarctic-snow"\]\s+body/);
+  assert.equal(isLightAppTheme("antarctic-snow"), false); // removed
 });
 
 test("rejects unknown theme names", async () => {

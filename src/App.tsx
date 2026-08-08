@@ -58,7 +58,6 @@ import {
 import { initializeDevModeOnAppStart } from "@/lib/dev-mode-store";
 import { RequestPanel } from "@/components/request/RequestPanel";
 import { ResponsePanel } from "@/components/request/ResponsePanel";
-import { SnowLayer } from "@/components/theme/SnowLayer";
 import { ResizablePanels } from "@/components/ui/resizable-panels";
 
 const PackageInstaller = lazy(() => import("@/components/packages/PackageInstaller").then(m => ({ default: m.PackageInstaller })));
@@ -91,7 +90,6 @@ export default function App() {
     setInstallerOpen,
     addInstallLog,
     clearInstallLog,
-    theme,
   } = useAppStore();
 
   // 启动即预热包列表：后台拉一次 registry（顺带握好 TCP 连接、灌热内存缓存），
@@ -661,7 +659,6 @@ export default function App() {
 
   return (
     <div className="penguin-app-shell relative h-screen w-screen overflow-hidden bg-background text-foreground">
-      <SnowLayer active={theme === "antarctic-snow"} />
       <div className="relative z-10 flex h-full flex-col">
         <Header
           onOpenSettings={openSettings}
