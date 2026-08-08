@@ -163,8 +163,17 @@ pub async fn rest_send_request(payload: SendRequestPayload) -> Result<RestRespon
         }
     }
 
+    // Whether the user already declared a content-type. When they did, body
+    // modes must NOT override it — a gRPC-Web send sets
+    // `application/grpc-web+proto` explicitly, and JSON mode clobbering it with
+    // `application/json` is exactly why such requests failed before.
+    let user_set_content_type = req
+        .headers
+        .iter()
+        .any(|h| h.enabled && h.key.eq_ignore_ascii_case("content-type"));
+
     if let Some(body) = &req.body {
-        rb = apply_body(rb, body);
+        rb = apply_body(rb, body, user_set_content_type)?;
     }
 
     // 6) Send + measure.
@@ -214,12 +223,15 @@ pub async fn rest_send_request(payload: SendRequestPayload) -> Result<RestRespon
     let total_size = response_bytes.total_size;
     let truncated = response_bytes.truncated;
 
-    // Try UTF-8 first; if binary, base64-encode so JSON IPC stays clean.
-    let body_str = match String::from_utf8(response_bytes.bytes) {
-        Ok(s) => s,
+    // Try UTF-8 first; if binary, base64-encode so JSON IPC stays clean. The
+    // FE learns which happened via `body_encoding` so it can deframe binary
+    // responses (e.g. gRPC-Web) instead of treating them as truncated text.
+    let (body_str, body_encoding) = match String::from_utf8(response_bytes.bytes) {
+        Ok(s) => (s, "utf8".to_string()),
         Err(e) => {
             use base64::Engine;
-            base64::engine::general_purpose::STANDARD.encode(e.into_bytes())
+            let encoded = base64::engine::general_purpose::STANDARD.encode(e.into_bytes());
+            (encoded, "base64".to_string())
         }
     };
 
@@ -229,6 +241,7 @@ pub async fn rest_send_request(payload: SendRequestPayload) -> Result<RestRespon
         status,
         headers: resp_headers,
         body: body_str,
+        body_encoding,
         body_bytes: total_size,
         elapsed_ms,
         truncated,
@@ -292,11 +305,23 @@ fn parse_secret_path(path: &str) -> Result<(&str, &str), RestError> {
     Ok((location, key))
 }
 
-fn apply_body(rb: reqwest::RequestBuilder, body: &RestBody) -> reqwest::RequestBuilder {
-    match body {
-        RestBody::Json { content } => rb
-            .header("content-type", "application/json")
-            .body(content.clone()),
+fn apply_body(
+    rb: reqwest::RequestBuilder,
+    body: &RestBody,
+    user_set_content_type: bool,
+) -> Result<reqwest::RequestBuilder, RestError> {
+    Ok(match body {
+        RestBody::Json { content } => {
+            // Only default the content-type when the user hasn't set one —
+            // otherwise an explicit `application/grpc-web+proto` (or anything
+            // else) would be silently overridden.
+            let rb = if user_set_content_type {
+                rb
+            } else {
+                rb.header("content-type", "application/json")
+            };
+            rb.body(content.clone())
+        }
         RestBody::Raw { content } => rb.body(content.clone()),
         RestBody::FormUrlencoded { fields } => {
             let pairs: Vec<(&str, &str)> = fields
@@ -308,9 +333,50 @@ fn apply_body(rb: reqwest::RequestBuilder, body: &RestBody) -> reqwest::RequestB
         }
         // Multipart upload is Phase 10D; skip for now.
         RestBody::Multipart { .. } => rb,
-        // Binary body assumed already-encoded UTF-8 or base64 text; raw send.
-        RestBody::Binary { content } => rb.body(content.clone()),
+        // Binary body: decode per `encoding` into raw bytes and send those
+        // exact bytes. "hex" / "base64" let the user emit arbitrary binary
+        // (e.g. a gRPC-Web frame); "utf8" sends the string verbatim (legacy).
+        RestBody::Binary { content, encoding } => {
+            rb.body(decode_binary_body(content, encoding)?)
+        }
         RestBody::None => rb,
+    })
+}
+
+/// Decode a Binary-mode body string into the exact bytes to send.
+/// - "utf8" (or unknown): the string's own UTF-8 bytes, verbatim.
+/// - "hex": hex digits, ASCII whitespace ignored (e.g. `00 00 00 00 00`).
+/// - "base64": standard base64.
+fn decode_binary_body(content: &str, encoding: &str) -> Result<Vec<u8>, RestError> {
+    match encoding.to_ascii_lowercase().as_str() {
+        "hex" => {
+            let cleaned: String = content.chars().filter(|c| !c.is_ascii_whitespace()).collect();
+            if cleaned.len() % 2 != 0 {
+                return Err(RestError {
+                    kind: "invalid-body".to_string(),
+                    message: "hex body has an odd number of digits".to_string(),
+                });
+            }
+            (0..cleaned.len())
+                .step_by(2)
+                .map(|i| {
+                    u8::from_str_radix(&cleaned[i..i + 2], 16).map_err(|_| RestError {
+                        kind: "invalid-body".to_string(),
+                        message: format!("invalid hex byte near '{}'", &cleaned[i..i + 2]),
+                    })
+                })
+                .collect()
+        }
+        "base64" => {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD
+                .decode(content.trim())
+                .map_err(|e| RestError {
+                    kind: "invalid-body".to_string(),
+                    message: format!("invalid base64 body: {}", e),
+                })
+        }
+        _ => Ok(content.as_bytes().to_vec()),
     }
 }
 
@@ -578,6 +644,39 @@ pub fn mask_secret(plaintext: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_binary_hex_ignores_whitespace() {
+        // The gRPC-Web empty-message frame: flag 0 + 4-byte length 0.
+        assert_eq!(
+            decode_binary_body("00 00 00 00 00", "hex").unwrap(),
+            vec![0u8, 0, 0, 0, 0]
+        );
+        assert_eq!(decode_binary_body("deadBEEF", "hex").unwrap(), vec![0xde, 0xad, 0xbe, 0xef]);
+    }
+
+    #[test]
+    fn decode_binary_hex_rejects_malformed() {
+        assert!(decode_binary_body("abc", "hex").is_err()); // odd length
+        assert!(decode_binary_body("zz", "hex").is_err()); // non-hex digit
+    }
+
+    #[test]
+    fn decode_binary_base64_roundtrip() {
+        // base64 of the 5-null-byte frame.
+        assert_eq!(
+            decode_binary_body("AAAAAAA=", "base64").unwrap(),
+            vec![0u8, 0, 0, 0, 0]
+        );
+        assert!(decode_binary_body("not base64!!!", "base64").is_err());
+    }
+
+    #[test]
+    fn decode_binary_utf8_is_verbatim() {
+        assert_eq!(decode_binary_body("hi", "utf8").unwrap(), b"hi".to_vec());
+        // Unknown encoding falls back to verbatim UTF-8 bytes.
+        assert_eq!(decode_binary_body("hi", "weird").unwrap(), b"hi".to_vec());
+    }
 
     #[test]
     fn parse_set_cookie_minimal() {

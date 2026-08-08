@@ -38,12 +38,31 @@ pub struct RestQueryParam {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "mode", rename_all = "kebab-case")]
 pub enum RestBody {
-    Json { content: String },
-    Raw { content: String },
-    FormUrlencoded { fields: Vec<RestHeader> },
-    Multipart { fields: Vec<RestHeader> }, // file upload spec — 10D
-    Binary { content: String },            // base64 in MVP
+    Json {
+        content: String,
+    },
+    Raw {
+        content: String,
+    },
+    FormUrlencoded {
+        fields: Vec<RestHeader>,
+    },
+    Multipart {
+        fields: Vec<RestHeader>,
+    }, // file upload spec — 10D
+    // `content` is interpreted per `encoding`: "utf8" sends the string's UTF-8
+    // bytes literally (legacy default); "hex" / "base64" decode to raw bytes so
+    // the user can emit arbitrary binary — e.g. a gRPC-Web frame `0000000000`.
+    Binary {
+        content: String,
+        #[serde(default = "default_body_encoding")]
+        encoding: String,
+    },
     None,
+}
+
+fn default_body_encoding() -> String {
+    "utf8".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,12 +92,22 @@ pub struct RestResponse {
     pub status: u16,
     pub headers: Vec<RestHeader>,
     pub body: String,
+    // How `body` is encoded: "utf8" (verbatim text) or "base64" (binary
+    // response wrapped so JSON IPC stays clean). The FE must consult this
+    // before treating `body` as text — e.g. a gRPC-Web response is binary and
+    // arrives base64, and can only be deframed after decoding.
+    #[serde(default = "default_utf8_encoding")]
+    pub body_encoding: String,
     pub body_bytes: u64,
     pub elapsed_ms: u64,
     #[serde(default)]
     pub truncated: bool,
     #[serde(default)]
     pub error: Option<RestError>,
+}
+
+fn default_utf8_encoding() -> String {
+    "utf8".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
