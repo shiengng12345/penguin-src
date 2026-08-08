@@ -266,8 +266,10 @@
   --color-card-foreground: oklch(0.27 0.012 280);
   --color-popover: oklch(0.985 0.006 75);
   --color-popover-foreground: oklch(0.27 0.012 280);
-  --color-primary: oklch(0.42 0.02 280);
-  --color-primary-foreground: oklch(0.98 0.008 80);
+  /* Amber-gold button (the cat's bell/eyes) so the black kitty on the Send
+     button pops instead of vanishing on a dark-on-dark button. */
+  --color-primary: oklch(0.66 0.14 78);
+  --color-primary-foreground: oklch(0.99 0.01 85);
   --color-secondary: oklch(0.92 0.012 70);
   --color-secondary-foreground: oklch(0.27 0.012 280);
   --color-muted: oklch(0.91 0.012 70);
@@ -278,7 +280,7 @@
   --color-destructive-foreground: oklch(0.985 0.01 20);
   --color-border: oklch(0.84 0.012 70);
   --color-input: oklch(0.82 0.014 70);
-  --color-ring: oklch(0.42 0.02 280);
+  --color-ring: oklch(0.66 0.14 78);
   --color-success: oklch(0.6 0.15 155);
   --color-warning: oklch(0.72 0.14 80);
 }
