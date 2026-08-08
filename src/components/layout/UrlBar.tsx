@@ -1,5 +1,5 @@
 import { useAppStore, useActiveTab } from "@/lib/store";
-import { ThemedMascotImg } from "@/components/common/ThemedMascotImg";
+import { SendMascot } from "@/components/common/SendMascot";
 import { EnvInput } from "@/components/ui/env-input";
 import { Badge } from "@/components/ui/badge";
 import { Globe, Server, RotateCcw, Pencil } from "lucide-react";
@@ -85,12 +85,7 @@ export function UrlBar({ resolvedUrl }: UrlBarProps) {
           size="default"
           data-tour="send-btn"
         >
-          <ThemedMascotImg
-            base="/mascot/penguin/send.png"
-            alt=""
-            draggable={false}
-            className={cn("send-mascot mr-1.5 h-6 w-auto", tab.isLoading && "animate-bounce")}
-          />
+          <SendMascot className={cn("mr-1.5 h-6 w-auto", tab.isLoading && "animate-bounce")} />
           {tab.isLoading ? "Sending..." : "Send"}
         </Button>
       </div>
