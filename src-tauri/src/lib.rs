@@ -8,7 +8,6 @@ mod knowledge;
 mod mcp;
 mod packages;
 mod proxy;
-mod redis;
 mod registry;
 mod registry_search;
 mod rest;
@@ -140,8 +139,6 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_clipboard_manager::init())
-        .manage(redis::RedisState::default())
-        .manage(redis::RedisRegistry::default())
         .manage(knowledge::WatchRegistry::default())
         .manage(knowledge::QueryRuntimeState::default())
         .manage(runtime::new_state())
@@ -296,76 +293,6 @@ pub fn run() {
             inline_webview::inline_webview_hide_all,
             inline_webview::inline_webview_purge_all_data,
             inline_webview::inline_webview_delete_data_dir,
-            redis::commands::redis_connect,
-            redis::commands::redis_connect_saved,
-            redis::commands::redis_disconnect,
-            redis::commands::redis_ping,
-            redis::commands::redis_save_connection,
-            redis::commands::redis_list_connections,
-            redis::commands::redis_delete_connection,
-            redis::commands::redis_scan,
-            redis::commands::redis_scan_enriched,
-            redis::commands::redis_dbsize,
-            redis::commands::redis_key_type,
-            redis::commands::redis_key_ttl,
-            redis::commands::redis_del_keys,
-            redis::commands::redis_rename_key,
-            redis::commands::redis_expire_key,
-            redis::commands::redis_string_get,
-            redis::commands::redis_string_set,
-            redis::commands::redis_hash_getall,
-            redis::commands::redis_hash_scan,
-            redis::commands::redis_hash_set,
-            redis::commands::redis_hash_del,
-            redis::commands::redis_list_range,
-            redis::commands::redis_set_members,
-            redis::commands::redis_zset_range,
-            redis::commands::redis_stats_start,
-            redis::commands::redis_stats_stop,
-            redis::commands::redis_info,
-            redis::registry::redis_reg_connect,
-            redis::registry::redis_reg_list,
-            redis::registry::redis_reg_disconnect,
-            redis::registry::redis_reg_dbsize,
-            redis::registry::redis_reg_info,
-            redis::registry::redis_reg_monitor_start,
-            redis::registry::redis_reg_monitor_stop,
-            redis::registry::reg_pubsub_start,
-            redis::registry::reg_pubsub_stop,
-            redis::registry::redis_conn_list_full,
-            redis::registry::redis_group_list,
-            redis::registry::redis_group_create,
-            redis::registry::redis_group_delete,
-            redis::registry::redis_conn_save,
-            redis::registry::redis_conn_delete,
-            redis::registry::redis_conn_open,
-            redis::registry::redis_conn_test,
-            redis::registry::redis_conn_export,
-            redis::registry::redis_conn_import,
-            redis::keys::reg_scan,
-            redis::keys::reg_key_type,
-            redis::keys::reg_ttl,
-            redis::keys::reg_expire,
-            redis::keys::reg_del,
-            redis::keys::reg_rename,
-            redis::keys::reg_string_get,
-            redis::keys::reg_string_set,
-            redis::keys::reg_hash_getall,
-            redis::keys::reg_hash_set,
-            redis::keys::reg_hash_del,
-            redis::keys::reg_list_range,
-            redis::keys::reg_list_push,
-            redis::keys::reg_list_set,
-            redis::keys::reg_set_members,
-            redis::keys::reg_set_add,
-            redis::keys::reg_set_rem,
-            redis::keys::reg_zset_range,
-            redis::keys::reg_zset_add,
-            redis::keys::reg_zset_rem,
-            redis::keys::reg_stream_range,
-            redis::keys::reg_cli_exec,
-            redis::keys::reg_slowlog,
-            redis::keys::reg_publish,
             runtime::commands::runtime_get_status,
             runtime::commands::runtime_set_prevent_sleep,
             runtime::commands::runtime_set_mode,

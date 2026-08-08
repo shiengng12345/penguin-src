@@ -6,19 +6,19 @@
 // Gating tiers (Sprint 8.5 — three-tier model):
 //   "none"        — always visible (Client)
 //   "token"       — needs Dev Mode + any valid token (Vault, Browser)
-//   "super-admin" — needs Dev Mode + super-admin token (Home / REST / Docs / Database)
+//   "super-admin" — needs Dev Mode + super-admin token (Home / REST / Docs)
 // Super-admin implies token, so super-admin users see everything.
 
 import { cn } from "@/lib/utils";
 
-export type MainModule = "client" | "rest" | "vault" | "docs" | "database" | "wiki";
+export type MainModule = "client" | "rest" | "vault" | "docs" | "wiki";
 
 export interface MainSidebarProps {
   active: MainModule;
   onSelect: (module: MainModule) => void;
   // Dev Mode enabled + dev token validated. Unlocks Vault.
   hasValidToken: boolean;
-  // Dev Mode enabled + super-admin token validated. Unlocks Home / REST / Docs / Database.
+  // Dev Mode enabled + super-admin token validated. Unlocks Home / REST / Docs.
   isSuperAdmin: boolean;
 }
 
@@ -39,7 +39,6 @@ const ITEMS: RailItem[] = [
   { kind: "vault", img: "/nav/vault.png", label: "Vault", longLabel: "Vault / 凭据库", requires: "token" },
   { kind: "rest", img: "/nav/rest.png", label: "REST", longLabel: "REST API / 接口客户端", requires: "none" },
   { kind: "docs", img: "/nav/docs.png", label: "Docs", longLabel: "Knowledge Base / 知识库 (Super Admin)", requires: "super-admin" },
-  { kind: "database", img: "/nav/database.png", label: "Database", longLabel: "Database / 数据库 (Super Admin)", requires: "super-admin" },
   // Penguin Knowledge Wiki — notes + code graph. Super-admin (dev-token) tier.
   { kind: "wiki", img: "/nav/wiki.png", label: "Wiki", longLabel: "Knowledge Wiki / 知识图谱 (Super Admin)", requires: "super-admin" },
 ];

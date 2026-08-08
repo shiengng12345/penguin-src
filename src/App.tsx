@@ -15,7 +15,6 @@ import { UrlBar } from "@/components/layout/UrlBar";
 import { VaultPage } from "@/components/vault/VaultPage";
 import { ApiDocsPage } from "@/components/docs/ApiDocsPage";
 import { RestPage } from "@/components/rest/RestPage";
-import { DatabasePage } from "@/components/database/DatabasePage";
 import { WikiPage } from "@/components/wiki/WikiPage";
 import { MainSidebar, type MainModule } from "@/components/layout/MainSidebar";
 import { getPersistedValue, setPersistedValue } from "@/lib/app-persistence";
@@ -31,7 +30,6 @@ const VALID_MODULES: ReadonlySet<MainModule> = new Set([
   "vault",
   "rest",
   "docs",
-  "database",
   "wiki",
 ]);
 function loadInitialActiveModule(): MainModule | null {
@@ -39,7 +37,6 @@ function loadInitialActiveModule(): MainModule | null {
   try {
     const raw = getPersistedValue(APP_VALUE_KEYS.activeModule);
     if (raw === null) return null;
-    if (raw === "redis") return "database";
     if (VALID_MODULES.has(raw as MainModule)) return raw as MainModule;
   } catch {
     /* fall through to null */
@@ -128,13 +125,11 @@ export default function App() {
   const [vaultOpen, setVaultOpen] = useState(initialModule === "vault");
   const [docsOpen, setDocsOpen] = useState(initialModule === "docs");
   const [restOpen, setRestOpen] = useState(initialModule === "rest");
-  const [databaseOpen, setDatabaseOpen] = useState(initialModule === "database");
   const [wikiOpen, setWikiOpen] = useState(initialModule === "wiki");
   const openSettings = useCallback(() => {
     setSettingsOpen(true);
   }, []);
   const closeVault = useCallback(() => setVaultOpen(false), []);
-  const closeDatabase = useCallback(() => setDatabaseOpen(false), []);
   const closeWiki = useCallback(() => setWikiOpen(false), []);
   // Returns to the API Client — the default module now that the Home hub
   // is gone. Used by the rail's fallback, the "go home" event, and the
@@ -143,20 +138,17 @@ export default function App() {
     setVaultOpen(false);
     setDocsOpen(false);
     setRestOpen(false);
-    setDatabaseOpen(false);
     setWikiOpen(false);
   }, []);
   const selectVaultFromHome = useCallback(() => {
     setDocsOpen(false);
     setRestOpen(false);
-    setDatabaseOpen(false);
     setWikiOpen(false);
     setVaultOpen(true);
   }, []);
   const selectDocsFromHome = useCallback(() => {
     setVaultOpen(false);
     setRestOpen(false);
-    setDatabaseOpen(false);
     setWikiOpen(false);
     setDocsOpen(true);
   }, []);
@@ -164,22 +156,13 @@ export default function App() {
   const selectRest = useCallback(() => {
     setVaultOpen(false);
     setDocsOpen(false);
-    setDatabaseOpen(false);
     setWikiOpen(false);
     setRestOpen(true);
-  }, []);
-  const selectDatabase = useCallback(() => {
-    setVaultOpen(false);
-    setDocsOpen(false);
-    setRestOpen(false);
-    setWikiOpen(false);
-    setDatabaseOpen(true);
   }, []);
   const selectWiki = useCallback(() => {
     setVaultOpen(false);
     setDocsOpen(false);
     setRestOpen(false);
-    setDatabaseOpen(false);
     setWikiOpen(true);
   }, []);
   // Sidebar derives a single "active module" enum from the boolean page
@@ -190,8 +173,6 @@ export default function App() {
     ? "docs"
     : restOpen
     ? "rest"
-    : databaseOpen
-    ? "database"
     : wikiOpen
     ? "wiki"
     : "client";
@@ -214,7 +195,6 @@ export default function App() {
   // its own gate so revoking super-admin but keeping dev token leaves the
   // user inside Vault but kicks them out of Docs.
   // Only Vault stays at the token tier.
-  const canAccessDatabase = devModeEnabled && isSuperAdmin;
   const canAccessWiki = devModeEnabled && isSuperAdmin;
   useEffect(() => {
     // Wait for the dev-mode token to finish loading before deciding to
@@ -225,20 +205,18 @@ export default function App() {
     if (vaultOpen && !canAccessVault) setVaultOpen(false);
     if (docsOpen && !canAccessDocs) setDocsOpen(false);
     if (restOpen && !canAccessRest) setRestOpen(false);
-    if (databaseOpen && !canAccessDatabase) setDatabaseOpen(false);
     if (wikiOpen && !canAccessWiki) setWikiOpen(false);
-  }, [devModeHydrated, canAccessVault, canAccessDocs, canAccessRest, canAccessDatabase, canAccessWiki, vaultOpen, docsOpen, restOpen, databaseOpen, wikiOpen]);
+  }, [devModeHydrated, canAccessVault, canAccessDocs, canAccessRest, canAccessWiki, vaultOpen, docsOpen, restOpen, wikiOpen]);
   const handleModuleSelect = useCallback(
     (m: MainModule) => {
       if (m === "client") selectApiClient();
       else if (m === "vault") selectVaultFromHome();
       else if (m === "docs") selectDocsFromHome();
       else if (m === "rest") selectRest();
-      else if (m === "database") selectDatabase();
       else if (m === "wiki") selectWiki();
       else selectApiClient();
     },
-    [selectApiClient, selectVaultFromHome, selectDocsFromHome, selectRest, selectDatabase, selectWiki],
+    [selectApiClient, selectVaultFromHome, selectDocsFromHome, selectRest, selectWiki],
   );
   const appUpdate = useAppUpdateScheduler(openSettings);
   // Background registry refresh for admins/super-admins — keeps the cache warm
@@ -620,7 +598,6 @@ export default function App() {
       setVaultOpen(false);
       setDocsOpen(false);
       setRestOpen(false);
-      setDatabaseOpen(false);
     };
     document.addEventListener(PENGUIN_GO_HOME_EVENT, handleGoHome);
     return () => document.removeEventListener(PENGUIN_GO_HOME_EVENT, handleGoHome);
@@ -705,7 +682,7 @@ export default function App() {
             active={activeModule}
             onSelect={handleModuleSelect}
             hasValidToken={canAccessVault}
-            isSuperAdmin={canAccessDocs || canAccessDatabase}
+            isSuperAdmin={canAccessDocs}
           />
           <div className="flex flex-1 flex-col min-w-0">
             {vaultOpen ? (
@@ -714,8 +691,6 @@ export default function App() {
               <ApiDocsPage onClose={selectApiClient} />
             ) : restOpen ? (
               <RestPage onClose={selectApiClient} />
-            ) : databaseOpen ? (
-              <DatabasePage onClose={closeDatabase} />
             ) : wikiOpen ? (
               <WikiPage onClose={closeWiki} />
             ) : (
