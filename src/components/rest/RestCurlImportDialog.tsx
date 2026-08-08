@@ -424,6 +424,11 @@ function deriveNameFromUrl(url: string): string {
 
 function inferBody(parsed: ParsedCurl): RestBody | undefined {
   if (!parsed.body) return undefined;
+  // ANSI-C `$'...'` payload decoded to raw bytes (e.g. a gRPC-Web frame) →
+  // hex binary body, sent byte-identically.
+  if (parsed.bodyEncoding === "hex") {
+    return { mode: "binary", content: parsed.body, encoding: "hex" };
+  }
   const contentType = (
     findHeader(parsed.headers, "Content-Type") ?? ""
   ).toLowerCase();

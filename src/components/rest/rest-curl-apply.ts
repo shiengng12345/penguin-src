@@ -40,6 +40,11 @@ const VALID_METHODS = new Set<RestMethod>([
 
 export function inferBody(parsed: ParsedCurl): RestBody | undefined {
   if (!parsed.body) return undefined;
+  // ANSI-C `$'...'` payload that decoded to raw bytes (e.g. a gRPC-Web frame)
+  // → a hex binary body, sent byte-identically.
+  if (parsed.bodyEncoding === "hex") {
+    return { mode: "binary", content: parsed.body, encoding: "hex" };
+  }
   const contentType = (
     findHeader(parsed.headers, "Content-Type") ?? ""
   ).toLowerCase();

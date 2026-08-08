@@ -45,7 +45,10 @@ export type RestBody =
   | { mode: "key-value"; fields: RestBodyField[] }
   | { mode: "form-urlencoded"; fields: RestHeader[] }
   | { mode: "multipart"; fields: RestHeader[] }
-  | { mode: "binary"; content: string }
+  // `content` interpreted per `encoding`: "utf8" = verbatim string bytes;
+  // "hex"/"base64" decode to raw bytes so arbitrary binary can be sent
+  // (e.g. a gRPC-Web frame). Absent encoding defaults to "utf8" on the backend.
+  | { mode: "binary"; content: string; encoding?: "utf8" | "hex" | "base64" }
   | { mode: "none" };
 
 export type RestAuth =
@@ -68,6 +71,9 @@ export interface RestResponse {
   status: number;
   headers: RestHeader[];
   body: string;
+  // "utf8": `body` is verbatim text. "base64": `body` is a base64-wrapped
+  // binary response that must be decoded before use (e.g. a gRPC-Web frame).
+  bodyEncoding: "utf8" | "base64";
   bodyBytes: number;
   elapsedMs: number;
   truncated: boolean;

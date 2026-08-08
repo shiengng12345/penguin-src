@@ -10,6 +10,84 @@ export interface ParsedCurl {
   method: string;
   headers: Record<string, string>;
   body: string;
+  // Set to "hex" when the body came from a `$'...'` ANSI-C payload that decoded
+  // to non-printable bytes — then `body` is a hex string (e.g. a gRPC-Web
+  // frame `0000000000`) to be imported as a binary body. Absent = plain text.
+  bodyEncoding?: "hex";
+}
+
+// Decode a shell ANSI-C `$'...'` string body (raw inner text, escapes intact)
+// into bytes. Handles the common escapes plus \xHH, \0NNN octal, \uHHHH.
+function decodeAnsiCBytes(raw: string): number[] {
+  const bytes: number[] = [];
+  const enc = new TextEncoder();
+  const simple: Record<string, number> = {
+    n: 0x0a, t: 0x09, r: 0x0d, "\\": 0x5c, "'": 0x27, '"': 0x22,
+    a: 0x07, b: 0x08, f: 0x0c, v: 0x0b, e: 0x1b, "0": 0x00,
+  };
+  let i = 0;
+  while (i < raw.length) {
+    const c = raw[i];
+    if (c !== "\\") {
+      for (const byte of enc.encode(c)) bytes.push(byte);
+      i += 1;
+      continue;
+    }
+    const next = raw[i + 1];
+    if (next === undefined) { bytes.push(0x5c); i += 1; continue; }
+    if (next === "x") {
+      const m = /^[0-9a-fA-F]{1,2}/.exec(raw.slice(i + 2));
+      if (m) { bytes.push(parseInt(m[0], 16)); i += 2 + m[0].length; continue; }
+    } else if (next === "u" || next === "U") {
+      const width = next === "u" ? 4 : 8;
+      const m = new RegExp(`^[0-9a-fA-F]{1,${width}}`).exec(raw.slice(i + 2));
+      if (m) {
+        for (const byte of enc.encode(String.fromCodePoint(parseInt(m[0], 16)))) bytes.push(byte);
+        i += 2 + m[0].length;
+        continue;
+      }
+    } else if (next >= "0" && next <= "7") {
+      const m = /^[0-7]{1,3}/.exec(raw.slice(i + 1));
+      if (m) { bytes.push(parseInt(m[0], 8) & 0xff); i += 1 + m[0].length; continue; }
+    }
+    if (next in simple) { bytes.push(simple[next]); i += 2; continue; }
+    // Unknown escape: keep the char literally (drop the backslash).
+    for (const byte of enc.encode(next)) bytes.push(byte);
+    i += 2;
+  }
+  return bytes;
+}
+
+// Read a `$'...'` literal starting at the opening quote; returns the raw inner
+// text (escapes intact) so decodeAnsiCBytes can interpret them. Honors \\ and
+// \' so the closing quote is found correctly.
+function extractAnsiCRaw(src: string, quoteStart: number): { raw: string; end: number } {
+  let i = quoteStart + 1;
+  let out = "";
+  while (i < src.length) {
+    if (src[i] === "\\") { out += src[i] + (src[i + 1] ?? ""); i += 2; continue; }
+    if (src[i] === "'") return { raw: out, end: i + 1 };
+    out += src[i];
+    i += 1;
+  }
+  return { raw: out, end: i };
+}
+
+function bytesAreProbablyText(bytes: number[]): boolean {
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(Uint8Array.from(bytes));
+    for (let i = 0; i < text.length; i++) {
+      const code = text.charCodeAt(i);
+      if (code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d) return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function bytesToHexString(bytes: number[]): string {
+  return bytes.map((b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 function extractQuoted(src: string, start: number): { value: string; end: number } | null {
@@ -58,6 +136,7 @@ export function parseCurl(input: string): ParsedCurl | null {
   let url = "";
   const headers: Record<string, string> = {};
   let body = "";
+  let bodyEncoding: "hex" | undefined;
 
   let i = 4;
   while (i < normalized.length) {
@@ -94,12 +173,26 @@ export function parseCurl(input: string): ParsedCurl | null {
           : 2;
         i += flagLen;
         i = skipWs(normalized, i);
-        // Skip the `$` shell sigil that some copy-paste flows include for
-        // POSIX-style locale escape (e.g. `--data $'...'`).
-        if (i < normalized.length && normalized[i] === "$") i++;
-        const tok = extractToken(normalized, i);
-        body = tok.value;
-        i = tok.end;
+        if (normalized[i] === "$" && normalized[i + 1] === "'") {
+          // ANSI-C quoting: `$'...'` interprets escape sequences (e.g. a
+          // gRPC-Web frame `$'\x00\x00\x00\x00\x00'`). Decode to real bytes;
+          // non-printable payloads become a hex binary body.
+          const { raw, end } = extractAnsiCRaw(normalized, i + 1);
+          const bytes = decodeAnsiCBytes(raw);
+          i = end;
+          if (bytesAreProbablyText(bytes)) {
+            body = new TextDecoder().decode(Uint8Array.from(bytes));
+          } else {
+            body = bytesToHexString(bytes);
+            bodyEncoding = "hex";
+          }
+        } else {
+          // Skip a bare `$` sigil before a normal quoted token.
+          if (i < normalized.length && normalized[i] === "$") i++;
+          const tok = extractToken(normalized, i);
+          body = tok.value;
+          i = tok.end;
+        }
       } else {
         const tok = extractToken(normalized, i);
         i = tok.end;
@@ -138,14 +231,17 @@ export function parseCurl(input: string): ParsedCurl | null {
   if (!method) method = body ? "POST" : "GET";
 
   // Best-effort pretty-print JSON body so the editor shows a readable example;
-  // leave non-JSON bodies (form data, raw text) untouched.
-  try {
-    body = JSON.stringify(JSON.parse(body), null, 2);
-  } catch {
-    // leave as-is
+  // leave non-JSON bodies (form data, raw text) untouched. Never touch a hex
+  // binary body.
+  if (!bodyEncoding) {
+    try {
+      body = JSON.stringify(JSON.parse(body), null, 2);
+    } catch {
+      // leave as-is
+    }
   }
 
-  return { url, method, headers, body };
+  return { url, method, headers, body, bodyEncoding };
 }
 
 // Split a parsed URL into (origin, pathWithQuery) — KB editor fills baseUrl

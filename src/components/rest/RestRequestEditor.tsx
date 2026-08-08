@@ -27,6 +27,7 @@ import { JsonEditor } from "@/components/ui/json-editor";
 import { RestKeyValueBody } from "./RestKeyValueBody";
 import { fieldsToJson, jsonToFields, newBodyField } from "@/lib/rest-body-fields";
 import type { RestMethod, RestRequestRecord, RestResponse } from "./rest-types";
+import { GrpcWebResponseView, isGrpcWebResponse } from "./GrpcWebResponseView";
 import { writeClipboard } from "@/lib/clipboard";
 import { EditorView } from "@codemirror/view";
 import { openSearchPanel } from "@codemirror/search";
@@ -171,7 +172,6 @@ export function RestRequestEditor({ request, onChange, envVars = {} }: RestReque
 
   // ---- Body (JSON/raw editable — matching gRPC client) ----
   const body = request.body;
-  const isKeyValue = body?.mode === "key-value";
   const kvFields = body?.mode === "key-value" ? body.fields : [];
   const bodyContent =
     body === undefined || body.mode === "none"
@@ -186,18 +186,45 @@ export function RestRequestEditor({ request, onChange, envVars = {} }: RestReque
               .map((f) => `${encodeURIComponent(f.key)}=${encodeURIComponent(f.value)}`)
               .join("&")
           : body.content;
-  // Switch between JSON and the typed key→value editor. Leaving key-value seeds
-  // the JSON editor with the generated body so nothing is lost.
-  const switchBodyMode = (mode: "json" | "key-value") => {
-    if (mode === "key-value") {
-      if (body?.mode === "key-value") return;
-      // JSON → rows: parse the current JSON so edits carry over both ways.
-      const parsed = jsonToFields(bodyContent);
-      onChange({ ...request, body: { mode: "key-value", fields: parsed.length > 0 ? parsed : [newBodyField()] } });
-    } else {
-      // rows → JSON: bodyContent already = fieldsToJson(fields) in key-value mode.
-      onChange({ ...request, body: { mode: "json", content: bodyContent } });
+  // The mode shown in the editor's toggle. Legacy form/multipart bodies render
+  // under "json" (as editable text) since they have no dedicated tab.
+  const bodyMode: "json" | "key-value" | "raw" | "binary" | "none" =
+    body?.mode === "key-value" || body?.mode === "raw" || body?.mode === "binary" || body?.mode === "none"
+      ? body.mode
+      : "json";
+  const binaryEncoding: "utf8" | "hex" | "base64" =
+    body?.mode === "binary" ? body.encoding ?? "utf8" : "hex";
+  // Switch body modes, preserving text where it makes sense. Entering Binary
+  // clears content (JSON/text isn't valid hex/base64) and defaults to hex —
+  // the common case for wire payloads like a gRPC-Web frame.
+  const switchBodyMode = (mode: "json" | "key-value" | "raw" | "binary" | "none") => {
+    if (mode === body?.mode) return;
+    const carryText = body?.mode === "binary" || body?.mode === "none" ? "" : bodyContent;
+    switch (mode) {
+      case "key-value": {
+        const parsed = jsonToFields(carryText || "{}");
+        onChange({ ...request, body: { mode: "key-value", fields: parsed.length > 0 ? parsed : [newBodyField()] } });
+        break;
+      }
+      case "json":
+        onChange({ ...request, body: { mode: "json", content: carryText || "{}" } });
+        break;
+      case "raw":
+        onChange({ ...request, body: { mode: "raw", content: carryText } });
+        break;
+      case "binary":
+        onChange({ ...request, body: { mode: "binary", content: "", encoding: "hex" } });
+        break;
+      case "none":
+        onChange({ ...request, body: { mode: "none" } });
+        break;
     }
+  };
+  const setBinaryContent = (content: string) =>
+    onChange({ ...request, body: { mode: "binary", content, encoding: binaryEncoding } });
+  const setBinaryEncoding = (encoding: "utf8" | "hex" | "base64") => {
+    if (body?.mode !== "binary") return;
+    onChange({ ...request, body: { ...body, encoding } });
   };
   const handleBodyChange = (content: string) =>
     // WHY: keep non-json bodies raw — stamping mode:"json" onto an edited
@@ -369,20 +396,20 @@ export function RestRequestEditor({ request, onChange, envVars = {} }: RestReque
               )}
             </div>
 
-            {/* Body — JSON editor or typed key→value rows */}
+            {/* Body — JSON / key-value / raw text / binary (hex·base64) / none */}
             <div className="flex-1 flex flex-col min-h-0">
               <div className="flex items-center justify-between px-3 py-1.5 bg-muted/20 border-b border-border">
                 <div className="flex items-center gap-2">
                   <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Body</span>
                   <div className="flex items-center gap-0.5 rounded border border-border p-0.5">
-                    {([["json", "JSON"], ["key-value", "键值对"]] as const).map(([m, label]) => (
+                    {([["json", "JSON"], ["key-value", "键值对"], ["raw", "Raw"], ["binary", "Binary"], ["none", "None"]] as const).map(([m, label]) => (
                       <button
                         key={m}
                         type="button"
                         onClick={() => switchBodyMode(m)}
                         className={cn(
                           "rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors",
-                          (m === "key-value" ? isKeyValue : !isKeyValue)
+                          bodyMode === m
                             ? "bg-primary text-primary-foreground"
                             : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
                         )}
@@ -391,8 +418,27 @@ export function RestRequestEditor({ request, onChange, envVars = {} }: RestReque
                       </button>
                     ))}
                   </div>
+                  {bodyMode === "binary" && (
+                    <div className="flex items-center gap-0.5 rounded border border-border p-0.5">
+                      {(["hex", "base64", "utf8"] as const).map((enc) => (
+                        <button
+                          key={enc}
+                          type="button"
+                          onClick={() => setBinaryEncoding(enc)}
+                          className={cn(
+                            "rounded px-1.5 py-0.5 text-[10px] font-medium transition-colors",
+                            binaryEncoding === enc
+                              ? "bg-primary text-primary-foreground"
+                              : "text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                          )}
+                        >
+                          {enc}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
-                {!isKeyValue && (
+                {bodyMode === "json" && (
                   <div className="flex gap-0.5">
                     <button className="h-5 w-5 inline-flex items-center justify-center rounded hover:bg-accent text-muted-foreground"
                       onClick={handleFormatBody} title="Format JSON"><Braces className="h-3 w-3" /></button>
@@ -402,10 +448,28 @@ export function RestRequestEditor({ request, onChange, envVars = {} }: RestReque
                 )}
               </div>
               <div className="flex-1 min-h-0 w-full overflow-auto">
-                {isKeyValue ? (
+                {bodyMode === "key-value" ? (
                   <RestKeyValueBody
                     fields={kvFields}
                     onChange={(fields) => onChange({ ...request, body: { mode: "key-value", fields } })}
+                  />
+                ) : bodyMode === "none" ? (
+                  <div className="flex h-full items-center justify-center p-4 text-[11px] text-muted-foreground">
+                    This request has no body.
+                  </div>
+                ) : bodyMode === "binary" ? (
+                  <textarea
+                    value={body?.mode === "binary" ? body.content : ""}
+                    onChange={(e) => setBinaryContent(e.target.value)}
+                    spellCheck={false}
+                    placeholder={
+                      binaryEncoding === "hex"
+                        ? "hex bytes, whitespace ok — e.g. 00 00 00 00 00"
+                        : binaryEncoding === "base64"
+                          ? "base64-encoded bytes"
+                          : "text sent as UTF-8 bytes"
+                    }
+                    className="h-full w-full resize-none bg-transparent px-3 py-2 font-mono text-xs text-foreground outline-none placeholder:text-muted-foreground/60"
                   />
                 ) : (
                   <JsonEditor value={bodyContent} onChange={handleBodyChange} placeholder='{"key": "value"}' />
@@ -433,7 +497,17 @@ export function RestRequestEditor({ request, onChange, envVars = {} }: RestReque
 // ---- Simplified response panel (matching gRPC client: no sub-tabs, just body) ----
 const RESPONSE_DISPLAY_CAP = 1_000_000;
 
-function ResponsePanel({ response }: { response: RestResponse; requestId: string }) {
+// Dispatcher (no hooks): gRPC-Web responses get the dedicated lens; everything
+// else falls through to the normal body panel. Keeping this hook-free avoids a
+// conditional-hooks violation when a response changes type between renders.
+function ResponsePanel(props: { response: RestResponse; requestId: string }) {
+  if (isGrpcWebResponse(props.response)) {
+    return <GrpcWebResponseView response={props.response} />;
+  }
+  return <RestBodyResponsePanel {...props} />;
+}
+
+function RestBodyResponsePanel({ response }: { response: RestResponse; requestId: string }) {
   const [showFullBody, setShowFullBody] = useState(false);
   const [bodyCopied, setBodyCopied] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);

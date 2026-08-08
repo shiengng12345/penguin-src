@@ -115,11 +115,12 @@ test("RestRequestEditor uses client-module-style section layout (Headers + Body)
   assert.match(editor, /Body/);
   assert.match(editor, /handleFormatBody/);
   assert.match(editor, /JsonEditor/);
-  // No tab strip, no toggle buttons.
+  // No legacy tab strip / BODY_MODES constant; body-mode toggle is via
+  // switchBodyMode (json/key-value/raw/binary/none).
   assert.doesNotMatch(editor, /REQUEST_TABS/);
   assert.doesNotMatch(editor, /BODY_MODES/);
   assert.doesNotMatch(editor, /handleBodyMode/);
-  assert.doesNotMatch(editor, /bodyMode/);
+  assert.match(editor, /switchBodyMode/);
   assert.match(editor, /METHOD_OPTIONS/);
   assert.match(editor, /Send/);
   assert.match(editor, /ResponseEmptyState/);
@@ -183,7 +184,8 @@ test("MainSidebar — REST open to all users (requires: \"none\")", async () => 
   // Item entry: REST now requires: "none" (open to all).
   // source: { kind: "rest", ... requires: "none" }
   assert.match(sidebar, /kind:\s*"rest"[\s\S]*?requires:\s*"none"/);
-  assert.match(sidebar, /import\s+{[^}]*\bGlobe\b[^}]*}\s+from\s+"lucide-react"/);
+  // REST nav renders a mascot image tile (not a lucide Globe icon).
+  assert.match(sidebar, /kind:\s*"rest",[\s\S]*?img:\s*"\/nav\/rest\.png"/);
   // Anti-regression: REST's own requires field must NOT be token or super-admin.
   // Match the full REST entry without crossing to the next kind: line.
   assert.doesNotMatch(sidebar, /kind:\s*"rest",[^}]*?requires:\s*"token"/);
@@ -202,11 +204,13 @@ test("App.tsx — REST module routed + open to all users (no token required)", a
   assert.match(app, /restOpen[\s\S]*?\?\s*"rest"/);
 });
 
-test("MainSidebar props — REST open to all, Docs/Database/Browser still super-admin", async () => {
-  // REST is now open to all (requires: "none"). isSuperAdmin still gates Docs/Database/Browser.
+test("MainSidebar props — REST open to all, Docs still super-admin", async () => {
+  // REST is now open to all (requires: "none"). isSuperAdmin still gates Docs.
+  // (The Database + Browser modules were removed, so the gate collapsed to
+  // canAccessDocs alone.)
   const app = await loadSource("../src/App.tsx");
   assert.match(app, /hasValidToken=\{canAccessVault\}/);
-  assert.match(app, /isSuperAdmin=\{canAccessDocs\s*\|\|\s*canAccessDatabase\s*\|\|\s*canAccessBrowser\}/);
+  assert.match(app, /isSuperAdmin=\{canAccessDocs\}/);
 });
 
 test("REST module — context-aware keyboard shortcuts wired (shortcut audit fix)", async () => {
@@ -941,14 +945,17 @@ test("rest-curl-builder — Copy fetch button + buildFetchSnippet helper removed
   assert.doesNotMatch(editor, /buildFetchSnippet/);
 });
 
-test("RestRequestEditor — body: JSON only (no toggle, no raw)", async () => {
+test("RestRequestEditor — body modes json/key-value/raw/binary/none + binary hex·base64", async () => {
   const editor = await loadSource("../src/components/rest/RestRequestEditor.tsx");
   assert.match(editor, /JsonEditor/);
   assert.match(editor, /handleFormatBody/);
+  assert.match(editor, /switchBodyMode/);
+  // Raw + Binary modes exposed; binary uses a textarea + encoding selector.
+  assert.match(editor, /"raw"/);
+  assert.match(editor, /"binary"/);
+  assert.match(editor, /<textarea/);
+  assert.match(editor, /setBinaryEncoding/);
   assert.doesNotMatch(editor, /BODY_MODES/);
-  assert.doesNotMatch(editor, /handleBodyMode/);
-  assert.doesNotMatch(editor, /bodyMode/);
-  assert.doesNotMatch(editor, /<textarea/);
 });
 
 test("Phase 10D review fixes — must-fix invariants locked (post-adversarial-review)", async () => {
@@ -1085,9 +1092,7 @@ test("keychain.rs — active_adapter defaults to SqliteKeychain to avoid macOS p
 });
 
 test("Rust dev build hygiene — test-only helpers do not leak into normal builds", async () => {
-  const authPopover = await loadSource("../src-tauri/src/auth_popover.rs");
-  assert.doesNotMatch(authPopover, /fn\s+base64_encode\(/);
-
+  // (auth_popover.rs was removed together with the Browser module.)
   const keychain = await loadSource("../src-tauri/src/rest/keychain.rs");
   assert.match(keychain, /#\[cfg\(test\)\]\s*pub struct MockKeychain\b/);
   assert.match(
@@ -1238,13 +1243,12 @@ test("REST split pane — min-w-0 chain still locks content-driven width drift",
   assert.ok(pageRow, "RestPage sidebar+workspace row — no flex row with flex-1 + min-h-0 + min-w-0");
 });
 
-test("REST body panel — JSON only, always JsonEditor (no raw)", async () => {
-  // Simplified: json → CodeMirror only, no raw mode.
+test("REST body panel — JsonEditor for json/raw, textarea for binary", async () => {
   const editor = await loadSource("../src/components/rest/RestRequestEditor.tsx");
   assert.match(editor, /^import \{ JsonEditor \} from "@\/components\/ui\/json-editor"/m);
   assert.match(editor, /<JsonEditor/);
-  assert.doesNotMatch(editor, /<textarea/);
+  // Binary body uses a plain textarea (hex/base64 input).
+  assert.match(editor, /<textarea/);
+  assert.match(editor, /bodyMode/);
   assert.doesNotMatch(editor, /BODY_MODES/);
-  assert.doesNotMatch(editor, /bodyMode/);
-  assert.doesNotMatch(editor, /name="body-mode"/);
 });

@@ -182,3 +182,36 @@ test("getHeader: missing header returns empty string", async () => {
   assert.equal(getHeader(headers, "Authorization"), "");
   assert.equal(getHeader({}, "anything"), "");
 });
+
+test("ANSI-C $'...' body: 5-null-byte gRPC-Web frame → hex binary body", async () => {
+  const { parseCurl } = await loadCurlParserModule();
+  const parsed = parseCurl(
+    "curl 'https://x.me/svc/M' -H 'content-type: application/grpc-web+proto' --data-raw $'\\x00\\x00\\x00\\x00\\x00'",
+  );
+  assert.equal(parsed.bodyEncoding, "hex");
+  assert.equal(parsed.body, "0000000000");
+  assert.equal(parsed.method, "POST");
+  // content-type must survive — it's the whole point of the grpc-web send.
+  assert.equal(parsed.headers["content-type"], "application/grpc-web+proto");
+});
+
+test("ANSI-C $'...' body: printable escapes decode to text (not hex)", async () => {
+  const { parseCurl } = await loadCurlParserModule();
+  const parsed = parseCurl("curl 'https://x.me' --data-raw $'a\\tb\\n'");
+  assert.equal(parsed.bodyEncoding, undefined);
+  assert.equal(parsed.body, "a\tb\n");
+});
+
+test("ANSI-C $'...' body: mixed binary payload → hex", async () => {
+  const { parseCurl } = await loadCurlParserModule();
+  const parsed = parseCurl("curl 'https://x.me' --data-binary $'\\x01\\x02\\xff'");
+  assert.equal(parsed.bodyEncoding, "hex");
+  assert.equal(parsed.body, "0102ff");
+});
+
+test("plain single-quoted body still parses as text (no ANSI-C)", async () => {
+  const { parseCurl } = await loadCurlParserModule();
+  const parsed = parseCurl("curl 'https://x.me' --data '{\"a\":1}'");
+  assert.equal(parsed.bodyEncoding, undefined);
+  assert.equal(JSON.parse(parsed.body).a, 1);
+});
