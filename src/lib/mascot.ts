@@ -3,7 +3,7 @@ import type { AppTheme } from "./theme";
 // Themes that ship their own illustration set (mirroring the penguin default).
 // Add a theme id here + drop its art under public/{id}.png, public/mascot/{id}/,
 // public/nav/{id}/ and it swaps automatically.
-const MASCOT_THEMES = new Set<AppTheme>(["duck", "cat"]);
+const MASCOT_THEMES = new Set<AppTheme>(["duck", "cat", "black-cat"]);
 
 // Map a default (penguin) mascot asset path to the active theme's variant.
 // Themes without an alternate set keep the penguin art. A missing variant file

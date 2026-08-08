@@ -8,7 +8,8 @@ export type AppTheme =
   | "antarctic-snow"
   | "penguin"
   | "duck"
-  | "cat";
+  | "cat"
+  | "black-cat";
 
 export const THEMES = [
   { id: "dark" as const, label: "Dark", color: "oklch(0.25 0.02 260)" },
@@ -21,6 +22,7 @@ export const THEMES = [
   { id: "penguin" as const, label: "Penguin", color: "oklch(0.72 0.15 65)" },
   { id: "duck" as const, label: "Duck", color: "oklch(0.82 0.15 90)" },
   { id: "cat" as const, label: "Cat", color: "oklch(0.78 0.13 15)" },
+  { id: "black-cat" as const, label: "Black Cat", color: "oklch(0.4 0.015 280)" },
 ] as const;
 
 const THEME_IDS = new Set<AppTheme>(THEMES.map((theme) => theme.id));
@@ -31,12 +33,13 @@ export function isAppTheme(value: string): value is AppTheme {
 
 export function isLightAppTheme(
   value: string | null | undefined,
-): value is "light" | "antarctic-snow" | "penguin" | "duck" | "cat" {
+): value is "light" | "antarctic-snow" | "penguin" | "duck" | "cat" | "black-cat" {
   return (
     value === "light" ||
     value === "antarctic-snow" ||
     value === "penguin" ||
     value === "duck" ||
-    value === "cat"
+    value === "cat" ||
+    value === "black-cat"
   );
 }

@@ -256,13 +256,40 @@
   --color-warning: oklch(0.72 0.14 80);
 }
 
+/* ── Black Cat ── mascot palette: cream canvas, graphite-black ink + buttons,
+   gold bell/eye accent. Mirrors the Penguin theme (palette-only). */
+[data-theme="black-cat"] {
+  --color-background: oklch(0.96 0.01 70);
+  --color-foreground: oklch(0.27 0.012 280);
+  --color-card: oklch(0.985 0.006 75);
+  --color-card-foreground: oklch(0.27 0.012 280);
+  --color-popover: oklch(0.985 0.006 75);
+  --color-popover-foreground: oklch(0.27 0.012 280);
+  --color-primary: oklch(0.42 0.02 280);
+  --color-primary-foreground: oklch(0.98 0.008 80);
+  --color-secondary: oklch(0.92 0.012 70);
+  --color-secondary-foreground: oklch(0.27 0.012 280);
+  --color-muted: oklch(0.91 0.012 70);
+  --color-muted-foreground: oklch(0.48 0.015 280);
+  --color-accent: oklch(0.85 0.12 85);
+  --color-accent-foreground: oklch(0.28 0.02 60);
+  --color-destructive: oklch(0.56 0.2 25);
+  --color-destructive-foreground: oklch(0.985 0.01 20);
+  --color-border: oklch(0.84 0.012 70);
+  --color-input: oklch(0.82 0.014 70);
+  --color-ring: oklch(0.42 0.02 280);
+  --color-success: oklch(0.6 0.15 155);
+  --color-warning: oklch(0.72 0.14 80);
+}
+
 /* Editor syntax palette for light themes — deep hues readable on pale
    backgrounds. Dark themes use the fallbacks baked into json-editor.tsx. */
 [data-theme="light"],
 [data-theme="antarctic-snow"],
 [data-theme="penguin"],
 [data-theme="duck"],
-[data-theme="cat"] {
+[data-theme="cat"],
+[data-theme="black-cat"] {
   --syntax-property: oklch(0.45 0.11 245);
   --syntax-string: oklch(0.5 0.11 145);
   --syntax-number: oklch(0.55 0.16 30);
