@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useAppStore } from "@/lib/store";
+import { ThemedMascotImg } from "@/components/common/ThemedMascotImg";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ArrowRight } from "lucide-react";
@@ -23,8 +24,8 @@ export function Welcome() {
 
       <div className="relative w-full max-w-sm px-6">
         <div className="mb-8 text-center">
-          <img
-            src="/penguin.png"
+          <ThemedMascotImg
+            base="/penguin.png"
             alt="Penguin"
             className="mx-auto mb-4 h-32 object-contain drop-shadow-lg"
             draggable={false}

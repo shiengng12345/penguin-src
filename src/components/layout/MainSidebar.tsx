@@ -10,6 +10,7 @@
 // Super-admin implies token, so super-admin users see everything.
 
 import { cn } from "@/lib/utils";
+import { ThemedMascotImg } from "@/components/common/ThemedMascotImg";
 
 export type MainModule = "client" | "rest" | "vault" | "docs" | "wiki";
 
@@ -72,8 +73,8 @@ export function MainSidebar({ active, onSelect, hasValidToken, isSuperAdmin }: M
                 : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
             )}
           >
-            <img
-              src={item.img}
+            <ThemedMascotImg
+              base={item.img}
               alt=""
               draggable={false}
               className={cn(

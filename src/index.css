@@ -204,11 +204,38 @@
   --color-warning: oklch(0.7 0.14 80);
 }
 
+/* ── Duck ── mascot palette: warm butter-yellow canvas, cocoa ink, duck-orange
+   beak/feet, blush cheeks. Mirrors the Penguin theme (palette-only). */
+[data-theme="duck"] {
+  --color-background: oklch(0.97 0.035 95);
+  --color-foreground: oklch(0.32 0.03 70);
+  --color-card: oklch(0.99 0.02 95);
+  --color-card-foreground: oklch(0.32 0.03 70);
+  --color-popover: oklch(0.99 0.02 95);
+  --color-popover-foreground: oklch(0.32 0.03 70);
+  --color-primary: oklch(0.74 0.16 68);
+  --color-primary-foreground: oklch(0.99 0.01 95);
+  --color-secondary: oklch(0.94 0.05 95);
+  --color-secondary-foreground: oklch(0.32 0.03 70);
+  --color-muted: oklch(0.93 0.045 95);
+  --color-muted-foreground: oklch(0.52 0.03 75);
+  --color-accent: oklch(0.91 0.045 30);
+  --color-accent-foreground: oklch(0.32 0.03 70);
+  --color-destructive: oklch(0.56 0.2 25);
+  --color-destructive-foreground: oklch(0.985 0.01 20);
+  --color-border: oklch(0.86 0.05 92);
+  --color-input: oklch(0.84 0.05 92);
+  --color-ring: oklch(0.74 0.16 68);
+  --color-success: oklch(0.6 0.15 155);
+  --color-warning: oklch(0.72 0.15 80);
+}
+
 /* Editor syntax palette for light themes — deep hues readable on pale
    backgrounds. Dark themes use the fallbacks baked into json-editor.tsx. */
 [data-theme="light"],
 [data-theme="antarctic-snow"],
-[data-theme="penguin"] {
+[data-theme="penguin"],
+[data-theme="duck"] {
   --syntax-property: oklch(0.45 0.11 245);
   --syntax-string: oklch(0.5 0.11 145);
   --syntax-number: oklch(0.55 0.16 30);

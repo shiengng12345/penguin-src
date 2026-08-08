@@ -1,4 +1,5 @@
 import { useState, useMemo, useCallback, memo } from "react";
+import { ThemedMascotImg } from "@/components/common/ThemedMascotImg";
 import {
   useAppStore,
   THEMES,
@@ -57,8 +58,8 @@ const PenguinBrand = memo(function PenguinBrand() {
 
   return (
     <div className="flex items-center gap-2 min-w-0">
-      <img
-        src="/penguin.png"
+      <ThemedMascotImg
+        base="/penguin.png"
         alt="Penguin"
         className={cn("h-8 shrink-0 object-contain", isLunch && "animate-bounce")}
         draggable={false}

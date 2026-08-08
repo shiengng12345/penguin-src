@@ -6,7 +6,8 @@ export type AppTheme =
   | "rose"
   | "violet"
   | "antarctic-snow"
-  | "penguin";
+  | "penguin"
+  | "duck";
 
 export const THEMES = [
   { id: "dark" as const, label: "Dark", color: "oklch(0.25 0.02 260)" },
@@ -17,6 +18,7 @@ export const THEMES = [
   { id: "violet" as const, label: "Violet", color: "oklch(0.55 0.2 290)" },
   { id: "antarctic-snow" as const, label: "Antarctic Snow", color: "oklch(0.94 0.035 210)" },
   { id: "penguin" as const, label: "Penguin", color: "oklch(0.72 0.15 65)" },
+  { id: "duck" as const, label: "Duck", color: "oklch(0.82 0.15 90)" },
 ] as const;
 
 const THEME_IDS = new Set<AppTheme>(THEMES.map((theme) => theme.id));
@@ -25,6 +27,8 @@ export function isAppTheme(value: string): value is AppTheme {
   return THEME_IDS.has(value as AppTheme);
 }
 
-export function isLightAppTheme(value: string | null | undefined): value is "light" | "antarctic-snow" | "penguin" {
-  return value === "light" || value === "antarctic-snow" || value === "penguin";
+export function isLightAppTheme(
+  value: string | null | undefined,
+): value is "light" | "antarctic-snow" | "penguin" | "duck" {
+  return value === "light" || value === "antarctic-snow" || value === "penguin" || value === "duck";
 }

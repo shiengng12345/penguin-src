@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, lazy, Suspense } from "react";
+import { ThemedMascotImg } from "@/components/common/ThemedMascotImg";
 import { useAppStore, useActiveTab, type MetadataEntry, type HistoryEntry, type SavedRequest } from "@/lib/store";
 import { useEnvironments } from "@/hooks/useEnvironments";
 import { interpolate } from "@/lib/environment-store";
@@ -557,7 +558,7 @@ export function RequestPanel() {
             className="flex-1 h-8"
             size="sm"
           >
-            <img src="/mascot/penguin/send.png" alt="" draggable={false} className="mr-1.5 h-5 w-auto" />
+            <ThemedMascotImg base="/mascot/penguin/send.png" alt="" draggable={false} className="mr-1.5 h-5 w-auto" />
             {configSynced ? "Send" : "Loading…"}
           </Button>
         )}
