@@ -558,7 +558,7 @@ export function RequestPanel() {
             className="flex-1 h-8"
             size="sm"
           >
-            <ThemedMascotImg base="/mascot/penguin/send.png" alt="" draggable={false} className="mr-1.5 h-5 w-auto" />
+            <ThemedMascotImg base="/mascot/penguin/send.png" alt="" draggable={false} className="mr-1.5 h-5 w-auto drop-shadow-sm" />
             {configSynced ? "Send" : "Loading…"}
           </Button>
         )}

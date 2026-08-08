@@ -89,7 +89,7 @@ export function UrlBar({ resolvedUrl }: UrlBarProps) {
             base="/mascot/penguin/send.png"
             alt=""
             draggable={false}
-            className={cn("mr-1.5 h-6 w-auto", tab.isLoading && "animate-bounce")}
+            className={cn("mr-1.5 h-6 w-auto drop-shadow-sm", tab.isLoading && "animate-bounce")}
           />
           {tab.isLoading ? "Sending..." : "Send"}
         </Button>
