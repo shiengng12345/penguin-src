@@ -10,7 +10,8 @@ export type AppTheme =
   | "duck"
   | "cat"
   | "black-cat"
-  | "hamster";
+  | "hamster"
+  | "rabbit";
 
 export const THEMES = [
   { id: "dark" as const, label: "Dark", color: "oklch(0.25 0.02 260)" },
@@ -25,6 +26,7 @@ export const THEMES = [
   { id: "cat" as const, label: "Cat", color: "oklch(0.78 0.13 15)" },
   { id: "black-cat" as const, label: "Black Cat", color: "oklch(0.4 0.015 280)" },
   { id: "hamster" as const, label: "Hamster", color: "oklch(0.75 0.12 70)" },
+  { id: "rabbit" as const, label: "Rabbit", color: "oklch(0.8 0.09 8)" },
 ] as const;
 
 const THEME_IDS = new Set<AppTheme>(THEMES.map((theme) => theme.id));
@@ -35,7 +37,15 @@ export function isAppTheme(value: string): value is AppTheme {
 
 export function isLightAppTheme(
   value: string | null | undefined,
-): value is "light" | "antarctic-snow" | "penguin" | "duck" | "cat" | "black-cat" | "hamster" {
+): value is
+  | "light"
+  | "antarctic-snow"
+  | "penguin"
+  | "duck"
+  | "cat"
+  | "black-cat"
+  | "hamster"
+  | "rabbit" {
   return (
     value === "light" ||
     value === "antarctic-snow" ||
@@ -43,6 +53,7 @@ export function isLightAppTheme(
     value === "duck" ||
     value === "cat" ||
     value === "black-cat" ||
-    value === "hamster"
+    value === "hamster" ||
+    value === "rabbit"
   );
 }

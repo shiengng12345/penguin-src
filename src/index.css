@@ -308,6 +308,32 @@
   --color-warning: oklch(0.72 0.14 80);
 }
 
+/* ── Rabbit ── mascot palette: soft blush-cream canvas, cocoa ink, rose-pink
+   primary, gentle pink accent. Mirrors the Penguin theme (palette-only). */
+[data-theme="rabbit"] {
+  --color-background: oklch(0.975 0.012 12);
+  --color-foreground: oklch(0.33 0.02 25);
+  --color-card: oklch(0.99 0.008 12);
+  --color-card-foreground: oklch(0.33 0.02 25);
+  --color-popover: oklch(0.99 0.008 12);
+  --color-popover-foreground: oklch(0.33 0.02 25);
+  --color-primary: oklch(0.76 0.12 10);
+  --color-primary-foreground: oklch(0.99 0.008 20);
+  --color-secondary: oklch(0.95 0.025 12);
+  --color-secondary-foreground: oklch(0.33 0.02 25);
+  --color-muted: oklch(0.94 0.022 12);
+  --color-muted-foreground: oklch(0.53 0.025 20);
+  --color-accent: oklch(0.93 0.04 12);
+  --color-accent-foreground: oklch(0.33 0.02 25);
+  --color-destructive: oklch(0.56 0.2 25);
+  --color-destructive-foreground: oklch(0.985 0.01 20);
+  --color-border: oklch(0.88 0.025 12);
+  --color-input: oklch(0.86 0.025 12);
+  --color-ring: oklch(0.76 0.12 10);
+  --color-success: oklch(0.6 0.15 155);
+  --color-warning: oklch(0.72 0.14 80);
+}
+
 /* Editor syntax palette for light themes — deep hues readable on pale
    backgrounds. Dark themes use the fallbacks baked into json-editor.tsx. */
 [data-theme="light"],
@@ -316,7 +342,8 @@
 [data-theme="duck"],
 [data-theme="cat"],
 [data-theme="black-cat"],
-[data-theme="hamster"] {
+[data-theme="hamster"],
+[data-theme="rabbit"] {
   --syntax-property: oklch(0.45 0.11 245);
   --syntax-string: oklch(0.5 0.11 145);
   --syntax-number: oklch(0.55 0.16 30);
