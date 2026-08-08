@@ -356,6 +356,16 @@
   --syntax-punct: oklch(0.5 0.02 260);
 }
 
+/* Thin dark outline for the Send-button mascot so pale critters (bunny, white
+   cat) still read on a colored button — no backing chip, just a crisp edge. */
+.send-mascot {
+  filter:
+    drop-shadow(0.6px 0 0 rgba(60, 42, 32, 0.6))
+    drop-shadow(-0.6px 0 0 rgba(60, 42, 32, 0.6))
+    drop-shadow(0 0.6px 0 rgba(60, 42, 32, 0.6))
+    drop-shadow(0 -0.6px 0 rgba(60, 42, 32, 0.6));
+}
+
 * {
   border-color: var(--color-border);
 }
