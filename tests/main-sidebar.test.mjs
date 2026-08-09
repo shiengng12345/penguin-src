@@ -20,14 +20,18 @@ test("MainSidebar exports MainModule + MainSidebar component", async () => {
   assert.match(src, /export interface MainSidebarProps/);
 });
 
-test("MainSidebar declares the modules: client / vault / browser / rest / docs / database", async () => {
+test("MainSidebar declares the modules: client / rest / vault / docs / wiki", async () => {
   const src = await loadSource("../src/components/layout/MainSidebar.tsx");
-  // The union members are written into MainModule.
-  assert.match(src, /"client"\s*\|\s*"rest"\s*\|\s*"vault"\s*\|\s*"docs"\s*\|\s*"browser"\s*\|\s*"database"/);
+  // The union members are written into MainModule. (Browser + Database
+  // modules were removed.)
+  assert.match(src, /"client"\s*\|\s*"rest"\s*\|\s*"vault"\s*\|\s*"docs"\s*\|\s*"wiki"/);
   // ITEMS array contains each kind.
-  for (const kind of ["client", "vault", "browser", "rest", "docs", "database"]) {
+  for (const kind of ["client", "vault", "rest", "docs", "wiki"]) {
     assert.match(src, new RegExp(`kind:\\s*"${kind}"`));
   }
+  // Removed modules must not reappear.
+  assert.doesNotMatch(src, /kind:\s*"browser"/);
+  assert.doesNotMatch(src, /kind:\s*"database"/);
 });
 
 test("MainSidebar requires `hasValidToken` + `isSuperAdmin` props (Sprint 8.5 three-tier)", async () => {
@@ -63,10 +67,9 @@ test("MainSidebar items include English label + bilingual tooltip", async () => 
   for (const literal of [
     'longLabel: "API Client / 客户端"',
     'longLabel: "Vault / 凭据库"',
-    'longLabel: "In-App Browser / 内嵌浏览器 (Super Admin)"',
     'longLabel: "REST API / 接口客户端"',
     'longLabel: "Knowledge Base / 知识库 (Super Admin)"',
-    'longLabel: "Database / 数据库 (Super Admin)"',
+    'longLabel: "Knowledge Wiki / 知识图谱 (Super Admin)"',
   ]) {
     assert.ok(src.includes(literal), `MainSidebar should declare: ${literal}`);
   }
@@ -112,7 +115,7 @@ test("App.tsx wires MainSidebar gate props from per-tier access flags", async ()
   // Token tier = Vault only. Docs / Database / Browser stay under
   // super-admin; REST left the OR when it opened to all users (v1.12.0).
   assert.match(src, /hasValidToken=\{canAccessVault\}/);
-  assert.match(src, /isSuperAdmin=\{canAccessDocs\s*\|\|\s*canAccessDatabase\s*\|\|\s*canAccessBrowser\}/);
+  assert.match(src, /isSuperAdmin=\{canAccessDocs\}/);
 });
 
 test("App.tsx redirects out of Vault when dev token revoked (regression)", async () => {
@@ -138,10 +141,9 @@ test("Dev token holder (token=true, super=false) sees Client + REST + Vault only
   const expected = {
     client: "none",
     vault: "token",
-    browser: "super-admin",
     rest: "none",
     docs: "super-admin",
-    database: "super-admin",
+    wiki: "super-admin",
   };
   for (const [kind, tier] of Object.entries(expected)) {
     const re = new RegExp(`kind:\\s*"${kind}"[^}]*?requires:\\s*"${tier}"`);

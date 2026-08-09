@@ -109,42 +109,6 @@ test("HTTP proxy and REST sender stream responses through explicit byte caps", a
   assert.doesNotMatch(rest, /response\.bytes\(\)\.await/);
 });
 
-test("Redis Set paging passes cursor through Rust instead of restarting SSCAN", async () => {
-  const commands = await loadSource("../src-tauri/src/redis/commands.rs");
-  const setValue = await loadSource("../src/components/redis/values/RedisSetValue.tsx");
-
-  assert.match(commands, /pub async fn redis_set_members\([\s\S]*?cursor:\s*u64/);
-  assert.match(commands, /CustomCommand::new_static\("SSCAN"/);
-  assert.match(commands, /cursor\.to_string\(\)/);
-  assert.match(setValue, /cursor,\s*count:\s*100/);
-});
-
-test("Redis secrets and large values are not exposed through broad payloads", async () => {
-  const connection = await loadSource("../src-tauri/src/redis/connection.rs");
-  const commands = await loadSource("../src-tauri/src/redis/commands.rs");
-  const types = await loadSource("../src/lib/redis-types.ts");
-  const panel = await loadSource("../src/components/redis/RedisConnectionPanel.tsx");
-  const lib = await loadSource("../src-tauri/src/lib.rs");
-
-  assert.match(connection, /const REDIS_SECRET_PREFIX:/);
-  assert.match(connection, /app_value_set_internal/);
-  assert.match(connection, /app_value_get_internal/);
-  assert.match(connection, /pub has_password:\s*bool/);
-  assert.doesNotMatch(connection, /pub password:\s*String/);
-  assert.doesNotMatch(types, /password:\s*string/);
-  assert.match(types, /has_password:\s*boolean/);
-  assert.match(commands, /pub async fn redis_connect_saved\(/);
-  assert.match(lib, /redis::commands::redis_connect_saved/);
-  assert.match(panel, /"redis_connect_saved"/);
-  assert.doesNotMatch(panel, /c\.password/);
-
-  assert.match(commands, /CustomCommand::new_static\("STRLEN"/);
-  assert.match(commands, /CustomCommand::new_static\("GETRANGE"/);
-  assert.doesNotMatch(commands, /c\.get\(&key\)/);
-  assert.match(commands, /CustomCommand::new_static\("HSCAN"/);
-  assert.doesNotMatch(commands, /hgetall\(&key\)/);
-});
-
 test("Tauri security config uses a real CSP instead of disabling it", async () => {
   const config = await loadSource("../src-tauri/tauri.conf.json");
   const capabilities = await loadSource("../src-tauri/capabilities/default.json");
@@ -155,11 +119,9 @@ test("Tauri security config uses a real CSP instead of disabling it", async () =
   assert.doesNotMatch(capabilities, /"cmd": "\/bin\/zsh", "args": true/);
 });
 
-test("Browser link entry and native child webview only allow http(s) URLs", async () => {
-  const jenkins = await loadSource("../src/components/browser/JenkinsSidebar.tsx");
+test("Native child webview only allows http(s) URLs", async () => {
   const inline = await loadSource("../src-tauri/src/inline_webview.rs");
 
-  assert.match(jenkins, /isHttpUrl\(u\)/);
   assert.match(inline, /fn parse_http_webview_url/);
   assert.match(inline, /unsupported inline webview URL scheme/);
 });
