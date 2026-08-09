@@ -98,6 +98,28 @@ export default function App() {
     void fetchRegistryPackages().catch(() => {});
   }, []);
 
+  // Warm the most-used lazy dialog chunks during idle so first-open is instant.
+  // These are code-split (lazy + Suspense fallback=null); without warming, the
+  // first click blanks for ~1–2s while the chunk loads (worst in dev, where
+  // Vite compiles it on demand). Same specifiers as the lazy() calls → same
+  // chunk. Runs once after first paint, on idle, so it never delays startup.
+  useEffect(() => {
+    const warm = () => {
+      void import("@/components/settings/SettingsDialog");
+      void import("@/components/packages/PackageInstaller");
+      void import("@/components/search/CommandSearch");
+      void import("@/components/history/HistoryPanel");
+      void import("@/components/request/NewRequestDialog");
+    };
+    const ric = window.requestIdleCallback;
+    if (ric) {
+      const id = ric(warm, { timeout: 3000 });
+      return () => window.cancelIdleCallback?.(id);
+    }
+    const t = window.setTimeout(warm, 1500);
+    return () => window.clearTimeout(t);
+  }, []);
+
   const { packages, refresh, uninstall } = usePackages();
   const { activeEnv } = useEnvironments();
   const activeTab = useActiveTab();
