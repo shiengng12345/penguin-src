@@ -77,6 +77,8 @@ const Welcome = lazy(() => import("@/components/onboarding/Welcome").then(m => (
 const DeveloperModeModal = lazy(() => import("@/components/settings/DeveloperModeModal").then(m => ({ default: m.DeveloperModeModal })));
 
 import { StatusBar } from "@/components/layout/StatusBar";
+import { ExtrasPage } from "@/submodules/ExtrasPage";
+import { useSubmoduleStore } from "@/submodules/submodule-store";
 import { Toaster } from "@/components/ui/toast";
 
 export default function App() {
@@ -123,6 +125,9 @@ export default function App() {
   const { packages, refresh, uninstall } = usePackages();
   const { activeEnv } = useEnvironments();
   const activeTab = useActiveTab();
+  // Extras page (opened from the penguin icon) overlays the content area above
+  // the current primary module without touching activeModule.
+  const extrasOpen = useSubmoduleStore((s) => s.launcherOpen);
 
   const [searchOpen, setSearchOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -229,6 +234,8 @@ export default function App() {
   }, [devModeHydrated, canAccessVault, canAccessDocs, canAccessRest, canAccessWiki, vaultOpen, docsOpen, restOpen, wikiOpen]);
   const handleModuleSelect = useCallback(
     (m: MainModule) => {
+      // Picking a primary module exits the Extras page (which overlays content).
+      useSubmoduleStore.getState().closeLauncher();
       if (m === "client") selectApiClient();
       else if (m === "vault") selectVaultFromHome();
       else if (m === "docs") selectDocsFromHome();
@@ -704,7 +711,9 @@ export default function App() {
             isSuperAdmin={canAccessDocs}
           />
           <div className="flex flex-1 flex-col min-w-0">
-            {vaultOpen ? (
+            {extrasOpen ? (
+              <ExtrasPage />
+            ) : vaultOpen ? (
               <VaultPage onClose={closeVault} />
             ) : docsOpen ? (
               <ApiDocsPage onClose={selectApiClient} />
@@ -788,6 +797,7 @@ export default function App() {
           <Welcome />
           <InteractiveTutorial />
         </Suspense>
+
       </div>
     </div>
   );

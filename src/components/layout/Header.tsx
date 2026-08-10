@@ -1,5 +1,6 @@
 import { useState, useMemo, useCallback, memo } from "react";
 import { ThemedMascotImg } from "@/components/common/ThemedMascotImg";
+import { useSubmoduleStore } from "@/submodules/submodule-store";
 import {
   useAppStore,
   THEMES,
@@ -58,12 +59,20 @@ const PenguinBrand = memo(function PenguinBrand() {
 
   return (
     <div className="flex items-center gap-2 min-w-0">
-      <ThemedMascotImg
-        base="/penguin.png"
-        alt="Penguin"
-        className={cn("h-8 shrink-0 object-contain", isLunch && "animate-bounce")}
-        draggable={false}
-      />
+      <button
+        type="button"
+        onClick={() => useSubmoduleStore.getState().openLauncher()}
+        title="Extras"
+        aria-label="Open Extras"
+        className="shrink-0 rounded-md outline-none transition-transform hover:scale-105 focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        <ThemedMascotImg
+          base="/penguin.png"
+          alt="Penguin"
+          className={cn("h-8 object-contain", isLunch && "animate-bounce")}
+          draggable={false}
+        />
+      </button>
       <span
         className={cn(
           "text-sm font-medium truncate max-w-[280px]",
