@@ -12,6 +12,7 @@ mod registry;
 mod registry_search;
 mod rest;
 mod runtime;
+mod wallpaper;
 
 pub use packages::{InstalledPackage, ProtoFile};
 pub use proxy::{HttpProxyRequest, HttpProxyResponse};
@@ -142,6 +143,7 @@ pub fn run() {
         .manage(knowledge::WatchRegistry::default())
         .manage(knowledge::QueryRuntimeState::default())
         .manage(runtime::new_state())
+        .manage(wallpaper::WallpaperManager::default())
         .setup(|app| {
             // macOS' default menu binds ⌘W to "Close Window", which quits this
             // single-window app before the webview ever sees the key. Replace it
@@ -298,6 +300,8 @@ pub fn run() {
             runtime::commands::runtime_set_mode,
             runtime::commands::runtime_register_source,
             runtime::commands::runtime_unregister_source,
+            wallpaper::wallpaper_set_enabled,
+            wallpaper::wallpaper_get_status,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

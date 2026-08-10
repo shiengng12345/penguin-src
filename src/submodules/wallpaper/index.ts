@@ -1,5 +1,6 @@
-import type { SubmoduleDefinition } from "../types";
+import type { SubmoduleDefinition, SubmoduleStatus } from "../types";
 import { WallpaperConfig } from "./WallpaperConfig";
+import { useWallpaperStatus } from "./useWallpaperStatus";
 
 export const wallpaperSubmodule: SubmoduleDefinition = {
   id: "wallpaper",
@@ -10,4 +11,8 @@ export const wallpaperSubmodule: SubmoduleDefinition = {
   surface: "page",
   runtime: "background",
   component: WallpaperConfig,
+  useStatus: (): SubmoduleStatus => {
+    const state = useWallpaperStatus().state;
+    return state === "running" ? "running" : state === "error" ? "error" : "disabled";
+  },
 };

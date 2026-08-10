@@ -52,56 +52,64 @@ export function ExtrasPage() {
           <selected.component onClose={clearSelection} />
         ) : (
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {submodules.map((def) => {
-              const { available, reason } = submoduleAvailability(def);
-              const status = def.useStatus?.();
-              return (
-                <button
-                  key={def.id}
-                  type="button"
-                  disabled={!available}
-                  onClick={() => available && selectSubmodule(def.id)}
-                  className={cn(
-                    "flex flex-col gap-1 rounded-lg border border-border p-4 text-left transition-colors",
-                    available
-                      ? "hover:border-primary/40 hover:bg-accent/40"
-                      : "cursor-not-allowed opacity-50",
-                  )}
-                >
-                  <div className="flex items-center gap-2">
-                    <span className="text-xl">{def.icon}</span>
-                    <span className="text-sm font-medium text-foreground">{def.title}</span>
-                  </div>
-                  <div className="text-[11px] text-muted-foreground">{def.description}</div>
-                  <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                    {def.availability?.experimental && <Badge variant="secondary">Experimental</Badge>}
-                    {def.availability?.platforms?.map((p) => (
-                      <Badge key={p} variant="outline">
-                        {p}
-                      </Badge>
-                    ))}
-                    {status && status !== "disabled" && (
-                      <span
-                        className={cn(
-                          "text-[10px] font-medium",
-                          status === "running" && "text-emerald-500",
-                          status === "paused" && "text-amber-500",
-                          status === "error" && "text-red-500",
-                        )}
-                      >
-                        ● {status}
-                      </span>
-                    )}
-                    {!available && reason && (
-                      <span className="text-[10px] text-muted-foreground">{reason}</span>
-                    )}
-                  </div>
-                </button>
-              );
-            })}
+            {submodules.map((def) => (
+              <SubmoduleTile key={def.id} def={def} onSelect={() => selectSubmodule(def.id)} />
+            ))}
           </div>
         )}
       </div>
     </section>
+  );
+}
+
+// Each tile is its own component so a submodule's optional `useStatus` hook is
+// called at the top level of a component (not inside a .map loop in ExtrasPage,
+// which would violate the rules of hooks).
+function SubmoduleTile({
+  def,
+  onSelect,
+}: {
+  def: (typeof submodules)[number];
+  onSelect: () => void;
+}) {
+  const { available, reason } = submoduleAvailability(def);
+  const status = def.useStatus?.();
+  return (
+    <button
+      type="button"
+      disabled={!available}
+      onClick={() => available && onSelect()}
+      className={cn(
+        "flex flex-col gap-1 rounded-lg border border-border p-4 text-left transition-colors",
+        available ? "hover:border-primary/40 hover:bg-accent/40" : "cursor-not-allowed opacity-50",
+      )}
+    >
+      <div className="flex items-center gap-2">
+        <span className="text-xl">{def.icon}</span>
+        <span className="text-sm font-medium text-foreground">{def.title}</span>
+      </div>
+      <div className="text-[11px] text-muted-foreground">{def.description}</div>
+      <div className="mt-1 flex flex-wrap items-center gap-1.5">
+        {def.availability?.experimental && <Badge variant="secondary">Experimental</Badge>}
+        {def.availability?.platforms?.map((p) => (
+          <Badge key={p} variant="outline">
+            {p}
+          </Badge>
+        ))}
+        {status && status !== "disabled" && (
+          <span
+            className={cn(
+              "text-[10px] font-medium",
+              status === "running" && "text-emerald-500",
+              status === "paused" && "text-amber-500",
+              status === "error" && "text-red-500",
+            )}
+          >
+            ● {status}
+          </span>
+        )}
+        {!available && reason && <span className="text-[10px] text-muted-foreground">{reason}</span>}
+      </div>
+    </button>
   );
 }

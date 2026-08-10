@@ -64,6 +64,9 @@ export const APP_VALUE_KEYS = {
   // "unread" entries (errors with timestamp > this value) for the
   // StatusBar badge.
   errorLogLastSeenAt: "penguin-error-log-last-seen-at",
+  // Live Wallpaper submodule (Extras) — whether the macOS wallpaper window is
+  // enabled. Persisted so it re-applies on next launch. Value: "true"/"false".
+  wallpaperEnabled: "penguin-wallpaper-enabled",
 } as const;
 
 export const ENVIRONMENT_VALUE_KEYS: Record<PersistedProtocol, string> = {

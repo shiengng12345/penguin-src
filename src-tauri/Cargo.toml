@@ -65,3 +65,21 @@ async-trait = "0.1"
 # src/rest/keychain.rs. The old `keyring` dependency was removed because
 # the OS-keychain prompt loop in dev was unacceptable UX and Postman /
 # Insomnia / Bruno all store secrets in a local file anyway.)
+
+# Live Wallpaper submodule (macOS only) — drop a dedicated webview window to
+# the desktop-icon window level via AppKit. Versions match what the tauri stack
+# already locks. objc2-app-kit is heavily feature-gated: only the classes used
+# below are enabled.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-core-graphics = "0.3"
+objc2-app-kit = { version = "0.3", features = [
+  "NSResponder",
+  "NSWindow",
+  "NSView",
+  "NSScreen",
+  "NSColor",
+  "NSApplication",
+  "NSGraphics",
+] }
