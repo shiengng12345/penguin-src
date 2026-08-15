@@ -69,6 +69,7 @@ export async function callPenguinMcpTool(payload) {
       code: "ok",
       toolName: payload.toolName,
       content: called.result?.content ?? [],
+      structuredContent: called.result?.structuredContent ?? null,
       isError: called.result?.isError === true,
       stderr,
     };

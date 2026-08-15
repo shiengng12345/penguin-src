@@ -1657,13 +1657,105 @@
               ]
             },
             "scope": {
-              "type": "object"
+              "type": "object",
+              "properties": {
+                "workspaceId": {
+                  "type": "string"
+                },
+                "revisions": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "repoId": {
+                        "type": "string"
+                      },
+                      "repoName": {
+                        "type": "string"
+                      },
+                      "branch": {
+                        "type": "string"
+                      },
+                      "snapshotId": {
+                        "type": "string"
+                      },
+                      "commitSha": {
+                        "type": "string"
+                      },
+                      "workingTree": {
+                        "type": "boolean"
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "paths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "languages": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "kinds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "additionalProperties": false
             },
             "options": {
-              "type": "object"
+              "type": "object",
+              "properties": {
+                "caseSensitive": {
+                  "type": "boolean"
+                },
+                "wholeWord": {
+                  "type": "boolean"
+                },
+                "includeGenerated": {
+                  "type": "boolean"
+                },
+                "includeVendor": {
+                  "type": "boolean"
+                },
+                "includeExcludedMetadata": {
+                  "type": "boolean"
+                },
+                "semantic": {
+                  "type": "string",
+                  "enum": [
+                    "off",
+                    "fallback",
+                    "blend"
+                  ]
+                },
+                "compact": {
+                  "type": "boolean"
+                },
+                "explain": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
             },
             "page": {
-              "type": "object"
+              "type": "object",
+              "properties": {
+                "limit": {
+                  "type": "number"
+                },
+                "cursor": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
             }
           },
           "required": [
@@ -4937,13 +5029,105 @@
               ]
             },
             "scope": {
-              "type": "object"
+              "type": "object",
+              "properties": {
+                "workspaceId": {
+                  "type": "string"
+                },
+                "revisions": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "repoId": {
+                        "type": "string"
+                      },
+                      "repoName": {
+                        "type": "string"
+                      },
+                      "branch": {
+                        "type": "string"
+                      },
+                      "snapshotId": {
+                        "type": "string"
+                      },
+                      "commitSha": {
+                        "type": "string"
+                      },
+                      "workingTree": {
+                        "type": "boolean"
+                      }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "paths": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "languages": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "kinds": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              },
+              "additionalProperties": false
             },
             "options": {
-              "type": "object"
+              "type": "object",
+              "properties": {
+                "caseSensitive": {
+                  "type": "boolean"
+                },
+                "wholeWord": {
+                  "type": "boolean"
+                },
+                "includeGenerated": {
+                  "type": "boolean"
+                },
+                "includeVendor": {
+                  "type": "boolean"
+                },
+                "includeExcludedMetadata": {
+                  "type": "boolean"
+                },
+                "semantic": {
+                  "type": "string",
+                  "enum": [
+                    "off",
+                    "fallback",
+                    "blend"
+                  ]
+                },
+                "compact": {
+                  "type": "boolean"
+                },
+                "explain": {
+                  "type": "boolean"
+                }
+              },
+              "additionalProperties": false
             },
             "page": {
-              "type": "object"
+              "type": "object",
+              "properties": {
+                "limit": {
+                  "type": "number"
+                },
+                "cursor": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
             }
           },
           "required": [

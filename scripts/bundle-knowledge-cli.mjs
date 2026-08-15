@@ -17,6 +17,8 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const entry = join(repoRoot, "packages/knowledge-cli/dist/bin.js");
 const outdir = join(repoRoot, "packages/knowledge-cli/bundle");
 const outfile = join(outdir, "penguin.mjs");
+const workerEntry = join(repoRoot, "packages/knowledge-cli/dist/query-worker.js");
+const workerOutfile = join(outdir, "query-worker.js");
 
 mkdirSync(outdir, { recursive: true });
 
@@ -47,5 +49,27 @@ await build({
   logLevel: "info",
 });
 
+await build({
+  entryPoints: [workerEntry],
+  outfile: workerOutfile,
+  bundle: true,
+  platform: "node",
+  format: "esm",
+  target: "node18",
+  external: ["better-sqlite3"],
+  banner: {
+    js: [
+      "import { createRequire as __pgvCreateRequire } from 'node:module';",
+      "import { fileURLToPath as __pgvFileURLToPath } from 'node:url';",
+      "import { dirname as __pgvDirname } from 'node:path';",
+      "const require = __pgvCreateRequire(import.meta.url);",
+      "const __filename = __pgvFileURLToPath(import.meta.url);",
+      "const __dirname = __pgvDirname(__filename);",
+    ].join("\n"),
+  },
+  logLevel: "info",
+});
+
 chmodSync(outfile, 0o755);
+chmodSync(workerOutfile, 0o755);
 console.log(`[bundle] wrote ${outfile}`);

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
@@ -57,7 +58,50 @@ function seed() {
   store.replaceFileEdges({ branchId: branch, filePath: "a.ts", edges: [
     { src: caller, dst: login, edgeType: "calls", origin: "parser", method: "EXTRACTED" },
   ] });
-  return { store, repoId, login, caller };
+  return { store, repoId, branch, login, caller };
+}
+
+function seedSearchSnapshot(store, { name, rootPath, filePath, content }) {
+  const repoId = store.registerRepo({ name, rootPath });
+  const branchId = store.registerBranch({ repoId, name: "main", status: "live" });
+  const topology = new GitTopologyStore(store);
+  const snapshot = topology.createBuildingSnapshot({
+    snapshotKey: `${name}-snapshot`,
+    repoId,
+    parserVersion: "test-parser",
+    resolverVersion: "test-resolver",
+    schemaVersion: 14,
+  });
+  const raw = Buffer.from(content, "utf8");
+  const contentHash = createHash("sha256").update(raw).digest("hex");
+  const source = new SourceStore(store);
+  const blob = source.putBlob({
+    contentHash,
+    rawBytes: raw,
+    decodedContent: content,
+    encoding: "utf8",
+  });
+  const fact = source.putSourceFact({
+    repoId,
+    filePath,
+    factFingerprint: contentHash,
+    contentHash,
+    sourceBlobId: blob,
+    coverage: {
+      status: "admitted",
+      reasonCode: "text_searchable",
+      classification: "source",
+    },
+  });
+  store.db.prepare(
+    "INSERT INTO coverage_records(repo_id,file_path,git_state,coverage_status,reason_code,classification,byte_size,reason,updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+  ).run(repoId, filePath, "tracked", "admitted", "text_searchable", "source", raw.length, "fixture", new Date().toISOString());
+  const snapshots = new SourceSnapshotStore(store);
+  snapshots.replaceOverlay(snapshot.id, [{ op: "add", path: filePath, sourceFactId: fact }]);
+  snapshots.materializeManifest(snapshot.id);
+  topology.markSnapshotReady(snapshot.id);
+  topology.publishSnapshot({ branchId, snapshotId: snapshot.id, headCommit: null });
+  return { repoId, snapshotId: snapshot.id };
 }
 
 test("knowledge tools registered (dependency analysis is MCP-reachable)", () => {
@@ -82,6 +126,19 @@ test("retrieved MCP content is explicitly bounded as untrusted data", () => {
   assert.match(searchTool.description, /untrusted data/i);
   assert.match(searchTool.description, /not system instructions/i);
   assert.match(hitTool.description, /untrusted data/i);
+});
+
+test("knowledge_search publishes its canonical scope, options, and page contract", () => {
+  const searchTool = KNOWLEDGE_TOOL_DEFS.find((tool) => tool.name === "knowledge_search");
+  const properties = searchTool.inputSchema.properties;
+
+  assert.equal(properties.scope.type, "object");
+  assert.equal(properties.scope.properties.revisions.type, "array");
+  assert.equal(properties.scope.properties.revisions.items.properties.repoId.type, "string");
+  assert.equal(properties.scope.properties.revisions.items.properties.snapshotId.type, "string");
+  assert.equal(properties.options.properties.caseSensitive.type, "boolean");
+  assert.equal(properties.page.properties.cursor.type, "string");
+  assert.equal(properties.page.properties.limit.type, "number");
 });
 
 test("MCP mutations are disabled by default and require an operation-scoped token", async () => {
@@ -179,6 +236,115 @@ test("knowledge_search resolves repository roots and rejects unknown repo select
   assert.equal(byRoot.error, undefined, "registered root path must be accepted as a repository selector");
   const missing = handleKnowledgeTool("knowledge_search", { query: "login", repo: "/missing-repo", mode: "exact", contract_version: "2" }, store);
   assert.equal(missing.error, "REPOSITORY_NOT_FOUND");
+  store.close();
+});
+
+test("knowledge_search applies canonical nested repo/snapshot scope without resolving unrelated repositories", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pk-mcp-search-scope-"));
+  const store = KnowledgeStore.open({ dbPath: join(dir, "k.db"), ledgerPath: join(dir, "l.jsonl") });
+  const target = seedSearchSnapshot(store, {
+    name: "target",
+    rootPath: "/target",
+    filePath: "src/target.ts",
+    content: "export const SharedScopeNeedle = true;\n",
+  });
+  seedSearchSnapshot(store, {
+    name: "unrelated",
+    rootPath: "/unrelated",
+    filePath: "src/unrelated.ts",
+    content: "export const SharedScopeNeedle = false;\n",
+  });
+
+  const result = handleKnowledgeTool("knowledge_search", {
+    query: "SharedScopeNeedle",
+    mode: "exact",
+    scope: { repo: target.repoId, snapshot_id: target.snapshotId },
+    page: { limit: 20 },
+  }, store);
+
+  assert.deepEqual(
+    result.diagnostics.resolvedScopes.map(({ repoId, snapshotId }) => ({ repoId, snapshotId })),
+    [target],
+  );
+  assert.deepEqual(result.diagnostics.requestedScope.revisions, [target]);
+  assert.equal(result.diagnostics.scopeApplied, true);
+  assert.ok(result.hits.length > 0);
+  assert.ok(result.hits.every((hit) => hit.locator.repoId === target.repoId && hit.locator.revisionId === target.snapshotId));
+  store.close();
+});
+
+test("knowledge_search preserves every canonical revision instead of silently using only the first", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pk-mcp-search-multi-scope-"));
+  const store = KnowledgeStore.open({ dbPath: join(dir, "k.db"), ledgerPath: join(dir, "l.jsonl") });
+  const first = seedSearchSnapshot(store, {
+    name: "first",
+    rootPath: "/first",
+    filePath: "src/first.ts",
+    content: "export const MultiScopeNeedleFirst = true;\n",
+  });
+  const second = seedSearchSnapshot(store, {
+    name: "second",
+    rootPath: "/second",
+    filePath: "src/second.ts",
+    content: "export const MultiScopeNeedleSecond = true;\n",
+  });
+
+  const result = handleKnowledgeTool("knowledge_search", {
+    query: "MultiScopeNeedle",
+    mode: "exact",
+    scope: {
+      revisions: [
+        { repoId: first.repoId, snapshotId: first.snapshotId },
+        { repoId: second.repoId, snapshotId: second.snapshotId },
+      ],
+    },
+    page: { limit: 20 },
+  }, store);
+
+  assert.deepEqual(
+    result.diagnostics.requestedScope.revisions,
+    [first, second],
+  );
+  assert.deepEqual(
+    result.diagnostics.resolvedScopes.map(({ repoId, snapshotId }) => ({ repoId, snapshotId })),
+    [first, second],
+  );
+  assert.deepEqual(
+    [...new Set(result.hits.map((hit) => hit.locator.repoId))].sort(),
+    [first.repoId, second.repoId].sort(),
+  );
+  store.close();
+});
+
+test("knowledge_search applies canonical nested page cursor and advances without repeating page one", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pk-mcp-search-page-"));
+  const store = KnowledgeStore.open({ dbPath: join(dir, "k.db"), ledgerPath: join(dir, "l.jsonl") });
+  const target = seedSearchSnapshot(store, {
+    name: "paged",
+    rootPath: "/paged",
+    filePath: "src/paged.ts",
+    content: Array.from({ length: 12 }, (_, index) => `export const PagingNeedle${index} = "PagingNeedle";`).join("\n"),
+  });
+  const base = {
+    query: "PagingNeedle",
+    mode: "exact",
+    scope: { repo: target.repoId, snapshot_id: target.snapshotId },
+  };
+
+  const first = handleKnowledgeTool("knowledge_search", { ...base, page: { limit: 5 } }, store);
+  const second = handleKnowledgeTool("knowledge_search", {
+    ...base,
+    page: { limit: 5, cursor: first.page.nextCursor },
+  }, store);
+
+  assert.equal(first.hits.length, 5);
+  assert.equal(second.hits.length, 5);
+  assert.ok(first.page.nextCursor);
+  assert.ok(second.page.nextCursor);
+  assert.equal(
+    first.hits.some((hit) => second.hits.some((candidate) => candidate.hitId === hit.hitId)),
+    false,
+  );
   store.close();
 });
 

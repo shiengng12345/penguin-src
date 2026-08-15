@@ -16,6 +16,61 @@ function loadDatabaseCtor(): typeof Database {
   return DatabaseCtor;
 }
 
+const EDGE_REPLACEMENT_INDEX_NAMES = [
+  "idx_edges_parser_branch_file",
+  "idx_edges_parser_global_repo_file",
+  "idx_symbol_versions_branch_file_status",
+  "idx_nodes_log_site_repo_file",
+] as const;
+
+// replaceFileEdges() deletes parser output by the exact JSON provenance
+// expressions below once per indexed file. Without matching expression and
+// partial indexes, each delete walks millions of edges during a full rebuild.
+const EDGE_REPLACEMENT_INDEX_DDL = `
+CREATE INDEX IF NOT EXISTS idx_edges_parser_branch_file
+  ON edges(branch_id, json_extract(provenance, '$.file'))
+  WHERE origin = 'parser';
+
+CREATE INDEX IF NOT EXISTS idx_edges_parser_global_repo_file
+  ON edges(
+    json_extract(provenance, '$.repo'),
+    json_extract(provenance, '$.file')
+  )
+  WHERE branch_id IS NULL AND origin = 'parser';
+
+-- priorSymbols() and markFileSymbolsStale() run once per rebuilt file. The
+-- node/branch uniqueness index starts with node_id, so it cannot serve this
+-- branch+file access path and otherwise forces a full symbol_versions scan.
+CREATE INDEX IF NOT EXISTS idx_symbol_versions_branch_file_status
+  ON symbol_versions(branch_id, file_path, status);
+
+-- clearLogSitesForFile() replaces parser-owned log nodes once per file. Match
+-- its exact JSON expression so SQLite does not scan every log site in a repo.
+CREATE INDEX IF NOT EXISTS idx_nodes_log_site_repo_file
+  ON nodes(repo_id, json_extract(meta, '$.filePath'))
+  WHERE node_type = 'log_site';
+`;
+
+export type SchemaMaintenanceEvent =
+  | {
+      operation: "edge-replacement-indexes";
+      phase: "start" | "complete";
+      indexes: readonly string[];
+      elapsedMs?: number;
+    }
+  | {
+      operation: "fts-row-maps";
+      phase: "start" | "complete";
+      symbolRows?: number;
+      identifierRows?: number;
+      elapsedMs?: number;
+    };
+
+export interface OpenDatabaseOptions {
+  allowSchemaMutation?: boolean;
+  onSchemaMaintenance?: (event: SchemaMaintenanceEvent) => void;
+}
+
 // spec §3.2 全量表。核心关系模型不用 SQLite 专有特性（D4）；
 // FTS5 虚表是可随时 drop 重建的加速索引，不属于核心模型。
 const DDL = `
@@ -187,6 +242,61 @@ CREATE INDEX IF NOT EXISTS idx_edges_branch_status ON edges(branch_id, status);
 -- table (~240k rows → the "服务图" froze for ~2.7s). Leads with edge_type.
 CREATE INDEX IF NOT EXISTS idx_edges_type_status ON edges(edge_type, status);
 
+-- Content-addressed summary of one parser-owned file edge set. Rebuild still
+-- parses every file, but unchanged graph output can avoid deleting/reinserting
+-- thousands of identical edges and updating every secondary edge index.
+CREATE TABLE IF NOT EXISTS parser_edge_sets (
+  repo_id TEXT NOT NULL,
+  branch_id TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  edge_count INTEGER NOT NULL,
+  edge_fingerprint TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (repo_id, branch_id, file_path)
+);
+CREATE TRIGGER IF NOT EXISTS trg_parser_edge_sets_insert
+AFTER INSERT ON edges WHEN NEW.origin = 'parser'
+BEGIN
+  DELETE FROM parser_edge_sets
+   WHERE file_path = json_extract(NEW.provenance, '$.file')
+     AND (
+       (NEW.branch_id IS NOT NULL AND branch_id = NEW.branch_id)
+       OR
+       (NEW.branch_id IS NULL AND repo_id = json_extract(NEW.provenance, '$.repo'))
+     );
+END;
+CREATE TRIGGER IF NOT EXISTS trg_parser_edge_sets_delete
+AFTER DELETE ON edges WHEN OLD.origin = 'parser'
+BEGIN
+  DELETE FROM parser_edge_sets
+   WHERE file_path = json_extract(OLD.provenance, '$.file')
+     AND (
+       (OLD.branch_id IS NOT NULL AND branch_id = OLD.branch_id)
+       OR
+       (OLD.branch_id IS NULL AND repo_id = json_extract(OLD.provenance, '$.repo'))
+     );
+END;
+CREATE TRIGGER IF NOT EXISTS trg_parser_edge_sets_update
+AFTER UPDATE ON edges WHEN OLD.origin = 'parser' OR NEW.origin = 'parser'
+BEGIN
+  DELETE FROM parser_edge_sets
+   WHERE (
+     file_path = json_extract(OLD.provenance, '$.file')
+     AND (
+       (OLD.branch_id IS NOT NULL AND branch_id = OLD.branch_id)
+       OR
+       (OLD.branch_id IS NULL AND repo_id = json_extract(OLD.provenance, '$.repo'))
+     )
+   ) OR (
+     file_path = json_extract(NEW.provenance, '$.file')
+     AND (
+       (NEW.branch_id IS NOT NULL AND branch_id = NEW.branch_id)
+       OR
+       (NEW.branch_id IS NULL AND repo_id = json_extract(NEW.provenance, '$.repo'))
+     )
+   );
+END;
+
 -- Per-repo/branch coverage tallies by graph layer (file/symbol/edge/route/di/
 -- test): resolved-vs-total counts backing trust/coverage reporting.
 CREATE TABLE IF NOT EXISTS coverage_layers (
@@ -317,6 +427,15 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts_notes USING fts5(
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_symbols USING fts5(
   node_id UNINDEXED, name, signature
 );
+-- FTS5 UNINDEXED columns cannot support equality deletes. Keep the virtual
+-- rowid in ordinary indexed tables so per-symbol/per-file replacement never
+-- scans the entire FTS corpus during rebuild.
+CREATE TABLE IF NOT EXISTS fts_symbol_rows (
+  fts_rowid INTEGER PRIMARY KEY,
+  node_id TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_fts_symbol_rows_node
+  ON fts_symbol_rows(node_id, fts_rowid);
 -- Lightweight, non-graph identifier index: object-literal property keys,
 -- interface/type-alias member names, class field names — none of these are
 -- symbol nodes (they'd explode node/edge count for no real graph value), but
@@ -325,6 +444,13 @@ CREATE VIRTUAL TABLE IF NOT EXISTS fts_symbols USING fts5(
 CREATE VIRTUAL TABLE IF NOT EXISTS fts_identifiers USING fts5(
   name, repo_id UNINDEXED, file_path UNINDEXED, start_line UNINDEXED, kind UNINDEXED
 );
+CREATE TABLE IF NOT EXISTS fts_identifier_rows (
+  fts_rowid INTEGER PRIMARY KEY,
+  repo_id TEXT NOT NULL,
+  file_path TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_fts_identifier_rows_scope
+  ON fts_identifier_rows(repo_id, file_path, fts_rowid);
 
 CREATE TABLE IF NOT EXISTS file_facts (
   id TEXT PRIMARY KEY,
@@ -801,6 +927,28 @@ function migrate(db: Database.Database, _from: number): void {
   ensureOneDefaultBranchIndex(db);
 }
 
+function backfillFtsRowMaps(db: Database.Database): { symbolRows: number; identifierRows: number } {
+  const symbolRows = db.prepare(
+    `INSERT OR IGNORE INTO fts_symbol_rows(fts_rowid, node_id)
+     SELECT rowid, node_id FROM fts_symbols`,
+  ).run().changes;
+  const identifierRows = db.prepare(
+    `INSERT OR IGNORE INTO fts_identifier_rows(fts_rowid, repo_id, file_path)
+     SELECT rowid, repo_id, file_path FROM fts_identifiers`,
+  ).run().changes;
+  return { symbolRows, identifierRows };
+}
+
+function hasFtsRowMaps(db: Database.Database): boolean {
+  const rows = db
+    .prepare(
+      `SELECT name FROM sqlite_master
+       WHERE type='table' AND name IN ('fts_symbol_rows', 'fts_identifier_rows')`,
+    )
+    .all() as Array<{ name: string }>;
+  return rows.length === 2;
+}
+
 function ensureOneDefaultBranchIndex(db: Database.Database): void {
   const defaults = db.prepare(
     `SELECT id, repo_id AS repoId
@@ -826,6 +974,21 @@ const DDL_OBJECT_NAMES: string[] = [
   ),
 ].map((m) => m[1]);
 
+// These structures were added as same-version maintenance accelerators. They
+// are only touched by indexing/write paths, so an already-current database
+// remains safe to query while they are absent. A writable open installs and
+// backfills them before any writer uses them.
+const OPTIONAL_MAINTENANCE_OBJECT_NAMES = new Set([
+  "parser_edge_sets",
+  "trg_parser_edge_sets_insert",
+  "trg_parser_edge_sets_delete",
+  "trg_parser_edge_sets_update",
+  "fts_symbol_rows",
+  "idx_fts_symbol_rows_node",
+  "fts_identifier_rows",
+  "idx_fts_identifier_rows_scope",
+]);
+
 /** Tables are derived from the same DDL used by openDatabase. */
 export const SCHEMA_TABLES: readonly string[] = [
   ...DDL.matchAll(/CREATE\s+(?:VIRTUAL\s+)?TABLE\s+IF\s+NOT\s+EXISTS\s+([A-Za-z_]\w*)/gi),
@@ -836,11 +999,16 @@ export const SCHEMA_TABLES: readonly string[] = [
 // columns WITHOUT a SCHEMA_VERSION bump, so version equality alone doesn't
 // prove completeness). Keep the two in sync: a new guard in migrate() needs
 // its column check added here.
-function isSchemaCurrent(db: Database.Database): boolean {
+function isSchemaCurrent(
+  db: Database.Database,
+  options?: { allowMissingMaintenanceObjects?: boolean },
+): boolean {
   const have = new Set(
     (db.prepare("SELECT name FROM sqlite_master").all() as { name: string }[]).map((r) => r.name),
   );
-  if (!DDL_OBJECT_NAMES.every((n) => have.has(n))) return false;
+  if (!DDL_OBJECT_NAMES.every((name) =>
+    have.has(name) || (options?.allowMissingMaintenanceObjects && OPTIONAL_MAINTENANCE_OBJECT_NAMES.has(name))
+  )) return false;
   const edgeCols = (db.prepare("PRAGMA table_info(edges)").all() as { name: string }[]).map(
     (c) => c.name,
   );
@@ -877,13 +1045,50 @@ function isSchemaCurrent(db: Database.Database): boolean {
   if (!externalCols.includes("content_type")) return false;
   const evidenceCols = (db.prepare("PRAGMA table_info(trust_evidence)").all() as { name: string }[]).map((c) => c.name);
   if (!evidenceCols.includes("query_hash")) return false;
+  const coverageCols = (db.prepare("PRAGMA table_info(coverage_records)").all() as { name: string }[]).map((c) => c.name);
+  if (!["parser_status", "parser_language", "parser_version", "parser_error"].every((column) => coverageCols.includes(column))) return false;
+  const savedQueryCols = (db.prepare("PRAGMA table_info(saved_queries)").all() as { name: string }[]).map((c) => c.name);
+  if (!savedQueryCols.includes("contract_version")) return false;
   if (!have.has("idx_branches_one_default_per_repo")) return false;
   return db.prepare("SELECT 1 FROM ledger_state WHERE id='main'").get() != null;
 }
 
+function missingEdgeReplacementIndexes(db: Database.Database): string[] {
+  const have = new Set(
+    (
+      db
+        .prepare("SELECT name FROM sqlite_master WHERE type='index'")
+        .all() as Array<{ name: string }>
+    ).map((row) => row.name),
+  );
+  return EDGE_REPLACEMENT_INDEX_NAMES.filter((name) => !have.has(name));
+}
+
+function installEdgeReplacementIndexes(
+  db: Database.Database,
+  missingIndexes: readonly string[],
+  onSchemaMaintenance?: (event: SchemaMaintenanceEvent) => void,
+): void {
+  if (missingIndexes.length === 0) return;
+  const indexes = [...missingIndexes];
+  const startedAt = Date.now();
+  onSchemaMaintenance?.({
+    operation: "edge-replacement-indexes",
+    phase: "start",
+    indexes,
+  });
+  db.transaction(() => db.exec(EDGE_REPLACEMENT_INDEX_DDL))();
+  onSchemaMaintenance?.({
+    operation: "edge-replacement-indexes",
+    phase: "complete",
+    indexes,
+    elapsedMs: Date.now() - startedAt,
+  });
+}
+
 export function openDatabase(
   path: string,
-  options?: { allowSchemaMutation?: boolean },
+  options?: OpenDatabaseOptions,
 ): Database.Database {
   const db = new (loadDatabaseCtor())(path);
   db.pragma("journal_mode = WAL");
@@ -900,6 +1105,7 @@ export function openDatabase(
     db
       .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'")
       .get() != null;
+  const needsFtsRowMapBackfill = preexisting && !hasFtsRowMaps(db);
 
   const storedVersion = preexisting
     ? Number(
@@ -911,6 +1117,13 @@ export function openDatabase(
       )
     : SCHEMA_VERSION;
 
+  const currentSchema = preexisting && storedVersion === SCHEMA_VERSION && isSchemaCurrent(db);
+  const readableSchema = currentSchema || (
+    preexisting &&
+    storedVersion === SCHEMA_VERSION &&
+    isSchemaCurrent(db, { allowMissingMaintenanceObjects: true })
+  );
+
   // Fail loud on a DB written by a newer build — operating on it with an older
   // schema would silently drop/misread columns (§9 绝不静默降级).
   if (storedVersion > SCHEMA_VERSION) {
@@ -921,13 +1134,19 @@ export function openDatabase(
     );
   }
 
-  // Steady state (schema already current): return WITHOUT a single write.
-  // Everything below needs SQLite's one write lock, and a long-running writer
-  // (a multi-minute rebuild transaction) would SQLITE_BUSY this open after
-  // busy_timeout — killing even pure read commands like `penguin status`.
-  if (preexisting && storedVersion === SCHEMA_VERSION && isSchemaCurrent(db)) {
+  // Steady state (schema already current): return WITHOUT a single write once
+  // the optional performance indexes are installed. Read-only callers may use
+  // a current DB while those indexes are still missing; the next write command
+  // performs the one-time optimization instead of breaking status/search.
+  if (currentSchema) {
+    const missingIndexes = missingEdgeReplacementIndexes(db);
+    if (missingIndexes.length > 0 && options?.allowSchemaMutation !== false) {
+      installEdgeReplacementIndexes(db, missingIndexes, options?.onSchemaMaintenance);
+    }
     return db;
   }
+
+  if (readableSchema && options?.allowSchemaMutation === false) return db;
 
   // Read-only callers (CLI read verbs) must never take the write lock or run
   // DDL/migrations against a stale DB — fail loud instead (Task 4, §9 绝不静默降级).
@@ -942,9 +1161,33 @@ export function openDatabase(
     );
   }
 
+  const ftsMapStartedAt = needsFtsRowMapBackfill ? Date.now() : null;
+  if (ftsMapStartedAt != null) {
+    options?.onSchemaMaintenance?.({ operation: "fts-row-maps", phase: "start" });
+  }
+
   db.exec(DDL);
 
   migrate(db, storedVersion);
+  const ftsRows = backfillFtsRowMaps(db);
+  if (ftsMapStartedAt != null) {
+    options?.onSchemaMaintenance?.({
+      operation: "fts-row-maps",
+      phase: "complete",
+      ...ftsRows,
+      elapsedMs: Date.now() - ftsMapStartedAt,
+    });
+  }
+
+  // Performance-only migration: no SCHEMA_VERSION bump, because changing the
+  // indexed schema version would incorrectly force every branch to rebuild.
+  // Existing large DBs get a visible callback; fresh empty DBs create the same
+  // indexes silently as part of initialization.
+  installEdgeReplacementIndexes(
+    db,
+    missingEdgeReplacementIndexes(db),
+    preexisting ? options?.onSchemaMaintenance : undefined,
+  );
 
   // Upsert (NOT INSERT OR IGNORE): after a successful migration the stored
   // version must actually advance to the code's version, so future opens gate

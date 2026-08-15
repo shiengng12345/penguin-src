@@ -78,6 +78,18 @@ export function validateSearchResponse(input: unknown): SearchResponse {
   if (!Array.isArray(input.diagnostics.nextActions)) {
     invalid("response.diagnostics.nextActions", "response.diagnostics.nextActions must be an array");
   }
+  if (!isRecord(input.diagnostics.requestedScope)) {
+    invalid("response.diagnostics.requestedScope", "response.diagnostics.requestedScope must be an object");
+  }
+  if (!Array.isArray(input.diagnostics.resolvedScope)) {
+    invalid("response.diagnostics.resolvedScope", "response.diagnostics.resolvedScope must be an array");
+  }
+  if (typeof input.diagnostics.scopeApplied !== "boolean") {
+    invalid("response.diagnostics.scopeApplied", "response.diagnostics.scopeApplied must be boolean");
+  }
+  if (!Number.isInteger(input.diagnostics.candidateCount) || Number(input.diagnostics.candidateCount) < 0) {
+    invalid("response.diagnostics.candidateCount", "response.diagnostics.candidateCount must be a non-negative integer");
+  }
   if (input.error !== undefined) {
     if (!isRecord(input.error) || typeof input.error.code !== "string" || typeof input.error.message !== "string" || !isRecord(input.error.details) || typeof input.error.retryable !== "boolean") {
       invalid("response.error", "response.error must be a typed error envelope");

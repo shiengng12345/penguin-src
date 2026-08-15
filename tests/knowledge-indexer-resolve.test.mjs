@@ -118,6 +118,80 @@ test("resolveRefs still resolves a generic name when it is import-scoped", async
   assert.ok(r.edges.some((e) => e.dst === "n_create" && e.method === "EXTRACTED"));
 });
 
+test("resolveRefs does not bind a collaborator member call to an unrelated repo-wide bare symbol", async () => {
+  const src = "class TokenService { issue() { return this.jwtService.sign({ sub: '1' }); } }";
+  const out = await extractSymbols({ lang: "ts", source: src });
+  const call = out.refs.find((ref) => ref.kind === "call" && ref.rawName === "sign");
+  assert.equal(call?.memberReceiver, "this.jwtService");
+  const ids = new Map([
+    ["TokenService", "n_class"],
+    ["TokenService.issue", "n_issue"],
+  ]);
+  const r = resolveRefs({
+    refs: out.refs,
+    fileSymbols: out.symbols,
+    fileSymbolIds: ids,
+    lookup: fakeLookup({
+      bare: { sign: [{ id: "n_unrelated_test_helper", filePath: "test/helpers.ts" }] },
+    }),
+    currentFile: "src/token.service.ts",
+    importedFiles: new Set(),
+  });
+  assert.equal(
+    r.edges.some((edge) => edge.dst === "n_unrelated_test_helper"),
+    false,
+    "a member receiver is stronger evidence than an unrelated unique bare name",
+  );
+});
+
+test("resolveRefs still resolves a collaborator member call through an imported file", async () => {
+  const src = "class AuthService { login() { return this.loginProcessor.loginAndGenerateToken(); } }";
+  const out = await extractSymbols({ lang: "ts", source: src });
+  const r = resolveRefs({
+    refs: out.refs,
+    fileSymbols: out.symbols,
+    fileSymbolIds: new Map([
+      ["AuthService", "n_class"],
+      ["AuthService.login", "n_login"],
+    ]),
+    lookup: fakeLookup({
+      bare: {
+        loginAndGenerateToken: [
+          { id: "n_login_processor", filePath: "src/login-processor.ts" },
+          { id: "n_unrelated", filePath: "test/login-helper.ts" },
+        ],
+      },
+    }),
+    currentFile: "src/auth.service.ts",
+    importedFiles: new Set(["src/login-processor.ts"]),
+  });
+  assert.ok(r.edges.some((edge) => edge.dst === "n_login_processor"));
+});
+
+test("resolveRefs does not bind an external type reference to an unrelated repo-wide bare symbol", async () => {
+  const src = "class AuthService { login(metadata: Metadata): void {} }";
+  const out = await extractSymbols({ lang: "ts", source: src });
+  const r = resolveRefs({
+    refs: out.refs,
+    fileSymbols: out.symbols,
+    fileSymbolIds: new Map([
+      ["AuthService", "n_class"],
+      ["AuthService.login", "n_login"],
+    ]),
+    lookup: fakeLookup({
+      qualified: { Metadata: "n_unrelated_schema" },
+      bare: { Metadata: [{ id: "n_unrelated_schema", filePath: "src/player-photo-type.schema.ts" }] },
+    }),
+    currentFile: "src/auth.service.ts",
+    importedFiles: new Set(),
+  });
+  assert.equal(
+    r.edges.some((edge) => edge.dst === "n_unrelated_schema"),
+    false,
+    "an unscoped type must not guess an unrelated same-repo target",
+  );
+});
+
 test("resolveRefs: same-file tier-1 self-match falls through instead of silently dropping the edge", async () => {
   // Real-world NestJS shape: a controller handler calls a same-named method on
   // an injected processor (`getPlayerProfileByJwt` calling

@@ -11,7 +11,14 @@ export {
   type LedgerReadResult,
   type LedgerTarget,
 } from "./ledger.js";
-export { SCHEMA_VERSION, SCHEMA_MIGRATIONS, SCHEMA_TABLES, openDatabase } from "./schema.js";
+export {
+  SCHEMA_VERSION,
+  SCHEMA_MIGRATIONS,
+  SCHEMA_TABLES,
+  openDatabase,
+  type OpenDatabaseOptions,
+  type SchemaMaintenanceEvent,
+} from "./schema.js";
 export { SourceStore, type EffectiveSource, type PutBlobInput, type PutSourceFactInput, type SourceCoverageInput } from "./source-store.js";
 export { buildLineIndex, locateOffset, type LineIndex, type LineIndexEntry } from "./line-index.js";
 export {

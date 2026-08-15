@@ -14,8 +14,54 @@ const string = (description?: string) => ({ type: "string", ...(description ? { 
 const number = () => ({ type: "number" });
 const boolean = () => ({ type: "boolean" });
 
+const searchRevision = {
+  type: "object",
+  properties: {
+    repoId: string(),
+    repoName: string(),
+    branch: string(),
+    snapshotId: string(),
+    commitSha: string(),
+    workingTree: boolean(),
+  },
+  additionalProperties: false,
+};
+
+const searchScope = {
+  type: "object",
+  properties: {
+    workspaceId: string(),
+    revisions: { type: "array", items: searchRevision },
+    paths: { type: "array", items: string() },
+    languages: { type: "array", items: string() },
+    kinds: { type: "array", items: string() },
+  },
+  additionalProperties: false,
+};
+
+const searchOptions = {
+  type: "object",
+  properties: {
+    caseSensitive: boolean(),
+    wholeWord: boolean(),
+    includeGenerated: boolean(),
+    includeVendor: boolean(),
+    includeExcludedMetadata: boolean(),
+    semantic: { type: "string", enum: ["off", "fallback", "blend"] },
+    compact: boolean(),
+    explain: boolean(),
+  },
+  additionalProperties: false,
+};
+
+const searchPage = {
+  type: "object",
+  properties: { limit: number(), cursor: string() },
+  additionalProperties: false,
+};
+
 const SCHEMAS: Record<string, KnowledgeInputSchema> = {
-  "knowledge.search": object({ query: string("Non-empty deterministic or semantic query"), mode: { type: "string", enum: ["auto", "exact", "phrase", "substring", "path", "regex", "lexical", "semantic", "structural"] }, scope: { type: "object" }, options: { type: "object" }, page: { type: "object" } }, ["query"]),
+  "knowledge.search": object({ query: string("Non-empty deterministic or semantic query"), mode: { type: "string", enum: ["auto", "exact", "phrase", "substring", "path", "regex", "lexical", "semantic", "structural"] }, scope: searchScope, options: searchOptions, page: searchPage }, ["query"]),
   "knowledge.get_hit": object({ snapshot_id: string(), file_path: string(), start_line: number(), end_line: number(), start_byte: number(), context_lines: number(), original_revision_id: string(), caller_workspace_id: string() }, ["snapshot_id", "file_path"]),
   "knowledge.graph.query": object({ request: { type: "object" }, start: { type: "object" }, traverse: { type: "array" }, project: { type: "array" }, limit: number(), scope: { type: "object" } }, ["start", "traverse", "project", "limit"]),
   "knowledge.context": object({ target: string(), repo: string(), branch: string(), commit_sha: string(), snapshot_id: string(), depth: number(), limit: number(), allow_fallback: boolean() }, ["target"]),

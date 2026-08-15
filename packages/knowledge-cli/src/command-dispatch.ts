@@ -71,7 +71,7 @@ import {
   type GraphMode,
   type KnowledgeStore,
 } from "@penguin/knowledge-core";
-import { indexRepo, indexRevision, RevisionIndexCoordinator, startWatcher, createNote, createIncident, appendNote, writeNoteBody, readNote, listNotes, reindexNotesDir, listDanglingNoteLinks, listEvidenceNotes, setEvidenceStatus, evidenceDoctor, repairEvidence, readGitContext, type EvidenceLifecycle } from "@penguin/knowledge-indexer";
+import { indexRepo, indexRevision, RevisionIndexCoordinator, KNOWLEDGE_PARSER_VERSION, KNOWLEDGE_RESOLVER_VERSION, startWatcher, createNote, createIncident, appendNote, writeNoteBody, readNote, listNotes, reindexNotesDir, listDanglingNoteLinks, listEvidenceNotes, setEvidenceStatus, evidenceDoctor, repairEvidence, readGitContext, type EvidenceLifecycle } from "@penguin/knowledge-indexer";
 import { resolveProvider, aiComplete } from "./ai.js";
 import { runClaudeHook } from "./claude-hook.js";
 import { createIndexRenderer } from "./render-progress.js";
@@ -1298,8 +1298,8 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
         rootPath: repo.rootPath,
         repoId,
         revision: branch ? { branch } : { commitSha },
-        parserVersion: "tree-sitter-wasm-v5-single-pass-log-sites",
-        resolverVersion: "resolver-v1",
+        parserVersion: KNOWLEDGE_PARSER_VERSION,
+        resolverVersion: KNOWLEDGE_RESOLVER_VERSION,
         coordinator: new RevisionIndexCoordinator(),
       });
       emit(deps, json, `materialized ${repoName}@${result.context.commitSha}`, result);

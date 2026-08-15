@@ -56,6 +56,24 @@ const GENERIC_NAMES = new Set([
   "read", "write", "parse", "format", "validate", "build", "of", "from", "to",
 ]);
 
+// Static platform/global objects are not repository symbols. Without the
+// receiver captured by the extractor, `Date.now()` used to become a high-
+// confidence call to the only user-defined `now` symbol in a repo. Keep this
+// list intentionally limited to language/runtime globals; collaborator member
+// calls still proceed through same-file/import-scoped resolution below.
+const PLATFORM_MEMBER_RECEIVERS = new Set([
+  "Array", "ArrayBuffer", "Atomics", "BigInt", "Boolean", "Buffer", "console",
+  "crypto", "Date", "Error", "Intl", "JSON", "Map", "Math", "Number", "Object",
+  "Promise", "Proxy", "Reflect", "RegExp", "Set", "String", "Symbol", "WeakMap",
+  "WeakSet", "process", "global", "globalThis",
+]);
+
+function isPlatformMemberReceiver(receiver: string | undefined): boolean {
+  if (!receiver) return false;
+  const root = receiver.trim().split(/[.[]/, 1)[0];
+  return PLATFORM_MEMBER_RECEIVERS.has(root);
+}
+
 // Resolve call + type refs to graph edges (§6.2 + Plan B):
 //   - `call` ref → `calls` edge (a function/method invocation)
 //   - `type` ref → `references` edge (a type annotation/generic/extends/impl —
@@ -121,9 +139,28 @@ export function resolveRefs(input: {
       }
     }
 
-    // tier 2: same-repo unique qualified-name hit
+    // A platform member call is already fully qualified by its receiver and
+    // must never fall back to a repo-wide bare-name guess. Same-file symbols
+    // run first so legitimate shadowing (`class Date { static now() {} }`) is
+    // still treated as user code rather than as the JavaScript global.
+    if (ref.kind === "call" && isPlatformMemberReceiver(ref.memberReceiver)) {
+      unresolved += 1;
+      continue;
+    }
+
+    // tier 2: same-repo unique qualified-name hit. A bare token is not truly
+    // qualified merely because a top-level repo symbol happens to store that
+    // exact name. In the production pipeline (importedFiles is provided),
+    // member calls and type refs must not use that shortcut: `Metadata` from
+    // @grpc/grpc-js otherwise binds to an unrelated local class Metadata.
     const qualified = input.lookup.byQualifiedName(ref.rawName);
-    if (qualified) {
+    const rawNameIsQualified = ref.rawName.includes(".") || ref.rawName.includes("::");
+    const unsafeBareQualifiedGuess = Boolean(
+      input.importedFiles
+      && !rawNameIsQualified
+      && ((ref.kind === "call" && ref.memberReceiver) || ref.kind === "type"),
+    );
+    if (qualified && !unsafeBareQualifiedGuess) {
       push(src, qualified, edgeType, "EXTRACTED");
       continue;
     }
@@ -135,8 +172,6 @@ export function resolveRefs(input: {
     // to resolve, or tier 3c would risk picking the wrong one of the "tie").
     const candidates = input.lookup.bareNameCandidates(bare).filter((c) => c.id !== src);
     const generic = GENERIC_NAMES.has(bare);
-    // Zero candidates = likely forward reference; every path below drops it.
-    if (candidates.length === 0) unresolvedNames.push(bare);
 
     // tier 3a: narrow to the current file + its imports. An imported symbol is
     // the strongly-likely target; a unique scoped hit wins. Import evidence is
@@ -157,10 +192,29 @@ export function resolveRefs(input: {
       }
     }
 
+    // A member receiver is concrete ownership evidence. If it did not resolve
+    // to a same-file, qualified, or imported-file symbol above, guessing from
+    // an unrelated repo-wide bare name is less accurate than leaving the edge
+    // unresolved (`this.jwtService.sign()` must not bind to a test helper named
+    // `sign`). Type references follow the same rule: real cross-file types are
+    // imported, while an unscoped unique bare hit can easily be an unrelated
+    // class with a common framework name such as `Metadata`.
+    if (input.importedFiles && ((ref.kind === "call" && ref.memberReceiver) || ref.kind === "type")) {
+      // A zero-candidate member/type can only become resolvable later when the
+      // file imports repository code. External SDK/framework receivers have no
+      // internal imported file and must not schedule an unrelated second pass.
+      if (candidates.length === 0 && input.importedFiles.size > 0) unresolvedNames.push(bare);
+      unresolved += 1;
+      continue;
+    }
+
     // Generic names get no bare-unique/best-guess hit — without import evidence
     // a repo-wide match is almost certainly a builtin/framework call, not this
     // user symbol. Dropping here is what removes the fake mega-hubs.
     if (generic) {
+      if (candidates.length === 0 && input.importedFiles && input.importedFiles.size > 0) {
+        unresolvedNames.push(bare);
+      }
       unresolved += 1;
       continue;
     }
@@ -176,6 +230,9 @@ export function resolveRefs(input: {
     if (candidates.length > 1 && candidates.length <= MAX_BARE_CANDIDATES) {
       push(src, candidates[0].id, edgeType, "INFERRED", 1 / candidates.length);
     } else {
+      if (candidates.length === 0 && input.importedFiles && input.importedFiles.size > 0) {
+        unresolvedNames.push(bare);
+      }
       unresolved += 1; // 0 candidates, or too ambiguous to guess
     }
   }

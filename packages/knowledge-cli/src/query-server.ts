@@ -1,8 +1,274 @@
 import { createInterface } from "node:readline";
-import { CAPABILITIES, capabilityHash, type SearchResponse } from "@penguin/knowledge-contracts";
-import { searchKnowledge, getSourceHit, compactIndexStatus, buildStatusPanel, resolveRevisionContext, SCHEMA_VERSION } from "@penguin/knowledge-core";
+import { randomUUID } from "node:crypto";
+import { Worker } from "node:worker_threads";
+import { CAPABILITIES, capabilityHash } from "@penguin/knowledge-contracts";
+import { getSourceHit, compactIndexStatus, buildStatusPanel, SCHEMA_VERSION } from "@penguin/knowledge-core";
 import { runCli, type CliDeps } from "./index.js";
 import { dispatchQueryFrame, encodeFrame, parseFrame, queryHello } from "./query-protocol.js";
+
+interface QueryWorkerJob {
+  id: string;
+  capabilityId: string;
+  input: unknown;
+  resolve: (value: unknown) => void;
+  reject: (error: Error & { code?: string }) => void;
+  timer: ReturnType<typeof setTimeout>;
+  signal?: AbortSignal;
+  abortListener?: () => void;
+  settled: boolean;
+  startedAt: number;
+  startedCpu: NodeJS.CpuUsage;
+}
+
+interface QueryWorkerSlot {
+  worker: Worker;
+  current?: QueryWorkerJob;
+}
+
+function queryRuntimeError(code: string, message: string): Error & { code: string } {
+  return Object.assign(new Error(message), { code });
+}
+
+/**
+ * Bounded pool for synchronous SQLite search work. Each worker owns an
+ * independent read connection, so a stuck sqlite3_step cannot block the
+ * resident protocol/event loop. Timeout/cancel terminates that worker, which
+ * is SQLite's reliable cross-thread interrupt boundary for better-sqlite3.
+ */
+export class QueryWorkerPool {
+  private readonly slots: QueryWorkerSlot[];
+  private readonly queue: QueryWorkerJob[] = [];
+  private readonly retiringWorkers = new Set<Promise<number>>();
+  private readonly maxQueue: number;
+  private readonly defaultTimeoutMs: number;
+  private closing = false;
+
+  private logSlowOrStopped(job: QueryWorkerJob, outcome: string, result?: unknown): void {
+    const elapsedMs = performance.now() - job.startedAt;
+    const slowThresholdMs = boundedInteger(process.env.PENGUIN_QUERY_SLOW_MS, 1_000, 1, 120_000);
+    if (elapsedMs < slowThresholdMs && outcome === "ok") return;
+    const cpu = process.cpuUsage(job.startedCpu);
+    const response = result && typeof result === "object" ? result as {
+      diagnostics?: { resolvedScopes?: unknown[]; candidateCount?: number };
+    } : undefined;
+    process.stderr.write(`${JSON.stringify({
+      event: "penguin_slow_query",
+      queryId: job.id,
+      capabilityId: job.capabilityId,
+      outcome,
+      elapsedMs: Math.round(elapsedMs * 1000) / 1000,
+      cpuMs: Math.round((cpu.user + cpu.system) / 1000),
+      resolvedRepoCount: response?.diagnostics?.resolvedScopes?.length ?? null,
+      candidateCount: response?.diagnostics?.candidateCount ?? null,
+    })}\n`);
+  }
+
+  constructor(private readonly options: {
+    dbPath: string;
+    ledgerPath: string;
+    workerUrl?: URL;
+    size?: number;
+    maxQueue?: number;
+    timeoutMs?: number;
+  }) {
+    const configuredSize = Number(options.size);
+    const configuredQueue = Number(options.maxQueue);
+    const configuredTimeout = Number(options.timeoutMs);
+    const size = Number.isFinite(configuredSize)
+      ? Math.max(1, Math.min(4, Math.floor(configuredSize)))
+      : 2;
+    this.maxQueue = Number.isFinite(configuredQueue)
+      ? Math.max(0, Math.min(128, Math.floor(configuredQueue)))
+      : 16;
+    this.defaultTimeoutMs = Number.isFinite(configuredTimeout)
+      ? Math.max(1, Math.floor(configuredTimeout))
+      : 15_000;
+    this.slots = Array.from({ length: size }, () => ({ worker: this.createWorker() }));
+    for (const slot of this.slots) this.attach(slot);
+  }
+
+  private createWorker(): Worker {
+    const worker = new Worker(this.options.workerUrl ?? new URL("./query-worker.js", import.meta.url), {
+      workerData: { dbPath: this.options.dbPath, ledgerPath: this.options.ledgerPath },
+    });
+    worker.unref();
+    return worker;
+  }
+
+  private attach(slot: QueryWorkerSlot): void {
+    const worker = slot.worker;
+    worker.on("message", (message: {
+      type: "result";
+      id: string;
+      ok: boolean;
+      result?: unknown;
+      error?: { code?: string; message?: string };
+    }) => {
+      if (slot.worker !== worker || message.type !== "result") return;
+      const job = slot.current;
+      if (!job || job.id !== message.id) return;
+      slot.current = undefined;
+      if (message.ok) {
+        this.logSlowOrStopped(job, "ok", message.result);
+        this.settle(job, true, message.result);
+      } else {
+        this.logSlowOrStopped(job, message.error?.code ?? "error");
+        this.settle(
+        job,
+        false,
+        queryRuntimeError(message.error?.code ?? "INTERNAL", message.error?.message ?? "query worker failed"),
+      );
+      }
+      this.drain();
+    });
+    worker.on("error", (error) => {
+      if (slot.worker !== worker || this.closing) return;
+      const job = slot.current;
+      slot.current = undefined;
+      if (job) this.settle(job, false, queryRuntimeError("QUERY_WORKER_CRASH", error.message));
+      this.replace(slot);
+      this.drain();
+    });
+    worker.on("exit", (code) => {
+      if (slot.worker !== worker || this.closing) return;
+      const job = slot.current;
+      slot.current = undefined;
+      if (job) this.settle(
+        job,
+        false,
+        queryRuntimeError("QUERY_WORKER_CRASH", `query worker exited with code ${code}`),
+      );
+      this.replace(slot);
+      this.drain();
+    });
+  }
+
+  private replace(slot: QueryWorkerSlot): void {
+    const previous = slot.worker;
+    const replacement = this.createWorker();
+    slot.worker = replacement;
+    slot.current = undefined;
+    this.attach(slot);
+    this.retire(previous);
+  }
+
+  private retire(worker: Worker): Promise<number> {
+    let tracked: Promise<number>;
+    tracked = worker.terminate()
+      // Termination is cleanup; a failed termination must not become an
+      // unhandled rejection, while close() still waits for it to settle.
+      .catch(() => -1)
+      .finally(() => this.retiringWorkers.delete(tracked));
+    this.retiringWorkers.add(tracked);
+    return tracked;
+  }
+
+  private settle(job: QueryWorkerJob, ok: boolean, value: unknown): void {
+    if (job.settled) return;
+    job.settled = true;
+    clearTimeout(job.timer);
+    if (job.signal && job.abortListener) {
+      job.signal.removeEventListener("abort", job.abortListener);
+    }
+    if (ok) job.resolve(value);
+    else job.reject(value as Error & { code?: string });
+  }
+
+  private stop(job: QueryWorkerJob, code: "CANCELLED" | "QUERY_TIMEOUT"): void {
+    if (job.settled) return;
+    const queued = this.queue.indexOf(job);
+    if (queued >= 0) this.queue.splice(queued, 1);
+    const activeSlot = this.slots.find((slot) => slot.current === job);
+    if (activeSlot) this.replace(activeSlot);
+    this.logSlowOrStopped(job, code);
+    this.settle(
+      job,
+      false,
+      queryRuntimeError(
+        code,
+        code === "CANCELLED" ? "query was cancelled" : "query exceeded the hard timeout",
+      ),
+    );
+    this.drain();
+  }
+
+  private drain(): void {
+    if (this.closing) return;
+    for (const slot of this.slots) {
+      if (slot.current) continue;
+      const job = this.queue.shift();
+      if (!job) break;
+      if (job.settled) continue;
+      slot.current = job;
+      slot.worker.postMessage({
+        type: "run",
+        id: job.id,
+        capabilityId: job.capabilityId,
+        input: job.input,
+      });
+    }
+  }
+
+  run(
+    capabilityId: string,
+    input: unknown,
+    signal?: AbortSignal,
+    timeoutMs = this.defaultTimeoutMs,
+  ): Promise<unknown> {
+    if (this.closing) return Promise.reject(queryRuntimeError("QUERY_RUNTIME_CLOSED", "query worker pool is closed"));
+    if (signal?.aborted) return Promise.reject(queryRuntimeError("CANCELLED", "query was cancelled"));
+    const hasIdle = this.slots.some((slot) => !slot.current);
+    if (!hasIdle && this.queue.length >= this.maxQueue) {
+      return Promise.reject(queryRuntimeError("QUERY_BUSY", "query worker queue is full"));
+    }
+    return new Promise((resolve, reject) => {
+      const job: QueryWorkerJob = {
+        id: `query_${randomUUID()}`,
+        capabilityId,
+        input,
+        resolve,
+        reject,
+        timer: undefined as unknown as ReturnType<typeof setTimeout>,
+        signal,
+        settled: false,
+        startedAt: performance.now(),
+        startedCpu: process.cpuUsage(),
+      };
+      job.timer = setTimeout(() => this.stop(job, "QUERY_TIMEOUT"), Math.max(1, timeoutMs));
+      if (signal) {
+        job.abortListener = () => this.stop(job, "CANCELLED");
+        signal.addEventListener("abort", job.abortListener, { once: true });
+      }
+      this.queue.push(job);
+      this.drain();
+    });
+  }
+
+  async close(): Promise<void> {
+    if (this.closing) return;
+    this.closing = true;
+    for (const job of this.queue.splice(0)) {
+      this.settle(job, false, queryRuntimeError("QUERY_RUNTIME_CLOSED", "query worker pool is closed"));
+    }
+    for (const slot of this.slots) {
+      if (slot.current) {
+        this.settle(slot.current, false, queryRuntimeError("QUERY_RUNTIME_CLOSED", "query worker pool is closed"));
+        slot.current = undefined;
+      }
+    }
+    const terminating = [
+      ...this.retiringWorkers,
+      ...this.slots.map((slot) => this.retire(slot.worker)),
+    ];
+    await Promise.all(terminating);
+  }
+
+}
+
+function boundedInteger(value: string | undefined, fallback: number, min: number, max: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(min, Math.min(max, Math.floor(parsed))) : fallback;
+}
 
 /** Reads may overlap; mutations are chained in manifest order. */
 export class QueryExecutionQueue {
@@ -61,6 +327,13 @@ export async function runQueryServer(deps: CliDeps, input = process.stdin, outpu
   const active = new Map<string, AbortController>();
   const executionQueue = new QueryExecutionQueue();
   const caches = new QueryServerCaches(store);
+  const queryWorkers = new QueryWorkerPool({
+    dbPath: store.db.name,
+    ledgerPath: store.ledgerPath,
+    size: boundedInteger(process.env.PENGUIN_QUERY_WORKERS, 2, 1, 4),
+    maxQueue: boundedInteger(process.env.PENGUIN_QUERY_MAX_QUEUE, 16, 0, 128),
+    timeoutMs: boundedInteger(process.env.PENGUIN_QUERY_TIMEOUT_MS, 15_000, 1, 120_000),
+  });
   caches.prepare("SELECT 1");
   output.write(encodeFrame(queryHello(SCHEMA_VERSION)));
   const rl = createInterface({ input });
@@ -77,54 +350,7 @@ export async function runQueryServer(deps: CliDeps, input = process.stdin, outpu
       return getSourceHit(store, { snapshotId: request.snapshotId, filePath: request.filePath, ...(request.repoId ? { repoId: request.repoId } : {}), ...(Number.isInteger(request.startLine) ? { startLine: request.startLine } : {}), ...(Number.isInteger(request.endLine) ? { endLine: request.endLine } : {}), ...(Number.isInteger(request.startByte) ? { startByte: request.startByte } : {}), ...(Number.isInteger(request.contextLines) ? { contextLines: request.contextLines } : {}) });
     }
     if (capabilityId === "knowledge.search") {
-      const request = value as { scope?: { revisions?: Array<{ repoId?: string; repoName?: string; branch?: string; snapshotId?: string }> } };
-      const requested = request.scope?.revisions ?? [];
-      const scopes: Array<{ repoId?: string; repoName?: string; branch?: string; snapshotId: string }> = [];
-      const scopeWarnings: Array<{ code: string; message: string }> = [];
-      for (const rev of requested) {
-        // A caller-supplied snapshotId is an explicit override -- pass the
-        // entry through as-is (preserving any other fields it carried)
-        // rather than reconstructing a stripped-down {repoId, snapshotId}.
-        if (typeof rev.snapshotId === "string") { scopes.push({ ...rev, snapshotId: rev.snapshotId }); continue; }
-        const repoRow = rev.repoId ?? rev.repoName
-          ? (store.db.prepare("SELECT id FROM repos WHERE id=? OR name=? LIMIT 1").get(rev.repoId ?? rev.repoName, rev.repoName ?? rev.repoId) as { id: string } | undefined)
-          : undefined;
-        if (!repoRow) { scopeWarnings.push({ code: "SCOPE_UNRESOLVED", message: `scope entry did not match a repo: ${JSON.stringify(rev)}` }); continue; }
-        const resolution = resolveRevisionContext(store, { repoId: repoRow.id, ...(rev.branch ? { branch: rev.branch } : {}) });
-        if (resolution.status !== "resolved") { scopeWarnings.push({ code: "SCOPE_UNRESOLVED", message: resolution.reason }); continue; }
-        // resolveRevisionContext's branch/live-fallback paths always mint a
-        // `legacy:<branchId>` snapshotId (revision.ts contextOf() never reads
-        // current_snapshot_id). search-engine's own scope machinery
-        // (scopeRows()/revisionContext() in search-engine.ts) prefers the
-        // branch's real revision_snapshots id whenever one exists, falling
-        // back to the legacy form only when current_snapshot_id is still
-        // null. Re-derive here so a branch that has been promoted to a real
-        // snapshot is scoped to it, not silently downgraded to the legacy
-        // branch-id form that source/path lane lookups can't resolve.
-        const branchRow = resolution.context.branchId
-          ? (store.db.prepare("SELECT current_snapshot_id AS currentSnapshotId FROM branches WHERE id=?").get(resolution.context.branchId) as { currentSnapshotId: string | null } | undefined)
-          : undefined;
-        scopes.push({ repoId: repoRow.id, snapshotId: branchRow?.currentSnapshotId ?? resolution.context.snapshotId });
-      }
-      // searchKnowledge re-derives its own scope filter from
-      // request.scope.revisions on top of whatever `scopes` we pass as
-      // context.scopes (see search-engine.ts): its repoName check
-      // short-circuits before ever consulting branch, and its branch check
-      // requires exact current_snapshot_id equality that a resolved `legacy:`
-      // snapshotId cannot satisfy. Rewriting the outgoing revisions to plain
-      // resolved snapshotId entries keeps that inner filter exact. Dropping
-      // unresolved entries here (rather than forwarding them unresolved)
-      // means a wholly-unresolvable request degrades to the default scope
-      // with a warning instead of tripping searchKnowledge's own
-      // REPOSITORY_NOT_FOUND error.
-      const { revisions: _rawRevisions, ...restScope } = (request.scope ?? {}) as Record<string, unknown>;
-      const requestForSearch = requested.length
-        ? { ...(value as Record<string, unknown>), scope: scopes.length ? { ...restScope, revisions: scopes } : restScope }
-        : value;
-      const response = searchKnowledge(requestForSearch as never, { store, ...(scopes.length ? { scopes } : {}), signal }) as SearchResponse;
-      return scopeWarnings.length
-        ? { ...response, diagnostics: { ...response.diagnostics, warnings: [...response.diagnostics.warnings, ...scopeWarnings] } }
-        : response;
+      return queryWorkers.run("knowledge.search", value, signal);
     }
     // Compatibility bridge for the existing Tauri query surface. It keeps the
     // CLI parser/core implementation as the semantic authority while avoiding
@@ -197,7 +423,15 @@ export async function runQueryServer(deps: CliDeps, input = process.stdin, outpu
     } catch (error) {
       framingErrors += 1;
       output.write(encodeFrame({ type: "response", id: "unknown", ok: false, error: { code: String((error as Error).message) === "PROTOCOL_MAJOR_MISMATCH" ? "PROTOCOL_MAJOR_MISMATCH" : "MALFORMED_FRAME", message: String((error as Error).message) } }));
-      if (framingErrors >= 3) { framingCorruption = true; break; }
+      if (framingErrors >= 3) {
+        framingCorruption = true;
+        // Stop retaining the still-open parent stdin pipe. Otherwise the
+        // runtime has finished but Node cannot exit until the client closes
+        // its side, defeating the corruption self-recovery contract.
+        rl.close();
+        input.pause();
+        break;
+      }
       continue;
     }
     const capability = frame.type === "request" ? CAPABILITIES.find((candidate) => candidate.id === frame.capabilityId) : undefined;
@@ -207,6 +441,7 @@ export async function runQueryServer(deps: CliDeps, input = process.stdin, outpu
     tasks.push(task.then((response) => { if (response) output.write(encodeFrame(response)); }));
   }
   await Promise.all(tasks);
+  await queryWorkers.close();
   store.close();
   return framingCorruption ? 1 : 0;
 }

@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
-import { basename, dirname, relative, resolve as pathResolve } from "node:path";
-import { SCHEMA_VERSION, GitTopologyStore, FileFactStore, SourceStore, SourceSnapshotStore, resolveBranchBase, type KnowledgeStore, type ParsedFileFact, type ParsedEdge, type SnapshotOverlayEntry, type SourceSnapshotOverlayEntry } from "@penguin/knowledge-core";
-import { extractSymbols, type ExtractedSymbol } from "./extract.js";
+import { basename, dirname, extname, relative, resolve as pathResolve } from "node:path";
+import { performance } from "node:perf_hooks";
+import { SCHEMA_VERSION, GitTopologyStore, FileFactStore, ResolutionStore, SourceStore, SourceSnapshotStore, resolveBranchBase, type KnowledgeStore, type ParsedFileFact, type ParsedEdge, type SnapshotOverlayEntry, type SourceSnapshotOverlayEntry } from "@penguin/knowledge-core";
+import { extractSymbols, type ExtractedFile, type ExtractedSymbol } from "./extract.js";
 import { extractFieldAccesses } from "./field-access.js";
 import { extractIacFacts } from "./iac.js";
 import { grpcEndpointKey } from "./grpc-client.js";
@@ -49,9 +50,96 @@ export interface IndexReport {
   renamed: number;
   commits: number; // git commit nodes captured
   tags: number; // git tag nodes captured
+  timings: {
+    totalMs: number;
+    stages: Partial<Record<IndexStageId, number>>;
+    parse: ParseTimingBreakdown;
+  };
+  maintenance: {
+    walAutoCheckpointPages: number;
+    sqliteTuning: {
+      previousCacheSize: number;
+      activeCacheSize: number;
+      previousMmapSize: number;
+      activeMmapSize: number;
+    };
+    analyzedIndexes: string[];
+    analyzeMs: number;
+    optimizeMs: number;
+    checkpointMs: number;
+    checkpointAttempts: number;
+    checkpointWarning: string | null;
+    checkpoint: { busy: number; log: number; checkpointed: number };
+  };
 }
 
-export const KNOWLEDGE_PARSER_VERSION = "tree-sitter-wasm-v5-single-pass-log-sites";
+export interface ParseTimingBreakdown {
+  filePasses: number;
+  secondPasses: number;
+  edgeSets: Record<"cached" | "compared" | "replaced", number>;
+  edgeSetsByPass: Record<"first" | "second", Record<"cached" | "compared" | "replaced", number>>;
+  sourceHashMs: number;
+  sourceLookupMs: number;
+  sourceIngestMs: number;
+  sourceReadMs: number;
+  extractMs: number;
+  fileFactMs: number;
+  priorSymbolsMs: number;
+  transactionMs: number;
+  nodeWritesMs: number;
+  logSitesMs: number;
+  symbolVersionsMs: number;
+  referenceResolutionMs: number;
+  graphWritesMs: number;
+  replaceEdgesMs: number;
+  symbolFtsMs: number;
+  identifierFtsMs: number;
+  checkpointMs: number;
+  metricsMs: number;
+}
+
+type ParseDurationKey = Exclude<keyof ParseTimingBreakdown, "filePasses" | "secondPasses" | "edgeSets" | "edgeSetsByPass">;
+
+function emptyParseTimings(): ParseTimingBreakdown {
+  return {
+    filePasses: 0,
+    secondPasses: 0,
+    edgeSets: { cached: 0, compared: 0, replaced: 0 },
+    edgeSetsByPass: {
+      first: { cached: 0, compared: 0, replaced: 0 },
+      second: { cached: 0, compared: 0, replaced: 0 },
+    },
+    sourceHashMs: 0,
+    sourceLookupMs: 0,
+    sourceIngestMs: 0,
+    sourceReadMs: 0,
+    extractMs: 0,
+    fileFactMs: 0,
+    priorSymbolsMs: 0,
+    transactionMs: 0,
+    nodeWritesMs: 0,
+    logSitesMs: 0,
+    symbolVersionsMs: 0,
+    referenceResolutionMs: 0,
+    graphWritesMs: 0,
+    replaceEdgesMs: 0,
+    symbolFtsMs: 0,
+    identifierFtsMs: 0,
+    checkpointMs: 0,
+    metricsMs: 0,
+  };
+}
+
+function addParseDuration(
+  timings: ParseTimingBreakdown | undefined,
+  key: ParseDurationKey,
+  startedAt: number,
+): void {
+  if (timings) timings[key] += performance.now() - startedAt;
+}
+
+export const KNOWLEDGE_PARSER_VERSION = "tree-sitter-wasm-v6-member-receivers";
+export const KNOWLEDGE_RESOLVER_VERSION = "resolver-v4-import-scoped-qualified";
 
 // In-process index task lock: one active task per repo+branch+checkout (§8.3).
 const activeLocks = new Set<string>();
@@ -107,7 +195,17 @@ function isFile(p: string): boolean {
 function resolveRelativeImport(fromAbsPath: string, spec: string, rootPath: string): string | null {
   if (!spec.startsWith(".")) return null; // bare/external module — no file node
   const base = pathResolve(dirname(fromAbsPath), spec);
-  for (const cand of [...IMPORT_EXTS.map((e) => base + e), ...IMPORT_INDEX.map((e) => base + e)]) {
+  const emittedExtension = extname(base);
+  const sourceCandidates = emittedExtension === ".js"
+    ? [base.slice(0, -3) + ".ts", base.slice(0, -3) + ".tsx", base.slice(0, -3) + ".d.ts"]
+    : emittedExtension === ".jsx"
+      ? [base.slice(0, -4) + ".tsx"]
+      : emittedExtension === ".mjs"
+        ? [base.slice(0, -4) + ".mts"]
+        : emittedExtension === ".cjs"
+          ? [base.slice(0, -4) + ".cts"]
+          : [];
+  for (const cand of [...sourceCandidates, ...IMPORT_EXTS.map((e) => base + e), ...IMPORT_INDEX.map((e) => base + e)]) {
     if (isFile(cand)) {
       const rel = relative(rootPath, cand);
       if (rel && !rel.startsWith("..")) return rel.split("\\").join("/");
@@ -227,6 +325,10 @@ async function indexFileWithSource(
     sizeBytes: number;
     recordRenames?: boolean;
     snapshotId?: string;
+    timings?: ParseTimingBreakdown;
+    pass?: "first" | "second";
+    preExtracted?: ExtractedFile;
+    deferEdgesOnUnresolved?: boolean;
   },
 ): Promise<{
   error: string | null;
@@ -238,7 +340,9 @@ async function indexFileWithSource(
   // caller retries this file in a second pass once the symbol table is full.
   retryNames: string[];
   fileFactId?: string;
+  extracted?: ExtractedFile;
 }> {
+  if (p.timings) p.timings.filePasses += 1;
   const lang = langForExtension(p.relPath);
   const iacFacts = extractIacFacts(p.relPath, p.source);
   // Skip non-source files AND minified/generated bundles that slipped past the
@@ -260,7 +364,10 @@ async function indexFileWithSource(
     return { error: null, renamed: 0, endpoints: [], retryNames: [] };
   }
 
-  const extracted = await extractSymbols({ lang, source: p.source, relPath: p.relPath });
+  let timingStartedAt = performance.now();
+  const extracted = p.preExtracted
+    ?? await extractSymbols({ lang, source: p.source, relPath: p.relPath });
+  if (!p.preExtracted) addParseDuration(p.timings, "extractMs", timingStartedAt);
   // Object-literal keys / interface / type-alias / class field names — none
   // of these are symbol nodes, so this feeds fts_identifiers only (see
   // identifiers.ts). TS/JS-only for now: the grammar node types it looks for
@@ -273,6 +380,7 @@ async function indexFileWithSource(
     });
     return { error: extracted.parseError, renamed: 0, endpoints: [], retryNames: [] };
   }
+  timingStartedAt = performance.now();
   const fileFactId = new FileFactStore(store).upsertFileFact({
     repoId: p.repoId, filePath: p.relPath, contentHash: p.contentHash,
     language: lang, parserVersion: "parser-v1",
@@ -280,11 +388,23 @@ async function indexFileWithSource(
     symbols: extracted.symbols.map((symbol) => ({ identityKey: symbolIdentityKey(p.repoId, p.relPath, symbol.qualifiedName), title: symbol.name, kind: symbol.kind, ...(symbol.signature ? { signature: symbol.signature } : {}), startLine: symbol.startLine, endLine: symbol.endLine, contentHash: symbol.contentHash })),
     imports: [], unresolvedReferences: [], endpoints: [], logSites: [],
   });
+  addParseDuration(p.timings, "fileFactMs", timingStartedAt);
   // Hoisted out of the write-transaction closure below so the return can see it.
   let retryNames: string[] = [];
+  let snapshotResolutionEdges: Array<{
+    srcIdentityKey: string;
+    dstIdentityKey?: string;
+    rawTarget?: string;
+    edgeType: string;
+    method: string;
+    confidence: number;
+    provenance: Record<string, unknown>;
+  }> | null = null;
 
   // Rename detection BEFORE the rebuildable txn — aliases go to the Ledger (§2.2.4).
+  timingStartedAt = performance.now();
   const prior = priorSymbols(store, p.repoId, p.branchId, p.relPath);
+  addParseDuration(p.timings, "priorSymbolsMs", timingStartedAt);
   const priorKeys = new Set(prior.map((s) => s.qualifiedName));
   const nowKeys = new Set(extracted.symbols.map((s) => s.qualifiedName));
   const disappeared = prior.filter((s) => !nowKeys.has(s.qualifiedName));
@@ -315,6 +435,7 @@ async function indexFileWithSource(
 
   const tx = store.db.transaction(() => {
     // 0. the file itself is a node (defines/imports edges hang off it)
+    let transactionStepStartedAt = performance.now();
     const fileNodeId = store.upsertNode({
       nodeType: "file",
       identityKey: fileIdentityKey(p.repoId, p.relPath),
@@ -335,10 +456,12 @@ async function indexFileWithSource(
       });
       fileSymbolIds.set(sym.qualifiedName, nodeId);
     }
+    addParseDuration(p.timings, "nodeWritesMs", transactionStepStartedAt);
 
-    // log_site nodes are rebuildable parser output. Replace this file's full
-    // set so removed/changed log messages cannot remain searchable.
-    store.clearLogSitesForFile(p.repoId, p.relPath);
+    // log_site identity is content-addressed. Upsert the current set first so
+    // unchanged sites keep stable node/edge ids, then delete only disappeared
+    // sites; clearing the whole file here made every rebuild rewrite its graph.
+    transactionStepStartedAt = performance.now();
     const logSiteNodes: Array<{ site: (typeof extracted.logSites)[number]; nodeId: string }> = [];
     for (const site of extracted.logSites) {
       const identityKey = `${p.repoId}::log::${p.relPath}:${site.startLine}:${sha256(site.message).slice(0, 16)}`;
@@ -357,8 +480,15 @@ async function indexFileWithSource(
       });
       logSiteNodes.push({ site, nodeId });
     }
+    store.clearLogSitesForFile(
+      p.repoId,
+      p.relPath,
+      logSiteNodes.map(({ nodeId }) => nodeId),
+    );
+    addParseDuration(p.timings, "logSitesMs", transactionStepStartedAt);
 
     // 2. mark this file's prior versions stale, then upsert fresh versions
+    transactionStepStartedAt = performance.now();
     store.markFileSymbolsStale({ branchId: p.branchId, filePath: p.relPath });
     for (const sym of extracted.symbols) {
       const nodeId = fileSymbolIds.get(sym.qualifiedName)!;
@@ -369,9 +499,11 @@ async function indexFileWithSource(
         status: "fresh",
       });
     }
+    addParseDuration(p.timings, "symbolVersionsMs", transactionStepStartedAt);
 
     // 3. resolve call/type refs → edges (import-scoped), plus structural edges:
     //    file →defines→ symbol, and file →imports→ imported file.
+    transactionStepStartedAt = performance.now();
     const symbolLookup = storeSymbolIndex(store, p.repoId);
     const resolved = resolveRefs({
       refs: extracted.refs, fileSymbols: extracted.symbols,
@@ -381,6 +513,8 @@ async function indexFileWithSource(
     // Cap: a file with hundreds of external (node_modules/stdlib) misses would
     // otherwise carry a huge retry list for names that never resolve.
     retryNames = [...new Set(resolved.unresolvedNames)].slice(0, 100);
+    addParseDuration(p.timings, "referenceResolutionMs", transactionStepStartedAt);
+    transactionStepStartedAt = performance.now();
     const structural: ParsedEdge[] = [];
     for (const nodeId of fileSymbolIds.values()) {
       structural.push({ src: fileNodeId, dst: nodeId, edgeType: "defines", origin: "parser", method: "EXTRACTED" });
@@ -551,31 +685,82 @@ async function indexFileWithSource(
       });
       structural.push({ src, dst: fieldId, edgeType: access.kind, origin: "parser", method: access.method, confidence: access.method === "EXTRACTED" ? 1 : 0.45 });
     }
-    store.replaceFileEdges({
-      repoId: p.repoId, branchId: p.branchId, filePath: p.relPath,
-      edges: [...resolved.edges, ...structural],
-    });
+    addParseDuration(p.timings, "graphWritesMs", transactionStepStartedAt);
+    transactionStepStartedAt = performance.now();
+    if (!(p.deferEdgesOnUnresolved && retryNames.length > 0)) {
+      const fileEdges = [...resolved.edges, ...structural];
+      const edgeSetResult = store.replaceFileEdges({
+        repoId: p.repoId, branchId: p.branchId, filePath: p.relPath,
+        edges: fileEdges,
+      });
+      snapshotResolutionEdges = fileEdges.flatMap((edge) => {
+        const srcIdentityKey = store.getNode(edge.src)?.identity_key;
+        if (!srcIdentityKey) return [];
+        const dstIdentityKey = edge.dst ? store.getNode(edge.dst)?.identity_key : undefined;
+        return [{
+          srcIdentityKey,
+          ...(dstIdentityKey ? { dstIdentityKey } : {}),
+          ...(edge.rawTarget ? { rawTarget: edge.rawTarget } : {}),
+          edgeType: edge.edgeType,
+          method: edge.method,
+          confidence: edge.confidence ?? 1,
+          provenance: { ...edge.provenance, filePath: p.relPath },
+        }];
+      });
+      if (p.timings) {
+        p.timings.edgeSets[edgeSetResult] += 1;
+        p.timings.edgeSetsByPass[p.pass ?? "first"][edgeSetResult] += 1;
+      }
+    }
+    addParseDuration(p.timings, "replaceEdgesMs", transactionStepStartedAt);
 
     // 4. FTS for each symbol
+    transactionStepStartedAt = performance.now();
     for (const sym of extracted.symbols) {
       store.indexSymbolText({
         nodeId: fileSymbolIds.get(sym.qualifiedName)!, name: sym.name, signature: sym.signature,
       });
     }
+    addParseDuration(p.timings, "symbolFtsMs", transactionStepStartedAt);
 
     // 4b. field/object-key identifier index (file:line only, not graph nodes)
+    transactionStepStartedAt = performance.now();
     store.indexIdentifiers({ repoId: p.repoId, filePath: p.relPath, entries: extracted.identifiers });
+    addParseDuration(p.timings, "identifierFtsMs", transactionStepStartedAt);
 
     // 5. checkpoint
+    transactionStepStartedAt = performance.now();
     store.upsertFileCheckpoint({
       repoId: p.repoId, branchId: p.branchId, filePath: p.relPath, lang,
       mtimeMs: p.mtimeMs, sizeBytes: p.sizeBytes, contentHash: p.contentHash, status: "indexed",
     });
+    addParseDuration(p.timings, "checkpointMs", transactionStepStartedAt);
 
     return { fileSymbolIds };
   });
 
+  timingStartedAt = performance.now();
   const { fileSymbolIds } = tx();
+  addParseDuration(p.timings, "transactionMs", timingStartedAt);
+
+  if (p.snapshotId && snapshotResolutionEdges) {
+    const resolverVersion = KNOWLEDGE_RESOLVER_VERSION;
+    const contextFingerprint = createHash("sha256")
+      .update(JSON.stringify({ fileFactId, resolverVersion, edges: snapshotResolutionEdges }))
+      .digest("hex");
+    const resolutions = new ResolutionStore(store);
+    const set = resolutions.replaceResolutionSet({
+      fileFactId,
+      contextFingerprint,
+      resolverVersion,
+      edges: snapshotResolutionEdges,
+    });
+    resolutions.attachSnapshotResolution({
+      snapshotId: p.snapshotId,
+      filePath: p.relPath,
+      resolutionSetId: set.id,
+    });
+  }
 
   // Apply rename aliases now that node ids exist (Ledger-first, outside the txn).
   let renamed = 0;
@@ -607,6 +792,7 @@ async function indexFileWithSource(
     endpoints: extracted.endpoints.map((e) => ({ key: e.key, protocol: e.protocol })),
     retryNames,
     fileFactId,
+    extracted,
   };
 }
 
@@ -645,6 +831,7 @@ export async function indexRepo(input: {
   mode: "incremental" | "rebuild";
   onProgress?: (p: IndexProgressEvent) => void;
 }): Promise<IndexReport> {
+  const runStartedAt = Date.now();
   const { store, rootPath, mode } = input;
   const git = readGitContext(rootPath);
   // Prefer the git remote's repo name (e.g. penguin-src); fall back to the local
@@ -694,12 +881,12 @@ export async function indexRepo(input: {
     ? (git.commit ?? git.worktreeFingerprint)
     : `${git.commit ?? "worktree"}:${git.worktreeFingerprint}`;
   const snapshot = topology.createBuildingSnapshot({
-    snapshotKey: `${repoId}:${snapshotRevisionKey}:${KNOWLEDGE_PARSER_VERSION}:resolver-v1:${SCHEMA_VERSION}`,
+    snapshotKey: `${repoId}:${snapshotRevisionKey}:${KNOWLEDGE_PARSER_VERSION}:${KNOWLEDGE_RESOLVER_VERSION}:${SCHEMA_VERSION}`,
     repoId,
     ...(git.commit ? { commitSha: git.commit } : {}),
     worktreeFingerprint: git.worktreeFingerprint,
     parserVersion: KNOWLEDGE_PARSER_VERSION,
-    resolverVersion: "resolver-v1",
+    resolverVersion: KNOWLEDGE_RESOLVER_VERSION,
     schemaVersion: SCHEMA_VERSION,
     ...(baseSnapshotId ? { baseSnapshotId } : {}),
   });
@@ -730,6 +917,23 @@ export async function indexRepo(input: {
     coverageWarnings: [],
     scanned: 0, parsed: 0, skipped: 0, deleted: 0, errors: 0, renamed: 0,
     commits: 0, tags: 0,
+    timings: { totalMs: 0, stages: {}, parse: emptyParseTimings() },
+    maintenance: {
+      walAutoCheckpointPages: 0,
+      sqliteTuning: {
+        previousCacheSize: 0,
+        activeCacheSize: 0,
+        previousMmapSize: 0,
+        activeMmapSize: 0,
+      },
+      analyzedIndexes: [],
+      analyzeMs: 0,
+      optimizeMs: 0,
+      checkpointMs: 0,
+      checkpointAttempts: 0,
+      checkpointWarning: null,
+      checkpoint: { busy: 0, log: 0, checkpointed: 0 },
+    },
   };
   const dirtyFiles = new Set(git.dirtyFiles);
   const commitForFile = (relPath: string): string | null => {
@@ -744,9 +948,11 @@ export async function indexRepo(input: {
     emit?.({ phase: "stage", stage: s, state: "start" });
   };
   const stageDone = (s: IndexStageId, detail?: string) => {
+    const elapsedMs = Date.now() - (stageT0.get(s) ?? Date.now());
+    report.timings.stages[s] = elapsedMs;
     emit?.({
       phase: "stage", stage: s, state: "done", detail,
-      elapsedMs: Date.now() - (stageT0.get(s) ?? Date.now()),
+      elapsedMs,
     });
   };
   // Endpoints surfaced this run (per-file NestJS + proto pass) for the metric line.
@@ -763,8 +969,30 @@ export async function indexRepo(input: {
   };
 
   let rebuildTransactionOpen = false;
-
+  const previousWalAutoCheckpoint = Number(
+    store.db.pragma("wal_autocheckpoint", { simple: true }),
+  );
+  const previousCacheSize = Number(store.db.pragma("cache_size", { simple: true }));
+  const previousMmapSize = Number(store.db.pragma("mmap_size", { simple: true }));
+  const rebuildCacheSize = -262_144; // 256 MiB, expressed as KiB by SQLite.
+  const rebuildMmapSize = 1_073_741_824; // 1 GiB of read-only mapped pages.
+  report.maintenance.walAutoCheckpointPages = previousWalAutoCheckpoint;
+  report.maintenance.sqliteTuning = {
+    previousCacheSize,
+    activeCacheSize: rebuildCacheSize,
+    previousMmapSize,
+    activeMmapSize: rebuildMmapSize,
+  };
   try {
+    store.db.pragma("wal_autocheckpoint = 0");
+    store.db.pragma(`cache_size = ${rebuildCacheSize}`);
+    store.db.pragma(`mmap_size = ${rebuildMmapSize}`);
+    report.maintenance.sqliteTuning.activeCacheSize = Number(
+      store.db.pragma("cache_size", { simple: true }),
+    );
+    report.maintenance.sqliteTuning.activeMmapSize = Number(
+      store.db.pragma("mmap_size", { simple: true }),
+    );
     if (effectiveMode === "rebuild") {
       store.db.exec("BEGIN IMMEDIATE");
       rebuildTransactionOpen = true;
@@ -829,7 +1057,11 @@ export async function indexRepo(input: {
     const targetSourceManifest = new Map(baseSourceManifest);
     // Files whose refs had zero-candidate (forward-reference) misses in the
     // first pass — retried below once the full symbol table exists.
-    const retryByFile = new Map<string, { file: (typeof files)[number]; names: string[] }>();
+    const retryByFile = new Map<string, {
+      file: (typeof files)[number];
+      names: string[];
+      extracted: ExtractedFile;
+    }>();
     const seen = new Set<string>();
     let done = 0;
     for (const file of files) {
@@ -842,11 +1074,20 @@ export async function indexRepo(input: {
       // Source ingestion is independent of parser support. Every admitted
       // file, including unsupported/config/documentation files, is available
       // through the revision-aware source corpus.
+      let parseStepStartedAt = performance.now();
       const rawHash = (await hashFileStream(file.absPath)).contentHash;
+      addParseDuration(report.timings.parse, "sourceHashMs", parseStepStartedAt);
+      parseStepStartedAt = performance.now();
       const existingSource = store.db.prepare(
         "SELECT id FROM source_facts WHERE repo_id=? AND file_path=? AND content_hash=? ORDER BY source_fact_rowid DESC LIMIT 1",
       ).get(repoId, file.relPath, rawHash) as { id: string } | undefined;
-      const sourceFactId = existingSource?.id ?? ingestSourceFile(store, repoId, file.discovered).sourceFactId;
+      addParseDuration(report.timings.parse, "sourceLookupMs", parseStepStartedAt);
+      let sourceFactId = existingSource?.id;
+      if (!sourceFactId) {
+        parseStepStartedAt = performance.now();
+        sourceFactId = ingestSourceFile(store, repoId, file.discovered).sourceFactId;
+        addParseDuration(report.timings.parse, "sourceIngestMs", parseStepStartedAt);
+      }
       targetSourceManifest.set(file.relPath, sourceFactId);
 
       // quick filter: mtime+size unchanged (and not previously errored) → skip
@@ -863,8 +1104,10 @@ export async function indexRepo(input: {
         continue;
       }
 
+      parseStepStartedAt = performance.now();
       const source = readFileSync(file.absPath, "utf8");
       const contentHash = sha256(source);
+      addParseDuration(report.timings.parse, "sourceReadMs", parseStepStartedAt);
 
       // hash unchanged (touch / format-revert) → refresh checkpoint mtime, skip parse
       if (
@@ -888,6 +1131,9 @@ export async function indexRepo(input: {
         source, contentHash, mtimeMs: file.mtimeMs, sizeBytes: file.sizeBytes,
         recordRenames: effectiveMode !== "rebuild",
         snapshotId: snapshot.id,
+        timings: report.timings.parse,
+        pass: "first",
+        deferEdgesOnUnresolved: true,
       });
       store.db.prepare("UPDATE coverage_records SET parser_status=?,parser_language=?,parser_version=?,parser_error=?,updated_at=? WHERE repo_id=? AND file_path=?").run(
         r.error ? "failed" : langOf(file.relPath) === "other" ? "unsupported" : "parsed",
@@ -899,13 +1145,19 @@ export async function indexRepo(input: {
       if (r.error) report.errors += 1;
       else report.parsed += 1;
       report.renamed += r.renamed;
-      if (r.retryNames.length > 0) retryByFile.set(file.relPath, { file, names: r.retryNames });
+      if (r.retryNames.length > 0 && r.extracted) {
+        retryByFile.set(file.relPath, { file, names: r.retryNames, extracted: r.extracted });
+      }
       if (r.fileFactId) targetManifest.set(file.relPath, r.fileFactId);
       for (const ep of r.endpoints) {
         endpointsFound += 1;
         emit?.({ phase: "discovery", kind: "endpoint", title: ep.key, file: file.relPath });
       }
-      if (done % metricEvery === 0) emitMetric();
+      if (done % metricEvery === 0) {
+        parseStepStartedAt = performance.now();
+        emitMetric();
+        addParseDuration(report.timings.parse, "metricsMs", parseStepStartedAt);
+      }
     }
 
     // ── Second resolution pass. Single-pass resolution sees only symbols
@@ -919,9 +1171,7 @@ export async function indexRepo(input: {
     // treats these files as reprocessed.
     let reResolved = 0;
     if (retryByFile.size > 0) {
-      const idx = storeSymbolIndex(store, repoId);
-      for (const { file, names } of retryByFile.values()) {
-        if (!names.some((n) => idx.bareNameCandidates(n).length > 0)) continue;
+      for (const { file, extracted } of retryByFile.values()) {
         let source: string;
         try {
           source = readFileSync(file.absPath, "utf8");
@@ -932,7 +1182,11 @@ export async function indexRepo(input: {
           source, contentHash: sha256(source), mtimeMs: file.mtimeMs, sizeBytes: file.sizeBytes,
           recordRenames: effectiveMode !== "rebuild",
           snapshotId: snapshot.id,
+          timings: report.timings.parse,
+          pass: "second",
+          preExtracted: extracted,
         });
+        report.timings.parse.secondPasses += 1;
         if (!r2.error) reResolved += 1;
         if (!r2.error && r2.fileFactId) targetManifest.set(file.relPath, r2.fileFactId);
       }
@@ -951,13 +1205,10 @@ export async function indexRepo(input: {
       store.markFileSymbolsStale({ branchId, filePath: cp.file_path });
       store.replaceFileEdges({ repoId, branchId, filePath: cp.file_path, edges: [] });
       store.clearLogSitesForFile(repoId, cp.file_path);
-      store.db
-        .prepare(
-          `DELETE FROM fts_symbols WHERE node_id IN (
-             SELECT node_id FROM symbol_versions WHERE branch_id=? AND file_path=?
-           )`,
-        )
-        .run(branchId, cp.file_path);
+      const staleNodeIds = store.db
+        .prepare("SELECT node_id FROM symbol_versions WHERE branch_id=? AND file_path=?")
+        .all(branchId, cp.file_path) as Array<{ node_id: string }>;
+      for (const row of staleNodeIds) store.deleteSymbolText(row.node_id);
       report.deleted += 1;
     }
     for (const path of [...targetManifest.keys()]) {
@@ -1323,6 +1574,64 @@ export async function indexRepo(input: {
       store.db.exec("COMMIT");
       rebuildTransactionOpen = false;
     }
+    const rebuildHotIndexes = [
+      "idx_edges_parser_branch_file",
+      "idx_edges_parser_global_repo_file",
+      "idx_symbol_versions_branch_file_status",
+      "idx_nodes_log_site_repo_file",
+      "idx_fts_symbol_rows_node",
+      "idx_fts_identifier_rows_scope",
+    ];
+    const hasStatistics = store.db.prepare(
+      "SELECT 1 FROM sqlite_master WHERE type='table' AND name='sqlite_stat1'",
+    ).get() != null;
+    const existingStatistics = new Set(
+      hasStatistics
+        ? (store.db.prepare("SELECT idx FROM sqlite_stat1 WHERE idx IS NOT NULL").all() as Array<{ idx: string }>)
+            .map(({ idx }) => idx)
+        : [],
+    );
+    report.maintenance.analyzedIndexes = rebuildHotIndexes.filter(
+      (indexName) => !existingStatistics.has(indexName),
+    );
+    let maintenanceStartedAt = performance.now();
+    for (const indexName of report.maintenance.analyzedIndexes) {
+      store.db.exec(`ANALYZE ${indexName}`);
+    }
+    report.maintenance.analyzeMs = performance.now() - maintenanceStartedAt;
+    maintenanceStartedAt = performance.now();
+    store.db.pragma("optimize");
+    report.maintenance.optimizeMs = performance.now() - maintenanceStartedAt;
+    maintenanceStartedAt = performance.now();
+    const previousBusyTimeout = Number(store.db.pragma("busy_timeout", { simple: true }));
+    let checkpoint = { busy: 0, log: 0, checkpointed: 0 };
+    try {
+      // A long-lived MCP reader can prevent TRUNCATE. Bound each wait so index
+      // completion never stalls for the normal 5s busy timeout three times,
+      // but retry transient readers before returning an observable warning.
+      store.db.pragma("busy_timeout = 250");
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        report.maintenance.checkpointAttempts = attempt;
+        const rows = store.db.pragma("wal_checkpoint(TRUNCATE)") as Array<{
+          busy: number;
+          log: number;
+          checkpointed: number;
+        }>;
+        checkpoint = rows[0] ?? { busy: 0, log: 0, checkpointed: 0 };
+        if (checkpoint.busy === 0) break;
+        if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, attempt * 25));
+      }
+    } finally {
+      store.db.pragma(`busy_timeout = ${previousBusyTimeout}`);
+    }
+    report.maintenance.checkpointMs = performance.now() - maintenanceStartedAt;
+    report.maintenance.checkpoint = checkpoint;
+    if (checkpoint.busy > 0) {
+      report.maintenance.checkpointWarning =
+        `WAL_CHECKPOINT_BUSY after ${report.maintenance.checkpointAttempts} attempts; ` +
+        `${checkpoint.log - checkpoint.checkpointed} WAL frame(s) remain`;
+    }
+    report.timings.totalMs = Date.now() - runStartedAt;
     return report;
   } catch (error) {
     if (rebuildTransactionOpen && store.db.inTransaction) {
@@ -1334,6 +1643,9 @@ export async function indexRepo(input: {
     }
     throw error;
   } finally {
+    store.db.pragma(`wal_autocheckpoint = ${previousWalAutoCheckpoint}`);
+    store.db.pragma(`cache_size = ${previousCacheSize}`);
+    store.db.pragma(`mmap_size = ${previousMmapSize}`);
     store.releaseIndexMarker(branchId);
     lock.release();
   }

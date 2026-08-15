@@ -56,7 +56,12 @@ function candidateBlobIds(store: KnowledgeStore, scope: ResolvedRevisionScope, q
   return new Set((store.db.prepare(sql).all(...params) as Array<{ blobId: number }>).map((row) => row.blobId));
 }
 
-function rowsForScope(store: KnowledgeStore, scope: ResolvedRevisionScope, query: string): ScopeSourceRow[] {
+function rowsForScope(
+  store: KnowledgeStore,
+  scope: ResolvedRevisionScope,
+  query: string,
+  options: Pick<NormalizedSearchRequest["options"], "includeGenerated" | "includeVendor">,
+): ScopeSourceRow[] {
   const candidates = candidateBlobIds(store, scope, query);
   // A trigram miss is a definitive miss for exact/phrase/substring source
   // search. Do not materialize the entire snapshot just to filter it out in
@@ -75,8 +80,13 @@ function rowsForScope(store: KnowledgeStore, scope: ResolvedRevisionScope, query
   for (const batch of candidateBatches) {
     const params: unknown[] = [scope.snapshotId];
     let sql = `SELECT e.source_fact_id AS sourceFactId, e.source_blob_id AS blobId, b.content_hash AS contentHash, e.file_path AS filePath, b.decoded_content AS content
-      FROM effective_snapshot_sources e JOIN source_blobs b ON b.id=e.source_blob_id WHERE e.snapshot_id=?`;
-    if (scope.repoId) { sql += " AND EXISTS (SELECT 1 FROM source_facts sf WHERE sf.id=e.source_fact_id AND sf.repo_id=?)"; params.push(scope.repoId); }
+      FROM effective_snapshot_sources e JOIN source_blobs b ON b.id=e.source_blob_id
+      JOIN source_facts sf ON sf.id=e.source_fact_id
+      LEFT JOIN coverage_records c ON c.repo_id=sf.repo_id AND c.file_path=e.file_path
+      WHERE e.snapshot_id=?`;
+    if (scope.repoId) { sql += " AND sf.repo_id=?"; params.push(scope.repoId); }
+    if (!options.includeGenerated) sql += " AND COALESCE(c.classification, 'source') <> 'generated'";
+    if (!options.includeVendor) sql += " AND COALESCE(c.classification, 'source') <> 'vendor'";
     if (batch) { sql += ` AND e.source_blob_id IN (${batch.map(() => "?").join(",")})`; params.push(...batch); }
     rows.push(...store.db.prepare(sql).all(...params) as ScopeSourceRow[]);
   }
@@ -88,7 +98,7 @@ export function searchSource(store: KnowledgeStore, scope: ResolvedRevisionScope
   if (mode !== "exact" && mode !== "phrase" && mode !== "substring") return [];
   const hits: SourceSearchOccurrence[] = [];
   const byBlob = new Map<number, ScopeSourceRow[]>();
-  for (const row of rowsForScope(store, scope, request.query)) byBlob.set(row.blobId, [...(byBlob.get(row.blobId) ?? []), row]);
+  for (const row of rowsForScope(store, scope, request.query, request.options)) byBlob.set(row.blobId, [...(byBlob.get(row.blobId) ?? []), row]);
   for (const rows of byBlob.values()) {
     if (options.signal?.aborted) throw new Error("SEARCH_CANCELLED");
     const row = rows[0];

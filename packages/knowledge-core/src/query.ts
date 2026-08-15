@@ -53,6 +53,32 @@ function snapshotEdgePairs(store: KnowledgeStore, revision: RevisionContext): Ar
   }));
 }
 
+function snapshotEdgePairsForNodes(
+  store: KnowledgeStore,
+  revision: RevisionContext,
+  nodeIds: string[],
+  options: { edgeTypes?: string[]; direction?: "in" | "out" | "both"; limit?: number },
+): Array<{ src: string; dst: string | null; edgeType: string }> {
+  if (nodeIds.length === 0) return [];
+  const edges = openRevisionView(store, revision).edges({
+    nodeIds,
+    edgeTypes: options.edgeTypes,
+    direction: options.direction,
+    limit: options.limit,
+  });
+  const identityKeys = [...new Set(edges.flatMap((edge) => [edge.srcIdentityKey, edge.dstIdentityKey].filter((key): key is string => Boolean(key))))];
+  if (identityKeys.length === 0) return [];
+  const rows = store.db.prepare(
+    `SELECT id, identity_key AS identityKey FROM nodes WHERE identity_key IN (${identityKeys.map(() => "?").join(",")})`,
+  ).all(...identityKeys) as Array<{ id: string; identityKey: string }>;
+  const ids = new Map(rows.map((row) => [row.identityKey, row.id]));
+  return edges.map((edge) => ({
+    src: ids.get(edge.srcIdentityKey) ?? edge.srcIdentityKey,
+    dst: edge.dstIdentityKey ? (ids.get(edge.dstIdentityKey) ?? edge.dstIdentityKey) : null,
+    edgeType: edge.edgeType,
+  }));
+}
+
 function revisionBranchId(options?: { revision?: RevisionContext; branchId?: string }): string | undefined {
   return options?.revision?.branchId ?? options?.branchId;
 }
@@ -96,14 +122,42 @@ export type SymbolResolution =
 // zero/unique/truly-few-candidates are the cases this feature is for.
 const MAX_AMBIGUOUS_CANDIDATES = 20;
 
-function symbolCandidateOf(store: KnowledgeStore, nodeId: string): SymbolCandidate {
+type SymbolCandidateScope = { branchId?: string; revision?: RevisionContext };
+
+function symbolCandidateOf(
+  store: KnowledgeStore,
+  nodeId: string,
+  scope?: SymbolCandidateScope,
+): SymbolCandidate {
   const n = store.getNode(nodeId)!;
-  const v = store.db
-    .prepare(
-      `SELECT file_path AS filePath, branch_id AS branchId, start_line AS startLine
-       FROM symbol_versions WHERE node_id=? ORDER BY (status='fresh') DESC LIMIT 1`,
-    )
-    .get(nodeId) as { filePath: string | null; branchId: string | null; startLine: number | null } | undefined;
+  const scopedBranchId = scope?.revision?.branchId ?? scope?.branchId;
+  let v: { filePath: string | null; branchId: string | null; startLine: number | null } | undefined;
+  if (scope?.revision && !scope.revision.snapshotId.startsWith("legacy:")) {
+    const row = openRevisionView(store, scope.revision).symbolVersions([nodeId])[0];
+    if (row) {
+      v = {
+        filePath: row.filePath,
+        branchId: scope.revision.branchId ?? null,
+        startLine: row.startLine ?? null,
+      };
+    }
+  } else if (scopedBranchId) {
+    v = store.db
+      .prepare(
+        `SELECT file_path AS filePath, branch_id AS branchId, start_line AS startLine
+         FROM symbol_versions
+         WHERE node_id=? AND branch_id=? AND status='fresh'
+         LIMIT 1`,
+      )
+      .get(nodeId, scopedBranchId) as typeof v;
+  } else {
+    v = store.db
+      .prepare(
+        `SELECT file_path AS filePath, branch_id AS branchId, start_line AS startLine
+         FROM symbol_versions WHERE node_id=? ORDER BY (status='fresh') DESC LIMIT 1`,
+      )
+      .get(nodeId) as typeof v;
+  }
   const branch = v?.branchId
     ? ((store.db.prepare("SELECT name FROM branches WHERE id=?").get(v.branchId) as { name: string } | undefined)?.name ?? v.branchId)
     : null;
@@ -118,7 +172,11 @@ function symbolCandidateOf(store: KnowledgeStore, nodeId: string): SymbolCandida
 // `flow` for any name shared by 2+ symbols, e.g. several classes each with a
 // same-named method). `symbol:<node-id>` is an explicit escape hatch a
 // disambiguation prompt can suggest back to the caller.
-export function resolveSymbolMatches(store: KnowledgeStore, idOrKey: string): SymbolResolution {
+export function resolveSymbolMatches(
+  store: KnowledgeStore,
+  idOrKey: string,
+  scope?: SymbolCandidateScope,
+): SymbolResolution {
   const raw = idOrKey.startsWith("symbol:") ? idOrKey.slice("symbol:".length) : idOrKey;
   if (store.getNode(raw)) return { kind: "unique", nodeId: raw };
   const r = store.resolveIdentity(raw);
@@ -139,7 +197,7 @@ export function resolveSymbolMatches(store: KnowledgeStore, idOrKey: string): Sy
     if (resolvedIds.size > 1) {
       return {
         kind: "ambiguous",
-        candidates: [...resolvedIds].slice(0, MAX_AMBIGUOUS_CANDIDATES).map((nodeId) => symbolCandidateOf(store, nodeId)),
+        candidates: [...resolvedIds].slice(0, MAX_AMBIGUOUS_CANDIDATES).map((nodeId) => symbolCandidateOf(store, nodeId, scope)),
       };
     }
   }
@@ -165,7 +223,7 @@ export function resolveSymbolMatches(store: KnowledgeStore, idOrKey: string): Sy
     .all(raw, `%::${raw}`, `%.${raw}`) as { id: string }[];
   if (rows.length === 0) return { kind: "none" };
   if (rows.length === 1) return { kind: "unique", nodeId: rows[0].id };
-  return { kind: "ambiguous", candidates: rows.slice(0, MAX_AMBIGUOUS_CANDIDATES).map((row) => symbolCandidateOf(store, row.id)) };
+  return { kind: "ambiguous", candidates: rows.slice(0, MAX_AMBIGUOUS_CANDIDATES).map((row) => symbolCandidateOf(store, row.id, scope)) };
 }
 
 // Shared renderer for an ambiguous SymbolResolution — used by `context`/`node`
@@ -1277,7 +1335,7 @@ function collectGraph(
   }
   const isolated = ids.filter((id) => !touched.has(id));
   if (isolated.length > 0) {
-    const seen = new Set(edges.map((e) => `${e.src} ${e.dst} ${e.edgeType}`));
+    const seen = new Set(edges.map((e) => `${e.src}\0${e.dst}\0${e.edgeType}`));
     const perNode = store.db.prepare(
       `SELECT src, dst, edge_type AS edgeType, source_type AS sourceType FROM edges
        WHERE status='active' AND dst IS NOT NULL ${branchClause}
@@ -1290,7 +1348,7 @@ function collectGraph(
     for (const id of isolated) {
       const extraParams = branchId ? [branchId, id, id, ...ids, ...ids] : [id, id, ...ids, ...ids];
       for (const e of perNode.all(...extraParams) as GraphView["edges"]) {
-        const key = `${e.src} ${e.dst} ${e.edgeType}`;
+        const key = `${e.src}\0${e.dst}\0${e.edgeType}`;
         if (seen.has(key)) continue;
         seen.add(key);
         edges.push(e);
@@ -1456,7 +1514,7 @@ export function buildContextPack(
   };
   let resolution: SymbolResolution;
   try {
-    resolution = resolveSymbolMatches(store, target);
+    resolution = resolveSymbolMatches(store, target, options);
   } catch (e) {
     return { ...empty, assemblyError: (e as Error).message };
   }
@@ -1491,15 +1549,19 @@ function buildContextPackBody(
   const branchId = explicitBranchId ?? liveBranchOf(store, focusId);
   const scopeFallback = !explicitBranchId && branchId ? { branchId } : undefined;
   const bx = branchId ? " AND (branch_id = ? OR branch_id IS NULL)" : "";
-  const snapshotPairs = options?.revision && !options.revision.snapshotId.startsWith("legacy:") ? snapshotEdgePairs(store, options.revision) : null;
-  const snapshotIds = (pairs: Array<{ src: string; dst: string | null; edgeType: string }>, type: string, direction: "in" | "out") => pairs
-    .filter((edge) => edge.edgeType === type && (direction === "in" ? edge.dst === focusId : edge.src === focusId))
+  const snapshotRevision = options?.revision && !options.revision.snapshotId.startsWith("legacy:") ? options.revision : null;
+  const snapshotIds = (type: string, direction: "in" | "out") => snapshotEdgePairsForNodes(
+    store,
+    snapshotRevision!,
+    [focusId],
+    { edgeTypes: [type], direction, limit },
+  )
     .map((edge) => direction === "in" ? edge.src : edge.dst).filter((id): id is string => Boolean(id)).map((id) => ({ id })).slice(0, limit);
   const inEdges = (type: string) =>
-    snapshotPairs ? snapshotIds(snapshotPairs, type, "in") : store.db.prepare(`SELECT DISTINCT src AS id FROM edges WHERE dst=? AND edge_type=? AND ${active}${bx} LIMIT ?`)
+    snapshotRevision ? snapshotIds(type, "in") : store.db.prepare(`SELECT DISTINCT src AS id FROM edges WHERE dst=? AND edge_type=? AND ${active}${bx} LIMIT ?`)
       .all(...(branchId ? [focusId, type, branchId, limit] : [focusId, type, limit])) as { id: string }[];
   const outEdges = (type: string) =>
-    snapshotPairs ? snapshotIds(snapshotPairs, type, "out") : store.db.prepare(`SELECT DISTINCT dst AS id FROM edges WHERE src=? AND edge_type=? AND dst IS NOT NULL AND ${active}${bx} LIMIT ?`)
+    snapshotRevision ? snapshotIds(type, "out") : store.db.prepare(`SELECT DISTINCT dst AS id FROM edges WHERE src=? AND edge_type=? AND dst IS NOT NULL AND ${active}${bx} LIMIT ?`)
       .all(...(branchId ? [focusId, type, branchId, limit] : [focusId, type, limit])) as { id: string }[];
 
   const callers = inEdges("calls");
@@ -1702,6 +1764,10 @@ export interface FlowResult {
   trust: TrustEnvelope | null;
   root: FlowStep | null;
   steps: FlowStep[];
+  // Aggregated across every node in `steps`, so callers do not need one
+  // context query per hop to discover regression tests and operational notes.
+  relatedTests: ContextBrief[];
+  linkedKnowledge: ContextBrief[];
   diagnostic?: FlowDiagnostic;
   ambiguous?: SymbolCandidate[]; // populated only when diagnostic.reason === "ambiguous"
   // Set ONLY when no revision/branchId was supplied by the caller and the
@@ -1711,7 +1777,165 @@ export interface FlowResult {
   scopeFallback?: { branchId: string };
 }
 
+function emptyFlowEnrichment(): Pick<FlowResult, "relatedTests" | "linkedKnowledge"> {
+  return { relatedTests: [], linkedKnowledge: [] };
+}
+
+function flowEnrichment(
+  store: KnowledgeStore,
+  stepNodeIds: string[],
+  options: {
+    branchId?: string;
+    limit: number;
+    snapshotPairs?: Array<{ src: string; dst: string | null; edgeType: string }>;
+    snapshotRevision?: RevisionContext;
+  },
+): Pick<FlowResult, "relatedTests" | "linkedKnowledge"> {
+  const nodeIds = [...new Set(stepNodeIds)];
+  if (nodeIds.length === 0) return emptyFlowEnrichment();
+  const nodeSet = new Set(nodeIds);
+
+  let testIds: string[];
+  if (options.snapshotRevision) {
+    testIds = snapshotEdgePairsForNodes(store, options.snapshotRevision, nodeIds, {
+      edgeTypes: ["tests"],
+      direction: "in",
+      limit: options.limit,
+    })
+      .filter((edge) => edge.dst != null && nodeSet.has(edge.dst))
+      .map((edge) => edge.src);
+  } else if (options.snapshotPairs) {
+    testIds = options.snapshotPairs
+      .filter((edge) => edge.edgeType === "tests" && edge.dst != null && nodeSet.has(edge.dst))
+      .map((edge) => edge.src);
+  } else {
+    const placeholders = nodeIds.map(() => "?").join(",");
+    const branchClause = options.branchId ? "AND (e.branch_id=? OR e.branch_id IS NULL)" : "";
+    const params = options.branchId
+      ? [...nodeIds, options.branchId, options.limit]
+      : [...nodeIds, options.limit];
+    testIds = (store.db.prepare(
+      `SELECT DISTINCT e.src AS id
+         FROM edges e JOIN nodes n ON n.id=e.src
+        WHERE e.status='active' AND e.edge_type='tests'
+          AND e.dst IN (${placeholders}) ${branchClause}
+        ORDER BY n.title LIMIT ?`,
+    ).all(...params) as Array<{ id: string }>).map((row) => row.id);
+  }
+
+  // Markdown knowledge edges are branch-independent and point from a note to
+  // the code/entity they mention. Querying them separately also keeps an
+  // immutable code snapshot from silently hiding still-relevant runbooks.
+  const placeholders = nodeIds.map(() => "?").join(",");
+  const knowledgeIds = (store.db.prepare(
+    `SELECT DISTINCT e.src AS id
+       FROM edges e JOIN nodes n ON n.id=e.src
+      WHERE e.status='active' AND n.node_type='note'
+        AND e.dst IN (${placeholders})
+      ORDER BY n.title LIMIT ?`,
+  ).all(...nodeIds, options.limit) as Array<{ id: string }>).map((row) => row.id);
+
+  const uniqueBriefs = (ids: string[]) => briefsFrom(
+    store,
+    [...new Set(ids)].slice(0, options.limit).map((id) => ({ id })),
+  );
+  return { relatedTests: uniqueBriefs(testIds), linkedKnowledge: uniqueBriefs(knowledgeIds) };
+}
+
 const DOWNSTREAM = ["calls", "invokes", "references", "reads", "writes", "throws", "uses", "handles"];
+const FLOW_INGRESS = ["handles", "calls", "invokes"];
+
+type FlowTraversalEdge = { id: string; via: string };
+type FlowDownstreamEdge = FlowTraversalEdge & { src: string };
+
+function flowIngressPath(
+  store: KnowledgeStore,
+  focus: string,
+  incomingEdges: (id: string) => FlowTraversalEdge[],
+  depthCap: number,
+  limit: number,
+): FlowTraversalEdge[] {
+  const focusOnly = [{ id: focus, via: "root" }];
+  if (store.getNode(focus)?.node_type === "endpoint") return focusOnly;
+
+  type ReverseEdge = { parent: string; child: string; via: string };
+  const queue: Array<{ id: string; reverseEdges: ReverseEdge[] }> = [
+    { id: focus, reverseEdges: [] },
+  ];
+  const seen = new Set<string>([focus]);
+
+  while (queue.length > 0 && seen.size <= limit) {
+    const current = queue.shift()!;
+    if (current.reverseEdges.length >= depthCap) continue;
+    const parents = incomingEdges(current.id)
+      .filter((edge) => !seen.has(edge.id))
+      .sort((a, b) => {
+        const aKey = store.getNode(a.id)?.identity_key ?? a.id;
+        const bKey = store.getNode(b.id)?.identity_key ?? b.id;
+        return a.via.localeCompare(b.via) || aKey.localeCompare(bKey);
+      });
+    for (const parent of parents) {
+      if (seen.size >= limit) break;
+      seen.add(parent.id);
+      const reverseEdges = [
+        ...current.reverseEdges,
+        { parent: parent.id, child: current.id, via: parent.via },
+      ];
+      if (store.getNode(parent.id)?.node_type === "endpoint") {
+        return [
+          { id: parent.id, via: "root" },
+          ...reverseEdges.reverse().map((edge) => ({ id: edge.child, via: edge.via })),
+        ];
+      }
+      queue.push({ id: parent.id, reverseEdges });
+    }
+  }
+  return focusOnly;
+}
+
+function appendFlowDownstream(
+  store: KnowledgeStore,
+  focus: string,
+  focusDepth: number,
+  steps: FlowStep[],
+  seen: Set<string>,
+  outEdges: (ids: string[]) => FlowDownstreamEdge[],
+  depthCap: number,
+  limit: number,
+  revisionId: string,
+): void {
+  // Breadth-first expansion preserves every shallow/direct relationship before
+  // spending the response budget on one large descendant subtree. The old DFS
+  // could exhaust a 60-step limit inside the first callee and silently omit a
+  // sibling call that Context had already confirmed. `seen` is checked before
+  // append so converging branches also do not duplicate steps.
+  let frontier: Array<{ id: string; depth: number }> = [{ id: focus, depth: focusDepth }];
+  while (frontier.length > 0 && steps.length < limit) {
+    const expandable = frontier.filter((item) => item.depth < depthCap);
+    if (expandable.length === 0) break;
+    const grouped = new Map<string, FlowDownstreamEdge[]>();
+    for (const edge of outEdges(expandable.map((item) => item.id))) {
+      grouped.set(edge.src, [...(grouped.get(edge.src) ?? []), edge]);
+    }
+
+    // Round-robin within one depth: a high-fanout node cannot consume the
+    // remaining response budget before its same-depth siblings contribute.
+    const next: Array<{ id: string; depth: number }> = [];
+    const maxEdges = Math.max(0, ...expandable.map((item) => grouped.get(item.id)?.length ?? 0));
+    for (let edgeIndex = 0; edgeIndex < maxEdges && steps.length < limit; edgeIndex += 1) {
+      for (const current of expandable) {
+        if (steps.length >= limit) break;
+        const edge = grouped.get(current.id)?.[edgeIndex];
+        if (!edge || seen.has(edge.id) || !store.getNode(edge.id)) continue;
+        seen.add(edge.id);
+        const depth = current.depth + 1;
+        steps.push({ depth, ...nodeBriefStep(store, edge.id, revisionId), via: edge.via });
+        if (depth < depthCap) next.push({ id: edge.id, depth });
+      }
+    }
+    frontier = next;
+  }
+}
 
 // gRPC route-string resolution for `flow`/`context` targets. NestJS
 // `@GrpcMethod('Service','Method')` handlers are indexed as a single GLOBAL
@@ -1789,7 +2013,7 @@ export function buildFlow(
     focus = grpc.nodeId;
   } else if (grpc.kind === "ambiguous") {
     return {
-      target, trust: null, root: null, steps: [], ambiguous: grpc.candidates,
+      target, trust: null, root: null, steps: [], ...emptyFlowEnrichment(), ambiguous: grpc.candidates,
       diagnostic: {
         reason: "ambiguous",
         message: `"${target}" matches ${grpc.candidates.length} gRPC endpoints across different services — specify one.`,
@@ -1798,12 +2022,12 @@ export function buildFlow(
     };
   } else {
     if (grpc.kind === "not_found") attemptedKey = grpc.attemptedKey;
-    const sym = resolveSymbolMatches(store, target);
+    const sym = resolveSymbolMatches(store, target, options);
     if (sym.kind === "unique") {
       focus = sym.nodeId;
     } else if (sym.kind === "ambiguous") {
       return {
-        target, trust: null, root: null, steps: [], ambiguous: sym.candidates,
+        target, trust: null, root: null, steps: [], ...emptyFlowEnrichment(), ambiguous: sym.candidates,
         diagnostic: {
           reason: "ambiguous",
           message: `"${target}" matches ${sym.candidates.length} symbols — specify one.`,
@@ -1814,7 +2038,7 @@ export function buildFlow(
   }
   if (!focus) {
     return {
-      target, trust: null, root: null, steps: [],
+      target, trust: null, root: null, steps: [], ...emptyFlowEnrichment(),
       diagnostic: {
         reason: "not_indexed",
         message: attemptedKey
@@ -1826,16 +2050,28 @@ export function buildFlow(
   const depthCap = options?.depth ?? 5;
   const limit = options?.limit ?? 60;
   if (options?.revision && !options.revision.snapshotId.startsWith("legacy:")) {
-    const identityOf = (id: string) => store.getNode(id)?.identity_key ?? id;
-    const nodeOf = (key: string) => store.findNodeIdByIdentity(key);
-    const pairs = snapshotEdgePairs(store, options.revision);
-    const outEdges = (id: string) => pairs.filter((edge) => edge.src === id && edge.dst).map((edge) => ({ id: edge.dst!, via: edge.edgeType }));
+    const outEdges = (ids: string[]) => snapshotEdgePairsForNodes(store, options.revision!, ids, {
+      edgeTypes: DOWNSTREAM,
+      direction: "out",
+      limit: Math.max(limit, Math.min(5_000, limit * ids.length)),
+    }).filter((edge) => edge.dst).map((edge) => ({ src: edge.src, id: edge.dst!, via: edge.edgeType }));
+    const inEdges = (id: string) => snapshotEdgePairsForNodes(store, options.revision!, [id], {
+      edgeTypes: FLOW_INGRESS,
+      direction: "in",
+      limit,
+    }).filter((edge) => edge.dst === id).map((edge) => ({ id: edge.src, via: edge.edgeType }));
     const flowRevisionId = options.revision.snapshotId ?? options.revision.branchId ?? "live";
-    const root: FlowStep = { depth: 0, ...nodeBriefStep(store, focus, flowRevisionId), via: "root" };
-    const steps: FlowStep[] = [root]; const seen = new Set<string>([focus]);
-    const visit = (id: string, depth: number) => { if (depth >= depthCap || steps.length >= limit) return; for (const edge of outEdges(id)) { if (steps.length >= limit) break; const child = nodeOf(identityOf(edge.id)) ?? edge.id; if (!store.getNode(child)) continue; steps.push({ depth: depth + 1, ...nodeBriefStep(store, child, flowRevisionId), via: edge.via }); if (!seen.has(child)) { seen.add(child); visit(child, depth + 1); } } };
-    visit(focus, 0);
-    return { target, trust: options.revision.branchId ? trustEnvelopeForBranch(store, options.revision.branchId) : null, root, steps, ...(steps.length === 1 ? { diagnostic: { reason: "no_outgoing_edges" as const, message: `"${root.title}" is indexed but has no outgoing edges in the selected revision.` } } : {}) };
+    const ingress = flowIngressPath(store, focus, inEdges, depthCap, limit);
+    const steps: FlowStep[] = ingress.map((edge, depth) => ({ depth, ...nodeBriefStep(store, edge.id, flowRevisionId), via: edge.via }));
+    const root = steps[0];
+    const seen = new Set<string>(ingress.map((edge) => edge.id));
+    appendFlowDownstream(store, focus, ingress.length - 1, steps, seen, outEdges, depthCap, limit, flowRevisionId);
+    const enrichment = flowEnrichment(store, steps.map((step) => step.nodeId), {
+      branchId: options.revision.branchId,
+      limit,
+      snapshotRevision: options.revision,
+    });
+    return { target, trust: options.revision.branchId ? trustEnvelopeForBranch(store, options.revision.branchId) : null, root, steps, ...enrichment, ...(steps.length === 1 ? { diagnostic: { reason: "no_outgoing_edges" as const, message: `"${root.title}" is indexed but has no outgoing edges in the selected revision.` } } : {}) };
   }
   const explicitBranchId = revisionBranchId(options);
   const branchId = explicitBranchId ?? liveBranchOf(store, focus);
@@ -1843,39 +2079,41 @@ export function buildFlow(
   const bx = branchId ? " AND (branch_id = ? OR branch_id IS NULL)" : "";
   const ph = DOWNSTREAM.map(() => "?").join(",");
 
-  const outEdges = (id: string) => {
-    const params = branchId ? [id, ...DOWNSTREAM, branchId] : [id, ...DOWNSTREAM];
+  const outEdges = (ids: string[]) => {
+    const srcPlaceholders = ids.map(() => "?").join(",");
+    const params = branchId ? [...ids, ...DOWNSTREAM, branchId] : [...ids, ...DOWNSTREAM];
     return store.db
       .prepare(
-        `SELECT DISTINCT dst AS id, edge_type AS via FROM edges
-         WHERE src=? AND dst IS NOT NULL AND status='active' AND edge_type IN (${ph})${bx}
-         ORDER BY edge_type`,
+        `SELECT DISTINCT src, dst AS id, edge_type AS via FROM edges
+         WHERE src IN (${srcPlaceholders}) AND dst IS NOT NULL AND status='active' AND edge_type IN (${ph})${bx}
+         ORDER BY src, edge_type, dst`,
+      )
+      .all(...params) as FlowDownstreamEdge[];
+  };
+
+  const inEdges = (id: string) => {
+    const ingressPlaceholders = FLOW_INGRESS.map(() => "?").join(",");
+    const params = branchId ? [id, ...FLOW_INGRESS, branchId] : [id, ...FLOW_INGRESS];
+    return store.db
+      .prepare(
+        `SELECT DISTINCT src AS id, edge_type AS via FROM edges
+         WHERE dst=? AND status='active' AND edge_type IN (${ingressPlaceholders})${bx}
+         ORDER BY edge_type, src`,
       )
       .all(...params) as Array<{ id: string; via: string }>;
   };
 
-  const root: FlowStep = { depth: 0, ...nodeBriefStep(store, focus, branchId ?? "live"), via: "root" };
-  const steps: FlowStep[] = [root];
-  const seen = new Set<string>([focus]);
-  // DFS so a chain reads top-to-bottom (controller → service → repo → db).
-  const visit = (id: string, depth: number) => {
-    if (depth >= depthCap || steps.length >= limit) return;
-    for (const e of outEdges(id)) {
-      if (steps.length >= limit) break;
-      const brief = nodeBriefStep(store, e.id, branchId ?? "live");
-      steps.push({ depth: depth + 1, ...brief, via: e.via });
-      if (!seen.has(e.id)) {
-        seen.add(e.id);
-        visit(e.id, depth + 1);
-      }
-    }
-  };
-  visit(focus, 0);
+  const ingress = flowIngressPath(store, focus, inEdges, depthCap, limit);
+  const steps: FlowStep[] = ingress.map((edge, depth) => ({ depth, ...nodeBriefStep(store, edge.id, branchId ?? "live"), via: edge.via }));
+  const root = steps[0];
+  const seen = new Set<string>(ingress.map((edge) => edge.id));
+  appendFlowDownstream(store, focus, ingress.length - 1, steps, seen, outEdges, depthCap, limit, branchId ?? "live");
+  const enrichment = flowEnrichment(store, steps.map((step) => step.nodeId), { branchId: branchId ?? undefined, limit });
   if (steps.length === 1) {
     const node = store.getNode(focus);
     const isEndpoint = node?.node_type === "endpoint";
     return {
-      target, trust: trustEnvelopeForBranch(store, branchId), root, steps,
+      target, trust: trustEnvelopeForBranch(store, branchId), root, steps, ...enrichment,
       diagnostic: {
         reason: isEndpoint ? "endpoint_no_handler" : "no_outgoing_edges",
         message: isEndpoint
@@ -1885,7 +2123,7 @@ export function buildFlow(
       ...(scopeFallback ? { scopeFallback } : {}),
     };
   }
-  return { target, trust: trustEnvelopeForBranch(store, branchId), root, steps, ...(scopeFallback ? { scopeFallback } : {}) };
+  return { target, trust: trustEnvelopeForBranch(store, branchId), root, steps, ...enrichment, ...(scopeFallback ? { scopeFallback } : {}) };
 }
 
 function nodeBriefStep(store: KnowledgeStore, id: string, revisionId = "live") {
@@ -2048,6 +2286,12 @@ export function renderFlowMarkdown(flow: FlowResult): string {
     const arrow = s.via === "root" ? "" : `${s.via} → `;
     const tag = s.nodeType !== "symbol" ? ` _(${s.nodeType})_` : "";
     L.push(`${indent}${s.depth === 0 ? "" : "↳ "}${arrow}\`${s.title}\`${tag}`);
+  }
+  if (flow.relatedTests.length > 0) {
+    L.push("", "## Related tests", "", ...flow.relatedTests.map((item) => `- \`${item.title}\``));
+  }
+  if (flow.linkedKnowledge.length > 0) {
+    L.push("", "## Linked knowledge", "", ...flow.linkedKnowledge.map((item) => `- ${item.title}`));
   }
   if (flow.diagnostic) L.push("", `⚠ ${flow.diagnostic.message}`);
   return L.join("\n");

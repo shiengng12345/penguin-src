@@ -36,7 +36,17 @@ export { extractMarkdownLinks, type MarkdownLink } from "./markdown-links.js";
 export { parseCanvas, serializeCanvas, canvasToSearchableMarkdown, exportGraphSelectionToCanvas, type CanvasDocument, type CanvasNode, type CanvasEdge, type CanvasGraphSelection } from "./canvas.js";
 export { ingestSourceFile, type SourceIngestResult } from "./source-ingest.js";
 export { indexGitObjects, type GitGraphResult } from "./gitgraph.js";
-export { indexRepo, reconcileOnStartup, IndexTaskLock, resolveIndexMode, type IndexReport, type IndexProgressEvent, type IndexStageId } from "./pipeline.js";
+export {
+  indexRepo,
+  reconcileOnStartup,
+  IndexTaskLock,
+  resolveIndexMode,
+  KNOWLEDGE_PARSER_VERSION,
+  KNOWLEDGE_RESOLVER_VERSION,
+  type IndexReport,
+  type IndexProgressEvent,
+  type IndexStageId,
+} from "./pipeline.js";
 export { startWatcher, type WatcherHandle, type WatcherStatus } from "./watcher.js";
 export { detectPackages, flyoverPackageNames, buildPackageRegistry, type PackageInfo, type PackageRegistry } from "./package-detect.js";
 export {

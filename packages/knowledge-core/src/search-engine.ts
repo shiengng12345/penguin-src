@@ -66,6 +66,27 @@ function scopeRows(store: KnowledgeStore): ResolvedRevisionScope[] {
   return (store.db.prepare("SELECT repo_id AS repoId,id AS branchId,current_snapshot_id AS snapshotId FROM branches WHERE status='live' ORDER BY default_branch DESC,name").all() as Array<{ repoId: string; branchId: string; snapshotId: string | null }>).map((row) => ({ repoId: row.repoId, snapshotId: row.snapshotId ?? `legacy:${row.branchId}` }));
 }
 function hitId(scope: ResolvedRevisionScope, path: string, startByte = 0, endByte = 0, contentHash?: string): string { return `hit_${hash([scope.snapshotId, path, startByte, endByte, contentHash ?? null]).slice(0, 24)}`; }
+const MAX_SEARCH_CANDIDATES = 5_000;
+const MAX_TOTAL_SNIPPET_BYTES = 32_000;
+
+function enforceResultBudgets(hits: SearchHit[]): { hits: SearchHit[]; truncated: boolean } {
+  let remainingSnippetBytes = MAX_TOTAL_SNIPPET_BYTES;
+  let truncated = hits.length > MAX_SEARCH_CANDIDATES;
+  const bounded = hits.slice(0, MAX_SEARCH_CANDIDATES).map((hit) => {
+    if (!hit.snippet) return hit;
+    const bytes = Buffer.from(hit.snippet, "utf8");
+    if (bytes.byteLength <= remainingSnippetBytes) {
+      remainingSnippetBytes -= bytes.byteLength;
+      return hit;
+    }
+    truncated = true;
+    if (remainingSnippetBytes <= 0) return { ...hit, snippet: undefined };
+    const snippet = bytes.subarray(0, remainingSnippetBytes).toString("utf8");
+    remainingSnippetBytes = 0;
+    return { ...hit, snippet };
+  });
+  return { hits: bounded, truncated };
+}
 
 function editDistance(a: string, b: string): number {
   const previous = Array.from({ length: b.length + 1 }, (_, i) => i);
@@ -107,19 +128,25 @@ function sourceHit(scope: ResolvedRevisionScope, store: KnowledgeStore, item: { 
 }
 
 export function searchKnowledge(input: SearchRequest | NormalizedSearchRequest, context: SearchContext): SearchResponse {
+  const startedAt = performance.now();
   const request = normalizeSearchRequest(input);
   const plan = planSearch(request);
+  const semanticDeferred = plan.stages.some((stage) => stage.lane === "semantic");
   const availableScopes = context.scopes?.length ? context.scopes : scopeRows(context.store);
   const requestedRevisions = request.scope.revisions;
-  const scopes = requestedRevisions?.length
-    ? availableScopes.filter((scope) => requestedRevisions.some((revision) => {
-        if (revision.snapshotId) return revision.snapshotId === scope.snapshotId;
-        if (revision.repoId) return revision.repoId === scope.repoId;
-        if (revision.repoName && scope.repoId) return revision.repoName.toLocaleLowerCase() === repoName(context.store, scope.repoId).toLocaleLowerCase();
-        if (revision.branch && scope.repoId) return Boolean(context.store.db.prepare("SELECT 1 FROM branches WHERE repo_id=? AND name=? AND current_snapshot_id=?").get(scope.repoId, revision.branch, scope.snapshotId));
-        return true;
-      }))
+  const matchesRevision = (scope: ResolvedRevisionScope, revision: NonNullable<typeof requestedRevisions>[number]): boolean => {
+    if (revision.snapshotId && revision.snapshotId !== scope.snapshotId) return false;
+    if (revision.repoId && revision.repoId !== scope.repoId) return false;
+    if (revision.repoName && scope.repoId && revision.repoName.toLocaleLowerCase() !== repoName(context.store, scope.repoId).toLocaleLowerCase()) return false;
+    if (revision.branch && scope.repoId && !context.store.db.prepare("SELECT 1 FROM branches WHERE repo_id=? AND name=? AND (current_snapshot_id=? OR (? LIKE 'legacy:%' AND id=?))").get(scope.repoId, revision.branch, scope.snapshotId, scope.snapshotId, scope.snapshotId.replace(/^legacy:/, ""))) return false;
+    return true;
+  };
+  const matchingScopes = requestedRevisions?.length
+    ? availableScopes.filter((scope) => requestedRevisions.some((revision) => matchesRevision(scope, revision)))
     : availableScopes;
+  const allRequestedScopesResolved = !requestedRevisions?.length
+    || requestedRevisions.every((revision) => availableScopes.some((scope) => matchesRevision(scope, revision)));
+  const scopes = allRequestedScopesResolved ? matchingScopes : [];
   const secret = context.cursorSecret ?? DEFAULT_CURSOR_SECRET;
   const codec = new HmacSearchCursorCodec(secret, () => (context.now?.() ?? new Date()).getTime());
   const normalizedHash = hash({ ...request, page: { limit: request.page.limit } });
@@ -149,7 +176,7 @@ export function searchKnowledge(input: SearchRequest | NormalizedSearchRequest, 
             .map((item) => sourceHit(scope, context.store, item, callExpressionQuery ? 1.3 : request.mode === "exact" ? 1.1 : LANE_WEIGHTS.source, callExpressionQuery ? "verified exact call expression; call-site boost=0.3" : request.mode === "exact" ? "verified exact source occurrence; exact boost=0.1" : "verified source occurrence")));
         }
       } else if (stage.lane === "path") {
-        for (const item of searchPath(context.store, scope, request.query, request.options.includeExcludedMetadata).filter((candidate) => !request.scope.paths?.length || request.scope.paths.some((prefix) => candidate.filePath === prefix || candidate.filePath.startsWith(`${prefix.replace(/\/$/, "")}/`)))) {
+        for (const item of searchPath(context.store, scope, request.query, request.options.includeExcludedMetadata, request.options).filter((candidate) => !request.scope.paths?.length || request.scope.paths.some((prefix) => candidate.filePath === prefix || candidate.filePath.startsWith(`${prefix.replace(/\/$/, "")}/`)))) {
           if (context.signal?.aborted) throw Object.assign(new Error("SEARCH_CANCELLED"), { code: "SEARCH_CANCELLED" });
           const locator = { repoId: scope.repoId ?? "", repoName: repoName(context.store, scope.repoId ?? ""), revisionId: scope.snapshotId, revisionKind: "commit" as const, filePath: item.filePath };
           const normalizedPath = request.query.replaceAll("\\", "/").replace(/^\.\//, "");
@@ -203,7 +230,9 @@ export function searchKnowledge(input: SearchRequest | NormalizedSearchRequest, 
     if (!useful && !deadEnd) return hit;
     return { ...hit, score: hit.score + useful * 0.02 - deadEnd * 0.05, rankReasons: [...hit.rankReasons, ...(useful ? [`feedback useful x${useful}`] : []), ...(deadEnd ? [`feedback dead-end x${deadEnd}`] : [])] };
   });
-  let ranked = rankSearchHits(adjusted);
+  const budgeted = enforceResultBudgets(rankSearchHits(adjusted));
+  let ranked = budgeted.hits;
+  const candidateCount = adjusted.length;
   if (after) { const index = ranked.findIndex((item) => item.hitId === after); if (index >= 0) ranked = ranked.slice(index + 1); else warnings.push({ code: "CURSOR_STALE", message: "cursor hit is not present in the current result set" }); }
   const pageHits = ranked.slice(0, request.page.limit);
   const last = pageHits.at(-1);
@@ -213,6 +242,7 @@ export function searchKnowledge(input: SearchRequest | NormalizedSearchRequest, 
   if (sourceFacts === 0 && plan.stages.some((stage) => stage.lane === "source")) warnings.push({ code: "SOURCE_NOT_INCLUDED", message: "the selected artifact/index contains no source corpus; graph and metadata may still be available, but exact source search cannot prove absence" });
   if (coverage.excluded > 0 || coverage.failed > 0) warnings.push({ code: "COVERAGE_INCOMPLETE", message: "coverage includes excluded or failed files; an empty result is not proof of absence" });
   if (coverage.stale > 0) warnings.push({ code: "INDEX_STALE", message: "one or more coverage records are stale; the result total is not exact" });
+  if (semanticDeferred) warnings.push({ code: "SEMANTIC_LANE_UNAVAILABLE", message: "semantic search requires the async provider runtime; deterministic lanes are partial results" });
   const exclusions: Array<{ filePath: string; code: string; reason: string }> = [];
   if (pageHits.length === 0) {
     warnings.push({ code: "NO_MATCH", message: "no verified match in the resolved scopes" });
@@ -229,7 +259,7 @@ export function searchKnowledge(input: SearchRequest | NormalizedSearchRequest, 
     ? { code: "REPOSITORY_NOT_FOUND" as const, message: "requested repository or revision was not found in the indexed knowledge store", details: { revisions: request.scope.revisions }, retryable: false }
     : undefined;
   const totalIsExact = coverage.stale === 0 && coverage.failed === 0 && coverage.excluded === 0 && request.mode === "exact" && ranked.length <= request.page.limit;
-  const incomplete = coverage.failed > 0 || coverage.excluded > 0 || coverage.stale > 0;
+  const incomplete = coverage.failed > 0 || coverage.excluded > 0 || coverage.stale > 0 || semanticDeferred;
   const queryStatus = error
     ? "SCOPE_ERROR"
     : pageHits.length > 0
@@ -242,7 +272,8 @@ export function searchKnowledge(input: SearchRequest | NormalizedSearchRequest, 
     : incomplete
       ? [{ command: "penguin index <repo-path>", reason: "refresh stale or failed coverage before relying on a negative result" }]
       : [];
-  return validateSearchResponse({ schemaVersion: "2", hits: pageHits, ...(error ? { error } : {}), diagnostics: { queryStatus, requestId: `search_${hash([normalizedHash, Date.now()]).slice(0, 16)}`, contractVersion: "2", capabilityHash: capabilityHash(CAPABILITIES), resolvedScopes: scopes.map((scope) => ({ repoId: scope.repoId ?? "", branch: (storeBranch(context.store, scope.snapshotId) ?? ""), snapshotId: scope.snapshotId, revisionKind: "commit" as const })), searchedLanes: plan.stages.map((stage) => stage.lane), skippedLanes: [], coverage, exclusions, warnings, nextActions, suggestions, timingsMs: {}, truncated: false }, page: { limit: request.page.limit, ...(nextCursor ? { nextCursor } : {}), totalIsExact, ...(totalIsExact ? { total: ranked.length } : {}) } });
+  const deterministicLanes = plan.stages.map((stage) => stage.lane).filter((lane) => lane !== "semantic");
+  return validateSearchResponse({ schemaVersion: "2", hits: pageHits, ...(error ? { error } : {}), diagnostics: { queryStatus, requestId: `search_${hash([normalizedHash, Date.now()]).slice(0, 16)}`, contractVersion: "2", capabilityHash: capabilityHash(CAPABILITIES), requestedScope: request.scope, resolvedScope: scopes.map((scope) => ({ repoId: scope.repoId ?? "", snapshotId: scope.snapshotId })), scopeApplied: allRequestedScopesResolved && (!requestedRevisions?.length || scopes.length > 0), resolvedScopes: scopes.map((scope) => ({ repoId: scope.repoId ?? "", branch: (storeBranch(context.store, scope.snapshotId) ?? ""), snapshotId: scope.snapshotId, revisionKind: "commit" as const })), searchedLanes: deterministicLanes, skippedLanes: semanticDeferred ? [{ lane: "semantic", reason: "async_semantic_lane_required" }] : [], coverage, exclusions, warnings, nextActions, suggestions, timingsMs: { total: Math.round((performance.now() - startedAt) * 1000) / 1000 }, candidateCount, truncated: budgeted.truncated }, page: { limit: request.page.limit, ...(nextCursor ? { nextCursor } : {}), totalIsExact, ...(totalIsExact ? { total: ranked.length } : {}) } });
 }
 
 /** Async companion for the optional semantic lane. Deterministic search remains
@@ -254,19 +285,32 @@ export async function searchKnowledgeAsync(input: SearchRequest | NormalizedSear
   if (request.options.semantic === "off") return deterministic;
   const scopes = context.scopes?.length ? context.scopes : scopeRows(context.store);
   const warnings = [...deterministic.diagnostics.warnings];
+  const skippedSemantic = (reason: string, message: string): SearchResponse => ({
+    ...deterministic,
+    diagnostics: {
+      ...deterministic.diagnostics,
+      searchedLanes: deterministic.diagnostics.searchedLanes.filter((lane) => lane !== "semantic"),
+      skippedLanes: [
+        ...deterministic.diagnostics.skippedLanes.filter((lane) => lane.lane !== "semantic"),
+        { lane: "semantic", reason },
+      ],
+      warnings: [...warnings, { code: "SEMANTIC_LANE_UNAVAILABLE", message }],
+      queryStatus: deterministic.hits.length > 0 ? "MATCH" : "NO_MATCH_INCOMPLETE",
+    },
+  });
   if (!context.semanticProvider) {
-    warnings.push({ code: "SEMANTIC_UNAVAILABLE", message: "semantic search was requested but no embedding provider is configured; deterministic lanes were returned" });
-    return { ...deterministic, diagnostics: { ...deterministic.diagnostics, warnings } };
+    return skippedSemantic("provider_not_configured", "semantic search was requested but no embedding provider is configured; deterministic lanes are partial results");
   }
   try {
-    const providerHealth = await context.semanticProvider.health();
+    const providerHealth = await Promise.race([
+      context.semanticProvider.health(),
+      new Promise<never>((_, reject) => setTimeout(() => reject(Object.assign(new Error("SEMANTIC_LANE_TIMEOUT"), { code: "SEMANTIC_LANE_TIMEOUT" })), 1_000)),
+    ]);
     if (!providerHealth.ok) {
-      warnings.push({ code: "SEMANTIC_UNAVAILABLE", message: providerHealth.reason ?? "embedding provider is unhealthy; deterministic lanes were returned" });
-      return { ...deterministic, diagnostics: { ...deterministic.diagnostics, warnings } };
+      return skippedSemantic("provider_unhealthy", providerHealth.reason ?? "embedding provider is unhealthy; deterministic lanes are partial results");
     }
   } catch (error) {
-    warnings.push({ code: "SEMANTIC_UNAVAILABLE", message: String((error as Error).message ?? error) });
-    return { ...deterministic, diagnostics: { ...deterministic.diagnostics, warnings } };
+    return skippedSemantic((error as { code?: string }).code === "SEMANTIC_LANE_TIMEOUT" ? "timeout" : "provider_error", String((error as Error).message ?? error));
   }
   const requestedRevisions = request.scope.revisions;
   const semanticScopes = requestedRevisions?.length
@@ -292,12 +336,11 @@ export async function searchKnowledgeAsync(input: SearchRequest | NormalizedSear
   }
   if (semanticScopes.length !== scopes.length) warnings.push({ code: "SEMANTIC_SCOPE_FILTERED", message: "semantic documents were restricted to the requested repository/revision scope" });
   if (!documents.length) {
-    warnings.push({ code: "SEMANTIC_EMPTY_CORPUS", message: "semantic search has no source documents in the resolved scopes" });
-    return { ...deterministic, diagnostics: { ...deterministic.diagnostics, warnings } };
+    return skippedSemantic("empty_corpus", "semantic search has no source documents in the resolved scopes");
   }
   let semanticHits;
   try { semanticHits = await semanticSearch(context.semanticProvider, request.query, documents, Math.max(50, request.page.limit)); }
-  catch (error) { warnings.push({ code: "SEMANTIC_UNAVAILABLE", message: String((error as Error).message ?? error) }); return { ...deterministic, diagnostics: { ...deterministic.diagnostics, warnings } }; }
+  catch (error) { return skippedSemantic("provider_error", String((error as Error).message ?? error)); }
   const inferred: SearchHit[] = semanticHits.map((hit) => ({ hitId: `semantic_${hash(hit.id).slice(0, 24)}`, kind: "source_document", lane: "semantic", title: String((hit.locator as { filePath?: string }).filePath ?? hit.id), locator: hit.locator as SearchHit["locator"], score: semanticLaneScore(hit.similarity), rankReasons: [`semantic similarity ${hit.similarity.toFixed(4)}`, "semantic score normalized within semantic lane"], untrustedContent: true, evidence: [{ source: "semantic", locator: hit.locator as SearchHit["locator"], status: "inference" }] }));
   const merged = rankSearchHits([...deterministic.hits, ...inferred]).slice(0, request.page.limit);
   return { ...deterministic, hits: merged, diagnostics: { ...deterministic.diagnostics, searchedLanes: [...new Set([...deterministic.diagnostics.searchedLanes, "semantic" as const])], warnings }, page: { limit: request.page.limit, totalIsExact: false } };

@@ -56,7 +56,7 @@ export function legacySearch(store: KnowledgeStore, query: string, filters?: Leg
   const rows = searchLegacyRows(store, query, filters);
   const result = rows as LegacySearchResponse;
   Object.defineProperties(result, {
-    v2: { value: v2 ?? { schemaVersion: "2", hits: [], diagnostics: { requestId: "legacy-fallback", contractVersion: "2", capabilityHash: "", resolvedScopes: [], searchedLanes: [], skippedLanes: [], coverage: { discovered: 0, admitted: 0, excluded: 0, failed: 0, stale: 0 }, exclusions: [], warnings: [{ code: "LEGACY_FALLBACK", message: "No live revision snapshot was available; legacy rows were preserved." }], suggestions: [], timingsMs: {}, truncated: false }, page: { limit: filters?.limit ?? 50, totalIsExact: true, total: rows.length } }, enumerable: false },
+    v2: { value: v2 ?? { schemaVersion: "2", hits: [], diagnostics: { requestId: "legacy-fallback", contractVersion: "2", capabilityHash: "", requestedScope: {}, resolvedScope: [], scopeApplied: false, resolvedScopes: [], searchedLanes: [], skippedLanes: [], coverage: { discovered: 0, admitted: 0, excluded: 0, failed: 0, stale: 0 }, exclusions: [], warnings: [{ code: "LEGACY_FALLBACK", message: "No live revision snapshot was available; legacy rows were preserved." }], suggestions: [], timingsMs: {}, candidateCount: 0, truncated: false }, page: { limit: filters?.limit ?? 50, totalIsExact: true, total: rows.length } }, enumerable: false },
     schemaVersion: { value: "2", enumerable: false },
     deprecation: { value: { replacement: "knowledge.search", removalVersion: "3.0.0" }, enumerable: false },
   });

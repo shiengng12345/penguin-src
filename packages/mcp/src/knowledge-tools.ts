@@ -81,6 +81,8 @@ const execFileAsync = promisify(execFile);
 export interface KnowledgeToolOptions {
   /** Host-owned adapter; credentials are resolved outside the MCP process. */
   postgresSchemaClient?: PostgresSchemaClient;
+  /** Worker-owned store; avoids reopening the DB inside an isolated query. */
+  store?: KnowledgeStore;
 }
 
 async function invokeLocalCli(args: string[]): Promise<Record<string, unknown>> {
@@ -294,7 +296,7 @@ export async function runKnowledgeTool(name: string, a: Record<string, unknown>,
   if (mutation && "error" in mutation) return mutation;
   let store: KnowledgeStore | null;
   try {
-    store = openKnowledgeStore();
+    store = options.store ?? openKnowledgeStore();
   } catch (error) {
     if (error instanceof Error && (error as { code?: string }).code === "SCHEMA_OUTDATED") {
       return { error: { code: "SCHEMA_OUTDATED", message: error.message, retryable: false } };
@@ -422,7 +424,7 @@ export async function runKnowledgeTool(name: string, a: Record<string, unknown>,
       const commitSha = typeof a.commit_sha === "string" ? a.commit_sha : undefined;
       if (!!branch === !!commitSha) return { error: "EXACTLY_ONE_REVISION_REQUIRED" };
       const indexer = await import("@penguin/knowledge-indexer");
-      return indexer.indexRevision({ store, rootPath: repo.rootPath, repoId, revision: branch ? { branch } : { commitSha: commitSha! }, parserVersion: "tree-sitter-wasm-v5-single-pass-log-sites", resolverVersion: "resolver-v1", coordinator: new indexer.RevisionIndexCoordinator() });
+      return indexer.indexRevision({ store, rootPath: repo.rootPath, repoId, revision: branch ? { branch } : { commitSha: commitSha! }, parserVersion: indexer.KNOWLEDGE_PARSER_VERSION, resolverVersion: indexer.KNOWLEDGE_RESOLVER_VERSION, coordinator: new indexer.RevisionIndexCoordinator() });
     }
     return handleKnowledgeTool(routedName, a, store, options);
   } finally {
@@ -431,7 +433,7 @@ export async function runKnowledgeTool(name: string, a: Record<string, unknown>,
         new AuditStore(store).append({ capabilityId: name, actorId: "mcp", scopeHash: createHash("sha256").update(JSON.stringify({ repo: a.repo ?? null, branch: a.branch ?? null, snapshot_id: a.snapshot_id ?? null })).digest("hex"), input: a, resultCode: "completed_or_returned" });
       } catch { /* audit must not turn a read result into a transport failure */ }
     }
-    store?.close();
+    if (!options.store) store?.close();
   }
 }
 
@@ -526,6 +528,48 @@ function hasExplicitScopeSelector(args: Record<string, unknown>): boolean {
 
 function legacyGatedRepoId(store: KnowledgeStore, args: Record<string, unknown>, target: string): string | null {
   return hasExplicitScopeSelector(args) ? nodeRepoId(store, target) : null;
+}
+
+function inputRecord(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {};
+}
+
+/**
+ * Canonical knowledge.search exposes nested `scope`, `options`, and `page`
+ * objects, while the original MCP handler accepted their fields at the top
+ * level. Normalize both shapes at this adapter boundary so canonical clients
+ * cannot silently lose revision isolation or pagination.
+ */
+function normalizeMcpSearchInput(input: Record<string, unknown>): Record<string, unknown> {
+  const scope = inputRecord(input.scope);
+  const options = inputRecord(input.options);
+  const page = inputRecord(input.page);
+  const firstRevision = Array.isArray(scope.revisions)
+    ? inputRecord(scope.revisions[0])
+    : {};
+  const nestedRepo = scope.repo ?? scope.repoId ?? firstRevision.repoId ?? firstRevision.repoName;
+  const nestedSnapshot = scope.snapshot_id ?? scope.snapshotId ?? firstRevision.snapshotId;
+  const nestedBranch = scope.branch ?? firstRevision.branch;
+  const nestedCommit = scope.commit_sha ?? scope.commitSha ?? firstRevision.commitSha;
+  return {
+    ...input,
+    ...(input.repo === undefined && typeof nestedRepo === "string" ? { repo: nestedRepo } : {}),
+    ...(input.snapshot_id === undefined && typeof nestedSnapshot === "string" ? { snapshot_id: nestedSnapshot } : {}),
+    ...(input.branch === undefined && typeof nestedBranch === "string" ? { branch: nestedBranch } : {}),
+    ...(input.commit_sha === undefined && typeof nestedCommit === "string" ? { commit_sha: nestedCommit } : {}),
+    ...(input.limit === undefined && Number.isInteger(page.limit) ? { limit: page.limit } : {}),
+    ...(input.cursor === undefined && typeof page.cursor === "string" ? { cursor: page.cursor } : {}),
+    ...(input.case_sensitive === undefined && typeof options.caseSensitive === "boolean" ? { case_sensitive: options.caseSensitive } : {}),
+    ...(input.whole_word === undefined && typeof options.wholeWord === "boolean" ? { whole_word: options.wholeWord } : {}),
+    ...(input.include_generated === undefined && typeof options.includeGenerated === "boolean" ? { include_generated: options.includeGenerated } : {}),
+    ...(input.include_vendor === undefined && typeof options.includeVendor === "boolean" ? { include_vendor: options.includeVendor } : {}),
+    ...(input.include_excluded_metadata === undefined && typeof options.includeExcludedMetadata === "boolean" ? { include_excluded_metadata: options.includeExcludedMetadata } : {}),
+    ...(input.semantic === undefined && typeof options.semantic === "string" ? { semantic: options.semantic } : {}),
+    ...(input.compact === undefined && typeof options.compact === "boolean" ? { compact: options.compact } : {}),
+    ...(input.explain === undefined && typeof options.explain === "boolean" ? { explain: options.explain } : {}),
+  };
 }
 
 // Dispatch a knowledge tool call. `store` may be null when the knowledge DB
@@ -664,6 +708,35 @@ export function handleKnowledgeTool(
         return { error: "knowledge_search requires a non-empty query" };
       }
       {
+        a = normalizeMcpSearchInput(a);
+        const canonicalScope = inputRecord(a.scope);
+        const canonicalRevisionInputs = Array.isArray(canonicalScope.revisions)
+          ? canonicalScope.revisions.map(inputRecord)
+          : [];
+        const canonicalRevisionContexts: RevisionContext[] = [];
+        if (canonicalRevisionInputs.length > 0) {
+          for (const selector of canonicalRevisionInputs) {
+            if (selector.workingTree === true) {
+              return { error: { code: "WORKING_TREE_SCOPE_UNSUPPORTED", message: "MCP search requires an indexed snapshot, branch, or commit" } };
+            }
+            const repoSelector = typeof selector.repoId === "string"
+              ? selector.repoId
+              : typeof selector.repoName === "string"
+                ? selector.repoName
+                : undefined;
+            const resolved = resolveMcpRevision(store, {
+              ...(repoSelector ? { repo: repoSelector } : {}),
+              ...(typeof selector.branch === "string" ? { branch: selector.branch } : {}),
+              ...(typeof selector.commitSha === "string" ? { commit_sha: selector.commitSha } : {}),
+              ...(typeof selector.snapshotId === "string" ? { snapshot_id: selector.snapshotId } : {}),
+            });
+            if (resolved.error) return resolved.error;
+            if (!resolved.context) {
+              return { error: { code: "REVISION_SCOPE_REQUIRED", message: "each canonical revision must resolve to an indexed repository snapshot" } };
+            }
+            canonicalRevisionContexts.push(resolved.context);
+          }
+        }
         const requestedRepo = typeof a.repo === "string" ? a.repo : undefined;
         const resolvedRepoIds = requestedRepo ? store.resolveRepoIds(requestedRepo) : [];
         if (requestedRepo && resolvedRepoIds.length === 0) return { error: "REPOSITORY_NOT_FOUND", repo: requestedRepo };
@@ -672,12 +745,14 @@ export function handleKnowledgeTool(
       const resolvedRepoName = resolvedRepoId
           ? (store.db.prepare("SELECT name FROM repos WHERE id=?").get(resolvedRepoId) as { name: string } | undefined)?.name
           : undefined;
-      const revision = resolveMcpRevision(store, resolvedRepoId ? { ...a, repo: resolvedRepoId } : a);
+      const revision = canonicalRevisionContexts.length > 0
+        ? { context: canonicalRevisionContexts[0] }
+        : resolveMcpRevision(store, resolvedRepoId ? { ...a, repo: resolvedRepoId } : a);
       if (revision.error) return revision.error;
       const queryText = String(a.query ?? "");
       const camelCaseIdentifier = /^[A-Za-z_$][\w$]*$/u.test(queryText) && /[a-z][A-Z]/u.test(queryText);
       const defaultIdentifier = camelCaseIdentifier && a.mode === undefined;
-      const useV2 = a.mode !== undefined || a.contract_version === "2" || camelCaseIdentifier;
+      const useV2 = a.mode !== undefined || a.contract_version === "2" || camelCaseIdentifier || canonicalRevisionContexts.length > 0;
       const sourceSnapshotId = revision.context && !revision.context.snapshotId.startsWith("legacy:")
           ? revision.context.snapshotId
           : (revision.context?.branchId
@@ -686,9 +761,42 @@ export function handleKnowledgeTool(
             ? (store.db.prepare("SELECT current_snapshot_id FROM branches WHERE repo_id=? AND status='live' AND current_snapshot_id IS NOT NULL ORDER BY default_branch DESC, name LIMIT 1").get(resolvedRepoId) as { current_snapshot_id: string | null } | undefined)?.current_snapshot_id ?? null
             : null);
       const repoId = revision.context?.repoId ?? resolvedRepoId;
-      const mode = ["exact", "phrase", "substring", "auto", "path", "regex"].includes(String(a.mode ?? "auto")) ? String(a.mode ?? "auto") as "exact" | "phrase" | "substring" | "auto" | "path" | "regex" : "auto";
+      const mode = ["exact", "phrase", "substring", "auto", "path", "regex", "lexical", "semantic", "structural"].includes(String(a.mode ?? "auto")) ? String(a.mode ?? "auto") as "exact" | "phrase" | "substring" | "auto" | "path" | "regex" | "lexical" | "semantic" | "structural" : "auto";
       if (useV2) {
-        const v2 = searchKnowledge({ query: queryText, mode: defaultIdentifier ? "exact" : mode, scope: sourceSnapshotId ? { revisions: [{ ...(repoId ? { repoId } : {}), snapshotId: sourceSnapshotId }] } : undefined, options: { caseSensitive: defaultIdentifier ? false : a.case_sensitive !== false, wholeWord: a.whole_word === true, includeExcludedMetadata: a.include_excluded_metadata === true, compact: a.compact !== false, explain: a.explain === true }, page: { limit: Number.isInteger(a.limit as number) ? a.limit as number : 20, ...(typeof a.cursor === "string" ? { cursor: a.cursor } : {}) } }, { store, scopes: sourceSnapshotId ? [{ snapshotId: sourceSnapshotId, repoId }] : undefined });
+        const revisionScopes = canonicalRevisionContexts.length > 0
+          ? canonicalRevisionContexts.map((context) => ({ repoId: context.repoId, snapshotId: context.snapshotId }))
+          : sourceSnapshotId
+            ? [{ ...(repoId ? { repoId } : {}), snapshotId: sourceSnapshotId }]
+            : [];
+        const v2 = searchKnowledge({
+          query: queryText,
+          mode: defaultIdentifier ? "exact" : mode,
+          scope: {
+            ...(revisionScopes.length > 0 ? { revisions: revisionScopes } : {}),
+            ...(Array.isArray(canonicalScope.paths) ? { paths: canonicalScope.paths.map(String) } : {}),
+            ...(Array.isArray(canonicalScope.languages) ? { languages: canonicalScope.languages.map(String) } : {}),
+            ...(Array.isArray(canonicalScope.kinds) ? { kinds: canonicalScope.kinds.map(String) } : {}),
+          },
+          options: {
+            caseSensitive: defaultIdentifier ? false : a.case_sensitive !== false,
+            wholeWord: a.whole_word === true,
+            includeGenerated: a.include_generated === true,
+            includeVendor: a.include_vendor === true,
+            includeExcludedMetadata: a.include_excluded_metadata === true,
+            semantic: mode === "semantic" ? "blend" : a.semantic === "fallback" || a.semantic === "blend" ? a.semantic : "off",
+            compact: a.compact !== false,
+            explain: a.explain === true,
+          },
+          page: {
+            limit: Number.isInteger(a.limit as number) ? a.limit as number : 20,
+            ...(typeof a.cursor === "string" ? { cursor: a.cursor } : {}),
+          },
+        }, {
+          store,
+          scopes: revisionScopes.length > 0
+            ? revisionScopes.map((scope) => ({ snapshotId: scope.snapshotId, repoId: scope.repoId }))
+            : undefined,
+        });
         return v2;
       }
       // Preserve the legacy response shape, but do not pay the global graph

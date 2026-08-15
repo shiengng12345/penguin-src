@@ -4,6 +4,7 @@ import { mkdtemp, cp, mkdir, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { CAPABILITIES, capabilityHash } from "../packages/knowledge-contracts/dist/index.js";
 
 async function initializeIsolatedMcpServer(entryPath) {
   const dir = await mkdtemp(join(tmpdir(), "penguin-mcp-release-"));
@@ -75,14 +76,19 @@ test("release-bundled MCP server initializes without workspace node_modules", as
   );
   assert.equal(result.code, 0);
   assert.equal(result.stderr, "");
-  assert.deepEqual(JSON.parse(result.stdout), {
-    result: {
-      protocolVersion: "2025-11-25",
-      capabilities: { tools: {} },
-      serverInfo: { name: "penguin-mcp", version: "0.0.1" },
-    },
-    jsonrpc: "2.0",
-    id: 0,
+  const response = JSON.parse(result.stdout);
+  assert.equal(response.jsonrpc, "2.0");
+  assert.equal(response.id, 0);
+  assert.equal(response.result.protocolVersion, "2025-11-25");
+  assert.deepEqual(response.result.capabilities, { tools: {} });
+  assert.deepEqual(response.result.serverInfo, {
+    name: "penguin-mcp",
+    version: `0.0.1+knowledge-${capabilityHash(CAPABILITIES).slice(0, 12)}`,
+  });
+  assert.deepEqual(JSON.parse(response.result.instructions), {
+    contractVersion: "2",
+    schemaVersion: 14,
+    capabilityHash: capabilityHash(CAPABILITIES),
   });
 });
 

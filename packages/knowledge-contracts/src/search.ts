@@ -139,6 +139,12 @@ export interface SearchDiagnostics {
   requestId: string;
   contractVersion: string;
   capabilityHash: string;
+  requestedScope: NormalizedSearchRequest["scope"];
+  resolvedScope: Array<{
+    repoId: string;
+    snapshotId: string;
+  }>;
+  scopeApplied: boolean;
   resolvedScopes: Array<{
     repoId: string;
     branch: string;
@@ -161,6 +167,8 @@ export interface SearchDiagnostics {
   nextActions: Array<{ command: string; reason: string }>;
   suggestions: Array<{ query: string; mode: SearchMode; reason: string }>;
   timingsMs: Record<string, number>;
+  /** Candidates considered before page limiting. Bounded by the query runtime. */
+  candidateCount: number;
   truncated: boolean;
 }
 

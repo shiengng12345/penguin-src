@@ -7,9 +7,9 @@
 // you installed via Penguin UI work here automatically. No duplicate install.
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-// Only the pure tool DEFS are imported statically (no knowledge-core / native
-// deps). The handler is dynamically imported on first knowledge-tool call so
-// the release-bundled server initializes without those deps present.
+// Tool definitions stay pure. DB-backed handlers are initialized only on a
+// knowledge request; QueryWorkerPool itself creates no SQLite connection in
+// this process because each bounded query opens its store inside a worker.
 import { KNOWLEDGE_TOOL_DEFS, LOG_INVESTIGATION_TOOL_DEFS, isKnowledgeTool } from "./knowledge-tool-defs.js";
 export { KNOWLEDGE_TOOL_DEFS } from "./knowledge-tool-defs.js";
 import { CAPABILITIES, capabilityHash } from "@penguin/knowledge-contracts";
@@ -17,6 +17,10 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import { QueryWorkerPool } from "../../knowledge-cli/src/query-server.js";
 import {
   callGrpcWeb,
   callGrpcNative,
@@ -63,6 +67,42 @@ import {
 
 const PROTOCOLS: readonly Protocol[] = ["grpc-web", "grpc", "sdk"] as const;
 const DESKTOP_PROTOCOLS: readonly DesktopProtocol[] = ["grpc-web", "grpc", "sdk", "rest"] as const;
+
+const MCP_FAST_KNOWLEDGE_TOOLS = new Set([
+  "knowledge_capabilities",
+  "knowledge_index_status",
+  "index_status",
+  "knowledge_status_panel",
+  "status_panel",
+]);
+
+let mcpQueryPool: QueryWorkerPool | undefined;
+function knowledgeDbPath(): string {
+  return process.env.PENGUIN_KNOWLEDGE_DB ?? join(homedir(), ".penguin", "knowledge", "knowledge.db");
+}
+
+function getMcpQueryPool(): QueryWorkerPool {
+  mcpQueryPool ??= new QueryWorkerPool({
+    dbPath: knowledgeDbPath(),
+    ledgerPath: process.env.PENGUIN_KNOWLEDGE_LEDGER ?? join(homedir(), ".penguin", "knowledge", "ledger.jsonl"),
+    workerUrl: new URL("./knowledge-worker.js", import.meta.url),
+    size: Number(process.env.PENGUIN_MCP_QUERY_WORKERS ?? 2),
+    maxQueue: Number(process.env.PENGUIN_MCP_QUERY_MAX_QUEUE ?? 16),
+    timeoutMs: Number(process.env.PENGUIN_MCP_QUERY_TIMEOUT_MS ?? 15_000),
+  });
+  return mcpQueryPool;
+}
+
+function isBoundedKnowledgeQuery(name: string): boolean {
+  const definition = KNOWLEDGE_TOOL_DEFS.find((tool) => tool.name === name) as
+    | { "x-penguin-capability-id"?: string }
+    | undefined;
+  const capabilityId = definition?.["x-penguin-capability-id"];
+  const capability = capabilityId
+    ? CAPABILITIES.find((candidate) => candidate.id === capabilityId)
+    : undefined;
+  return Boolean(capability && !capability.mutating && !MCP_FAST_KNOWLEDGE_TOOLS.has(name));
+}
 
 function asMetadata(headers: Record<string, string> | undefined): MetadataEntry[] {
   if (!headers) return [];
@@ -371,7 +411,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "mcp_health",
       description:
-        "One-shot diagnostic snapshot: which config file is in use, packages installed per protocol, environments configured per protocol, and the Node runtime info. Use this when something feels off or when you want to know what's available without crawling list_* tools.",
+        "Lightweight liveness check with runtime paths and bounded-query limits. This tool deliberately avoids package, environment, and database scans so it remains responsive while another query is slow.",
       inputSchema: { type: "object", properties: {} },
     },
     {
@@ -605,42 +645,40 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   ].sort((a, b) => a.name.localeCompare(b.name)),
 }));
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   const { name, arguments: args = {} } = request.params;
   const a = args as Record<string, unknown>;
 
   try {
     if (isKnowledgeTool(name)) {
+      // Preserve the established not-initialized response. A worker cannot
+      // open a missing database in read-only schema mode, so only route to the
+      // bounded pool after initialization has actually created the DB.
+      if (isBoundedKnowledgeQuery(name) && existsSync(knowledgeDbPath())) {
+        const result = await getMcpQueryPool().run(
+          "knowledge.mcp_tool",
+          { name, arguments: a },
+          extra.signal,
+        );
+        return jsonResult(result);
+      }
       // Lazy import keeps knowledge-core (native better-sqlite3) out of the
       // server's top-level load — only paid when a knowledge tool is called.
       const { runKnowledgeTool } = await import("./knowledge-tools.js");
       return jsonResult(await runKnowledgeTool(name, a));
     }
     if (name === "mcp_health") {
-      const cfg = readConfig();
-      const protocols = Object.fromEntries(
-        PROTOCOLS.map((p) => {
-          const installed = listInstalledPackages(p);
-          const envs = getSection(cfg, p).environments ?? [];
-          return [
-            p,
-            {
-              envCount: envs.length,
-              envNames: envs.map((e) => e.name),
-              packageCount: installed.length,
-              packageNames: installed.map((i) => i.name),
-            },
-          ];
-        }),
-      );
       return jsonResult({
         configPath: configPath(),
         penguinRoot: penguinRoot(),
         nodeVersion: process.version,
         platform: process.platform,
         cwd: process.cwd(),
-        desktopState: desktopStateStatus(),
-        protocols,
+        status: "ok",
+        queryRuntime: {
+          workers: Number(process.env.PENGUIN_MCP_QUERY_WORKERS ?? 2),
+          hardTimeoutMs: Number(process.env.PENGUIN_MCP_QUERY_TIMEOUT_MS ?? 15_000),
+        },
       });
     }
 
@@ -922,7 +960,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     );
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    return jsonResult(`Error: ${msg}`, true);
+    const code = (err as { code?: string }).code;
+    return jsonResult(
+      code ? { code, message: msg, retryable: code === "QUERY_BUSY" } : `Error: ${msg}`,
+      true,
+    );
   }
 });
 

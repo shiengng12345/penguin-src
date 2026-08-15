@@ -1,11 +1,12 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type DatabaseCtor from "better-sqlite3";
 import { Ledger, readLedgerFile } from "./ledger.js";
+import { canonicalJson } from "./canonical.js";
 
 type Database = DatabaseCtor.Database;
 import type { LedgerEvent, LedgerEventInput } from "./ledger.js";
 import { materialize, LedgerGapError } from "./materializer.js";
-import { openDatabase } from "./schema.js";
+import { openDatabase, type SchemaMaintenanceEvent } from "./schema.js";
 import { canonicalPathForCheck } from "./workspace-scope.js";
 
 function cjkBigrams(value: string): string[] {
@@ -189,8 +190,12 @@ export class KnowledgeStore {
     dbPath: string;
     ledgerPath: string;
     allowSchemaMutation?: boolean;
+    onSchemaMaintenance?: (event: SchemaMaintenanceEvent) => void;
   }): KnowledgeStore {
-    const db = openDatabase(opts.dbPath, { allowSchemaMutation: opts.allowSchemaMutation });
+    const db = openDatabase(opts.dbPath, {
+      allowSchemaMutation: opts.allowSchemaMutation,
+      onSchemaMaintenance: opts.onSchemaMaintenance,
+    });
     const { ledger, read } = Ledger.open(opts.ledgerPath);
     materialize(db, read.events); // 启动追平：账本领先则 replay
     return new KnowledgeStore(db, ledger, opts.ledgerPath);
@@ -806,17 +811,151 @@ export class KnowledgeStore {
   // 解析产出的代码边：同 file+branch 全量替换（§6.3 增量语义）。
   // 非 parser 边在这里是实现错误，不是数据——直接抛。
   replaceFileEdges(p: {
-    repoId: string;
-    branchId: string;
+    repoId?: string;
+    branchId?: string;
     filePath: string;
     edges: ParsedEdge[];
-  }): void {
+  }): "cached" | "compared" | "replaced" {
     for (const e of p.edges) {
       if (e.origin !== "parser") {
         throw new Error(
           `non-rebuildable edge (origin=${e.origin}) must go through recordKnowledge() — spec §2.2`,
         );
       }
+    }
+    const repoId = p.repoId ?? (p.branchId ? (this.db.prepare(
+      "SELECT repo_id AS repoId FROM branches WHERE id = ?",
+    ).get(p.branchId) as { repoId: string } | undefined)?.repoId : undefined);
+    if (!repoId) throw new Error(`repo not found for parser edge replacement branch ${p.branchId ?? "(global)"}`);
+    if (!p.branchId) {
+      if (p.edges.some((edge) => !edge.branchless)) {
+        throw new Error("branchId is required when replacing branch-scoped parser edges");
+      }
+      const replaceGlobal = this.db.transaction(() => {
+        this.db.prepare(
+          `DELETE FROM edges WHERE branch_id IS NULL AND origin = 'parser'
+             AND json_extract(provenance, '$.repo') = ?
+             AND json_extract(provenance, '$.file') = ?`,
+        ).run(repoId, p.filePath);
+        const insert = this.db.prepare(
+          `INSERT INTO edges (id, src, dst, raw_target, edge_type, branch_id,
+             origin, method, confidence, provenance, source_type)
+           VALUES (?, ?, ?, ?, ?, NULL, 'parser', ?, ?, ?, ?)`,
+        );
+        for (const edge of p.edges) {
+          insert.run(
+            `edge_${randomUUID()}`, edge.src, edge.dst, edge.rawTarget ?? null,
+            edge.edgeType, edge.method, edge.confidence ?? 1,
+            JSON.stringify({ ...(edge.provenance ?? {}), file: p.filePath, repo: repoId }),
+            edge.sourceType ?? null,
+          );
+        }
+      });
+      replaceGlobal();
+      return "replaced";
+    }
+    const fingerprint = (edge: {
+      src: string; dst: string | null; rawTarget: string | null; edgeType: string;
+      branchId: string | null; method: string; confidence: number;
+      provenance: Record<string, unknown>; sourceType: string | null;
+    }): string => canonicalJson([
+      edge.src, edge.dst, edge.rawTarget, edge.edgeType, edge.branchId,
+      edge.method, edge.confidence, edge.provenance, edge.sourceType,
+    ]);
+    const desiredFingerprints = p.edges.map((edge) => fingerprint({
+      src: edge.src,
+      dst: edge.dst ?? null,
+      rawTarget: edge.rawTarget ?? null,
+      edgeType: edge.edgeType,
+      branchId: edge.branchless ? null : p.branchId!,
+      method: edge.method,
+      confidence: edge.confidence ?? 1,
+      provenance: { ...(edge.provenance ?? {}), file: p.filePath, repo: repoId },
+      sourceType: edge.sourceType ?? null,
+    })).sort();
+    const desiredSetFingerprint = createHash("sha256")
+      .update(desiredFingerprints.join("\n"), "utf8")
+      .digest("hex");
+    const cachedSet = this.db.prepare(
+      `SELECT edge_count AS edgeCount, edge_fingerprint AS edgeFingerprint
+         FROM parser_edge_sets
+        WHERE repo_id = ? AND branch_id = ? AND file_path = ?`,
+    ).get(repoId, p.branchId, p.filePath) as {
+      edgeCount: number;
+      edgeFingerprint: string;
+    } | undefined;
+    if (
+      cachedSet?.edgeCount === desiredFingerprints.length &&
+      cachedSet.edgeFingerprint === desiredSetFingerprint
+    ) {
+      const scopedCount = (this.db.prepare(
+        `SELECT COUNT(*) AS count FROM edges
+          WHERE branch_id = ? AND origin = 'parser'
+            AND json_extract(provenance, '$.file') = ?`,
+      ).get(p.branchId, p.filePath) as { count: number }).count;
+      const globalCount = (this.db.prepare(
+        `SELECT COUNT(*) AS count FROM edges
+          WHERE branch_id IS NULL AND origin = 'parser'
+            AND json_extract(provenance, '$.repo') = ?
+            AND json_extract(provenance, '$.file') = ?`,
+      ).get(repoId, p.filePath) as { count: number }).count;
+      if (scopedCount + globalCount === cachedSet.edgeCount) return "cached";
+    }
+    const existingRows = [
+      ...(this.db.prepare(
+        `SELECT src, dst, raw_target AS rawTarget, edge_type AS edgeType,
+                branch_id AS branchId, method, confidence, provenance,
+                source_type AS sourceType
+           FROM edges
+          WHERE branch_id = ? AND origin = 'parser'
+            AND json_extract(provenance, '$.file') = ?`,
+      ).all(p.branchId, p.filePath) as Array<{
+        src: string; dst: string | null; rawTarget: string | null; edgeType: string;
+        branchId: string | null; method: string; confidence: number;
+        provenance: string; sourceType: string | null;
+      }>),
+      ...(this.db.prepare(
+        `SELECT src, dst, raw_target AS rawTarget, edge_type AS edgeType,
+                branch_id AS branchId, method, confidence, provenance,
+                source_type AS sourceType
+           FROM edges
+          WHERE branch_id IS NULL AND origin = 'parser'
+            AND json_extract(provenance, '$.repo') = ?
+            AND json_extract(provenance, '$.file') = ?`,
+      ).all(repoId, p.filePath) as Array<{
+        src: string; dst: string | null; rawTarget: string | null; edgeType: string;
+        branchId: string | null; method: string; confidence: number;
+        provenance: string; sourceType: string | null;
+      }>),
+    ];
+    let existingFingerprints: string[] | null;
+    try {
+      existingFingerprints = existingRows.map((edge) => fingerprint({
+        ...edge,
+        provenance: JSON.parse(edge.provenance) as Record<string, unknown>,
+      })).sort();
+    } catch {
+      // Corrupt/non-JSON parser provenance must be replaced, never treated as
+      // equivalent to freshly extracted graph data.
+      existingFingerprints = null;
+    }
+    if (
+      existingFingerprints != null &&
+      existingFingerprints.length === desiredFingerprints.length &&
+      existingFingerprints.every((value, index) => value === desiredFingerprints[index])
+    ) {
+      this.db.prepare(
+        `INSERT INTO parser_edge_sets(repo_id,branch_id,file_path,edge_count,edge_fingerprint,updated_at)
+         VALUES (?,?,?,?,?,?)
+         ON CONFLICT(repo_id,branch_id,file_path) DO UPDATE SET
+           edge_count=excluded.edge_count,
+           edge_fingerprint=excluded.edge_fingerprint,
+           updated_at=excluded.updated_at`,
+      ).run(
+        repoId, p.branchId, p.filePath, desiredFingerprints.length,
+        desiredSetFingerprint, new Date().toISOString(),
+      );
+      return "compared";
     }
     // Branch-scoped parser edges for this file (identity = branch + file).
     const delScoped = this.db.prepare(
@@ -838,7 +977,7 @@ export class KnowledgeStore {
     );
     const tx = this.db.transaction(() => {
       delScoped.run(p.branchId, p.filePath);
-      delGlobal.run(p.repoId, p.filePath);
+      delGlobal.run(repoId, p.filePath);
       for (const e of p.edges) {
         ins.run(
           `edge_${randomUUID()}`,
@@ -849,12 +988,24 @@ export class KnowledgeStore {
           e.branchless ? null : p.branchId,
           e.method,
           e.confidence ?? 1.0,
-          JSON.stringify({ ...(e.provenance ?? {}), file: p.filePath, repo: p.repoId }),
+          JSON.stringify({ ...(e.provenance ?? {}), file: p.filePath, repo: repoId }),
           e.sourceType ?? null,
         );
       }
+      this.db.prepare(
+        `INSERT INTO parser_edge_sets(repo_id,branch_id,file_path,edge_count,edge_fingerprint,updated_at)
+         VALUES (?,?,?,?,?,?)
+         ON CONFLICT(repo_id,branch_id,file_path) DO UPDATE SET
+           edge_count=excluded.edge_count,
+           edge_fingerprint=excluded.edge_fingerprint,
+           updated_at=excluded.updated_at`,
+      ).run(
+        repoId, p.branchId, p.filePath, desiredFingerprints.length,
+        desiredSetFingerprint, new Date().toISOString(),
+      );
     });
     tx();
+    return "replaced";
   }
 
   // Direct identity lookup (no alias fallback) — used to check whether a
@@ -1045,8 +1196,8 @@ export class KnowledgeStore {
     signature?: string | null;
   }): void {
     const tx = this.db.transaction(() => {
-      this.db.prepare("DELETE FROM fts_symbols WHERE node_id = ?").run(p.nodeId);
-      this.db
+      this.deleteSymbolText(p.nodeId);
+      const inserted = this.db
         .prepare(
           "INSERT INTO fts_symbols (node_id, name, signature) VALUES (?, ?, ?)",
         )
@@ -1054,8 +1205,20 @@ export class KnowledgeStore {
         // expansion belongs in the searchable name column; putting it into
         // signature leaks index-only tokens into API snippets.
         .run(p.nodeId, lexicalIdentifier(p.name), p.signature ?? "");
+      this.db
+        .prepare("INSERT INTO fts_symbol_rows(fts_rowid, node_id) VALUES (?, ?)")
+        .run(Number(inserted.lastInsertRowid), p.nodeId);
     });
     tx();
+  }
+
+  deleteSymbolText(nodeId: string): void {
+    const rows = this.db
+      .prepare("SELECT fts_rowid FROM fts_symbol_rows WHERE node_id = ?")
+      .all(nodeId) as Array<{ fts_rowid: number }>;
+    const delFts = this.db.prepare("DELETE FROM fts_symbols WHERE rowid = ?");
+    for (const row of rows) delFts.run(row.fts_rowid);
+    this.db.prepare("DELETE FROM fts_symbol_rows WHERE node_id = ?").run(nodeId);
   }
 
   // (repo_id, file_path) is the idempotency key — a full re-parse of that
@@ -1068,25 +1231,38 @@ export class KnowledgeStore {
     entries: Array<{ name: string; startLine: number; kind: string }>;
   }): void {
     const tx = this.db.transaction(() => {
-      this.db.prepare("DELETE FROM fts_identifiers WHERE repo_id = ? AND file_path = ?").run(p.repoId, p.filePath);
+      const existing = this.db
+        .prepare("SELECT fts_rowid FROM fts_identifier_rows WHERE repo_id = ? AND file_path = ?")
+        .all(p.repoId, p.filePath) as Array<{ fts_rowid: number }>;
+      const delFts = this.db.prepare("DELETE FROM fts_identifiers WHERE rowid = ?");
+      for (const row of existing) delFts.run(row.fts_rowid);
+      this.db.prepare("DELETE FROM fts_identifier_rows WHERE repo_id = ? AND file_path = ?")
+        .run(p.repoId, p.filePath);
       const insert = this.db.prepare(
         "INSERT INTO fts_identifiers (name, repo_id, file_path, start_line, kind) VALUES (?, ?, ?, ?, ?)",
       );
-      for (const e of p.entries) insert.run(lexicalIdentifier(e.name), p.repoId, p.filePath, e.startLine, e.kind);
+      const mapRow = this.db.prepare(
+        "INSERT INTO fts_identifier_rows(fts_rowid, repo_id, file_path) VALUES (?, ?, ?)",
+      );
+      for (const e of p.entries) {
+        const inserted = insert.run(lexicalIdentifier(e.name), p.repoId, p.filePath, e.startLine, e.kind);
+        mapRow.run(Number(inserted.lastInsertRowid), p.repoId, p.filePath);
+      }
     });
     tx();
   }
 
-  clearLogSitesForFile(repoId: string, filePath: string): void {
+  clearLogSitesForFile(repoId: string, filePath: string, keepNodeIds: readonly string[] = []): void {
     const rows = this.db.prepare(
       `SELECT id FROM nodes
        WHERE node_type = 'log_site' AND repo_id = ?
          AND json_extract(meta, '$.filePath') = ?`,
     ).all(repoId, filePath) as Array<{ id: string }>;
-    const delFts = this.db.prepare("DELETE FROM fts_symbols WHERE node_id = ?");
+    const keep = new Set(keepNodeIds);
     const delNode = this.db.prepare("DELETE FROM nodes WHERE id = ?");
     for (const row of rows) {
-      delFts.run(row.id);
+      if (keep.has(row.id)) continue;
+      this.deleteSymbolText(row.id);
       delNode.run(row.id);
     }
   }
@@ -1302,6 +1478,7 @@ export class KnowledgeStore {
     this.assertNoFreshIndexMarker(branchId);
     const repoId = branch.repo_id;
     const tx = this.db.transaction(() => {
+      this.db.prepare("DELETE FROM parser_edge_sets WHERE branch_id = ?").run(branchId);
       this.db.prepare("DELETE FROM edges WHERE branch_id = ?").run(branchId);
       this.db.prepare("DELETE FROM symbol_versions WHERE branch_id = ?").run(branchId);
       this.db.prepare("DELETE FROM files_index WHERE branch_id = ?").run(branchId);
@@ -1335,8 +1512,11 @@ export class KnowledgeStore {
         -- pending frontend rows whose source symbol is being GC'd would make a
         -- later replay insert an orphan-src edge — drop them with the node.
         DELETE FROM pending_frontend_edges WHERE src_node_id IN (SELECT id FROM gc_nodes);
-        DELETE FROM fts_symbols WHERE node_id IN (SELECT id FROM gc_nodes);
         DELETE FROM node_aliases WHERE node_id IN (SELECT id FROM gc_nodes);
+      `);
+      const gcNodeIds = this.db.prepare("SELECT id FROM gc_nodes").all() as Array<{ id: string }>;
+      for (const row of gcNodeIds) this.deleteSymbolText(row.id);
+      this.db.exec(`
         DELETE FROM nodes WHERE id IN (SELECT id FROM gc_nodes);
         DROP TABLE gc_nodes;
       `);
@@ -1363,15 +1543,23 @@ export class KnowledgeStore {
         `DELETE FROM edges WHERE src IN (SELECT id FROM nodes WHERE repo_id = ?)
            OR dst IN (SELECT id FROM nodes WHERE repo_id = ?)`,
       ).run(repoId, repoId);
-      this.db.prepare(
-        "DELETE FROM fts_symbols WHERE node_id IN (SELECT id FROM nodes WHERE repo_id = ?)",
-      ).run(repoId);
+      const repoNodeIds = this.db
+        .prepare("SELECT id FROM nodes WHERE repo_id = ?")
+        .all(repoId) as Array<{ id: string }>;
+      for (const row of repoNodeIds) this.deleteSymbolText(row.id);
+      const identifierRows = this.db
+        .prepare("SELECT fts_rowid FROM fts_identifier_rows WHERE repo_id = ?")
+        .all(repoId) as Array<{ fts_rowid: number }>;
+      const delIdentifier = this.db.prepare("DELETE FROM fts_identifiers WHERE rowid = ?");
+      for (const row of identifierRows) delIdentifier.run(row.fts_rowid);
+      this.db.prepare("DELETE FROM fts_identifier_rows WHERE repo_id = ?").run(repoId);
       this.db.prepare(
         "DELETE FROM symbol_versions WHERE branch_id IN (SELECT id FROM branches WHERE repo_id = ?)",
       ).run(repoId);
       this.db.prepare(
         "DELETE FROM symbol_versions WHERE node_id IN (SELECT id FROM nodes WHERE repo_id = ?)",
       ).run(repoId);
+      this.db.prepare("DELETE FROM parser_edge_sets WHERE repo_id = ?").run(repoId);
       this.db.prepare("DELETE FROM pending_frontend_edges WHERE repo_id = ?").run(repoId);
       this.db.prepare("DELETE FROM files_index WHERE repo_id = ?").run(repoId);
       this.db.prepare("DELETE FROM workspace_repos WHERE repo_id = ?").run(repoId);

@@ -28,6 +28,7 @@
 - `node_aliases`
 - `symbol_versions`
 - `edges`
+- `parser_edge_sets`
 - `coverage_layers`
 - `files_index`
 - `events`
@@ -41,7 +42,9 @@
 - `pending_frontend_edges`
 - `fts_notes`
 - `fts_symbols`
+- `fts_symbol_rows`
 - `fts_identifiers`
+- `fts_identifier_rows`
 - `file_facts`
 - `file_fact_symbols`
 - `snapshot_overlays`

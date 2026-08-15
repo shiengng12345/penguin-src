@@ -17,7 +17,7 @@ import {
   hasCapabilityOutputValidator,
   canonicalInputSchema,
 } from "../packages/knowledge-contracts/dist/index.js";
-import { KNOWLEDGE_TOOL_DEFS } from "../packages/mcp/dist/index.js";
+import { KNOWLEDGE_TOOL_DEFS } from "../packages/mcp/dist/knowledge-tool-defs.js";
 
 test("surface parity contract exposes every canonical capability", () => {
   for (const surface of ["cli", "mcp"]) {
@@ -54,7 +54,7 @@ test("CLI capability endpoint publishes the same canonical manifest hash", () =>
   );
   assert.equal(result.status, 0, result.stderr);
   const payload = JSON.parse(result.stdout);
-  assert.equal(payload.capabilities.length, 97);
+  assert.equal(payload.capabilities.length, CAPABILITIES.length);
   assert.equal(payload.capabilityHash, capabilityHash(CAPABILITIES));
   assert.deepEqual(
     payload.registrations.map((registration) => registration.capabilityId),

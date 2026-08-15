@@ -124,6 +124,32 @@ test("indexRepo: coverage discovery admits unsupported and 1.5MB text for the so
   rmSync(root, { recursive: true, force: true });
 });
 
+test("indexRepo reports a busy WAL checkpoint after bounded retries", async () => {
+  const root = tempRepo();
+  initRealGitRepo(root);
+  const dir = mkdtempSync(join(tmpdir(), "pk-pipe-checkpoint-"));
+  const dbPath = join(dir, "knowledge.db");
+  const ledgerPath = join(dir, "ledger.jsonl");
+  const store = KnowledgeStore.open({ dbPath, ledgerPath });
+  const reader = KnowledgeStore.open({ dbPath, ledgerPath, allowSchemaMutation: false });
+
+  try {
+    reader.db.exec("BEGIN");
+    reader.db.prepare("SELECT COUNT(*) FROM nodes").get();
+    const report = await indexRepo({ store, rootPath: root, mode: "rebuild" });
+
+    assert.equal(report.maintenance.checkpointAttempts, 3);
+    assert.ok(report.maintenance.checkpoint.busy > 0);
+    assert.match(report.maintenance.checkpointWarning, /WAL_CHECKPOINT_BUSY/);
+  } finally {
+    if (reader.db.inTransaction) reader.db.exec("ROLLBACK");
+    reader.close();
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("readGitContext: branch, detached, and non-git degrade", () => {
   const a = tempRepo();
   writeGit(a, "ref: refs/heads/main\n", { main: "abc123def456" });
