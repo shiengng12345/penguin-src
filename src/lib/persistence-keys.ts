@@ -21,6 +21,7 @@ export const APP_VALUE_KEYS = {
   remoteConfigSource: "penguin-remote-config-source",
   updateLastCheckedAt: "penguin-update-last-checked-at",
   updateDismissedVersion: "penguin-update-dismissed-version",
+  releaseWelcomeSeenVersion: "penguin-release-welcome-seen-version",
   // Auto-update preference — user opts IN (default false). When false, the
   // scheduler skips its startup + interval + focus checks. The Settings
   // "Check for Updates" button still works manually regardless.

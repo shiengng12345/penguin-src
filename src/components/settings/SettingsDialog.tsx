@@ -70,6 +70,7 @@ interface SettingsDialogProps {
   onOpenEnvManager: () => void;
   appUpdate: AppUpdateController;
   onPackagesCleared: () => Promise<void>;
+  initialSection?: "mcp" | null;
 }
 
 export function SettingsDialog({
@@ -77,6 +78,7 @@ export function SettingsDialog({
   onOpenEnvManager,
   appUpdate,
   onPackagesCleared,
+  initialSection = null,
 }: SettingsDialogProps) {
   const [clearing, setClearing] = useState(false);
   const [cleared, setCleared] = useState(false);
@@ -87,6 +89,7 @@ export function SettingsDialog({
   const [headerProtocol, setHeaderProtocol] = useState<VisibleProtocolTab>("grpc-web");
   const [editingName, setEditingName] = useState(false);
   const exportRef = useRef<HTMLTextAreaElement>(null);
+  const mcpSectionRef = useRef<HTMLDivElement>(null);
 
   const userName = useAppStore((s) => s.userName);
   const setUserName = useAppStore((s) => s.setUserName);
@@ -194,6 +197,14 @@ export function SettingsDialog({
     getVersion().then(setAppVersion).catch(() => setAppVersion("unknown"));
     refreshMcpStatus();
   }, [refreshMcpStatus]);
+
+  useEffect(() => {
+    if (initialSection !== "mcp") return;
+    const frame = window.requestAnimationFrame(() => {
+      mcpSectionRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [initialSection]);
 
   const currentHeaders = defaultHeaders[headerProtocol];
 
@@ -536,7 +547,7 @@ export function SettingsDialog({
           <RegistryAuthSection />
 
           {/* MCP Integration */}
-          <div className="rounded-lg border border-border bg-muted/20 p-4 md:col-span-2">
+          <div ref={mcpSectionRef} className="rounded-lg border border-border bg-muted/20 p-4 md:col-span-2">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <h3 className="text-sm font-medium text-foreground flex items-center gap-1.5">

@@ -15,6 +15,19 @@ interface UpdateBadgeInput {
   dismissedVersion: string | null;
 }
 
+interface ReleaseWelcomeInput {
+  currentVersion: string;
+  lastSeenVersion: string | null;
+}
+
+export function shouldShowReleaseWelcome({
+  currentVersion,
+  lastSeenVersion,
+}: ReleaseWelcomeInput): boolean {
+  const version = currentVersion.trim();
+  return version.length > 0 && version !== lastSeenVersion;
+}
+
 export function shouldRunScheduledUpdateCheck({
   nowMs,
   lastCheckedAt,

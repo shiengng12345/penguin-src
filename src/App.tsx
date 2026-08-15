@@ -74,6 +74,7 @@ const CurlImport = lazy(() => import("@/components/environment/CurlImport").then
 const ProtoViewer = lazy(() => import("@/components/request/ProtoViewer").then(m => ({ default: m.ProtoViewer })));
 const InteractiveTutorial = lazy(() => import("@/components/onboarding/InteractiveTutorial").then(m => ({ default: m.InteractiveTutorial })));
 const Welcome = lazy(() => import("@/components/onboarding/Welcome").then(m => ({ default: m.Welcome })));
+const ReleaseWelcomeDialog = lazy(() => import("@/components/onboarding/ReleaseWelcomeDialog").then(m => ({ default: m.ReleaseWelcomeDialog })));
 const DeveloperModeModal = lazy(() => import("@/components/settings/DeveloperModeModal").then(m => ({ default: m.DeveloperModeModal })));
 
 import { StatusBar } from "@/components/layout/StatusBar";
@@ -135,6 +136,7 @@ export default function App() {
   const [docOpen, setDocOpen] = useState(false);
   const [envManagerOpen, setEnvManagerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsInitialSection, setSettingsInitialSection] = useState<"mcp" | null>(null);
   const [newRequestOpen, setNewRequestOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [networkOpen, setNetworkOpen] = useState(false);
@@ -152,6 +154,11 @@ export default function App() {
   const [restOpen, setRestOpen] = useState(initialModule === "rest");
   const [wikiOpen, setWikiOpen] = useState(initialModule === "wiki");
   const openSettings = useCallback(() => {
+    setSettingsInitialSection(null);
+    setSettingsOpen(true);
+  }, []);
+  const openMcpSettings = useCallback(() => {
+    setSettingsInitialSection("mcp");
     setSettingsOpen(true);
   }, []);
   const closeVault = useCallback(() => setVaultOpen(false), []);
@@ -775,10 +782,14 @@ export default function App() {
           )}
           {settingsOpen && (
             <SettingsDialog
-              onClose={() => setSettingsOpen(false)}
+              onClose={() => {
+                setSettingsOpen(false);
+                setSettingsInitialSection(null);
+              }}
               onOpenEnvManager={() => setEnvManagerOpen(true)}
               appUpdate={appUpdate}
               onPackagesCleared={handlePackagesCleared}
+              initialSection={settingsInitialSection}
             />
           )}
           {envManagerOpen && (
@@ -796,6 +807,7 @@ export default function App() {
           {devModalOpen && <DeveloperModeModal onClose={() => setDevModalOpen(false)} />}
           <Welcome />
           <InteractiveTutorial />
+          <ReleaseWelcomeDialog onOpenMcpSettings={openMcpSettings} />
         </Suspense>
 
       </div>
