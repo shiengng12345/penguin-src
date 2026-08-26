@@ -88,24 +88,38 @@ function rowsForScope(
     if (!options.includeGenerated) sql += " AND COALESCE(c.classification, 'source') <> 'generated'";
     if (!options.includeVendor) sql += " AND COALESCE(c.classification, 'source') <> 'vendor'";
     if (batch) { sql += ` AND e.source_blob_id IN (${batch.map(() => "?").join(",")})`; params.push(...batch); }
-    rows.push(...store.db.prepare(sql).all(...params) as ScopeSourceRow[]);
+    // Loop-push instead of push(...spread): a broad query can return more rows
+    // than the engine allows spread arguments, which throws "Maximum call
+    // stack size exceeded".
+    for (const row of store.db.prepare(sql).all(...params) as ScopeSourceRow[]) rows.push(row);
   }
   return rows;
 }
 
-export function searchSource(store: KnowledgeStore, scope: ResolvedRevisionScope, request: Pick<NormalizedSearchRequest, "query" | "mode" | "options">, options: { signal?: AbortSignal } = {}): SourceSearchOccurrence[] {
+export interface SourceSearchLimits { signal?: AbortSignal; maxOccurrences?: number; paths?: string[]; }
+
+export function searchSource(store: KnowledgeStore, scope: ResolvedRevisionScope, request: Pick<NormalizedSearchRequest, "query" | "mode" | "options">, options: SourceSearchLimits = {}): SourceSearchOccurrence[] {
   const mode = request.mode === "auto" ? "substring" : request.mode;
   if (mode !== "exact" && mode !== "phrase" && mode !== "substring") return [];
+  const maxOccurrences = options.maxOccurrences ?? Number.POSITIVE_INFINITY;
+  const inPaths = (filePath: string) => !options.paths?.length || options.paths.some((prefix) => filePath === prefix || filePath.startsWith(`${prefix.replace(/\/$/, "")}/`));
   const hits: SourceSearchOccurrence[] = [];
   const byBlob = new Map<number, ScopeSourceRow[]>();
-  for (const row of rowsForScope(store, scope, request.query, request.options)) byBlob.set(row.blobId, [...(byBlob.get(row.blobId) ?? []), row]);
-  for (const rows of byBlob.values()) {
+  for (const row of rowsForScope(store, scope, request.query, request.options)) {
+    if (!inPaths(row.filePath)) continue;
+    byBlob.set(row.blobId, [...(byBlob.get(row.blobId) ?? []), row]);
+  }
+  scan: for (const rows of byBlob.values()) {
     if (options.signal?.aborted) throw new Error("SEARCH_CANCELLED");
     const row = rows[0];
     const matches = occurrences(row.content, request.query, mode, request.options.caseSensitive, request.options.wholeWord);
     for (const [start, end] of matches) {
+      if (hits.length >= maxOccurrences) break scan;
       const location = locateSourceRange(store, row.blobId, row.content, start, end);
-      for (const mapped of rows) hits.push({ ...location, sourceFactId: mapped.sourceFactId, blobId: mapped.blobId, contentHash: mapped.contentHash, filePath: mapped.filePath, snippet: sourceSnippet(row.content, start, end), verified: true });
+      for (const mapped of rows) {
+        if (hits.length >= maxOccurrences) break scan;
+        hits.push({ ...location, sourceFactId: mapped.sourceFactId, blobId: mapped.blobId, contentHash: mapped.contentHash, filePath: mapped.filePath, snippet: sourceSnippet(row.content, start, end), verified: true });
+      }
     }
   }
   return hits.sort((a, b) => a.filePath.localeCompare(b.filePath) || a.startByte - b.startByte || a.sourceFactId.localeCompare(b.sourceFactId));

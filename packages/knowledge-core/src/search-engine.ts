@@ -168,12 +168,19 @@ export function searchKnowledge(input: SearchRequest | NormalizedSearchRequest, 
         if (request.mode === "regex") {
           const result = searchRegex(context.store, scope, request.query, { allowPartial: false });
           if (result.status === "error") { warnings.push({ code: result.code, message: result.message }); continue; }
-          hits.push(...result.hits.map((item) => sourceHit(scope, context.store, item, LANE_WEIGHTS.source, "verified regex occurrence")));
+          // Loop-push, never push(...spread): a common query can match more
+          // occurrences than the engine allows spread arguments, which throws
+          // "Maximum call stack size exceeded".
+          for (const item of result.hits) hits.push(sourceHit(scope, context.store, item, LANE_WEIGHTS.source, "verified regex occurrence"));
         } else {
           const callExpressionQuery = /^\s*[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\s*\([^)]*\)\s*$/u.test(request.query);
-          hits.push(...searchSource(context.store, scope, { query: request.query, mode: request.mode, options: request.options }, { signal: context.signal })
-            .filter((item) => !request.scope.paths?.length || request.scope.paths.some((prefix) => item.filePath === prefix || item.filePath.startsWith(`${prefix.replace(/\/$/, "")}/`)))
-            .map((item) => sourceHit(scope, context.store, item, callExpressionQuery ? 1.3 : request.mode === "exact" ? 1.1 : LANE_WEIGHTS.source, callExpressionQuery ? "verified exact call expression; call-site boost=0.3" : request.mode === "exact" ? "verified exact source occurrence; exact boost=0.1" : "verified source occurrence")));
+          // Path scoping and the occurrence cap both live inside searchSource:
+          // filtering there keeps the cap from being consumed by out-of-scope
+          // occurrences, and everything past MAX_SEARCH_CANDIDATES would be
+          // discarded by enforceResultBudgets anyway (the +1 preserves the
+          // truncation signal).
+          const occurrences = searchSource(context.store, scope, { query: request.query, mode: request.mode, options: request.options }, { signal: context.signal, maxOccurrences: MAX_SEARCH_CANDIDATES + 1, paths: request.scope.paths });
+          for (const item of occurrences) hits.push(sourceHit(scope, context.store, item, callExpressionQuery ? 1.3 : request.mode === "exact" ? 1.1 : LANE_WEIGHTS.source, callExpressionQuery ? "verified exact call expression; call-site boost=0.3" : request.mode === "exact" ? "verified exact source occurrence; exact boost=0.1" : "verified source occurrence"));
         }
       } else if (stage.lane === "path") {
         for (const item of searchPath(context.store, scope, request.query, request.options.includeExcludedMetadata, request.options).filter((candidate) => !request.scope.paths?.length || request.scope.paths.some((prefix) => candidate.filePath === prefix || candidate.filePath.startsWith(`${prefix.replace(/\/$/, "")}/`)))) {

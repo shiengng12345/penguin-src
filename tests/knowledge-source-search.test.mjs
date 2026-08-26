@@ -68,6 +68,35 @@ test("source search exposes an indexed scope plan and honours cancellation betwe
   store.close();
 });
 
+test("source search stops materializing occurrences at the caller's cap", () => {
+  const store = openStore();
+  const snapshot = new GitTopologyStore(store).createBuildingSnapshot({ snapshotKey: "cap", repoId: "repo-1", parserVersion: "p", resolverVersion: "r", schemaVersion: 10 });
+  const fact = addSource(store, "docs/cap.md", "CapNeedle\nCapNeedle\nCapNeedle\nCapNeedle\nCapNeedle\n");
+  const cow = new SourceSnapshotStore(store);
+  cow.replaceOverlay(snapshot.id, [{ op: "add", path: "docs/cap.md", sourceFactId: fact }]);
+  cow.materializeManifest(snapshot.id);
+  const hits = searchSource(store, { snapshotId: snapshot.id, repoId: "repo-1" }, { query: "CapNeedle", mode: "exact", options: { caseSensitive: true, wholeWord: false } }, { maxOccurrences: 3 });
+  assert.equal(hits.length, 3);
+  store.close();
+});
+
+test("source search restricts occurrences to the requested path prefixes before the cap applies", () => {
+  const store = openStore();
+  const snapshot = new GitTopologyStore(store).createBuildingSnapshot({ snapshotKey: "paths", repoId: "repo-1", parserVersion: "p", resolverVersion: "r", schemaVersion: 10 });
+  const noisy = addSource(store, "vendor/noise.md", "PathNeedle\nPathNeedle\nPathNeedle\nPathNeedle\n");
+  const wanted = addSource(store, "docs/wanted.md", "PathNeedle\n");
+  const cow = new SourceSnapshotStore(store);
+  cow.replaceOverlay(snapshot.id, [
+    { op: "add", path: "vendor/noise.md", sourceFactId: noisy },
+    { op: "add", path: "docs/wanted.md", sourceFactId: wanted },
+  ]);
+  cow.materializeManifest(snapshot.id);
+  const hits = searchSource(store, { snapshotId: snapshot.id, repoId: "repo-1" }, { query: "PathNeedle", mode: "exact", options: { caseSensitive: true, wholeWord: false } }, { paths: ["docs"], maxOccurrences: 2 });
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].filePath, "docs/wanted.md");
+  store.close();
+});
+
 test("source search does not materialize a snapshot after an indexed trigram miss", () => {
   const store = openStore();
   const snapshot = new GitTopologyStore(store).createBuildingSnapshot({ snapshotKey: "miss", repoId: "repo-1", parserVersion: "p", resolverVersion: "r", schemaVersion: 10 });

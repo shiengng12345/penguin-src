@@ -66,6 +66,7 @@ import {
 } from "@penguin/knowledge-core";
 import { CAPABILITIES, capabilityHash, listMcpRegistrations, CAPABILITY_ALIASES } from "@penguin/knowledge-contracts";
 import { analyzeRepository } from "./repository-analysis.js";
+import { preflightSearchTerms } from "./log-investigation-preflight.js";
 import { readConfig } from "./config.js";
 import { INITIAL_SLS_TARGETS, mergeSlsTargets } from "./sls-target-registry.js";
 import { planLogInvestigation, continueLogInvestigation } from "./log-investigation.js";
@@ -259,14 +260,7 @@ function knowledgePreflight(store: KnowledgeStore | null): KnowledgeEvidencePref
   if (!store) return undefined;
   return {
     async collect({ request, targets }) {
-      const rawTerms = [
-        ...request.clues.traceIds ?? [], ...request.clues.requestIds ?? [],
-        ...request.clues.playerIds ?? [], ...request.clues.proposalIds ?? [],
-        ...request.clues.routes ?? [], ...request.clues.methods ?? [],
-        ...request.clues.keywords ?? [],
-        ...request.question.split(/[^A-Za-z0-9_.:/-]+/).filter((term) => term.length >= 3),
-      ];
-      const terms = [...new Set(rawTerms.map((term) => term.trim()).filter(Boolean))].slice(0, 24);
+      const terms = preflightSearchTerms(request);
       const facts: Array<{ factId: string; source: "knowledge" | "wiki"; statement: string; targetIds: string[]; evidenceIds: string[] }> = [];
       const evidence: Array<{ evidenceId: string; source: "knowledge" | "wiki"; locator: string }> = [];
       const seen = new Set<string>();

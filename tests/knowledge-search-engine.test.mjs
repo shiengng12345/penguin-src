@@ -268,3 +268,29 @@ test("lexical search preserves explicit phrases and indexes CJK bigrams", () => 
   assert.ok(store.searchText('"入口日志只记 platformId"').some((hit) => hit.nodeId === node));
   store.close();
 });
+
+test("a six-figure source occurrence count must not overflow the call stack and must report truncation", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pk-spread-cap-"));
+  const store = KnowledgeStore.open({ dbPath: join(dir, "knowledge.db"), ledgerPath: join(dir, "ledger.jsonl") });
+  const repoId = store.registerRepo({ name: "spread-fixture", rootPath: dir });
+  const snapshot = new GitTopologyStore(store).createBuildingSnapshot({ snapshotKey: "main", repoId, parserVersion: "p", resolverVersion: "r", schemaVersion: 11 });
+  // 250 occurrences in one blob mapped onto 1,000 snapshot paths = 250,000
+  // materialized source hits — the shape that crashed plan_log_investigation's
+  // knowledge preflight with "Maximum call stack size exceeded".
+  const content = "SpreadNeedle occurrence\n".repeat(250);
+  const raw = Buffer.from(content, "utf8");
+  const hash = createHash("sha256").update(raw).digest("hex");
+  const source = new SourceStore(store);
+  const blob = source.putBlob({ contentHash: hash, rawBytes: raw, decodedContent: content, encoding: "utf8" });
+  const fact = source.putSourceFact({ repoId, filePath: "src/spread.ts", factFingerprint: hash, contentHash: hash, sourceBlobId: blob, coverage: { status: "admitted", reasonCode: "text_searchable", classification: "source" } });
+  const cow = new SourceSnapshotStore(store);
+  cow.replaceOverlay(snapshot.id, Array.from({ length: 1000 }, (_, i) => ({ op: "add", path: `src/spread-${i}.ts`, sourceFactId: fact })));
+  cow.materializeManifest(snapshot.id);
+  const response = searchKnowledge(
+    { query: "SpreadNeedle", mode: "exact", scope: { revisions: [{ repoId, snapshotId: snapshot.id }] }, page: { limit: 8 } },
+    { store, scopes: [{ repoId, snapshotId: snapshot.id }], cursorSecret: "spread-secret" },
+  );
+  assert.equal(response.hits.length, 8);
+  assert.equal(response.diagnostics.truncated, true);
+  store.close();
+});
