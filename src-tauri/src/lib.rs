@@ -267,6 +267,7 @@ pub fn run() {
             db::db_count_error_log_since,
             db::db_clear_error_log,
             mcp::mcp_status,
+            mcp::mcp_server_health,
             mcp::mcp_install_to_local_clients,
             registry::write_registry_npmrc,
             registry::read_registry_npmrc_status,

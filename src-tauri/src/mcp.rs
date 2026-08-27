@@ -225,16 +225,30 @@ fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<(), String> {
     Ok(())
 }
 
-// Sync the bundled server JS (plus the package.json that carries
-// "type": "module" — without it node would run the ESM bundle as CJS) into
-// stable_dir. Refreshes stale copies after app updates. Returns the stable
-// server path to put in client configs.
+// Sync the bundled server's entire dist/ directory (plus the package.json
+// that carries "type": "module" — without it node would run the ESM bundle
+// as CJS) into stable_dir. Refreshes stale copies after app updates. Returns
+// the stable server path to put in client configs.
+//
+// Must copy the whole directory, not just index.js: at runtime index.js
+// dynamically imports/spawns sibling build outputs (knowledge-worker.js,
+// knowledge-tools.js, knowledge-tool-defs.js, ...) via
+// `new URL("./knowledge-worker.js", import.meta.url)`-style lookups relative
+// to itself. Copying index.js alone ships a server that 404s on its first
+// worker spawn — every knowledge_* tool call fails with QUERY_WORKER_CRASH
+// from the moment the app is installed, since those sibling files never
+// existed at the stable path to begin with.
 fn sync_stable_mcp_files(bundled_server: &Path, stable_dir: &Path) -> Result<PathBuf, String> {
     let dist = stable_dir.join("dist");
-    std::fs::create_dir_all(&dist).map_err(|e| e.to_string())?;
+    let bundled_dist = bundled_server.parent().ok_or_else(|| {
+        format!(
+            "bundled MCP server has no parent directory: {}",
+            bundled_server.display()
+        )
+    })?;
+    copy_dir_recursive(bundled_dist, &dist)?;
 
     let server_dest = dist.join("index.js");
-    copy_if_different(bundled_server, &server_dest)?;
 
     let pkg_dest = stable_dir.join("package.json");
     // Bundled layout: .../packages/mcp/dist/index.js with package.json two
@@ -675,8 +689,6 @@ pub(crate) struct McpStatus {
     server_name: String,
     bundled_server_path: Option<String>,
     node_path: Option<String>,
-    server_healthy: bool,
-    server_health_error: Option<String>,
     claude_desktop_config_path: Option<String>,
     claude_desktop_configured: bool,
     claude_code_config_path: Option<String>,
@@ -686,7 +698,71 @@ pub(crate) struct McpStatus {
 }
 
 #[tauri::command]
-pub(crate) fn mcp_status<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> McpStatus {
+pub(crate) async fn mcp_status<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> McpStatus {
+    // The status probe still does blocking work (stable-copy dist sync,
+    // login-shell node detection on dev builds, config parses), so it runs on
+    // the blocking pool — as a sync command it ran on the macOS main thread
+    // and froze the whole UI on every Settings open. The node health smoke
+    // test is NOT here: it takes up to 1500ms, so it lives in the separate
+    // mcp_server_health command and the UI fires it without waiting.
+    match tauri::async_runtime::spawn_blocking(move || mcp_status_blocking(&app)).await {
+        Ok(status) => status,
+        Err(_) => McpStatus {
+            server_name: "penguin".to_string(),
+            bundled_server_path: None,
+            node_path: None,
+            claude_desktop_config_path: None,
+            claude_desktop_configured: false,
+            claude_code_config_path: None,
+            claude_code_configured: false,
+            codex_config_path: None,
+            codex_configured: false,
+        },
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct McpServerHealth {
+    healthy: bool,
+    error: Option<String>,
+}
+
+// Slow path: spawns the bundled server under node and waits for a real MCP
+// initialize response (up to 1500ms). Split from mcp_status so Settings can
+// render config state instantly and fill the health badge in when this lands.
+#[tauri::command]
+pub(crate) async fn mcp_server_health<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> McpServerHealth {
+    let task = tauri::async_runtime::spawn_blocking(move || {
+        let (bundled, vendored_node) = match ensure_stable_mcp_server(&app) {
+            Ok((server, node)) => (Some(server), node),
+            Err(_) => (bundled_mcp_server_path(&app).ok(), None),
+        };
+        let node = vendored_node.or_else(detect_node_path);
+        match (node, bundled) {
+            (Some(node), Some(server)) => {
+                let health = check_mcp_server_runtime(&node, &server);
+                McpServerHealth { healthy: health.healthy, error: health.error }
+            }
+            (None, _) => McpServerHealth {
+                healthy: false,
+                error: Some("Node.js not detected".to_string()),
+            },
+            (_, None) => McpServerHealth {
+                healthy: false,
+                error: Some("Bundled MCP server missing".to_string()),
+            },
+        }
+    });
+    match task.await {
+        Ok(health) => health,
+        Err(e) => McpServerHealth {
+            healthy: false,
+            error: Some(format!("health check task failed: {e}")),
+        },
+    }
+}
+
+fn mcp_status_blocking<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> McpStatus {
     // Prefer the stable per-user copy (and refresh it while we're here so app
     // updates propagate); fall back to the in-bundle path for diagnostics.
     let (bundled, vendored_node) = match ensure_stable_mcp_server(&app) {
@@ -699,17 +775,6 @@ pub(crate) fn mcp_status<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> McpStat
     let cfg_path = claude_desktop_config_path();
     let claude_code_cfg_path = claude_code_config_path();
     let codex_cfg_path = codex_config_path();
-    let server_health = match (&node, &bundled) {
-        (Some(node), Some(server)) => check_mcp_server_runtime(node, server),
-        (None, _) => McpRuntimeHealth {
-            healthy: false,
-            error: Some("Node.js not detected".to_string()),
-        },
-        (_, None) => McpRuntimeHealth {
-            healthy: false,
-            error: Some("Bundled MCP server missing".to_string()),
-        },
-    };
 
     let claude_configured = cfg_path
         .as_ref()
@@ -729,8 +794,6 @@ pub(crate) fn mcp_status<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> McpStat
         server_name: "penguin".to_string(),
         bundled_server_path: bundled.map(|p| p.to_string_lossy().to_string()),
         node_path: node.map(|p| p.to_string_lossy().to_string()),
-        server_healthy: server_health.healthy,
-        server_health_error: server_health.error,
         claude_desktop_config_path: cfg_path.map(|p| p.to_string_lossy().to_string()),
         claude_desktop_configured: claude_configured,
         claude_code_config_path: claude_code_cfg_path.map(|p| p.to_string_lossy().to_string()),
@@ -759,10 +822,20 @@ fn detected_local_clients(home: &std::path::Path) -> Vec<(&'static str, PathBuf)
 }
 
 #[tauri::command]
-pub(crate) fn mcp_install_to_local_clients<R: tauri::Runtime>(
+pub(crate) async fn mcp_install_to_local_clients<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
 ) -> Result<String, String> {
-    let (server, vendored_node) = ensure_stable_mcp_server(&app)?;
+    // Same blocking profile as mcp_status (stable-copy sync + node detection);
+    // keep it off the main thread so the Settings UI stays responsive.
+    tauri::async_runtime::spawn_blocking(move || mcp_install_to_local_clients_blocking(&app))
+        .await
+        .map_err(|e| format!("install task failed: {e}"))?
+}
+
+fn mcp_install_to_local_clients_blocking<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<String, String> {
+    let (server, vendored_node) = ensure_stable_mcp_server(app)?;
     // Vendored node (known-matching ABI for the shipped better-sqlite3
     // prebuild) wins; only guess at a system node when the app shipped none
     // (dev builds — the workspace's own node_modules resolve it directly).
@@ -877,6 +950,60 @@ mod mcp_config_tests {
         fs::write(bundle_dir.join("dist/index.js"), "console.log('v2')").unwrap();
         sync_stable_mcp_files(&bundle_dir.join("dist/index.js"), &stable).unwrap();
         assert_eq!(fs::read_to_string(&server).unwrap(), "console.log('v2')");
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn sync_stable_mcp_files_copies_sibling_dist_files_index_js_depends_on() {
+        // Regression test for the release-breaks-on-install bug: index.js
+        // dynamically spawns sibling build outputs at runtime via
+        // `new URL("./knowledge-worker.js", import.meta.url)`-style lookups
+        // relative to itself. Copying index.js alone (the old behavior) ships
+        // a server that fails every knowledge_* tool call with
+        // QUERY_WORKER_CRASH from the moment the app is installed, because
+        // the sibling file it spawns never existed at the stable path.
+        let cfg = temp_config_path("stable-siblings");
+        let root = cfg.parent().unwrap().to_path_buf();
+
+        let bundle_dir = root.join("bundle/packages/mcp");
+        fs::create_dir_all(bundle_dir.join("dist")).unwrap();
+        fs::write(bundle_dir.join("dist/index.js"), "console.log('entry')").unwrap();
+        fs::write(
+            bundle_dir.join("dist/knowledge-worker.js"),
+            "console.log('worker')",
+        )
+        .unwrap();
+        fs::write(
+            bundle_dir.join("dist/knowledge-tool-defs.js"),
+            "console.log('defs')",
+        )
+        .unwrap();
+        fs::write(bundle_dir.join("package.json"), "{\"type\":\"module\"}").unwrap();
+
+        let stable = root.join("stable");
+        sync_stable_mcp_files(&bundle_dir.join("dist/index.js"), &stable).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(stable.join("dist/knowledge-worker.js")).unwrap(),
+            "console.log('worker')"
+        );
+        assert_eq!(
+            fs::read_to_string(stable.join("dist/knowledge-tool-defs.js")).unwrap(),
+            "console.log('defs')"
+        );
+
+        // App update: a sibling file's content changed → stable copy refreshes.
+        fs::write(
+            bundle_dir.join("dist/knowledge-worker.js"),
+            "console.log('worker-v2')",
+        )
+        .unwrap();
+        sync_stable_mcp_files(&bundle_dir.join("dist/index.js"), &stable).unwrap();
+        assert_eq!(
+            fs::read_to_string(stable.join("dist/knowledge-worker.js")).unwrap(),
+            "console.log('worker-v2')"
+        );
 
         let _ = fs::remove_dir_all(&root);
     }
