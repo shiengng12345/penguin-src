@@ -23,7 +23,8 @@
     "@penguin/knowledge-core": "workspace:*",
     "@penguin/knowledge-contracts": "workspace:*",
     "@penguin/knowledge-indexer": "workspace:*",
-    "@penguin/api-doc-generator": "workspace:*"
+    "@penguin/api-doc-generator": "workspace:*",
+    "@penguin/core": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^22.10.0"

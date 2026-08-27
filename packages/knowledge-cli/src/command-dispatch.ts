@@ -77,6 +77,7 @@ import { runClaudeHook } from "./claude-hook.js";
 import { createIndexRenderer } from "./render-progress.js";
 import { discoverSubRepos, isGitRepo, type RepoCandidate } from "./multi-repo.js";
 import { runApiDocCommand } from "./api-doc-command.js";
+import { runCallCommand } from "./call-command.js";
 import { createKnowledgeApiDocAdapter } from "./api-doc-knowledge-adapter.js";
 import { createLarkProcessRunner, LarkCliDocumentClient, type LarkProcessRunner } from "./lark-document-client.js";
 import { CAPABILITIES, capabilityHash, listCliRegistrations, warning, type ScopeEnvelope } from "@penguin/knowledge-contracts";
@@ -455,6 +456,7 @@ const HELP = `penguin — Penguin Knowledge CLI
   penguin architecture          project overview (repos/nodes/edges/langs/hubs/entrypoints)
   penguin communities [limit]   module/community clusters (label propagation; god node first)
   penguin timeline [limit]      recent commits across repos (date/author/merge/tags)
+  penguin call <pkg.Svc.Method> --env <name> [--body '{}'] one-shot RPC against the live backend (--transport connect for migrated servers)
   penguin sample <ep> <status> <json>  capture a real response for an endpoint
   penguin samples <endpoint>    captured runtime responses for an endpoint
   penguin deadcode              symbols nothing references (candidates; verify DI/reflection)
@@ -528,6 +530,17 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
   if (verb === "api-doc") {
     const apiStore = !deps.apiDocSourceAdapter && deps.storeExists() ? deps.openStore() : null;
     try { return await runApiDocCommand(argv.slice(1), { cwd: deps.cwd, out: deps.out, err: deps.err, json, previewRoot: deps.apiDocPreviewRoot ?? `${deps.cwd}/.penguin/api-docs/previews`, sourceAdapter: deps.apiDocSourceAdapter ?? (apiStore ? createKnowledgeApiDocAdapter(apiStore) : undefined), readStdin: deps.readStdin, bindingPath: deps.apiDocBindingPath, larkClient: deps.apiDocLarkClient ?? (deps.larkProcessRunner ? new LarkCliDocumentClient(deps.larkProcessRunner) : undefined) }); } finally { apiStore?.close(); }
+  }
+
+  // RPC invocation needs no knowledge store — dispatch before the DB gates so
+  // `penguin call` works even on machines that never ran `penguin init`.
+  if (verb === "call") {
+    try {
+      return await runCallCommand(argv.slice(1), { out: deps.out, err: deps.err, json });
+    } catch (error) {
+      deps.err(error instanceof Error ? error.message : String(error));
+      return 1;
+    }
   }
 
   if (!verb || verb === "help") {
