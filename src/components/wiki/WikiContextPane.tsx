@@ -3,18 +3,6 @@ import { Center, Dot } from "@/components/wiki/WikiUIKit";
 import { ScopeBadge } from "@/components/wiki/ScopeBadge";
 import type { ContextPack } from "@/lib/knowledge-client";
 
-// NestJS built-in exceptions → the HTTP status they produce, so "会抛出" reads as
-// the possible error responses of an endpoint.
-const EXC_STATUS: Record<string, string> = {
-  BadRequestException: "400", UnauthorizedException: "401", ForbiddenException: "403",
-  NotFoundException: "404", MethodNotAllowedException: "405", NotAcceptableException: "406",
-  RequestTimeoutException: "408", ConflictException: "409", GoneException: "410",
-  PayloadTooLargeException: "413", UnsupportedMediaTypeException: "415", UnprocessableEntityException: "422",
-  InternalServerErrorException: "500", NotImplementedException: "501", BadGatewayException: "502",
-  ServiceUnavailableException: "503", GatewayTimeoutException: "504", RpcException: "gRPC",
-};
-const withStatus = (exc: string) => (EXC_STATUS[exc] ? `${EXC_STATUS[exc]} · ${exc}` : exc);
-
 const briefCard = (label: string, items: { nodeId: string; title: string; nodeType: string }[], onSelectSymbol: (id: string) => void) =>
   items.length === 0 ? null : (
     <div className="rounded-xl border border-border bg-card/40">
@@ -47,16 +35,6 @@ const xServiceCard = (label: string, items: { nodeId: string; title: string; nod
             <span className="h-2 w-2 shrink-0 rounded-full bg-cyan-400" /><span className="min-w-0 flex-1 truncate">{n.title}</span>
           </button>
         ))}
-      </div>
-    </div>
-  );
-
-const chipList = (label: string, items: string[], color: string) =>
-  items.length === 0 ? null : (
-    <div className="rounded-xl border border-border bg-card/40">
-      <div className="border-b border-border px-3 py-2 text-[10px] font-bold uppercase tracking-wide text-muted-foreground">{label}</div>
-      <div className="flex flex-wrap gap-1.5 p-2.5">
-        {items.map((s) => <span key={s} className="rounded-md border border-border bg-muted/50 px-2 py-1 font-mono text-[11px]" style={{ color }}>{s}</span>)}
       </div>
     </div>
   );
@@ -101,7 +79,7 @@ export function WikiContextPane({
       {badge}
       <div className="rounded-2xl border border-border bg-card/85 p-4">
         <div className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-cyan-300">
-          <Sparkles className="h-3.5 w-3.5" />Context Pack
+          <Sparkles className="h-3.5 w-3.5" />Relations
         </div>
         <div className="font-mono text-sm font-semibold text-foreground">{f.title}</div>
         {f.filePath && <div className="mt-1 truncate font-mono text-xs text-muted-foreground">{f.filePath}</div>}
@@ -117,14 +95,8 @@ export function WikiContextPane({
       </div>
       {pack!.signals.length > 0 && (
         <div className="space-y-1.5 rounded-xl border border-amber-500/20 bg-amber-500/[0.04] p-3">
-          {pack!.signals.map((s, i) => <div key={i} className="flex items-start gap-2 text-xs text-foreground"><AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" />{s}</div>)}
-        </div>
-      )}
-      {f.source && (
-        <div className="overflow-hidden rounded-xl border border-border bg-card/85">
-          <div className="border-b border-border bg-card/60 px-3 py-1.5 text-[10px] font-bold uppercase text-muted-foreground">源码 · {(f.filePath?.split(".").pop() ?? "ts")}</div>
-          <pre className="max-h-80 overflow-auto bg-background/70 p-3 text-xs leading-relaxed text-foreground"><code className="font-mono">{f.source}</code></pre>
-        </div>
+        {pack!.signals.map((s, i) => <div key={i} className="flex items-start gap-2 text-xs text-foreground"><AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-400" />{s}</div>)}
+      </div>
       )}
       {(pack!.remoteCalls.length > 0 || pack!.invokedBy.length > 0) && (
         <div className="grid grid-cols-2 gap-3">
@@ -135,11 +107,12 @@ export function WikiContextPane({
       <div className="grid grid-cols-2 gap-3">
         {briefCard("被调用 · 被引用", [...pack!.callers, ...pack!.referencedBy], onSelectSymbol)}
         {briefCard("调用 · 用到类型", [...pack!.calls, ...pack!.usesTypes], onSelectSymbol)}
+        {briefCard("被这些组件渲染", pack!.renderedBy ?? [], onSelectSymbol)}
+        {briefCard("渲染这些组件", pack!.renders ?? [], onSelectSymbol)}
+        {briefCard("被这些回调动态调用", pack!.invokedDynamicallyBy ?? [], onSelectSymbol)}
+        {briefCard("动态调用这些回调", pack!.invokesDynamic ?? [], onSelectSymbol)}
         {briefCard("测试覆盖", pack!.tests, onSelectSymbol)}
         {briefCard("被这些文件 import", pack!.importers, onSelectSymbol)}
-        {pack!.routes.length > 0 && chipList("HTTP / gRPC 入口", pack!.routes.map((r) => r.route), "#22d3ee")}
-        {pack!.errors.length > 0 && chipList("可能错误响应", pack!.errors.map(withStatus), "#f87171")}
-        {pack!.envs.length > 0 && chipList("用到 env", pack!.envs, "#e879f9")}
       </div>
     </div>
   );

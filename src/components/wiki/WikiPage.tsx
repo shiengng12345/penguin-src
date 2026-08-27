@@ -1,11 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ArrowLeft,
-  ClipboardList,
   Loader2,
   Network,
   Search,
-  Sparkles,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -15,11 +13,9 @@ import { WikiGraph3D } from "@/components/wiki/WikiGraph3D";
 import { WikiContextPane } from "@/components/wiki/WikiContextPane";
 import { ScopeBlockerPanel } from "@/components/wiki/ScopeBlockerPanel";
 import { BranchPickerPopover, type BranchPickerOption } from "@/components/wiki/BranchPickerPopover";
-import { EvidenceInbox } from "@/components/wiki/EvidenceInbox";
 import { WikiSearchPage } from "@/components/wiki/WikiSearchPage";
 import { IndexProgressBanner } from "@/components/wiki/IndexProgressBanner";
 import { WikiOnboarding } from "@/components/wiki/WikiOnboarding";
-import { KnowledgeHomePanel } from "@/components/wiki/KnowledgeHomePanel";
 import { GraphEmptyState, GraphStatsOverlay, type GraphScope } from "@/components/wiki/GraphStatsOverlay";
 import { WikiStatusFooter } from "@/components/wiki/WikiStatusFooter";
 import {
@@ -27,7 +23,6 @@ import {
   formatKnowledgeError,
   isNoDatabaseError,
   knowledgeDbStatus,
-  knowledgeEvidenceList,
   knowledgeGraph,
   knowledgeIndexStatus,
   knowledgeRepoGraph,
@@ -41,7 +36,7 @@ import {
 
 interface WikiPageProps { onClose: () => void }
 
-type CenterTab = "search" | "context" | "graph" | "evidence";
+type CenterTab = "search" | "graph";
 // "home" = the repo/branch datatable (focusId null) — the implicit place
 // every FIRST symbol view was reached from (a graph node click, or nothing
 // yet). Without recording it, the very first symbol opened in a session had
@@ -55,7 +50,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
 
 
   const [focusId, setFocusId] = useState<string | null>(null);
-  const [tab, setTab] = useState<CenterTab>("search");
+  const [tab, setTab] = useState<CenterTab>("graph");
 
   const [pack, setPack] = useState<ContextPack | null>(null);
   const [packBusy, setPackBusy] = useState(false);
@@ -135,7 +130,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
   }, []);
 
   const selectSymbol = useCallback((id: string, record = true) => {
-    setError(null); setFocusId(id);
+    setError(null); setFocusId(id); setTab("graph");
     // An empty trail means this is the FIRST symbol viewed this session (from
     // a graph node click, or straight off the repo/branch home table) — seed
     // an implicit "home" entry underneath it so "返回" has somewhere to go
@@ -219,21 +214,6 @@ export function WikiPage({ onClose }: WikiPageProps) {
     setTrail((t) => { if (t.length <= 1) return []; const next = t.slice(0, -1); applyEntry(next[next.length - 1]); return next; });
   }, [applyEntry]);
 
-  const copyPack = () => {
-    if (!pack?.focus) return;
-    const L = [`# ${pack.focus.title} (${pack.focus.kind ?? pack.focus.nodeType})`, `file: ${pack.focus.filePath ?? "?"}`,
-      `branch: ${pack.focus.branches.map((b) => `${b.branch} (${b.status})`).join(", ")}`, ""];
-    if (pack.signals.length) L.push("## Signals", ...pack.signals.map((s) => `- ${s}`), "");
-    if (pack.focus.source) L.push("## Source", "```", pack.focus.source, "```", "");
-    const sec = (t: string, a: { title: string }[]) => { if (a.length) L.push(`## ${t}`, ...a.map((x) => `- ${x.title}`), ""); };
-    sec("Called by", pack.callers); sec("Calls", pack.calls); sec("Used by (type)", pack.referencedBy);
-    sec("Tested by", pack.tests); sec("Imported by", pack.importers);
-    if (pack.routes.length) L.push("## Routes", ...pack.routes.map((r) => `- ${r.route}`), "");
-    if (pack.errors.length) L.push("## Throws", ...pack.errors.map((e) => `- ${e}`), "");
-    void navigator.clipboard?.writeText(L.join("\n"));
-  };
-
-  const f = pack?.focus;
   // Fresh install / index deleted: no DB yet, or a DB with zero repos.
   const fresh = status != null && (!status.exists || status.repos === 0);
   useEffect(() => {
@@ -249,7 +229,6 @@ export function WikiPage({ onClose }: WikiPageProps) {
     const timer = window.setTimeout(() => {
       void import("force-graph").catch(() => undefined);
       void knowledgeServiceGraph().catch(() => undefined);
-      void knowledgeEvidenceList({ limit: 100 }).catch(() => undefined);
     }, 300);
     return () => window.clearTimeout(timer);
   }, [fresh]);
@@ -265,10 +244,8 @@ export function WikiPage({ onClose }: WikiPageProps) {
       <div className="flex min-h-0 flex-1 flex-col">
         <section className="flex min-h-0 min-w-0 flex-col bg-background">
           <div className="flex h-12 shrink-0 items-center gap-1 border-b border-border bg-card px-3">
-            <TabBtn on={tab === "search"} onClick={() => setTab("search")} icon={<Search className="h-3.5 w-3.5" />}>Search</TabBtn>
-            <TabBtn on={tab === "context"} onClick={() => setTab("context")} icon={<Sparkles className="h-3.5 w-3.5" />}>Context</TabBtn>
+            <TabBtn on={tab === "search"} onClick={() => setTab("search")} icon={<Search className="h-3.5 w-3.5" />}>Focus</TabBtn>
             <TabBtn on={tab === "graph"} onClick={() => setTab("graph")} icon={<Network className="h-3.5 w-3.5" />}>Graph</TabBtn>
-            <TabBtn on={tab === "evidence"} onClick={() => setTab("evidence")} icon={<ClipboardList className="h-3.5 w-3.5" />}>SLS Evidence</TabBtn>
             <div className="ml-auto flex items-center gap-2">
               {tab === "graph" && graphData && (
                 <div className="flex shrink-0 items-center gap-1 rounded-md border border-border bg-background/40 p-0.5 text-xs">
@@ -276,9 +253,6 @@ export function WikiPage({ onClose }: WikiPageProps) {
                   <button type="button" onClick={() => setGraphLayout("force")} className={cn("whitespace-nowrap rounded px-2 py-0.5", graphLayout === "force" ? "bg-cyan-500/15 text-cyan-200" : "text-muted-foreground hover:bg-accent")}>力导向</button>
                   <button type="button" onClick={() => setGraphLayout("3d")} className={cn("whitespace-nowrap rounded px-2 py-0.5", graphLayout === "3d" ? "bg-cyan-500/15 text-cyan-200" : "text-muted-foreground hover:bg-accent")}>3D</button>
                 </div>
-              )}
-              {tab === "context" && f && (
-                <button type="button" onClick={copyPack} className="flex h-8 items-center gap-1.5 rounded-lg bg-cyan-400 px-2.5 text-xs font-bold text-[#04121a] hover:bg-cyan-300"><Sparkles className="h-3.5 w-3.5" />Copy for AI</button>
               )}
               <button type="button" onClick={back} disabled={trail.length <= 1} title="返回上一步"
                 className="flex h-7 items-center gap-1 rounded-md border border-border px-2 text-xs text-foreground hover:bg-accent disabled:opacity-30">
@@ -288,47 +262,45 @@ export function WikiPage({ onClose }: WikiPageProps) {
             </div>
           </div>
 
-          {tab === "search" ? <WikiSearchPage /> : tab === "context" ? (
-            scopeBlock ? <ScopeBlockerPanel error={scopeBlock} onRetry={retryContextWithFallback} retrying={scopeBlockRetrying} /> :
-            f ? <WikiContextPane packBusy={packBusy} pack={pack} onSelectSymbol={selectSymbol} /> : (
-              <KnowledgeHomePanel
-                onOpenRepoGraph={(r, b) => void openRepoGraph(r, b)}
-              />
-            )
-          ) : tab === "graph" ? (
+          {tab === "search" ? <WikiSearchPage /> : (
             <div className="relative flex min-h-0 flex-1">
-              {graphBusy ? <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" /> 加载图谱…</div>
-                : graphData && graphData.nodes.length > 0
-                  ? (() => {
-                      const shown = filterGraphView(graphData, hiddenNodeTypes, hiddenNodeIds);
-                      const toggleNode = (id: string) =>
-                        setHiddenNodeIds((cur) => {
-                          const next = new Set(cur);
-                          if (next.has(id)) next.delete(id);
-                          else next.add(id);
-                          return next;
-                        });
-                      const toggleType = (t: string) =>
-                        setHiddenNodeTypes((cur) => {
-                          const next = new Set(cur);
-                          if (next.has(t)) next.delete(t);
-                          else next.add(t);
-                          return next;
-                        });
-                      return (
-                        <>
-                          {graphLayout === "3d"
-                            ? <WikiGraph3D data={shown} onNodeClick={onGraphNodeClick} />
-                            : <WikiGraph data={shown} layout={graphLayout} onNodeClick={onGraphNodeClick} />}
-                          <GraphStatsOverlay scope={graphScope} raw={graphData} shown={shown} hidden={hiddenNodeTypes} hiddenIds={hiddenNodeIds} onToggleType={toggleType} onToggleNode={toggleNode} />
-                        </>
-                      );
-                    })()
-                  : <GraphEmptyState onOpenServiceGraph={() => void openServiceGraph()} />}
-            </div>
-          ) : (
-            <div className="min-h-0 flex-1 overflow-auto p-6">
-              <EvidenceInbox />
+              <div className="relative flex min-w-0 flex-1">
+                {graphBusy ? <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" /> 加载图谱…</div>
+                  : graphData && graphData.nodes.length > 0
+                    ? (() => {
+                        const shown = filterGraphView(graphData, hiddenNodeTypes, hiddenNodeIds);
+                        const toggleNode = (id: string) =>
+                          setHiddenNodeIds((cur) => {
+                            const next = new Set(cur);
+                            if (next.has(id)) next.delete(id);
+                            else next.add(id);
+                            return next;
+                          });
+                        const toggleType = (t: string) =>
+                          setHiddenNodeTypes((cur) => {
+                            const next = new Set(cur);
+                            if (next.has(t)) next.delete(t);
+                            else next.add(t);
+                            return next;
+                          });
+                        return (
+                          <>
+                            {graphLayout === "3d"
+                              ? <WikiGraph3D data={shown} onNodeClick={onGraphNodeClick} />
+                              : <WikiGraph data={shown} layout={graphLayout} onNodeClick={onGraphNodeClick} />}
+                            <GraphStatsOverlay scope={graphScope} raw={graphData} shown={shown} hidden={hiddenNodeTypes} hiddenIds={hiddenNodeIds} onToggleType={toggleType} onToggleNode={toggleNode} />
+                          </>
+                        );
+                      })()
+                    : <GraphEmptyState onOpenServiceGraph={() => void openServiceGraph()} />}
+              </div>
+              {focusId && (
+                <aside aria-label="Relations" className="hidden w-[22rem] shrink-0 border-l border-border bg-background/80 xl:block">
+                  {scopeBlock
+                    ? <ScopeBlockerPanel error={scopeBlock} onRetry={retryContextWithFallback} retrying={scopeBlockRetrying} />
+                    : <WikiContextPane packBusy={packBusy} pack={pack} onSelectSymbol={selectSymbol} />}
+                </aside>
+              )}
             </div>
           )}
         </section>

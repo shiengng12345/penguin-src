@@ -5,7 +5,8 @@ import type { FlowResult } from "@/lib/knowledge-client";
 
 const VIA_COLOR: Record<string, string> = {
   calls: "#60a5fa", references: "#a78bfa", imports: "#94a3b8", defines: "#f59e0b",
-  tests: "#34d399", handles: "#fb7185", invokes: "#38bdf8", throws: "#f87171", uses: "#e879f9", root: "#22d3ee",
+  tests: "#34d399", handles: "#fb7185", invokes: "#38bdf8", renders: "#f472b6",
+  invokes_dynamic: "#c084fc", throws: "#f87171", uses: "#e879f9", root: "#22d3ee",
 };
 
 export function WikiFlowPane({

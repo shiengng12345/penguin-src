@@ -506,6 +506,10 @@ export interface ContextPack extends ScopeEnvelopeFields {
   } | null;
   callers: ContextBrief[];
   calls: ContextBrief[];
+  renderedBy: ContextBrief[];
+  renders: ContextBrief[];
+  invokedDynamicallyBy: ContextBrief[];
+  invokesDynamic: ContextBrief[];
   remoteCalls: ContextBrief[];
   invokedBy: ContextBrief[];
   referencedBy: ContextBrief[];
