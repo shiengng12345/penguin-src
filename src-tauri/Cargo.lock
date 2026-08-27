@@ -2902,7 +2902,7 @@ checksum = "df94ce210e5bc13cb6651479fa48d14f601d9858cfe0467f43ae157023b938d3"
 
 [[package]]
 name = "penguin"
-version = "1.15.0"
+version = "1.16.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
