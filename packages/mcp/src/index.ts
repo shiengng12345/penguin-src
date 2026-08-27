@@ -28,6 +28,7 @@ import {
   computeServicePath,
   generateDefaultJson,
   snsoftPackageNameFromSpec,
+  type FieldInfo,
   type MetadataEntry,
   type ProtoMethod,
   type ResponseState,
@@ -171,6 +172,48 @@ function findMethod(
   return { service, method };
 }
 
+// One-shot discovery: call_method arrived with a method (and optionally
+// service) name but no packageName — the common case for an agent that only
+// knows the method string. Find which installed package provides it instead
+// of forcing a search_methods round-trip first. Ambiguity is an error that
+// lists every candidate; it never guesses.
+function discoverCallTarget(
+  protocol: Protocol,
+  serviceName: string | undefined,
+  methodName: string,
+): { packageName: string; serviceFullName: string } {
+  const lowered = methodName.toLowerCase();
+  const matches: Array<{ packageName: string; serviceFullName: string; method: string }> = [];
+  for (const pkg of listInstalledPackages(protocol)) {
+    let services: ReturnType<typeof parseServicesForPackage>;
+    try {
+      services = parseServicesForPackage(protocol, pkg.name);
+    } catch {
+      continue; // one unparseable package must not block discovery in the rest
+    }
+    for (const svc of services) {
+      if (serviceName && !serviceNameMatches(svc, serviceName)) continue;
+      const method = svc.methods.find((m) => m.name.toLowerCase() === lowered);
+      if (method) {
+        matches.push({ packageName: pkg.name, serviceFullName: svc.fullName, method: method.name });
+      }
+    }
+  }
+  if (matches.length === 1) {
+    return { packageName: matches[0].packageName, serviceFullName: matches[0].serviceFullName };
+  }
+  if (matches.length === 0) {
+    throw new Error(
+      `Method ${serviceName ? `${serviceName}.` : ""}${methodName} not found in any installed ${protocol} package — use search_methods to locate it, or install_package first.`,
+    );
+  }
+  throw new Error(
+    `Method ${methodName} is ambiguous across installed packages — pass packageName (and serviceName) to pick one: ${matches
+      .map((m) => `${m.packageName} → ${m.serviceFullName}.${m.method}`)
+      .join("; ")}`,
+  );
+}
+
 // Build the protocol-specific routing fields from the unified
 // (packageName, serviceName, methodName) triple. Uses the same
 // computeServicePath as the desktop app —
@@ -188,6 +231,13 @@ function resolveCallRouting(args: {
   methodName?: string;
   packageName?: string;
 } {
+  // One-shot ergonomics: a method name with no package — discover the package
+  // across installed ones so a single call_method round-trip suffices.
+  if (!args.servicePath && !args.packageName && args.methodName && args.protocol !== "sdk") {
+    const found = discoverCallTarget(args.protocol, args.serviceName, args.methodName);
+    args = { ...args, packageName: found.packageName, serviceName: found.serviceFullName };
+  }
+
   // Legacy mode: caller already provided servicePath / (sdk) serviceName+methodName.
   if (args.servicePath || !args.packageName || !args.serviceName || !args.methodName) {
     return {
@@ -223,6 +273,51 @@ function resolveCallRouting(args: {
   return {
     packageName: args.packageName,
     servicePath: computeServicePath(method.fullName),
+  };
+}
+
+// Presentation cap for describe_* output. Shared enums can be huge — one
+// StatusCode enum carries 260 values and was >90% of a describe_method
+// response's tokens. The first values plus an explicit "+N more" marker keep
+// the schema readable; generateDefaultJson always runs on the UNTRIMMED
+// fields, so defaultBody is unaffected.
+const ENUM_PREVIEW_VALUES = 15;
+
+function trimFieldEnums(fields: FieldInfo[]): FieldInfo[] {
+  return fields.map((field) => {
+    const next: FieldInfo = { ...field };
+    if (next.enumValues && next.enumValues.length > ENUM_PREVIEW_VALUES) {
+      const total = next.enumValues.length;
+      const preview = next.enumValues.slice(0, ENUM_PREVIEW_VALUES);
+      next.enumValues = [...preview, `… +${total - ENUM_PREVIEW_VALUES} more (${total} values total)`];
+      if (next.enumNumbers) {
+        next.enumNumbers = Object.fromEntries(
+          Object.entries(next.enumNumbers).filter(([key]) => preview.includes(key)),
+        );
+      }
+    }
+    if (next.fields) next.fields = trimFieldEnums(next.fields);
+    if (next.map) {
+      const map = { ...next.map };
+      if (map.valueFields) map.valueFields = trimFieldEnums(map.valueFields);
+      if (map.valueEnumValues && map.valueEnumValues.length > ENUM_PREVIEW_VALUES) {
+        const total = map.valueEnumValues.length;
+        map.valueEnumValues = [
+          ...map.valueEnumValues.slice(0, ENUM_PREVIEW_VALUES),
+          `… +${total - ENUM_PREVIEW_VALUES} more (${total} values total)`,
+        ];
+      }
+      next.map = map;
+    }
+    return next;
+  });
+}
+
+function trimMethodEnums(method: ProtoMethod): ProtoMethod {
+  return {
+    ...method,
+    requestFields: trimFieldEnums(method.requestFields),
+    responseFields: trimFieldEnums(method.responseFields),
   };
 }
 
@@ -632,7 +727,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "call_method",
       description:
-        "Invoke an RPC method on the live backend in one call — no separate resolve_environment step needed. Recommended routing: pass `packageName` + `serviceName` + `methodName` — MCP will resolve the protocol-specific routing fields. Legacy `servicePath` works directly for native grpc; grpc-web still requires `packageName` to load the generated client module. Pass `environmentName` (from list_environments) to auto-resolve the target url and default headers (x-env-tag, authorization); pass `url` directly to bypass environment lookup. The result's `headers` always includes the real `x-penguin-id` correlation id that was actually sent with this request — never guess or synthesize one.",
+        "Invoke an RPC method on the live backend in ONE call — when you already know a method name, call this directly; do NOT run search_methods/describe_method/resolve_environment first. `methodName` alone is enough (`packageName`/`serviceName` are auto-discovered across installed packages; an ambiguous name errors with the candidate list). `environmentName` is case-insensitive and resolves the url + default headers (x-env-tag, authorization) automatically; pass `url` to bypass environment lookup. Errors are self-correcting: unknown method/service/environment errors list the valid candidates, so a failed call tells you exactly what to retry with. The result's `headers` always includes the real `x-penguin-id` correlation id that was actually sent — never guess or synthesize one.",
       inputSchema: {
         type: "object",
         required: ["protocol", "body"],
@@ -644,8 +739,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
               "Environment name from list_environments. Resolves url + default headers (x-env-tag, authorization) automatically; explicit `url`/`headers` override the resolved values. Either this or `url` is required.",
           },
           url: { type: "string", description: "Explicit target URL. Either this or `environmentName` is required." },
-          packageName: { type: "string", description: "e.g. @snsoft/auth-grpc-web" },
-          serviceName: { type: "string", description: "Short or fullName, e.g. 'Auth'" },
+          packageName: {
+            type: "string",
+            description:
+              "Optional — auto-discovered from methodName across installed packages. Pass only to disambiguate, e.g. @snsoft/auth-grpc-web",
+          },
+          serviceName: { type: "string", description: "Optional disambiguator. Short or fullName, e.g. 'Auth'" },
           methodName: { type: "string", description: "Case-insensitive, e.g. 'lookupNationalId'" },
           servicePath: { type: "string", description: "Legacy/manual override (grpc-web/grpc only)" },
           body: { type: "string", description: "JSON-stringified request body" },
@@ -739,9 +838,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       );
       // defaultBody seeds call_method — zero-valued JSON matching the request
       // schema. AI fills in the real values without having to guess field
-      // names or nesting structure.
+      // names or nesting structure. Computed BEFORE enum trimming so defaults
+      // stay exact.
       const defaultBody = generateDefaultJson(method.requestFields);
-      return jsonResult({ service: service.fullName, ...method, defaultBody });
+      return jsonResult({ service: service.fullName, ...trimMethodEnums(method), defaultBody });
     }
 
     if (name === "describe_service") {
@@ -752,8 +852,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       );
       // Synthesize defaultBody per method so the AI gets everything it needs
       // for follow-up call_method without further describe_method round trips.
+      // defaultBody uses the untrimmed fields; the returned trees are trimmed.
       const methods = service.methods.map((m) => ({
-        ...m,
+        ...trimMethodEnums(m),
         defaultBody: generateDefaultJson(m.requestFields),
       }));
       return jsonResult({

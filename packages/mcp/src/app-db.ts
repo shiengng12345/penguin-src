@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -41,11 +42,47 @@ function isSensitiveAppValueKey(key: string): boolean {
 const REQUEST_BODY_LIMIT = 4000;
 const MAX_LIST_LIMIT = 100;
 const SQLITE_MAX_BUFFER = 16 * 1024 * 1024;
+// Hard cap on any CLI-fallback read. One pathological query must fail loudly
+// instead of wedging the server: reads here run synchronously on the event
+// loop, so a hung child once serialized and blocked EVERY tool call
+// (including mcp_health) for 14+ minutes.
+const SQLITE_CLI_TIMEOUT_MS = 10_000;
 const SQLITE_CANDIDATES = ["/usr/bin/sqlite3", "/opt/homebrew/bin/sqlite3", "sqlite3"];
 
 function sqliteBinary(): string {
   return SQLITE_CANDIDATES.find((candidate) => candidate.includes("/") && existsSync(candidate))
     ?? "sqlite3";
+}
+
+// Driver-first SQLite access. The packaged server vendors better-sqlite3 (the
+// bundle externalizes it and ships a matching prebuild) and the workspace
+// resolves it directly; the sqlite3 CLI is only a fallback. The CLI's `-json`
+// output mode escapes strings in time quadratic in value length — a single
+// multi-MB app_kv row (a desktop tab that cached a large response body) once
+// pinned the child at 100% CPU for 14+ minutes per read.
+interface SqliteDriverDb {
+  prepare(sql: string): { all(...params: unknown[]): unknown[] };
+  close(): void;
+}
+type SqliteDriverCtor = new (
+  path: string,
+  opts: { readonly: boolean; fileMustExist: boolean },
+) => SqliteDriverDb;
+
+let cachedDriver: SqliteDriverCtor | null | undefined;
+function sqliteDriver(): SqliteDriverCtor | null {
+  if (cachedDriver !== undefined) return cachedDriver;
+  try {
+    cachedDriver = createRequire(import.meta.url)("better-sqlite3") as SqliteDriverCtor;
+  } catch {
+    cachedDriver = null;
+  }
+  return cachedDriver;
+}
+
+// SQL string literal for the CLI fallback, where parameters can't be bound.
+function sqlQuote(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`;
 }
 
 function defaultPenguinRoot(): string {
@@ -65,13 +102,40 @@ function sqliteErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function readSqliteRows(dbPath: string, sql: string): Record<string, unknown>[] {
+function readSqliteRows(
+  dbPath: string,
+  sql: string,
+  params: string[] = [],
+): Record<string, unknown>[] {
   if (!existsSync(dbPath)) return [];
+
+  const Driver = sqliteDriver();
+  if (Driver) {
+    let db: SqliteDriverDb | undefined;
+    try {
+      db = new Driver(dbPath, { readonly: true, fileMustExist: true });
+      return db
+        .prepare(sql)
+        .all(...params)
+        .filter((item): item is Record<string, unknown> => isRecord(item));
+    } catch (error) {
+      throw new Error(`SQLite read failed for ${dbPath}: ${sqliteErrorMessage(error)}`);
+    } finally {
+      db?.close();
+    }
+  }
+
+  // CLI fallback: inline the (internal, never user-supplied) parameters and
+  // enforce a hard timeout so a slow child kills itself instead of the server.
+  let inlined = sql;
+  for (const param of params) inlined = inlined.replace("?", sqlQuote(param));
   try {
-    const raw = execFileSync(sqliteBinary(), ["-json", dbPath, sql], {
+    const raw = execFileSync(sqliteBinary(), ["-json", dbPath, inlined], {
       encoding: "utf8",
       maxBuffer: SQLITE_MAX_BUFFER,
       stdio: ["ignore", "pipe", "ignore"],
+      timeout: SQLITE_CLI_TIMEOUT_MS,
+      killSignal: "SIGKILL",
     }).trim();
     if (!raw) return [];
     const parsed = JSON.parse(raw);
@@ -222,8 +286,22 @@ export function filterStoredRequests(
     .map((entry) => summarizeStoredRequest(entry));
 }
 
-export function readAppValues(dbPath = penguinDbPath()): Record<string, string> {
-  const rows = readSqliteRows(dbPath, "SELECT key, value FROM app_kv");
+// Values are read ONLY for explicitly named keys — never the whole table.
+// app_kv rows can reach several MB (tab state, registry caches), and pulling
+// every value to answer a single-key question is what made desktop-state
+// reads pathologically slow.
+export function readAppValues(
+  dbPath = penguinDbPath(),
+  keys: readonly string[],
+): Record<string, string> {
+  const wanted = keys.filter((key) => key && !isSensitiveAppValueKey(key));
+  if (wanted.length === 0) return {};
+  const placeholders = wanted.map(() => "?").join(", ");
+  const rows = readSqliteRows(
+    dbPath,
+    `SELECT key, value FROM app_kv WHERE key IN (${placeholders})`,
+    [...wanted],
+  );
   const values: Record<string, string> = {};
   for (const row of rows) {
     const key = asString(row.key);
@@ -233,11 +311,18 @@ export function readAppValues(dbPath = penguinDbPath()): Record<string, string> 
   return values;
 }
 
+/** Key names only — values are never loaded, so giant rows cost nothing. */
+export function listAppValueKeys(dbPath = penguinDbPath()): string[] {
+  return readSqliteRows(dbPath, "SELECT key FROM app_kv")
+    .map((row) => asString(row.key))
+    .filter((key) => key && !isSensitiveAppValueKey(key));
+}
+
 export function readDefaultHeaders(options: {
   dbPath?: string;
   protocol?: DesktopProtocol;
 } = {}): Partial<Record<DesktopProtocol, MetadataEntry[]>> {
-  const values = readAppValues(options.dbPath);
+  const values = readAppValues(options.dbPath, [APP_VALUE_KEYS.defaultHeaders]);
   return parseDefaultHeadersValue(values[APP_VALUE_KEYS.defaultHeaders], options.protocol);
 }
 
@@ -256,7 +341,7 @@ function readHistoryEntries(dbPath: string): Record<string, unknown>[] {
   } catch {
     // Table missing (pre-v1.9 desktop) — fall through to the legacy blob.
   }
-  const values = readAppValues(dbPath);
+  const values = readAppValues(dbPath, [APP_VALUE_KEYS.history]);
   return parseJsonArray(values[APP_VALUE_KEYS.history]);
 }
 
@@ -304,21 +389,25 @@ export function desktopStateStatus(dbPath = penguinDbPath()): {
   };
 
   try {
-    const values = readAppValues(dbPath);
+    const appValueKeys = listAppValueKeys(dbPath).sort();
     const savedRows = readSqliteRows(dbPath, "SELECT COUNT(*) AS count FROM saved_requests");
     const count = savedRows[0]?.count;
-    let historyCount = parseJsonArray(values[APP_VALUE_KEYS.history]).length;
+    let historyCount = 0;
     try {
       const historyRows = readSqliteRows(dbPath, "SELECT COUNT(*) AS count FROM request_history");
       const tableCount = historyRows[0]?.count;
-      if (typeof tableCount === "number" && tableCount > 0) historyCount = tableCount;
+      if (typeof tableCount === "number") historyCount = tableCount;
     } catch {
-      // Table missing (pre-v1.9 desktop) — blob count already computed.
+      // Table missing (pre-v1.9 desktop) — fall back to the legacy blob.
+    }
+    if (historyCount === 0 && appValueKeys.includes(APP_VALUE_KEYS.history)) {
+      const values = readAppValues(dbPath, [APP_VALUE_KEYS.history]);
+      historyCount = parseJsonArray(values[APP_VALUE_KEYS.history]).length;
     }
     return {
       ...base,
       ok: true,
-      appValueKeys: Object.keys(values).sort(),
+      appValueKeys,
       historyCount,
       savedRequestCount: typeof count === "number" ? count : 0,
     };

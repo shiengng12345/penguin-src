@@ -70,5 +70,12 @@ export function findEnvironment(
   envName: string,
 ): EnvironmentEntry | null {
   const envs = getSection(cfg, protocol).environments ?? [];
-  return envs.find((e) => e.name === envName) ?? null;
+  // Exact match wins; otherwise case-insensitive ("qat" → "QAT"). This was
+  // the one case-sensitive lookup in an otherwise fuzzy tool chain
+  // (methodName/serviceName already match case-insensitively).
+  return (
+    envs.find((e) => e.name === envName) ??
+    envs.find((e) => e.name.toLowerCase() === envName.toLowerCase()) ??
+    null
+  );
 }
