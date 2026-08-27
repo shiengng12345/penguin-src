@@ -175,8 +175,11 @@ export const KNOWLEDGE_TOOL_DEFS = [
   {
     name: "knowledge_explore",
     description:
-      "Default first call for code-understanding or editing work. Returns one bounded symbol/endpoint result with source, callers/calls, " +
-      "linear call path, transitive blast radius, tests, routes, edge provenance/confidence, freshness, and queryDiagnostics. " +
+      "Default FIRST call for any code-understanding or editing work — call this before grep/Read. One call returns `sources`: the VERBATIM, " +
+      "line-numbered-ranged source of the focus symbol plus its nearest callers/callees, re-read from disk at query time (safe to base edits on " +
+      "when `truncated` is false), alongside callers/calls, linear call path, transitive blast radius, tests, routes, edge provenance/confidence, " +
+      "freshness, and queryDiagnostics. Fuzzy input is fine: an inexact target falls back to search — a single hit resolves automatically, several " +
+      "come back as `ambiguousCandidates` to pick from (retry with the nodeId). Anything dropped for the line budget is named in `sourcesOmitted`. " +
       "Inspect queryDiagnostics before treating an empty relation as authoritative. Uses the same core result as `penguin explore`.",
     inputSchema: {
       type: "object",

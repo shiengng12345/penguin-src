@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  extractSearchHits,
   hasOrderedNodeIds,
   parseMcpGraphResult,
   scoreShadowParity,
@@ -9,6 +10,14 @@ import {
   summarizeTestMappings,
   summarizeShadowCases,
 } from "../scripts/knowledge-real-repo-benchmark.mjs";
+
+test("real-repo benchmark normalizes v2, legacy, and array search payloads", () => {
+  const hit = { nodeId: "n1" };
+  assert.deepEqual(extractSearchHits({ hits: [hit] }), [hit]);
+  assert.deepEqual(extractSearchHits({ results: [hit] }), [hit]);
+  assert.deepEqual(extractSearchHits([hit]), [hit]);
+  assert.throws(() => extractSearchHits({ hits: { bad: true } }), /no hits\/results array/);
+});
 
 test("golden flow scoring requires node ids in execution order", () => {
   const steps = [{ nodeId: "client" }, { nodeId: "noise" }, { nodeId: "endpoint" }, { nodeId: "handler" }];
@@ -53,6 +62,38 @@ test("real-repo benchmark parses the structured graph inside MCP text content", 
     }],
   });
   assert.deepEqual(parsed, { mode: "calls_of", nodes: [{ title: "callee" }] });
+});
+
+test("MCP benchmark prefers structuredContent over a human summary", () => {
+  const parsed = parseMcpGraphResult({
+    healthy: true,
+    isError: false,
+    structuredContent: { mode: "calls_of", nodes: [{ title: "structured" }] },
+    content: [
+      { type: "text", text: "182 hits · lanes source" },
+      { type: "text", text: JSON.stringify({ mode: "calls_of", nodes: [{ title: "wrong" }] }) },
+    ],
+  });
+  assert.deepEqual(parsed, { mode: "calls_of", nodes: [{ title: "structured" }] });
+});
+
+test("MCP benchmark skips human summaries and finds a later JSON text block", () => {
+  const parsed = parseMcpGraphResult({
+    healthy: true,
+    isError: false,
+    content: [
+      { type: "text", text: "182 hits · lanes source" },
+      { type: "text", text: JSON.stringify({ mode: "calls_of", nodes: [{ title: "callee" }] }) },
+    ],
+  });
+  assert.deepEqual(parsed, { mode: "calls_of", nodes: [{ title: "callee" }] });
+});
+
+test("MCP benchmark rejects summary-only output as a protocol failure", () => {
+  assert.throws(
+    () => parseMcpGraphResult({ healthy: true, isError: false, content: [{ type: "text", text: "182 hits · lanes source" }] }),
+    /structured JSON content/,
+  );
 });
 
 test("shadow parity compares stable relation identities, independent of output order", () => {

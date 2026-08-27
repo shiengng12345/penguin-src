@@ -103,3 +103,29 @@ test("distinguishes missing subjects, no paths, and depth truncation", () => {
     store.close();
   }
 });
+
+test("does not silently choose a duplicate service title across repositories", () => {
+  const { store } = seed();
+  try {
+    const secondRepoId = store.registerRepo({ name: "fixture-player", rootPath: "/fixture-player" });
+    store.registerBranch({ repoId: secondRepoId, name: "main", status: "live" });
+    store.upsertNode({
+      nodeType: "service",
+      identityKey: "npm-package::shared-player",
+      title: "auth",
+      repoId: secondRepoId,
+    });
+
+    const result = packageDependencies(store, {
+      subject: "auth",
+      direction: "dependencies",
+      transitive: false,
+      maxDepth: 5,
+      limit: 20,
+    });
+    assert.equal(result.status, "subject_ambiguous");
+    assert.deepEqual(result.nodes, []);
+  } finally {
+    store.close();
+  }
+});

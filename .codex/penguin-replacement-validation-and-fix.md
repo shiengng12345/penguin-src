@@ -162,11 +162,16 @@ handles 的重复多为不同 proto 文件对同 endpoint 的独立证据，应�
 
 这些案例应进入 real benchmark，而不是只留在文档；GREEN 案例防回退，RED 案例作为 feature acceptance，不允许用空 expected 制造假 100%。
 
-## 是否删除 CodeGraph / Graphify
+## 产品决议：完整替代 understandanything / CodeGraph / Graphify
 
-当前建议是移除它们在 `AGENTS.md` 中的强制前置顺序，但暂不物理删除索引与 hook：
+2026-08-28 起，产品目标正式改为：Penguin 必须成为唯一的代码理解、调用关系和代码图基础设施，完整替代并最终移除 understandanything、CodeGraph、Graphify。它们不再被定义为长期 fallback、对照工具或并行产品。
 
-- Penguin 已覆盖本轮 21 repo，CLI/MCP 同源且达到本报告的 100% 静态合同。
-- CodeGraph 仍可作为 source/call-path 的对照工具。
-- Graphify 仍可作为可视化/community 的对照工具。
-- 待日志索引、field read/write 与 watcher ownership 再经过真实 session 验证后，再决定删除 artifacts。
+本轮 P1 只是替代链路的一部分，不能宣称已经完成替代。完成标准是：
+
+- MCP、CLI、AI hook 三个入口同源，覆盖代码定位、逐字源码、调用链、影响面、测试/路由和关系图查询。
+- Penguin 的图模型覆盖前后端静态关系，并持续补齐 JSX render、动态回调、日志、字段读写、Mongo collection 和部署证据等原工具依赖的能力。
+- Wiki 对人类只保留 graph/relation-first 视图；AI 通过 Explore/source pack 获得可直接编辑的逐字源码。
+- 每个替代能力都有真实仓库 benchmark、CLI/MCP parity、precision/recall 或明确的 coverage gap；空结果不能伪装成 100%。
+- 只有在 replacement acceptance 全部通过后，才删除旧工具的 hooks、索引、配置和文档引用；在此之前也不得把它们描述成已被完全替代。
+
+因此，后续 roadmap、实现和 release decision 都按“替代完整度”验收，而不是按单个 Explore 功能是否完成验收。

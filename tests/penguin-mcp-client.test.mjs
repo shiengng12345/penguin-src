@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { callPenguinMcpTool } from "../scripts/penguin-mcp-client.mjs";
+import { callPenguinMcpTool, parseMcpStructuredResult } from "../scripts/penguin-mcp-client.mjs";
 
 test("MCP client invokes a knowledge tool through stdio JSON-RPC", async () => {
   const root = mkdtempSync(join(tmpdir(), "penguin-mcp-client-"));
@@ -45,4 +45,20 @@ input.on("line", (line) => {
     args: { mode: "calls_of", node: "checkBlacklist" },
   });
   rmSync(root, { recursive: true, force: true });
+});
+
+test("MCP client result parser prefers structuredContent and rejects summaries", () => {
+  assert.deepEqual(
+    parseMcpStructuredResult({
+      healthy: true,
+      isError: false,
+      structuredContent: { nodes: [{ title: "node" }] },
+      content: [{ type: "text", text: "1 hit · lanes source" }],
+    }),
+    { nodes: [{ title: "node" }] },
+  );
+  assert.throws(
+    () => parseMcpStructuredResult({ healthy: true, isError: false, content: [{ type: "text", text: "1 hit · lanes source" }] }),
+    /structured JSON content/,
+  );
 });

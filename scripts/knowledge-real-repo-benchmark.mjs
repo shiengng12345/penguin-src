@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { callPenguinMcpTool } from "./penguin-mcp-client.mjs";
+import { callPenguinMcpTool, parseMcpStructuredResult } from "./penguin-mcp-client.mjs";
 
 const INSTALLED_MCP_NODE = process.env.PENGUIN_MCP_NODE ?? "/Users/shieng/.penguin/mcp/node";
 const INSTALLED_MCP_SERVER = process.env.PENGUIN_MCP_SERVER ?? "/Users/shieng/.penguin/mcp/dist/index.js";
@@ -151,12 +151,7 @@ export function scoreRelationTitles(expectedTitles, actualTitles) {
 // MCP wraps each tool's structured JSON in a text content item; reject error
 // envelopes so schema/runtime failures cannot be mistaken for empty graphs.
 export function parseMcpGraphResult(result) {
-  if (!result.healthy || result.isError) {
-    throw new Error(result.error ?? result.content?.map((item) => item.text ?? "").join("\n") ?? "MCP query failed");
-  }
-  const textItem = result.content.find((item) => item.type === "text");
-  if (!textItem) throw new Error("MCP graph result has no text content");
-  return JSON.parse(textItem.text);
+  return parseMcpStructuredResult(result);
 }
 
 export function scoreShadowParity(cliGraph, mcpGraph) {
@@ -224,6 +219,13 @@ function runCliJson(args) {
   return JSON.parse(result.stdout);
 }
 
+export function extractSearchHits(payload) {
+  if (Array.isArray(payload)) return payload;
+  if (Array.isArray(payload?.hits)) return payload.hits;
+  if (Array.isArray(payload?.results)) return payload.results;
+  throw new Error("Search response has no hits/results array");
+}
+
 async function runMcpJson(toolName, args) {
   return parseMcpGraphResult(await callPenguinMcpTool({
     nodePath: INSTALLED_MCP_NODE,
@@ -245,11 +247,11 @@ function findNodeId(hits, identitySuffix) {
 }
 
 async function runClaudeDebugCorpus() {
-  const cliSearch = runCliJson(["search", "closeAccount"]);
-  const mcpSearch = (await runMcpJson("knowledge_search", {
+  const cliSearch = extractSearchHits(runCliJson(["search", "closeAccount"]));
+  const mcpSearch = extractSearchHits(await runMcpJson("knowledge_search", {
     query: "closeAccount",
     limit: 200,
-  })).results ?? [];
+  }));
   const searchParity = JSON.stringify(stableSearchKeys(cliSearch))
     === JSON.stringify(stableSearchKeys(mcpSearch));
 
@@ -291,8 +293,8 @@ async function runClaudeDebugCorpus() {
   const frontendMcpPassed = frontendIds.length === 2 && hasOrderedNodeIds(mcpFrontendFlow.callPath, frontendIds);
 
   const logQuery = "[BpAccountClosureService] closeAccount started";
-  const cliLogHits = runCliJson(["search", logQuery]);
-  const mcpLogHits = (await runMcpJson("knowledge_search", { query: logQuery, limit: 20 })).results ?? [];
+  const cliLogHits = extractSearchHits(runCliJson(["search", logQuery]));
+  const mcpLogHits = extractSearchHits(await runMcpJson("knowledge_search", { query: logQuery, limit: 20 }));
   const cliLog = cliLogHits.find((hit) => hit.nodeType === "log_site");
   const mcpLog = mcpLogHits.find((hit) => hit.nodeType === "log_site");
   const cliLogBacklinks = cliLog ? runCliJson(["backlinks", cliLog.nodeId]) : { nodes: [] };

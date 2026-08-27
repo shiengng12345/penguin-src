@@ -8,6 +8,7 @@ import {
   search,
   getNodeDetail,
   exploreGraph,
+  buildContextPack,
   buildExplorePack,
   compareBranches,
   compactIndexStatus,
@@ -252,6 +253,25 @@ test("buildExplorePack returns one trust-aware editing payload", () => {
   store.close();
 });
 
+test("context and explore expose typed UI relations without relabeling them as calls", () => {
+  const { store, main, login, helper, caller } = seed();
+  store.replaceFileEdges({ branchId: main, filePath: "a.ts", edges: [
+    { src: caller, dst: login, edgeType: "calls", origin: "parser", method: "EXTRACTED" },
+    { src: login, dst: helper, edgeType: "calls", origin: "parser", method: "EXTRACTED" },
+    { src: caller, dst: login, edgeType: "renders", origin: "parser", method: "INFERRED", confidence: 0.5 },
+    { src: login, dst: helper, edgeType: "invokes_dynamic", origin: "parser", method: "INFERRED", confidence: 0.5 },
+  ] });
+  const context = buildContextPack(store, login);
+  assert.deepEqual(context.renderedBy.map((node) => node.nodeId), [caller]);
+  assert.deepEqual(context.renders.map((node) => node.nodeId), []);
+  assert.deepEqual(context.invokesDynamic.map((node) => node.nodeId), [helper]);
+  assert.deepEqual(context.invokedDynamicallyBy.map((node) => node.nodeId), []);
+  const pack = buildExplorePack(store, login);
+  assert.ok(pack.provenance.some((row) => row.edgeType === "renders" && row.method === "INFERRED"));
+  assert.ok(pack.provenance.some((row) => row.edgeType === "invokes_dynamic" && row.confidence === 0.5));
+  store.close();
+});
+
 test("buildExplorePack reports a missing target without disguising it as an empty graph", () => {
   const { store } = seed();
   const pack = buildExplorePack(store, "does-not-exist");
@@ -370,5 +390,109 @@ test("compactIndexStatus keeps one bounded row per repo", () => {
   ]);
   assert.equal(compact.repos[0].repo, "fpms");
   assert.equal(compact.repos[0].liveBranch, "main");
+  store.close();
+});
+
+// —— Explore v2: verbatim source packs ————————————————————————————————
+
+import { writeFileSync, mkdirSync } from "node:fs";
+
+// A store whose repo rootPath is REAL, with a real file on disk, so
+// readSourceBlock can verify byte-for-byte reads.
+function seedWithSource() {
+  const dir = mkdtempSync(join(tmpdir(), "pk-explore-src-"));
+  const repoRoot = join(dir, "repo");
+  mkdirSync(join(repoRoot, "src"), { recursive: true });
+  const fileLines = [
+    "// pay module",                        // 1
+    "export function pay(amount) {",        // 2
+    "  return charge(amount);",             // 3
+    "}",                                    // 4
+    "export function charge(amount) {",     // 5
+    "  return amount > 0;",                 // 6
+    "}",                                    // 7
+    "export function checkout() {",         // 8
+    "  return pay(1);",                     // 9
+    "}",                                    // 10
+  ];
+  writeFileSync(join(repoRoot, "src", "pay.ts"), fileLines.join("\n"));
+
+  const store = KnowledgeStore.open({ dbPath: join(dir, "k.db"), ledgerPath: join(dir, "l.jsonl") });
+  const repoId = store.registerRepo({ name: "payrepo", rootPath: repoRoot });
+  const main = store.registerBranch({ repoId, name: "main", status: "live" });
+  const mk = (title) => store.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::${title}`, title, repoId });
+  const pay = mk("pay");
+  const charge = mk("charge");
+  const checkout = mk("checkout");
+  const ranges = { pay: [2, 4], charge: [5, 7], checkout: [8, 10] };
+  for (const [id, title] of [[pay, "pay"], [charge, "charge"], [checkout, "checkout"]]) {
+    store.upsertSymbolVersion({
+      nodeId: id, branchId: main, commitSha: "c0", filePath: "src/pay.ts", lang: "ts",
+      kind: "function", contentHash: `${title}-1`, startLine: ranges[title][0], endLine: ranges[title][1],
+    });
+    store.indexSymbolText({ nodeId: id, name: title, signature: "()" });
+  }
+  store.replaceFileEdges({ branchId: main, filePath: "src/pay.ts", edges: [
+    { src: checkout, dst: pay, edgeType: "calls", origin: "parser", method: "EXTRACTED" },
+    { src: pay, dst: charge, edgeType: "calls", origin: "parser", method: "EXTRACTED" },
+  ] });
+  return { store, pay, charge, checkout, fileLines };
+}
+
+test("explore v2: pack carries verbatim disk source for focus, callee, caller", () => {
+  const { store, pay, fileLines } = seedWithSource();
+  const pack = buildExplorePack(store, pay);
+  const focus = pack.sources.find((s) => s.role === "focus");
+  assert.ok(focus, "focus source present");
+  assert.equal(focus.filePath, "src/pay.ts");
+  assert.equal(focus.startLine, 2);
+  assert.equal(focus.endLine, 4);
+  assert.equal(focus.code, fileLines.slice(1, 4).join("\n"), "byte-for-byte disk content");
+  assert.equal(focus.truncated, false);
+  assert.ok(pack.sources.some((s) => s.role === "callee" && s.title === "charge"));
+  assert.ok(pack.sources.some((s) => s.role === "caller" && s.title === "checkout"));
+  assert.deepEqual(pack.sourcesOmitted, []);
+  store.close();
+});
+
+test("explore v2: missing file degrades to briefs, never throws", () => {
+  const { store, pay } = seedWithSource();
+  // Simulate a moved file: version points somewhere that doesn't exist.
+  store.db.prepare("UPDATE symbol_versions SET file_path='src/gone.ts'").run();
+  const pack = buildExplorePack(store, pay);
+  assert.deepEqual(pack.sources, []);
+  assert.ok(pack.callers.length > 0, "briefs still present");
+  store.close();
+});
+
+test("explore v2: inexact target resolves via single search hit", () => {
+  const { store } = seedWithSource();
+  // "checkout" is indexed; "check out" style fuzzy term must not be needed —
+  // use a distinct token only one symbol matches.
+  const pack = buildExplorePack(store, "checkout");
+  assert.ok(pack.focus, "resolved");
+  // Now a genuinely inexact form: FTS matches the identifier token.
+  const fuzzy = buildExplorePack(store, "chArGe");
+  assert.ok(fuzzy.focus, "case-insensitive resolution");
+  assert.equal(fuzzy.focus.title, "charge");
+  store.close();
+});
+
+test("explore v2: multi-hit fuzzy target returns candidates, never guesses", () => {
+  const { store } = seedWithSource();
+  const dirStore = store;
+  // Two symbols share the "pay" token lexically: pay + payLater.
+  const repoId = dirStore.db.prepare("SELECT id FROM repos LIMIT 1").get().id;
+  const branch = dirStore.db.prepare("SELECT id FROM branches LIMIT 1").get().id;
+  const payLater = dirStore.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::payLater`, title: "payLater", repoId });
+  dirStore.upsertSymbolVersion({ nodeId: payLater, branchId: branch, commitSha: "c0", filePath: "src/pay.ts", lang: "ts", kind: "function", contentHash: "pl-1", startLine: 8, endLine: 10 });
+  dirStore.indexSymbolText({ nodeId: payLater, name: "payLater", signature: "()" });
+  const pack = buildExplorePack(store, "pay");
+  // "pay" resolves EXACTLY (title match) — fuzzy path must not kick in.
+  assert.ok(pack.focus);
+  // A token that only exists lexically across both: "later" hits payLater only.
+  const single = buildExplorePack(store, "later");
+  assert.equal(single.focus?.title, "payLater");
+  assert.ok(single.diagnostics.some((d) => d.includes("search fallback")));
   store.close();
 });

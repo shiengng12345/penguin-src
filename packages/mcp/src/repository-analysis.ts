@@ -50,6 +50,8 @@ export function analyzeRepository(store: KnowledgeStore, options: RepositoryAnal
     evidence.push(result);
     if (result.status === "subject_not_found") {
       gaps.push(`No indexed package subject matched "${subject}"; this is not proof that the package is absent.`);
+    } else if (result.status === "subject_ambiguous") {
+      gaps.push(`Package subject "${subject}" matched multiple indexed services; specify an exact identity before trusting dependencies.`);
     } else {
       for (const node of result.nodes) {
         verifiedFacts.push(`${subject} depends on ${node.title} at graph depth ${node.depth}.`);

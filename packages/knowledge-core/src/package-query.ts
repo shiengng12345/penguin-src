@@ -12,18 +12,28 @@ export interface PackageDependencyNode {
 }
 
 export interface PackageDependencyQueryResult {
-  status: "ok" | "subject_not_found";
+  status: "ok" | "subject_not_found" | "subject_ambiguous";
   subject: string;
   nodes: PackageDependencyNode[];
   truncated: boolean;
+  candidates?: PackageDependencyCandidate[];
+}
+
+export interface PackageDependencyCandidate {
+  nodeId: string;
+  title: string;
+  identityKey: string;
+  repoId: string | null;
 }
 
 export interface DependencyPathResult {
-  status: "found" | "subject_not_found" | "no_path";
+  status: "found" | "subject_not_found" | "subject_ambiguous" | "no_path";
   from: string;
   to: string;
   path: PackageDependencyNode[];
   truncated: boolean;
+  fromCandidates?: PackageDependencyCandidate[];
+  toCandidates?: PackageDependencyCandidate[];
 }
 
 interface PackageRow {
@@ -47,29 +57,52 @@ function boundedNumber(value: number, fallback: number, max: number): number {
   return Number.isFinite(value) ? Math.max(0, Math.min(max, Math.floor(value))) : fallback;
 }
 
-function resolvePackage(store: KnowledgeStore, subject: string): PackageRow | null {
+function resolvePackage(store: KnowledgeStore, subject: string): PackageRow[] {
+  const exactId = store.db.prepare(
+    `SELECT id, title, identity_key, repo_id
+       FROM nodes
+      WHERE node_type = 'service' AND id = ?
+      LIMIT 1`,
+  ).get(subject) as PackageRow | undefined;
+  if (exactId) return [exactId];
+
+  const exactIdentity = store.db.prepare(
+    `SELECT id, title, identity_key, repo_id
+       FROM nodes
+      WHERE node_type = 'service' AND identity_key = ?
+      ORDER BY id`,
+  ).all(subject) as PackageRow[];
+  if (exactIdentity.length > 0) return exactIdentity;
+
   return store.db.prepare(
     `SELECT id, title, identity_key, repo_id
-     FROM nodes
-     WHERE node_type = 'service'
-       AND (id = ? OR identity_key = ? OR title = ?)
-     ORDER BY CASE WHEN id = ? THEN 0 WHEN identity_key = ? THEN 1 ELSE 2 END
-     LIMIT 1`,
-  ).get(subject, subject, subject, subject, subject) as PackageRow | undefined ?? null;
+       FROM nodes
+      WHERE node_type = 'service' AND title = ?
+      ORDER BY identity_key`,
+  ).all(subject) as PackageRow[];
 }
 
-function resolveRepoPackage(store: KnowledgeStore, subject: string): PackageRow | null {
+function resolveRepoPackage(store: KnowledgeStore, subject: string): PackageRow[] {
   return store.db.prepare(
     `SELECT n.id, n.title, n.identity_key, n.repo_id
      FROM nodes n JOIN repos r ON r.id = n.repo_id
      WHERE n.node_type = 'service' AND r.name = ?
-     ORDER BY n.identity_key
-     LIMIT 1`,
-  ).get(subject) as PackageRow | undefined ?? null;
+     ORDER BY n.identity_key`,
+  ).all(subject) as PackageRow[];
 }
 
-function resolveSubject(store: KnowledgeStore, subject: string): PackageRow | null {
-  return resolvePackage(store, subject) ?? resolveRepoPackage(store, subject);
+function resolveSubject(store: KnowledgeStore, subject: string): PackageRow[] {
+  const packages = resolvePackage(store, subject);
+  return packages.length > 0 ? packages : resolveRepoPackage(store, subject);
+}
+
+function candidates(rows: PackageRow[]): PackageDependencyCandidate[] {
+  return rows.map((row) => ({
+    nodeId: row.id,
+    title: row.title,
+    identityKey: row.identity_key,
+    repoId: row.repo_id,
+  }));
 }
 
 function parseEvidence(raw: string): Record<string, unknown> {
@@ -116,10 +149,14 @@ export function packageDependencies(
     limit: number;
   },
 ): PackageDependencyQueryResult {
-  const subject = resolveSubject(store, options.subject);
-  if (!subject) {
+  const subjects = resolveSubject(store, options.subject);
+  if (subjects.length === 0) {
     return { status: "subject_not_found", subject: options.subject, nodes: [], truncated: false };
   }
+  if (subjects.length > 1) {
+    return { status: "subject_ambiguous", subject: options.subject, nodes: [], truncated: false, candidates: candidates(subjects) };
+  }
+  const subject = subjects[0];
 
   const maxDepth = boundedNumber(options.maxDepth, 5, MAX_DEPTH);
   const limit = boundedNumber(options.limit, 100, MAX_LIMIT);
@@ -167,8 +204,22 @@ export function dependencyPath(
   store: KnowledgeStore,
   options: { from: string; to: string; maxDepth: number },
 ): DependencyPathResult {
-  const from = resolveSubject(store, options.from);
-  const to = resolveSubject(store, options.to);
+  const fromRows = resolveSubject(store, options.from);
+  const toRows = resolveSubject(store, options.to);
+  if (fromRows.length !== 1 || toRows.length !== 1) {
+    const ambiguous = fromRows.length > 1 || toRows.length > 1;
+    return {
+      status: ambiguous ? "subject_ambiguous" : "subject_not_found",
+      from: options.from,
+      to: options.to,
+      path: [],
+      truncated: false,
+      ...(fromRows.length > 1 ? { fromCandidates: candidates(fromRows) } : {}),
+      ...(toRows.length > 1 ? { toCandidates: candidates(toRows) } : {}),
+    };
+  }
+  const from = fromRows[0];
+  const to = toRows[0];
   if (!from || !to) {
     return { status: "subject_not_found", from: options.from, to: options.to, path: [], truncated: false };
   }

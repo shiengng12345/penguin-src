@@ -26,6 +26,7 @@ export {
   dependencyPath,
   type DependencyDirection,
   type PackageDependencyNode,
+  type PackageDependencyCandidate,
   type PackageDependencyQueryResult,
   type DependencyPathResult,
 } from "./package-query.js";

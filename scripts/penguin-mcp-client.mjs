@@ -4,6 +4,27 @@ import readline from "node:readline";
 const DEFAULT_TIMEOUT_MS = 5_000;
 const MCP_PROTOCOL_VERSION = "2025-11-25";
 
+// MCP hosts may include a short human summary before the machine result. A
+// caller must prefer structuredContent and only parse a text block when that
+// block is valid JSON; the summary is not a graph payload.
+export function parseMcpStructuredResult(result) {
+  if (!result.healthy || result.isError) {
+    throw new Error(result.error ?? "MCP tool call failed");
+  }
+  if (result.structuredContent !== null && typeof result.structuredContent === "object") {
+    return result.structuredContent;
+  }
+  for (const item of result.content ?? []) {
+    if (item.type !== "text" || typeof item.text !== "string") continue;
+    try {
+      return JSON.parse(item.text);
+    } catch {
+      // Human summaries and non-JSON content are not machine results.
+    }
+  }
+  throw new Error("MCP tool result has no structured JSON content");
+}
+
 // Calls one tool through the same stdio protocol used by Codex and Claude.
 // This keeps CLI-vs-MCP benchmarks independent from any host client's cached process.
 export async function callPenguinMcpTool(payload) {

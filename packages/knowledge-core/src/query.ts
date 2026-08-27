@@ -1466,6 +1466,10 @@ export interface ContextPack {
     | null;
   callers: ContextBrief[]; // who calls the focus (calls edges in)
   calls: ContextBrief[]; // what the focus calls (calls edges out)
+  renderedBy: ContextBrief[]; // components that render the focus (renders edges in)
+  renders: ContextBrief[]; // components the focus renders (renders edges out)
+  invokedDynamicallyBy: ContextBrief[]; // callers using a callback prop
+  invokesDynamic: ContextBrief[]; // callback props the focus invokes
   remoteCalls: ContextBrief[]; // gRPC services the focus invokes (invokes edges out, cross-service)
   invokedBy: ContextBrief[]; // symbols in OTHER services that invoke an endpoint this focus handles
   referencedBy: ContextBrief[]; // who uses this as a type (references in)
@@ -1507,7 +1511,8 @@ export function buildContextPack(
 ): ContextPack {
   const limit = options?.limit ?? 25;
   const empty: ContextPack = {
-    target, trust: null, focus: null, callers: [], calls: [], remoteCalls: [], invokedBy: [],
+    target, trust: null, focus: null, callers: [], calls: [], renderedBy: [], renders: [],
+    invokedDynamicallyBy: [], invokesDynamic: [], remoteCalls: [], invokedBy: [],
     referencedBy: [], usesTypes: [],
     routes: [], tests: [], errors: [], envs: [], notes: [], importers: [], signals: [],
     ambiguous: null, assemblyError: null,
@@ -1566,6 +1571,10 @@ function buildContextPackBody(
 
   const callers = inEdges("calls");
   const calls = outEdges("calls");
+  const renderedBy = inEdges("renders");
+  const renders = outEdges("renders");
+  const invokedDynamicallyBy = inEdges("invokes_dynamic");
+  const invokesDynamic = outEdges("invokes_dynamic");
   // Cross-service: gRPC endpoints this focus invokes (branch-less edges pass bx).
   const remoteCalls = outEdges("invokes");
   // Cross-service reverse: symbols in OTHER services that invoke an endpoint this
@@ -1652,6 +1661,10 @@ function buildContextPackBody(
       : null,
     callers: briefsFrom(store, callers),
     calls: briefsFrom(store, calls),
+    renderedBy: briefsFrom(store, renderedBy),
+    renders: briefsFrom(store, renders),
+    invokedDynamicallyBy: briefsFrom(store, invokedDynamicallyBy),
+    invokesDynamic: briefsFrom(store, invokesDynamic),
     remoteCalls: briefsFrom(store, remoteCalls),
     invokedBy: briefsFrom(store, invokedBy),
     referencedBy: briefsFrom(store, referencedBy),
@@ -1842,8 +1855,8 @@ function flowEnrichment(
   return { relatedTests: uniqueBriefs(testIds), linkedKnowledge: uniqueBriefs(knowledgeIds) };
 }
 
-const DOWNSTREAM = ["calls", "invokes", "references", "reads", "writes", "throws", "uses", "handles"];
-const FLOW_INGRESS = ["handles", "calls", "invokes"];
+const DOWNSTREAM = ["calls", "renders", "invokes_dynamic", "invokes", "references", "reads", "writes", "throws", "uses", "handles"];
+const FLOW_INGRESS = ["handles", "calls", "renders", "invokes_dynamic", "invokes"];
 
 type FlowTraversalEdge = { id: string; via: string };
 type FlowDownstreamEdge = FlowTraversalEdge & { src: string };
@@ -2137,6 +2150,78 @@ function nodeBriefStep(store: KnowledgeStore, id: string, revisionId = "live") {
   };
 }
 
+// —— Explore v2: verbatim source packs ———————————————————————————————
+// The pack carries the actual code, not just briefs/locators, so an AI
+// consumer can answer AND edit from ONE call — the two-step
+// "explore → Read the file anyway" loop is what pushed agents to other tools.
+
+export interface SourceBlock {
+  nodeId: string;
+  title: string;
+  role: "focus" | "implementation" | "callee" | "caller";
+  filePath: string;
+  startLine: number;
+  endLine: number;
+  lang: string | null;
+  /** Verbatim file content for [startLine, endLine] — re-read from DISK at
+   * query time, byte-for-byte what an editor would see (never a stale index
+   * copy). Safe to base edits on when `truncated` is false. */
+  code: string;
+  /** True when the block was cut to fit the pack's line budget. */
+  truncated: boolean;
+}
+
+// Read a symbol's current source off disk via its freshest version row.
+// Best-effort: moved/unreadable files or notes return null (callers fall back
+// to briefs) — same degradation contract as getNodeDetail's source field.
+function readSourceBlock(
+  store: KnowledgeStore,
+  nodeId: string,
+  maxLines: number,
+): Omit<SourceBlock, "role"> | null {
+  const node = store.db
+    .prepare("SELECT id, title, repo_id AS repoId FROM nodes WHERE id=?")
+    .get(nodeId) as { id: string; title: string; repoId: string | null } | undefined;
+  if (!node?.repoId) return null;
+  const version = store.db
+    .prepare(
+      `SELECT file_path AS filePath, start_line AS startLine, end_line AS endLine, lang
+         FROM symbol_versions WHERE node_id=?
+        ORDER BY (status='fresh') DESC LIMIT 1`,
+    )
+    .get(nodeId) as
+    | { filePath: string; startLine: number | null; endLine: number | null; lang: string | null }
+    | undefined;
+  if (!version?.filePath || version.startLine == null || version.endLine == null) return null;
+  const repo = store.db
+    .prepare("SELECT root_path AS rootPath FROM repos WHERE id=?")
+    .get(node.repoId) as { rootPath: string } | undefined;
+  if (!repo) return null;
+  try {
+    const abs = isAbsolute(version.filePath)
+      ? version.filePath
+      : join(repo.rootPath, version.filePath);
+    const lines = readFileSync(abs, "utf8").split(/\r?\n/);
+    const fullEnd = Math.min(version.endLine, lines.length);
+    const truncated = fullEnd - version.startLine + 1 > maxLines;
+    const endLine = truncated ? version.startLine + maxLines - 1 : fullEnd;
+    const code = lines.slice(version.startLine - 1, endLine).join("\n");
+    if (!code.trim()) return null;
+    return {
+      nodeId: node.id,
+      title: node.title,
+      filePath: version.filePath,
+      startLine: version.startLine,
+      endLine,
+      lang: version.lang,
+      code,
+      truncated,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export interface ExplorePack {
   target: string;
   focus: ContextPack["focus"];
@@ -2150,6 +2235,10 @@ export interface ExplorePack {
   };
   callers: ContextBrief[];
   calls: ContextBrief[];
+  renderedBy: ContextBrief[];
+  renders: ContextBrief[];
+  invokedDynamicallyBy: ContextBrief[];
+  invokesDynamic: ContextBrief[];
   callPath: FlowStep[];
   blastRadius: ContextBrief[];
   tests: ContextBrief[];
@@ -2168,6 +2257,11 @@ export interface ExplorePack {
     totalEdges: number;
   };
   diagnostics: string[];
+  /** Verbatim disk source for the focus/implementation and the nearest
+   * callers/callees, within a line budget. Never silently capped — anything
+   * dropped for budget is named in `sourcesOmitted`. */
+  sources: SourceBlock[];
+  sourcesOmitted: string[];
   // Structured counterpart to the "ambiguous target: N matches" diagnostics
   // string — callers need the actual candidates (nodeId/filePath/branch) to
   // disambiguate and retry directly, not just a count to guess against.
@@ -2188,8 +2282,34 @@ export function buildExplorePack(
   target: string,
   options?: { branchId?: string; revision?: RevisionContext; depth?: number; limit?: number },
 ): ExplorePack {
-  const context = buildContextPack(store, target, options);
-  const flow = buildFlow(store, target, options);
+  let context = buildContextPack(store, target, options);
+  let flow = buildFlow(store, target, options);
+  let searchFallback: string | null = null;
+  let searchCandidates: SymbolCandidate[] | null = null;
+  // Fuzzy resolution: an exact miss (no focus, no flow root, not ambiguous)
+  // falls back to full-text search. A SINGLE hit resolves automatically; more
+  // than one becomes ambiguousCandidates — never a guess (index answers are
+  // judged 对/错, and a wrong auto-pick is 错).
+  if (!context.focus && !flow.root && !context.ambiguous) {
+    const hits = store
+      .searchText(target, { limit: 5 })
+      .filter((hit) => hit.nodeType === "symbol" || hit.nodeType === "endpoint");
+    if (hits.length === 1) {
+      context = buildContextPack(store, hits[0].nodeId, options);
+      flow = buildFlow(store, hits[0].nodeId, options);
+      searchFallback = `resolved "${target}" via search fallback → ${hits[0].title}`;
+    } else if (hits.length > 1) {
+      searchCandidates = hits.map((hit) => ({
+        nodeId: hit.nodeId,
+        nodeType: hit.nodeType,
+        identityKey: hit.identityKey,
+        title: hit.title,
+        filePath: hit.filePath ?? null,
+        branch: hit.branch ?? null,
+        startLine: null,
+      }));
+    }
+  }
   const focusId = context.focus?.nodeId ?? flow.root?.nodeId ?? null;
   const handler = context.focus?.nodeType === "endpoint"
     ? flow.steps.find((step) => step.via === "handles" && step.nodeType === "symbol")
@@ -2228,9 +2348,59 @@ export function buildExplorePack(
     ...context.signals,
     ...(implementationContext?.signals ?? []),
     ...(context.ambiguous ? [`ambiguous target: ${context.ambiguous.length} matches`] : []),
+    ...(searchCandidates ? [`ambiguous target: ${searchCandidates.length} search matches`] : []),
+    ...(searchFallback ? [searchFallback] : []),
     ...(context.assemblyError ? [`context assembly failed: ${context.assemblyError}`] : []),
     ...(flow.diagnostic ? [flow.diagnostic.message] : []),
   ];
+
+  // —— verbatim sources, within an explicit budget ——————————————————————
+  // focus/implementation first (the thing being asked about), then nearest
+  // callees and callers. Budget keeps one pack safely inside a tool-result;
+  // every drop is NAMED in sourcesOmitted — silent truncation reads as
+  // "covered everything" when it didn't.
+  const SOURCE_BUDGET_LINES = 800;
+  const FOCUS_MAX_LINES = 400;
+  const NEIGHBOR_MAX_LINES = 120;
+  const NEIGHBOR_COUNT = 3;
+  const sources: SourceBlock[] = [];
+  const sourcesOmitted: string[] = [];
+  const seenSourceIds = new Set<string>();
+  let budgetLeft = SOURCE_BUDGET_LINES;
+  const pushSource = (
+    nodeId: string | null | undefined,
+    role: SourceBlock["role"],
+    title: string,
+    maxLines: number,
+  ): void => {
+    if (!nodeId || seenSourceIds.has(nodeId)) return;
+    if (budgetLeft <= 0) {
+      sourcesOmitted.push(`${role} ${title} (line budget exhausted)`);
+      return;
+    }
+    const block = readSourceBlock(store, nodeId, Math.min(maxLines, budgetLeft));
+    if (!block) return; // note/moved-file/no-range — briefs still cover it
+    seenSourceIds.add(nodeId);
+    const lineCount = block.endLine - block.startLine + 1;
+    budgetLeft -= lineCount;
+    sources.push({ ...block, role });
+  };
+  pushSource(context.focus?.nodeId, "focus", context.focus?.title ?? target, FOCUS_MAX_LINES);
+  if (implementationContext?.focus && implementationContext.focus.nodeId !== context.focus?.nodeId) {
+    pushSource(implementationContext.focus.nodeId, "implementation", implementationContext.focus.title, FOCUS_MAX_LINES);
+  }
+  for (const callee of effectiveContext.calls.slice(0, NEIGHBOR_COUNT)) {
+    pushSource(callee.nodeId, "callee", callee.title, NEIGHBOR_MAX_LINES);
+  }
+  for (const caller of effectiveContext.callers.slice(0, NEIGHBOR_COUNT)) {
+    pushSource(caller.nodeId, "caller", caller.title, NEIGHBOR_MAX_LINES);
+  }
+  for (const extra of effectiveContext.calls.slice(NEIGHBOR_COUNT)) {
+    sourcesOmitted.push(`callee ${extra.title} (beyond top ${NEIGHBOR_COUNT})`);
+  }
+  for (const extra of effectiveContext.callers.slice(NEIGHBOR_COUNT)) {
+    sourcesOmitted.push(`caller ${extra.title} (beyond top ${NEIGHBOR_COUNT})`);
+  }
   const routes = context.focus?.nodeType === "endpoint"
     ? [{ route: context.focus.title, via: "direct" as const }, ...effectiveContext.routes]
     : context.routes;
@@ -2256,6 +2426,10 @@ export function buildExplorePack(
     },
     callers: effectiveContext.callers,
     calls: effectiveContext.calls,
+    renderedBy: effectiveContext.renderedBy,
+    renders: effectiveContext.renders,
+    invokedDynamicallyBy: effectiveContext.invokedDynamicallyBy,
+    invokesDynamic: effectiveContext.invokesDynamic,
     callPath: flow.steps,
     blastRadius,
     tests: effectiveContext.tests,
@@ -2263,7 +2437,10 @@ export function buildExplorePack(
     provenance: rows,
     confidence: { level, minimum, inferredEdges, totalEdges },
     diagnostics: [...new Set(diagnostics)],
+    sources,
+    sourcesOmitted,
     ...(context.ambiguous ? { ambiguousCandidates: context.ambiguous } : {}),
+    ...(!context.ambiguous && searchCandidates ? { ambiguousCandidates: searchCandidates } : {}),
     ...(scopeFallback ? { scopeFallback } : {}),
     queryDiagnostics: buildQueryDiagnostics(
       store,
