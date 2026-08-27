@@ -216,6 +216,10 @@ export function startNotesWatcher(input: {
     if (!file || file.endsWith(".tmp") || !/\.(md|canvas)$/i.test(file)) return;
     schedule(file);
   });
+  // Reconcile once at startup: fs.watch guarantees nothing about writes that
+  // land before its event stream is live (macOS FSEvents has a real startup
+  // window), so an edit made moments after start would otherwise never index.
+  schedule();
   return {
     close: () => { closed = true; if (timer) clearTimeout(timer); watcher.close(); },
     status: () => ({ watching: !closed }),

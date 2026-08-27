@@ -1188,6 +1188,10 @@ export class KnowledgeStore {
         .run(p.nodeId, p.title, p.body);
     });
     tx();
+    // Writers must not serve their own stale reads: a searchText() that ran
+    // before this write would otherwise pin its (possibly empty) result in
+    // ftsCache forever for direct store users (notes watcher, MCP direct).
+    this.invalidateQueryCaches();
   }
 
   indexSymbolText(p: {
@@ -1210,6 +1214,8 @@ export class KnowledgeStore {
         .run(Number(inserted.lastInsertRowid), p.nodeId);
     });
     tx();
+    // Same staleness rule as indexNoteText above.
+    this.invalidateQueryCaches();
   }
 
   deleteSymbolText(nodeId: string): void {
@@ -1219,6 +1225,7 @@ export class KnowledgeStore {
     const delFts = this.db.prepare("DELETE FROM fts_symbols WHERE rowid = ?");
     for (const row of rows) delFts.run(row.fts_rowid);
     this.db.prepare("DELETE FROM fts_symbol_rows WHERE node_id = ?").run(nodeId);
+    this.invalidateQueryCaches();
   }
 
   // (repo_id, file_path) is the idempotency key — a full re-parse of that
@@ -1592,6 +1599,7 @@ export class KnowledgeStore {
       }
     });
     prune();
+    if (pruned > 0) this.invalidateQueryCaches();
     return pruned;
   }
 

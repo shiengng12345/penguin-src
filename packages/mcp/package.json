@@ -17,7 +17,7 @@
     "@penguin/knowledge-contracts": "workspace:*",
     "@penguin/knowledge-indexer": "workspace:*",
     "@penguin/api-doc-generator": "workspace:*",
-    "better-sqlite3": "^11.10.0"
+    "better-sqlite3": "^12.11.1"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
