@@ -295,6 +295,17 @@ fn sync_stable_mcp_runtime(runtime_dir: &Path, stable_dir: &Path) -> Result<Path
     Ok(node_dest)
 }
 
+// Keep the per-user MCP server copy in lockstep with the installed app —
+// runs once per launch, off the main thread. Without this the sync only
+// happened when Settings was opened (mcp_status) or the one-click setup was
+// clicked, so a user who updates the app but never opens Settings keeps
+// serving the OLD MCP bundle to Claude/Codex indefinitely.
+pub(crate) fn sync_stable_mcp_server_on_startup<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    std::thread::spawn(move || {
+        let _ = ensure_stable_mcp_server(&app);
+    });
+}
+
 // Resolves BOTH the stable server path and the node binary to launch it with.
 // Prefers the vendored runtime (known-good Node ABI, matches the shipped
 // better-sqlite3 prebuild) over guessing at a system Node — see

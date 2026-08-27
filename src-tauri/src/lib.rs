@@ -145,6 +145,11 @@ pub fn run() {
         .manage(runtime::new_state())
         .manage(wallpaper::WallpaperManager::default())
         .setup(|app| {
+            // WAL maintenance off the main thread: fold + truncate the WAL
+            // once per launch so it can't silently grow to multiples of the
+            // main DB again (checkpoint starvation under long-lived readers).
+            std::thread::spawn(db::checkpoint_product_db);
+
             // macOS' default menu binds ⌘W to "Close Window", which quits this
             // single-window app before the webview ever sees the key. Replace it
             // with the standard menu minus every close_window item so ⌘W falls
@@ -222,6 +227,10 @@ pub fn run() {
             // use it in a terminal without any manual step (no chicken-and-egg
             // `penguin install`). Idempotent, off-main-thread, self-healing.
             knowledge::install_cli_command(app.handle().clone());
+            // Refresh ~/.penguin/mcp/ from the installed bundle on every launch
+            // so app updates reach Claude/Codex without the user opening
+            // Settings. Idempotent (copy-if-different), off the main thread.
+            mcp::sync_stable_mcp_server_on_startup(app.handle().clone());
             // Runtime Manager: if the persisted policy is "on startup", the
             // frontend calls runtime_set_prevent_sleep after hydrating settings.
             // No blocking DB read here — startup stays fast. (Frontend drives.)

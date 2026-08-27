@@ -17,6 +17,9 @@ fn open_product_db_at(path: &Path) -> Result<Connection, String> {
     conn.execute_batch(
         r#"
         PRAGMA journal_mode = WAL;
+        -- Auto-truncate the WAL at checkpoint time. Without a limit it once
+        -- grew to 4x the main DB (167MB vs 40MB) under checkpoint starvation.
+        PRAGMA journal_size_limit = 67108864;
         CREATE TABLE IF NOT EXISTS app_kv (
             key TEXT PRIMARY KEY NOT NULL,
             value TEXT NOT NULL,
@@ -136,6 +139,15 @@ fn open_product_db() -> Result<Connection, String> {
 // connection but don't want to re-implement the path / migration plumbing.
 pub(crate) fn open_product_db_shared() -> Result<Connection, String> {
     open_product_db()
+}
+
+// One-shot WAL maintenance at app start: fold the WAL back into the main DB
+// and truncate it. Best-effort — TRUNCATE needs no active readers, so a busy
+// moment just means the next launch gets it.
+pub(crate) fn checkpoint_product_db() {
+    if let Ok(conn) = open_product_db() {
+        let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+    }
 }
 
 fn unix_millis() -> i64 {

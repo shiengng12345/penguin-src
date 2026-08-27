@@ -146,11 +146,35 @@ export function loadTabs(): { tabs: RequestTab[]; activeTabId: string | null } {
   return { tabs: [], activeTabId: null };
 }
 
+// Persisted tab state must never carry multi-MB response bodies: the
+// penguin-tabs app_kv row once grew to 8.6MB because one tab cached a 7.8MB
+// response, which made every full-row read of that table pathologically slow
+// (the sqlite3 CLI's -json escaping is quadratic in value length). Full
+// responses are archived per-row in request_history — the tab copy is only a
+// convenience preview, so cap it.
+export const PERSISTED_RESPONSE_BODY_LIMIT = 64 * 1024;
+
+export function tabsForPersistence(tabs: RequestTab[]): RequestTab[] {
+  return tabs.map((tab) => {
+    const body = tab.response?.body;
+    if (typeof body !== "string" || body.length <= PERSISTED_RESPONSE_BODY_LIMIT) return tab;
+    return {
+      ...tab,
+      response: {
+        ...tab.response!,
+        body:
+          body.slice(0, PERSISTED_RESPONSE_BODY_LIMIT) +
+          `\n… [response truncated for tab persistence — ${body.length} chars total; full response in History]`,
+      },
+    };
+  });
+}
+
 let _saveTabsTimer: ReturnType<typeof setTimeout> | null = null;
 export function saveTabs(tabs: RequestTab[], activeTabId: string | null) {
   if (_saveTabsTimer) clearTimeout(_saveTabsTimer);
   _saveTabsTimer = setTimeout(() => {
-    setPersistedValue(TABS_KEY, JSON.stringify(tabs));
+    setPersistedValue(TABS_KEY, JSON.stringify(tabsForPersistence(tabs)));
     if (activeTabId) {
       setPersistedValue(ACTIVE_TAB_KEY, activeTabId);
     } else {
