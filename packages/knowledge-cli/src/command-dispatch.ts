@@ -73,7 +73,7 @@ import {
 } from "@penguin/knowledge-core";
 import { indexRepo, indexRevision, RevisionIndexCoordinator, KNOWLEDGE_PARSER_VERSION, KNOWLEDGE_RESOLVER_VERSION, startWatcher, createNote, createIncident, appendNote, writeNoteBody, readNote, listNotes, reindexNotesDir, listDanglingNoteLinks, listEvidenceNotes, setEvidenceStatus, evidenceDoctor, repairEvidence, readGitContext, type EvidenceLifecycle } from "@penguin/knowledge-indexer";
 import { resolveProvider, aiComplete } from "./ai.js";
-import { runClaudeHook } from "./claude-hook.js";
+import { hashHookTarget, loadHookSessionState, runClaudeHook, saveHookSessionState, selectPromptTargets } from "./claude-hook.js";
 import { createIndexRenderer } from "./render-progress.js";
 import { discoverSubRepos, isGitRepo, type RepoCandidate } from "./multi-repo.js";
 import { runApiDocCommand } from "./api-doc-command.js";
@@ -119,6 +119,7 @@ export interface CliDeps {
   // Hook input is supplied only by the executable entrypoint and is bounded
   // there before parsing. Tests inject it directly; normal CLI verbs ignore it.
   readStdin?: () => Promise<string>;
+  hookStateDir?: string;
   apiDocPreviewRoot?: string;
   apiDocSourceAdapter?: import("@penguin/api-doc-generator").DocumentationSourceAdapter;
   apiDocBindingPath?: string;
@@ -774,32 +775,48 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
     }
 
     let prompt = "";
+    let sessionId: string | undefined;
     if (event === "user-prompt-submit") {
       try {
         const raw = await deps.readStdin?.();
         if (!raw) return 0;
-        const input = JSON.parse(raw) as { prompt?: unknown };
+        const input = JSON.parse(raw) as { prompt?: unknown; session_id?: unknown };
         if (typeof input.prompt !== "string") return 0;
         prompt = input.prompt;
+        sessionId = typeof input.session_id === "string" ? input.session_id : undefined;
       } catch {
         return 0;
       }
     }
 
+    const sessionState = sessionId
+      ? loadHookSessionState(deps.hookStateDir, sessionId)
+      : null;
+    const seenTargets = new Set(
+      sessionId
+        ? selectPromptTargets(prompt)
+          .filter((target) => sessionState?.targetHashes.has(hashHookTarget(target)))
+        : [],
+    );
     const store = deps.openStore();
     try {
       const output = await runClaudeHook(
-        { event, prompt },
+        { event, prompt, sessionId, seenTargets },
         {
           runPenguin: async (args) => {
             if (args[0] === "status") return compactIndexStatus(store);
-            if (args[0] === "context" && typeof args[1] === "string") {
-              return buildContextPack(store, args[1]);
+            if (args[0] === "explore" && typeof args[1] === "string") {
+              return buildExplorePack(store, args[1]);
             }
             throw new Error("hook attempted an unsupported Penguin query");
           },
+          markTargetSeen: (target) => seenTargets.add(target),
         },
       );
+      if (sessionId && sessionState) {
+        sessionState.targetHashes = new Set([...sessionState.targetHashes, ...[...seenTargets].map(hashHookTarget)]);
+        saveHookSessionState(deps.hookStateDir, sessionId, sessionState);
+      }
       if (output) deps.out(output);
       return 0;
     } finally {

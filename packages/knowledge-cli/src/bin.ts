@@ -13,6 +13,7 @@ const DB_PATH = process.env.PENGUIN_KNOWLEDGE_DB ?? join(homedir(), ".penguin", 
 const LEDGER_PATH = process.env.PENGUIN_KNOWLEDGE_LEDGER ?? join(homedir(), ".penguin", "knowledge", "ledger.jsonl");
 const NOTES_DIR = process.env.PENGUIN_KNOWLEDGE_NOTES ?? join(homedir(), ".penguin", "knowledge", "notes");
 const API_DOC_PREVIEWS = process.env.PENGUIN_API_DOC_PREVIEWS ?? join(homedir(), ".penguin", "knowledge", "api-docs", "previews");
+const HOOK_STATE_DIR = process.env.PENGUIN_HOOK_STATE_DIR ?? join(homedir(), ".penguin", "knowledge", "hook-sessions");
 
 runCli(process.argv.slice(2), {
   cwd: process.cwd(),
@@ -24,6 +25,7 @@ runCli(process.argv.slice(2), {
   readStdin: process.argv[2] === "hook"
     ? async () => (await readBoundedHookInput(process.stdin)) ?? ""
     : undefined,
+  hookStateDir: HOOK_STATE_DIR,
   notesDir: NOTES_DIR,
   apiDocPreviewRoot: API_DOC_PREVIEWS,
   larkProcessRunner: createLarkProcessRunner(),
