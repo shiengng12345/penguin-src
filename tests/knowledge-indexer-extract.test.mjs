@@ -88,6 +88,23 @@ test("TS: captures call refs + import targets", async () => {
   assert.ok(out.refs.some((r) => r.kind === "import" && r.rawName === "./dep"));
 });
 
+test("TSX: extracts conservative component and callback relation refs", async () => {
+  const source = [
+    "function Screen() {",
+    "  return <ProfileCard onSave={saveProfile} />;",
+    "}",
+    "function saveProfile() {}",
+    "function ProfileCard() {}",
+  ].join("\n");
+  const out = await extractSymbols({ lang: "tsx", relPath: "screen.tsx", source });
+  assert.ok(out.refs.some((ref) => ref.kind === "jsx-component" && ref.rawName === "ProfileCard"));
+  assert.ok(out.refs.some((ref) => ref.kind === "jsx-callback" && ref.rawName === "saveProfile"));
+  assert.equal(
+    out.refs.find((ref) => ref.kind === "jsx-component")?.enclosingQualifiedName,
+    "screen.tsx::Screen",
+  );
+});
+
 test("TS: extracts identifiers and static log sites in the same AST pass", async () => {
   const src = [
     "interface Detail { accountStatus: string }",

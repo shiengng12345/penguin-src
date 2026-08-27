@@ -22,7 +22,7 @@ export interface ExtractedSymbol {
 }
 
 export interface ExtractedRef {
-  kind: "call" | "import" | "type" | "throws" | "env";
+  kind: "call" | "import" | "type" | "throws" | "env" | "jsx-component" | "jsx-callback";
   rawName: string;
   // For member calls, retain the receiver text (`Date` in `Date.now()`,
   // `this.playerProcessor` in `this.playerProcessor.login()`). Resolving only
@@ -151,6 +151,42 @@ function qualifiedNameFor(defNode: Node, name: string, scopeNodes: Set<string>):
     cur = cur.parent;
   }
   return [...scopes, name].join(".");
+}
+
+function extractTsxRelationRefs(root: Node): ExtractedRef[] {
+  const refs: ExtractedRef[] = [];
+  walk(root, (node) => {
+    if (node.type === "jsx_self_closing_element" || node.type === "jsx_opening_element") {
+      const name = node.namedChild(0);
+      // Member expressions and namespaces need import/type resolution that is
+      // not available from this syntax alone. Lowercase names are intrinsic
+      // DOM elements, not repository component symbols.
+      if (name?.type === "identifier" && /^[A-Z_$]/u.test(name.text)) {
+        refs.push({
+          kind: "jsx-component",
+          rawName: name.text,
+          startLine: name.startPosition.row + 1,
+          enclosingQualifiedName: null,
+        });
+      }
+    }
+    if (node.type !== "jsx_attribute") return;
+    const value = [...Array(node.namedChildCount)].map((_, index) => node.namedChild(index)!).find(
+      (child) => child.type === "jsx_expression",
+    );
+    const expression = value?.namedChild(0);
+    // Only a direct identifier is a stable callback target. Calls, arrows,
+    // member expressions, spreads, and computed values remain unlinked.
+    if (expression?.type === "identifier") {
+      refs.push({
+        kind: "jsx-callback",
+        rawName: expression.text,
+        startLine: expression.startPosition.row + 1,
+        enclosingQualifiedName: null,
+      });
+    }
+  });
+  return refs;
 }
 
 // Extract symbols + raw refs/imports from one source file. Never throws:
@@ -307,6 +343,8 @@ export async function extractSymbols(input: {
       refs.push({ kind: ce.kind, rawName: ce.rawName, startLine: ce.startLine, enclosingQualifiedName: null });
     }
   }
+
+  if (lang === "tsx") refs.push(...extractTsxRelationRefs(tree.rootNode));
 
   // Attribute each ref to the innermost symbol whose line range contains it.
   for (const ref of refs) {

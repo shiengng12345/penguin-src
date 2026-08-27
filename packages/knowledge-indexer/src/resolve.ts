@@ -74,10 +74,12 @@ function isPlatformMemberReceiver(receiver: string | undefined): boolean {
   return PLATFORM_MEMBER_RECEIVERS.has(root);
 }
 
-// Resolve call + type refs to graph edges (§6.2 + Plan B):
+// Resolve call/type/TSX relation refs to graph edges (§6.2 + Plan B):
 //   - `call` ref → `calls` edge (a function/method invocation)
 //   - `type` ref → `references` edge (a type annotation/generic/extends/impl —
 //     so DTOs, interfaces and type aliases connect to the symbols that use them)
+//   - `jsx-component` ref → `renders` edge
+//   - `jsx-callback` ref → `invokes_dynamic` edge
 // Priority per ref:
 //   tier 1: same-file symbol by bare name → EXTRACTED
 //   tier 2: same-repo unique qualified-name hit → EXTRACTED
@@ -114,8 +116,13 @@ export function resolveRefs(input: {
   };
 
   for (const ref of input.refs) {
-    if (ref.kind !== "call" && ref.kind !== "type") continue;
-    const edgeType = ref.kind === "call" ? "calls" : "references";
+    const isJsxRelation = ref.kind === "jsx-component" || ref.kind === "jsx-callback";
+    if (!isJsxRelation && ref.kind !== "call" && ref.kind !== "type") continue;
+    const edgeType = ref.kind === "call"
+      ? "calls"
+      : ref.kind === "type"
+        ? "references"
+        : ref.kind === "jsx-component" ? "renders" : "invokes_dynamic";
     const src = ref.enclosingQualifiedName
       ? input.fileSymbolIds.get(ref.enclosingQualifiedName) ?? null
       : null;
@@ -124,6 +131,37 @@ export function resolveRefs(input: {
       continue;
     }
     const bare = bareOf(ref.rawName);
+
+    // JSX is syntactically explicit but its target can still be ambiguous.
+    // Resolve only a same-file, exact qualified, or unique imported/repo
+    // candidate; never apply the ordinary call-ref best guess to UI edges.
+    if (isJsxRelation) {
+      const local = fileByBare.get(bare) ?? [];
+      if (local.length === 1) {
+        const dst = input.fileSymbolIds.get(local[0].qualifiedName);
+        if (dst && dst !== src) {
+          push(src, dst, edgeType, "INFERRED", 0.5);
+          continue;
+        }
+      }
+      const qualified = input.lookup.byQualifiedName(ref.rawName);
+      if (qualified && qualified !== src) {
+        push(src, qualified, edgeType, "INFERRED", 0.5);
+        continue;
+      }
+      const candidates = input.lookup.bareNameCandidates(bare).filter((candidate) => candidate.id !== src);
+      const scope = input.importedFiles ?? new Set<string>();
+      const scoped = candidates.filter(
+        (candidate) => candidate.filePath && (candidate.filePath === input.currentFile || scope.has(candidate.filePath)),
+      );
+      const unique = scoped.length === 1 ? scoped[0] : !input.importedFiles && candidates.length === 1 ? candidates[0] : null;
+      if (unique) {
+        push(src, unique.id, edgeType, "INFERRED", 0.5);
+      } else {
+        unresolved += 1;
+      }
+      continue;
+    }
 
     // tier 1: same file. If the only same-file bare match IS the enclosing
     // symbol itself (e.g. a handler method calling a same-named method on an

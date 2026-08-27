@@ -525,6 +525,41 @@ test("indexRepo: ambiguous imported test targets are retained as low-confidence 
   store.close();
 });
 
+test("indexRepo: TSX component and callback relations are typed inferred edges", async () => {
+  const root = tempRepo();
+  writeGit(root, "ref: refs/heads/main\n", { main: "c0" });
+  mkdirSync(join(root, "src"), { recursive: true });
+  writeFileSync(
+    join(root, "src", "screen.tsx"),
+    [
+      "function Screen() {",
+      "  return <ProfileCard onSave={saveProfile} />;",
+      "}",
+      "function saveProfile() {}",
+      "function ProfileCard() {}",
+    ].join("\n"),
+  );
+  const store = openStore();
+  const report = await indexRepo({ store, rootPath: root, mode: "rebuild" });
+  const rows = store.db.prepare(
+    `SELECT e.edge_type AS edgeType, e.origin, e.method, e.confidence,
+            src.title AS srcTitle, dst.title AS dstTitle
+       FROM edges e
+       JOIN nodes src ON src.id=e.src
+       JOIN nodes dst ON dst.id=e.dst
+      WHERE e.branch_id=? AND e.edge_type IN ('renders', 'invokes_dynamic')
+      ORDER BY e.edge_type, dst.title`,
+  ).all(report.branchId);
+  assert.deepEqual(
+    rows.map((row) => [row.edgeType, row.srcTitle, row.dstTitle]),
+    [["invokes_dynamic", "Screen", "saveProfile"], ["renders", "Screen", "ProfileCard"]],
+  );
+  assert.ok(rows.every((row) => row.origin === "parser" && row.method === "INFERRED" && row.confidence === 0.5));
+  assert.equal(rows.some((row) => row.edgeType === "calls"), false);
+  store.close();
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("IndexTaskLock: only one active per key", () => {
   const a = IndexTaskLock.tryAcquire("repo:branch:/co");
   assert.ok(a);
