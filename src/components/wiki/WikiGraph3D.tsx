@@ -1,4 +1,5 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
+import { logger } from "@/lib/logger";
 import type { KnowledgeGraphView } from "@/lib/knowledge-client";
 
 // 3D force-directed "globe" view (WebGL via 3d-force-graph → three.js). Dynamic-
@@ -24,7 +25,22 @@ type G = any;
 function resolveBg(fallback: string): string {
   if (typeof window === "undefined") return fallback;
   const value = getComputedStyle(document.documentElement).getPropertyValue("--color-background").trim();
-  return value || fallback;
+  if (!value) return fallback;
+  // Theme tokens are oklch() (index.css), which three.js Color.setStyle does
+  // NOT parse (2D canvas does — that's why WikiGraph is unaffected). Normalize
+  // any CSS color to #rrggbb by letting the 2D canvas do the conversion.
+  try {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 1;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return fallback;
+    ctx.fillStyle = value;
+    ctx.fillRect(0, 0, 1, 1);
+    const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
+    return `#${[r, g, b].map((c) => c.toString(16).padStart(2, "0")).join("")}`;
+  } catch {
+    return fallback;
+  }
 }
 
 export function WikiGraph3D({ data, onNodeClick }: { data: KnowledgeGraphView; onNodeClick: (id: string, event?: MouseEvent) => void }) {
@@ -32,6 +48,7 @@ export function WikiGraph3D({ data, onNodeClick }: { data: KnowledgeGraphView; o
   const gRef = useRef<G>(null);
   const dataRef = useRef(data);
   const clickRef = useRef(onNodeClick);
+  const [initError, setInitError] = useState<string | null>(null);
   dataRef.current = data;
   clickRef.current = onNodeClick;
 
@@ -47,6 +64,11 @@ export function WikiGraph3D({ data, onNodeClick }: { data: KnowledgeGraphView; o
       .then(({ default: ForceGraph3D }) => {
         const el = ref.current;
         if (disposed || !el) return;
+        // Zero-height guard: if this mounts before the flex layout settles,
+        // a 0px canvas renders nothing forever (the ResizeObserver only fires
+        // on CHANGES). Fall back to the window so something is visible.
+        const width = el.clientWidth || window.innerWidth;
+        const height = el.clientHeight || Math.max(window.innerHeight - 160, 320);
         const g: G = new (ForceGraph3D as unknown as new (el: HTMLElement) => G)(el)
           .backgroundColor(resolveBg("#080b11"))
           .nodeRelSize(4)
@@ -61,8 +83,8 @@ export function WikiGraph3D({ data, onNodeClick }: { data: KnowledgeGraphView; o
           .linkDirectionalParticleWidth(1.4)
           .linkDirectionalParticleSpeed(0.006)
           .onNodeClick((n: G, event: MouseEvent) => clickRef.current(String(n.id), event))
-          .width(el.clientWidth)
-          .height(el.clientHeight);
+          .width(width)
+          .height(height);
         // gentle auto-orbit (地球仪); stops while the user drags.
         const controls = g.controls?.();
         if (controls) { controls.autoRotate = true; controls.autoRotateSpeed = 0.6; }
@@ -71,7 +93,14 @@ export function WikiGraph3D({ data, onNodeClick }: { data: KnowledgeGraphView; o
         ro = new ResizeObserver(() => { const c = ref.current; if (c) g.width(c.clientWidth).height(c.clientHeight); });
         ro.observe(el);
       })
-      .catch(() => { /* 3d-force-graph failed to load — canvas stays blank, rest of Wiki fine */ });
+      .catch((error: unknown) => {
+        // NEVER a silent blank canvas: surface the real reason on screen and
+        // in the error log — a swallowed init error here cost a debugging
+        // session ("why is 3D empty?") once already.
+        const message = error instanceof Error ? error.message : String(error);
+        logger.error("WikiGraph3D", "3D graph init failed", { error: message });
+        if (!disposed) setInitError(message);
+      });
     return () => {
       disposed = true;
       ro?.disconnect();
@@ -96,5 +125,12 @@ export function WikiGraph3D({ data, onNodeClick }: { data: KnowledgeGraphView; o
     return () => observer.disconnect();
   }, []);
 
+  if (initError) {
+    return (
+      <div className="flex h-full w-full items-center justify-center p-6 text-center text-xs text-muted-foreground">
+        3D 渲染不可用：{initError} — 请切换到「整洁 / 力导向」视图，或反馈此错误信息。
+      </div>
+    );
+  }
   return <div ref={ref} className="h-full w-full" />;
 }
