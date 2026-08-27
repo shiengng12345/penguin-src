@@ -27,7 +27,7 @@ import { JsonEditor } from "@/components/ui/json-editor";
 import { RestKeyValueBody } from "./RestKeyValueBody";
 import { fieldsToJson, jsonToFields, newBodyField } from "@/lib/rest-body-fields";
 import type { RestMethod, RestRequestRecord, RestResponse } from "./rest-types";
-import { GrpcWebResponseView, isGrpcWebResponse } from "./GrpcWebResponseView";
+import { GrpcWebResponseView, isProtoLensResponse } from "./GrpcWebResponseView";
 import { writeClipboard } from "@/lib/clipboard";
 import { EditorView } from "@codemirror/view";
 import { openSearchPanel } from "@codemirror/search";
@@ -501,7 +501,7 @@ const RESPONSE_DISPLAY_CAP = 1_000_000;
 // else falls through to the normal body panel. Keeping this hook-free avoids a
 // conditional-hooks violation when a response changes type between renders.
 function ResponsePanel(props: { response: RestResponse; requestId: string }) {
-  if (isGrpcWebResponse(props.response)) {
+  if (isProtoLensResponse(props.response)) {
     return <GrpcWebResponseView response={props.response} />;
   }
   return <RestBodyResponsePanel {...props} />;

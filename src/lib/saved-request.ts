@@ -26,6 +26,7 @@ export function openSavedRequest(entry: SavedRequest): void {
     selectedPackage: isRest ? null : entry.packageName || null,
     selectedService: isRest ? null : entry.serviceName || null,
     selectedMethod: isRest ? null : entry.selectedMethod ?? null,
+    transport: targetProtocol === "grpc-web" ? (entry.transport ?? "grpc-web") : undefined,
     response: entry.response,
     origin: "saved",
   };

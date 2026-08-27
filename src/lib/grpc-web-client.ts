@@ -1,7 +1,7 @@
 // grpc-web-client now lives in @penguin/core. This shim pre-binds the
 // Tauri-specific dependencies (proxyFetch for CORS, loadPackageModule for
 // runtime module loading) so existing call sites can keep the old signature.
-import { callGrpcWeb as coreCallGrpcWeb } from "@penguin/core";
+import { callGrpcWeb as coreCallGrpcWeb, callConnect as coreCallConnect } from "@penguin/core";
 import type { MetadataEntry, ResponseState } from "@penguin/core";
 import { loadPackageModule } from "./package-loader";
 import { proxyFetch } from "./proxy-fetch";
@@ -14,7 +14,10 @@ interface GrpcWebCallParams {
   packageName?: string;
 }
 
-export function callGrpcWeb(
+type CoreWebRpcCall = typeof coreCallGrpcWeb;
+
+function callViaProxy(
+  coreCall: CoreWebRpcCall,
   params: GrpcWebCallParams,
   signal?: AbortSignal,
 ): Promise<ResponseState> {
@@ -36,7 +39,7 @@ export function callGrpcWeb(
     });
     return response;
   };
-  return coreCallGrpcWeb({
+  return coreCall({
     ...params,
     loadModule: loadPackageModule,
     fetch: fetchWithSignal,
@@ -51,4 +54,19 @@ export function callGrpcWeb(
       "x-penguin-client-build": "dev-grpc-inspection",
     },
   }));
+}
+
+export function callGrpcWeb(
+  params: GrpcWebCallParams,
+  signal?: AbortSignal,
+): Promise<ResponseState> {
+  return callViaProxy(coreCallGrpcWeb, params, signal);
+}
+
+/** Connect unary (bare application/proto) — the migrated servers' protocol. */
+export function callConnect(
+  params: GrpcWebCallParams,
+  signal?: AbortSignal,
+): Promise<ResponseState> {
+  return callViaProxy(coreCallConnect, params, signal);
 }

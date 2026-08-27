@@ -16,6 +16,9 @@ export const APP_VALUE_KEYS = {
   maxHistory: "penguin-max-history",
   savedRequests: "penguin-saved-requests",
   defaultHeaders: "penguin-default-headers",
+  // Default wire transport for NEW grpc-web tabs: "grpc-web" (old servers)
+  // or "connect" (migrated servers). Per-tab flips always win over this.
+  defaultWebTransport: "penguin-default-web-transport",
   remoteConfigCache: "penguin-remote-config-cache",
   remoteConfigLastPulledAt: "penguin-remote-config-last-pulled-at",
   remoteConfigSource: "penguin-remote-config-source",

@@ -294,3 +294,59 @@ function decodeGrpcMessage(value: string): string {
     return value;
   }
 }
+
+// ---- Connect protocol helpers ----------------------------------------------
+
+/** Connect streaming envelope flag marking the JSON EndStreamResponse frame. */
+export const CONNECT_END_STREAM_FLAG = 0x02;
+
+/** Connect streaming EndStreamResponse: JSON `{error?, metadata?}`. */
+export interface ConnectEndStream {
+  error: { code: string; message: string } | null;
+  raw: string;
+}
+
+/** Parse a Connect end-stream frame's JSON payload. Never throws — an
+ * unparseable payload degrades to `{ error: null, raw }`. */
+export function parseConnectEndStream(data: Uint8Array): ConnectEndStream {
+  const raw = new TextDecoder().decode(data);
+  try {
+    const parsed = JSON.parse(raw) as { error?: { code?: unknown; message?: unknown } };
+    if (!parsed || typeof parsed !== "object" || !parsed.error) return { error: null, raw };
+    return {
+      error: {
+        code: typeof parsed.error.code === "string" ? parsed.error.code : "unknown",
+        message: typeof parsed.error.message === "string" ? parsed.error.message : "",
+      },
+      raw,
+    };
+  } catch {
+    return { error: null, raw };
+  }
+}
+
+/** How a proto response body is shaped, by content-type. */
+export type ProtoResponseKind = "grpc-web" | "proto-unary" | "connect-stream";
+
+/**
+ * Classify a response into a proto lens kind from its content-type (the part
+ * before `;`) and HTTP status.
+ *
+ * - gRPC-Web content-types → framed body, any HTTP status.
+ * - `application/proto` → one bare, un-framed message (Connect unary and
+ *   friends) — but ONLY on HTTP 200: Connect errors arrive as
+ *   application/json, so a non-200 proto body is an error payload from a
+ *   non-Connect server, not a decodable message.
+ * - `application/connect+proto` → Connect streaming envelopes (end-stream
+ *   frame is CONNECT_END_STREAM_FLAG with JSON, not 0x80 text trailers).
+ */
+export function classifyProtoResponse(
+  contentType: string | null | undefined,
+  httpStatus: number,
+): ProtoResponseKind | null {
+  const ct = contentType?.split(";")[0].trim().toLowerCase();
+  if (ct === "application/grpc-web" || ct === "application/grpc-web+proto") return "grpc-web";
+  if (ct === "application/proto" && httpStatus === 200) return "proto-unary";
+  if (ct === "application/connect+proto") return "connect-stream";
+  return null;
+}

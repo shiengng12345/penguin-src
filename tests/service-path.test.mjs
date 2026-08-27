@@ -44,3 +44,80 @@ test("nested proto package keeps inner segments' case", async () => {
     "/cms/CMS.Internal.AdminService/ListPages",
   );
 });
+
+// ---- Connect protocol paths -------------------------------------------------
+
+test("connect path: no gateway prefix, case preserved", async () => {
+  const { computeConnectServicePath } = await loadServicePathModule();
+  assert.equal(
+    computeConnectServicePath("CMS.FrontendService.GetPageResource"),
+    "/CMS.FrontendService/GetPageResource",
+  );
+  assert.equal(
+    computeConnectServicePath("recommend.FrontendRecommendService.Search"),
+    "/recommend.FrontendRecommendService/Search",
+  );
+});
+
+test("connect path: nested package stays intact", async () => {
+  const { computeConnectServicePath } = await loadServicePathModule();
+  assert.equal(
+    computeConnectServicePath("CMS.Internal.AdminService.ListPages"),
+    "/CMS.Internal.AdminService/ListPages",
+  );
+});
+
+test("parse: legacy 3-segment form works for both protocols", async () => {
+  const { parseWebRpcServicePath } = await loadServicePathModule();
+  for (const protocol of ["grpc-web", "connect"]) {
+    assert.deepEqual(parseWebRpcServicePath("/cms/CMS.FrontendService/GetPageGameListV2", protocol), {
+      protoPackage: "cms",
+      typeName: "CMS.FrontendService",
+      methodName: "GetPageGameListV2",
+    });
+  }
+});
+
+test("parse: extra middle segments collapse into the type name", async () => {
+  const { parseWebRpcServicePath } = await loadServicePathModule();
+  assert.deepEqual(parseWebRpcServicePath("/pkg/a/b/Method", "grpc-web"), {
+    protoPackage: "pkg",
+    typeName: "a.b",
+    methodName: "Method",
+  });
+});
+
+test("parse: connect accepts the 2-segment root-mounted form", async () => {
+  const { parseWebRpcServicePath } = await loadServicePathModule();
+  assert.deepEqual(
+    parseWebRpcServicePath("/player.FrontendLoginConfigService/GetFrontendLoginConfigNoAuth", "connect"),
+    {
+      protoPackage: null,
+      typeName: "player.FrontendLoginConfigService",
+      methodName: "GetFrontendLoginConfigNoAuth",
+    },
+  );
+  // Trailing slash tolerated.
+  assert.equal(
+    parseWebRpcServicePath("/recommend.FrontendRecommendService/Search/", "connect").typeName,
+    "recommend.FrontendRecommendService",
+  );
+});
+
+test("parse: grpc-web rejects the 2-segment form", async () => {
+  const { parseWebRpcServicePath } = await loadServicePathModule();
+  assert.equal(parseWebRpcServicePath("/player.FrontendLoginConfigService/GetX", "grpc-web"), null);
+});
+
+test("parse: 2-segment form requires a dotted service name", async () => {
+  const { parseWebRpcServicePath } = await loadServicePathModule();
+  // A plain REST-ish path must never be mistaken for a Connect service path.
+  assert.equal(parseWebRpcServicePath("/users/list", "connect"), null);
+});
+
+test("parse: too-short paths are rejected", async () => {
+  const { parseWebRpcServicePath } = await loadServicePathModule();
+  assert.equal(parseWebRpcServicePath("/OnlySegment", "connect"), null);
+  assert.equal(parseWebRpcServicePath("/", "connect"), null);
+  assert.equal(parseWebRpcServicePath("", "grpc-web"), null);
+});

@@ -25,6 +25,7 @@ import {
   type ProtocolTab,
   type RequestTab,
   type TabOrigin,
+  type WebTransport,
 } from "./store-types";
 import {
   closeOtherTabs as computeCloseOthers,
@@ -34,6 +35,7 @@ import {
 } from "./tab-actions";
 import {
   DEFAULT_HEADERS_KEY,
+  DEFAULT_WEB_TRANSPORT_KEY,
   HISTORY_KEY,
   MAX_HISTORY_KEY,
   SAVED_REQUESTS_KEY,
@@ -41,6 +43,7 @@ import {
   TUTORIAL_KEY,
   USERNAME_KEY,
   loadDefaultHeaders,
+  loadDefaultWebTransport,
   loadLegacyHistoryBlob,
   loadMaxHistorySize,
   loadSavedRequests,
@@ -72,9 +75,20 @@ function createTab(origin: TabOrigin = null, protocol: ProtocolTab = "grpc-web")
   } catch {
     headers = _defaultHeaders[visibleProtocol];
   }
+  // New grpc-web tabs start on the Settings-chosen wire transport (old
+  // gRPC-Web servers vs migrated Connect ones); the URL-bar flip still wins.
+  let transport: WebTransport | undefined;
+  if (visibleProtocol === "grpc-web") {
+    try {
+      transport = useAppStore.getState().defaultWebTransport;
+    } catch {
+      transport = loadDefaultWebTransport();
+    }
+  }
   return {
     id: `tab_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     protocolTab: visibleProtocol,
+    transport,
     targetUrl: "{{URL}}",
     pathOverride: null,
     restMethod: "POST",
@@ -578,6 +592,12 @@ export const useAppStore = create<AppState>((set, get) => {
       });
     },
 
+    defaultWebTransport: loadDefaultWebTransport(),
+    setDefaultWebTransport: (transport) => {
+      setPersistedValue(DEFAULT_WEB_TRANSPORT_KEY, transport);
+      set({ defaultWebTransport: transport });
+    },
+
     maxHistorySize: loadMaxHistorySize(),
     setMaxHistorySize: (size) => {
       setPersistedValue(MAX_HISTORY_KEY, String(size));
@@ -617,6 +637,7 @@ if (typeof window !== "undefined") {
       // heals once hydration lands.
       const update: Partial<AppState> = {
         defaultHeaders: loadDefaultHeaders(),
+        defaultWebTransport: loadDefaultWebTransport(),
         maxHistorySize: loadMaxHistorySize(),
         showTutorial: loadShowTutorial(),
         theme,

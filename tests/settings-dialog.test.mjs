@@ -59,20 +59,32 @@ test("MCP status checks server runtime health, not only client config presence",
     "utf8",
   );
   const backendSource = await readFile(new URL("../src-tauri/src/mcp.rs", import.meta.url), "utf8");
+  const libSource = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
   const statusStart = settingsSource.indexOf("  const mcpClaudeConfigured");
   const statusEnd = settingsSource.indexOf("  const copyMcpSetup", statusStart);
   const statusBlock = settingsSource.slice(statusStart, statusEnd);
 
-  assert.match(backendSource, /server_healthy:\s*bool/);
-  assert.match(backendSource, /server_health_error:\s*Option<String>/);
+  // Health is a separate slow command (node smoke test, up to 1.5s) so
+  // mcp_status stays fast and Settings opens instantly; the dialog fires
+  // mcp_server_health without awaiting and fills the badge in when it lands.
+  assert.match(backendSource, /struct McpServerHealth/);
+  assert.match(backendSource, /fn mcp_server_health/);
   assert.match(backendSource, /fn check_mcp_server_runtime/);
   assert.match(backendSource, /"method":"initialize"/);
-  assert.match(settingsSource, /server_healthy: boolean/);
-  assert.match(settingsSource, /server_health_error: string \| null/);
+  assert.match(libSource, /mcp_server_health,/);
+  // mcp_status must NOT carry health fields — that would put the 1.5s probe
+  // back on the fast path.
+  assert.doesNotMatch(backendSource, /server_healthy:\s*bool/);
+  assert.match(
+    settingsSource,
+    /invoke<\{ healthy: boolean; error: string \| null \}>\("mcp_server_health"\)/,
+  );
+  assert.match(settingsSource, /void refreshMcpHealth\(\)/);
   assert.match(statusBlock, /mcpServerHealthy/);
   assert.match(statusBlock, /mcpReady/);
   assert.match(statusBlock, /MCP Ready/);
   assert.match(statusBlock, /Server Check Failed/);
+  assert.match(statusBlock, /Checking Server/);
   assert.doesNotMatch(statusBlock, /mcpBothConfigured\s*\?\s*"Both Configured"/);
 });
 

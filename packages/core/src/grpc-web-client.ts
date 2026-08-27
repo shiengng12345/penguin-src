@@ -1,8 +1,9 @@
 import { createClient, type Interceptor } from "@connectrpc/connect";
-import { createGrpcWebTransport } from "@connectrpc/connect-web";
+import { createConnectTransport, createGrpcWebTransport } from "@connectrpc/connect-web";
 import type { ResponseState, MetadataEntry, ConnectServiceDef } from "./types.js";
 import { discoverServices } from "./discover-services.js";
 import { normalizeGrpcJsonBody } from "./grpc-json.js";
+import { parseWebRpcServicePath } from "./service-path.js";
 import { inspectGrpcWebResponse, type GrpcWebResponseInspection } from "./grpc-web-debug.js";
 
 // Module loader signature. Penguin desktop injects a Tauri-backed loader that
@@ -108,8 +109,27 @@ async function ensureServiceLoaded(
   return serviceMap.get(typeName) ?? null;
 }
 
+/** Wire protocol for a web-transport RPC call. Both share everything except
+ * the ConnectRPC transport, the URL layout, and the accepted path shapes. */
+export type WebRpcProtocol = "grpc-web" | "connect";
+
+/** Old servers: gRPC-Web framed, mounted under the proto package prefix. */
 export async function callGrpcWeb(
   params: GrpcWebCallParams
+): Promise<ResponseState> {
+  return callWebRpc(params, "grpc-web");
+}
+
+/** New servers: Connect unary (bare application/proto), mounted at the root. */
+export async function callConnect(
+  params: GrpcWebCallParams
+): Promise<ResponseState> {
+  return callWebRpc(params, "connect");
+}
+
+async function callWebRpc(
+  params: GrpcWebCallParams,
+  protocol: WebRpcProtocol,
 ): Promise<ResponseState> {
   const startTime = performance.now();
   const { url, servicePath, body, metadata, packageName, loadModule } = params;
@@ -123,24 +143,21 @@ export async function callGrpcWeb(
     return buildErrorResponse("Invalid JSON request body / 无效的 JSON 请求体", startTime);
   }
 
-  // Service path must contain at least package, type, and method segments.
-  const pathParts = servicePath.replace(/^\//, "").split("/");
-  const isPathTooShort = pathParts.length < 3;
-  if (isPathTooShort) {
+  const parsedPath = parseWebRpcServicePath(servicePath, protocol);
+  if (!parsedPath) {
     return buildErrorResponse(
-      `Invalid service path: ${servicePath}. Expected /<package>/<typeName>/<method>`,
+      protocol === "connect"
+        ? `Invalid service path: ${servicePath}. Expected /<pkg.Service>/<Method> or /<package>/<typeName>/<method>`
+        : `Invalid service path: ${servicePath}. Expected /<package>/<typeName>/<method>`,
       startTime,
     );
   }
+  const { protoPackage, typeName, methodName } = parsedPath;
 
-  const protoPackage = pathParts[0];
-  const typeName = pathParts.slice(1, -1).join(".");
-  const methodName = pathParts[pathParts.length - 1];
-
-  // gRPC-Web needs the package name to load the generated client module.
+  // Both protocols need the package name to load the generated client module.
   if (!packageName) {
     return buildErrorResponse(
-      "Package name is required for gRPC-Web calls. Select a method from an installed package.",
+      "Package name is required to load the service definition. Select a method from an installed package.",
       startTime,
     );
   }
@@ -169,7 +186,11 @@ export async function callGrpcWeb(
     );
   }
 
-  const baseUrl = `${url.replace(/\/$/, "")}/${protoPackage}`;
+  // gRPC-Web servers mount under the proto package prefix; Connect servers
+  // serve /<pkg.Service>/<Method> directly at the given URL (any mount prefix
+  // belongs in the URL itself, so /api/v1-style prefixes keep working).
+  const strippedUrl = url.replace(/\/$/, "");
+  const baseUrl = protocol === "connect" ? strippedUrl : `${strippedUrl}/${protoPackage}`;
 
   const headerInterceptor: Interceptor = (next) => async (req) => {
     for (const entry of metadata) {
@@ -181,21 +202,27 @@ export async function callGrpcWeb(
   };
 
   let transportInspection: Promise<GrpcWebResponseInspection | null> = Promise.resolve(null);
-  const transport = createGrpcWebTransport({
+  const transportOptions = {
     baseUrl,
     interceptors: [headerInterceptor],
-    fetch: async (input, init) => {
+    fetch: (async (input, init) => {
       const response = await fetchImpl(input, init);
       transportInspection = inspectGrpcWebResponse(response)
         .then((inspection) => {
           // Safe metadata only: no authorization, request body, or response body.
-          console.info("[Penguin gRPC-Web response inspection]", inspection);
+          console.info(`[Penguin ${protocol} response inspection]`, inspection);
           return inspection;
         })
         .catch(() => null);
       return response;
-    },
-  });
+    }) satisfies typeof globalThis.fetch,
+  };
+  // Connect binary format sends content-type: application/proto plus the
+  // connect-protocol-version header — the exact wire shape of the new servers.
+  const transport =
+    protocol === "connect"
+      ? createConnectTransport({ ...transportOptions, useBinaryFormat: true })
+      : createGrpcWebTransport(transportOptions);
 
   // ConnectRPC service definition types are not exported publicly; the cast
   // bridges our discovered shape to its internal expected shape.
@@ -244,7 +271,7 @@ export async function callGrpcWeb(
       body: formattedBody,
       headers: {
         "x-penguin-request-url": `${baseUrl}/${typeName}/${methodName}`,
-        "x-penguin-protocol": "grpc-web+proto",
+        "x-penguin-protocol": protocol === "connect" ? "connect+proto" : "grpc-web+proto",
         ...inspectionHeaders(inspection),
       },
       duration: Math.round(duration),

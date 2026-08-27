@@ -101,8 +101,13 @@ export function RestPage({ onClose }: RestPageProps) {
   const setSelectedProjectId = (id: string | null) => setWorkspace({ selectedProjectId: id });
   const setSelectedEnvId = (id: string | null) => setWorkspace({ selectedEnvId: id });
 
-  // Single active request (no multi-tab workspace — matches client module layout).
-  const [activeRequestId, setActiveRequestId] = useState<string | null>(null);
+  // Single active request — lifted into Zustand (session-only), same as
+  // selectedProjectId/selectedEnvId above, so module switch (REST → Client →
+  // REST) doesn't lose what was open. Deliberately still a single active
+  // request, not a multi-tab workspace (see DEC #193-204) — this only fixes
+  // persistence, it doesn't reintroduce the tab-bar component.
+  const activeRequestId = workspace.activeTabId;
+  const setActiveRequestId = (id: string | null) => setWorkspace({ activeTabId: id });
 
   // Bootstrap: on first mount of the session, seed selectedProjectId
   // to the first project if nothing's been picked yet. Subsequent
@@ -151,7 +156,6 @@ export function RestPage({ onClose }: RestPageProps) {
     () => requests.find((r) => r.id === activeRequestId) ?? null,
     [requests, activeRequestId],
   );
-
   // ---- Project handlers (name string from inline sidebar input) ----
   const handleNewProject = (name: string) => {
     const p = createProject({ name });

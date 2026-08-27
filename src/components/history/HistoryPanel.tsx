@@ -161,6 +161,7 @@ export function HistoryPanel({ open, onClose }: HistoryPanelProps) {
       selectedPackage: isRest ? null : entry.packageName || null,
       selectedService: isRest ? null : entry.serviceName || null,
       selectedMethod: isRest ? null : entry.selectedMethod ?? null,
+      transport: targetProtocol === "grpc-web" ? (entry.transport ?? "grpc-web") : undefined,
       // Restore the archived response so the old result is visible immediately.
       response: entry.response ?? null,
       origin: "history" as const,

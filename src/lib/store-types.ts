@@ -90,6 +90,7 @@ export interface HistoryEntry {
   restMethod?: RestMethod;
   restBodyMode?: RestBodyMode;
   selectedMethod?: ProtoMethod | null;
+  transport?: WebTransport;
   // Full response archived after the request completes (v1.9+); older
   // migrated entries have no response.
   response?: ResponseState | null;
@@ -108,12 +109,19 @@ export interface SavedRequest {
   requestBody: string;
   restMethod?: RestMethod;
   restBodyMode?: RestBodyMode;
+  transport?: WebTransport;
   response: ResponseState | null;
   selectedMethod: ProtoMethod | null;
 }
 
 export type ProtocolTab = "grpc-web" | "grpc" | "sdk" | "rest";
 export type VisibleProtocolTab = Exclude<ProtocolTab, "rest">;
+
+// Wire transport for the grpc-web protocol tab: classic gRPC-Web framing, or
+// Connect unary (bare application/proto) for the migrated servers. Optional
+// everywhere it appears — absent means "grpc-web", so old persisted
+// tabs/history/saved requests keep working untouched.
+export type WebTransport = "grpc-web" | "connect";
 
 export function visibleProtocolForTab(
   protocol: ProtocolTab | null | undefined,
@@ -128,6 +136,7 @@ export type TabOrigin = "history" | "saved" | null;
 export interface RequestTab {
   id: string;
   protocolTab: ProtocolTab;
+  transport?: WebTransport;
   targetUrl: string;
   pathOverride: string | null;
   restMethod: RestMethod;
@@ -316,6 +325,10 @@ export interface AppState {
 
   maxHistorySize: number;
   setMaxHistorySize: (size: number) => void;
+
+  // Default wire transport for NEW grpc-web tabs (old vs migrated servers).
+  defaultWebTransport: WebTransport;
+  setDefaultWebTransport: (transport: WebTransport) => void;
 
   defaultHeaders: Record<ProtocolTab, MetadataEntry[]>;
   setDefaultHeaders: (protocol: ProtocolTab, headers: MetadataEntry[]) => void;

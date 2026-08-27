@@ -126,3 +126,89 @@ test("schema-less decode: nested message detected as candidate", async () => {
   assert.ok(view["1"][0].lengthDelimited.nested, "expected nested candidate");
   assert.equal(view["1"][0].lengthDelimited.nested["1"][0].varint.unsigned, "42");
 });
+
+// ---- Connect protocol helpers -----------------------------------------------
+
+test("classify: gRPC-Web content-types on any HTTP status", async () => {
+  const { classifyProtoResponse } = await loadModule();
+  assert.equal(classifyProtoResponse("application/grpc-web+proto", 200), "grpc-web");
+  assert.equal(classifyProtoResponse("application/grpc-web", 500), "grpc-web");
+  assert.equal(classifyProtoResponse("Application/GRPC-Web+Proto", 200), "grpc-web");
+});
+
+test("classify: bare proto is decodable only on HTTP 200", async () => {
+  const { classifyProtoResponse } = await loadModule();
+  assert.equal(classifyProtoResponse("application/proto", 200), "proto-unary");
+  // Non-200 proto bodies are error payloads, not messages (Connect errors are
+  // application/json, so this is a non-Connect server's error).
+  assert.equal(classifyProtoResponse("application/proto", 500), null);
+  assert.equal(classifyProtoResponse("application/proto", 404), null);
+});
+
+test("classify: content-type parameters are ignored", async () => {
+  const { classifyProtoResponse } = await loadModule();
+  assert.equal(classifyProtoResponse("application/proto; charset=utf-8", 200), "proto-unary");
+});
+
+test("classify: connect streaming envelope content-type", async () => {
+  const { classifyProtoResponse } = await loadModule();
+  assert.equal(classifyProtoResponse("application/connect+proto", 200), "connect-stream");
+});
+
+test("classify: everything else stays out of the lens", async () => {
+  const { classifyProtoResponse } = await loadModule();
+  assert.equal(classifyProtoResponse("application/json", 200), null);
+  assert.equal(classifyProtoResponse("text/html", 200), null);
+  assert.equal(classifyProtoResponse(undefined, 200), null);
+  assert.equal(classifyProtoResponse(null, 200), null);
+  assert.equal(classifyProtoResponse("", 200), null);
+});
+
+test("connect end-stream: error code and message parsed", async () => {
+  const { parseConnectEndStream } = await loadModule();
+  const end = parseConnectEndStream(
+    new TextEncoder().encode('{"error":{"code":"unauthenticated","message":"token expired"}}'),
+  );
+  assert.deepEqual(end.error, { code: "unauthenticated", message: "token expired" });
+});
+
+test("connect end-stream: successful termination has no error", async () => {
+  const { parseConnectEndStream } = await loadModule();
+  assert.equal(parseConnectEndStream(new TextEncoder().encode("{}")).error, null);
+  assert.equal(parseConnectEndStream(new TextEncoder().encode('{"metadata":{}}')).error, null);
+});
+
+test("connect end-stream: malformed payload degrades, never throws", async () => {
+  const { parseConnectEndStream } = await loadModule();
+  const end = parseConnectEndStream(new TextEncoder().encode("not json"));
+  assert.equal(end.error, null);
+  assert.equal(end.raw, "not json");
+  // Non-string code falls back to "unknown" rather than leaking a non-string.
+  const weird = parseConnectEndStream(new TextEncoder().encode('{"error":{"code":3,"message":"x"}}'));
+  assert.equal(weird.error.code, "unknown");
+});
+
+test("connect stream: end-stream frame (0x02) splits from message frames", async () => {
+  const { parseGrpcWebFrames, parseConnectEndStream, decodeUnknownMessage, CONNECT_END_STREAM_FLAG } =
+    await loadModule();
+  const msg = frame(0x00, [0x08, 0x2a]); // field1 varint 42
+  const end = frame(CONNECT_END_STREAM_FLAG, textBytes('{"error":{"code":"internal","message":"boom"}}'));
+  const frames = parseGrpcWebFrames(concat(msg, end));
+  assert.equal(frames.length, 2);
+  const endFrame = frames.find((f) => (f.flag & CONNECT_END_STREAM_FLAG) !== 0);
+  assert.ok(endFrame, "end-stream frame found by flag");
+  assert.equal(endFrame.trailer, false, "0x02 is not the gRPC-Web trailer bit");
+  assert.equal(parseConnectEndStream(endFrame.data).error.code, "internal");
+  const messages = frames.filter((f) => (f.flag & CONNECT_END_STREAM_FLAG) === 0 && !f.trailer);
+  assert.equal(messages.length, 1);
+  assert.equal(decodeUnknownMessage(messages[0].data)["1"][0].varint.unsigned, "42");
+});
+
+test("connect unary: bare body decodes without any framing", async () => {
+  const { decodeUnknownMessage } = await loadModule();
+  // No 5-byte envelope — the whole body is the message (field1 = "hi").
+  const view = decodeUnknownMessage(Uint8Array.from([0x0a, 0x02, 0x68, 0x69]));
+  assert.equal(view["1"][0].lengthDelimited.utf8, "hi");
+  // And an empty body is a valid empty message.
+  assert.deepEqual(decodeUnknownMessage(Uint8Array.from([])), {});
+});

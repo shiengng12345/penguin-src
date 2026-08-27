@@ -11,6 +11,7 @@ import type {
   ProtocolTab,
   RequestTab,
   SavedRequest,
+  WebTransport,
 } from "./store-types";
 
 // --- Persistence keys ---
@@ -25,6 +26,7 @@ export const MAX_HISTORY_KEY = APP_VALUE_KEYS.maxHistory;
 export const DEFAULT_MAX_HISTORY = 500;
 export const SAVED_REQUESTS_KEY = APP_VALUE_KEYS.savedRequests;
 export const DEFAULT_HEADERS_KEY = APP_VALUE_KEYS.defaultHeaders;
+export const DEFAULT_WEB_TRANSPORT_KEY = APP_VALUE_KEYS.defaultWebTransport;
 
 // --- Load/save helpers ---
 
@@ -50,6 +52,10 @@ export function loadMaxHistorySize(): number {
     if (!isNaN(n) && n > 0) return n;
   }
   return DEFAULT_MAX_HISTORY;
+}
+
+export function loadDefaultWebTransport(): WebTransport {
+  return getPersistedValue(DEFAULT_WEB_TRANSPORT_KEY) === "connect" ? "connect" : "grpc-web";
 }
 
 export function loadDefaultHeaders(): Record<ProtocolTab, MetadataEntry[]> {

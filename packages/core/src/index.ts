@@ -11,7 +11,12 @@ export type {
 
 export { logger, setLoggerSink, type LoggerSink } from "./logger.js";
 export { parseProtoContent, generateDefaultJson, generateMethodPath, methodSchemaCompleteness } from "./proto-parser.js";
-export { computeServicePath } from "./service-path.js";
+export {
+  computeServicePath,
+  computeConnectServicePath,
+  parseWebRpcServicePath,
+  type ParsedWebRpcPath,
+} from "./service-path.js";
 export {
   parseGrpcWebFrames,
   parseGrpcTrailers,
@@ -19,6 +24,11 @@ export {
   bytesToHex,
   bytesToBase64,
   GrpcWebParseError,
+  CONNECT_END_STREAM_FLAG,
+  parseConnectEndStream,
+  classifyProtoResponse,
+  type ConnectEndStream,
+  type ProtoResponseKind,
   type GrpcWebFrame,
   type GrpcTrailer,
   type WireField,
@@ -36,7 +46,7 @@ export {
   snsoftPackageNameFromSpec,
   type SnsoftPackageProtocol,
 } from "./package-spec.js";
-export { callGrpcWeb, type LoadPackageModule } from "./grpc-web-client.js";
+export { callGrpcWeb, callConnect, type LoadPackageModule, type WebRpcProtocol } from "./grpc-web-client.js";
 export type { SidecarRunner, SidecarOutput } from "./sidecar-runner.js";
 export {
   callGrpcNative,

@@ -2,12 +2,12 @@ import { useAppStore, useActiveTab } from "@/lib/store";
 import { SendMascot } from "@/components/common/SendMascot";
 import { EnvInput } from "@/components/ui/env-input";
 import { Badge } from "@/components/ui/badge";
-import { Globe, Server, RotateCcw, Pencil } from "lucide-react";
+import { Globe, Server, RotateCcw, Pencil, ArrowLeftRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
 import { cn, ensureProtocol } from "@/lib/utils";
 import { REST_METHODS, toRestMethod } from "@/lib/rest";
-import { computeServicePath } from "@penguin/core";
+import { computeServicePath, computeConnectServicePath } from "@penguin/core";
 
 interface UrlBarProps {
   resolvedUrl: string | null;
@@ -32,7 +32,15 @@ export function UrlBar({ resolvedUrl }: UrlBarProps) {
     return ensureProtocol(url);
   };
 
-  const autoPath = tab.selectedMethod ? computeServicePath(tab.selectedMethod.fullName) : null;
+  // Wire transport for grpc-web tabs: classic gRPC-Web vs Connect unary.
+  // The auto path follows it — gateway-prefixed vs protocol-standard 2-segment.
+  const isGrpcWebTab = tab.protocolTab === "grpc-web";
+  const activeTransport = isGrpcWebTab ? (tab.transport ?? "grpc-web") : "grpc-web";
+  const autoPath = tab.selectedMethod
+    ? activeTransport === "connect"
+      ? computeConnectServicePath(tab.selectedMethod.fullName)
+      : computeServicePath(tab.selectedMethod.fullName)
+    : null;
   const effectivePath = tab.pathOverride ?? autoPath;
   const isOverridden = tab.pathOverride !== null;
   const displayUrl = resolvedUrl ?? tab.targetUrl;
@@ -47,14 +55,40 @@ export function UrlBar({ resolvedUrl }: UrlBarProps) {
     <div className="relative z-30 border-b border-border bg-card" data-tour="url-bar">
       {/* Base URL row */}
       <div className="flex items-center gap-2 px-4 py-2">
-        <Badge variant="outline" className="shrink-0 font-mono text-[10px] gap-1">
-          {tab.protocolTab === "grpc-web" || isRest ? (
-            <Globe className="h-3 w-3" />
-          ) : (
-            <Server className="h-3 w-3" />
-          )}
-          {tab.protocolTab.toUpperCase()}
-        </Badge>
+        {isGrpcWebTab ? (
+          // Per-request wire-transport flip button: one badge-sized control,
+          // fixed width for both labels, click swaps gRPC-Web ↔ Connect (old
+          // servers speak gRPC-Web, migrated ones speak Connect).
+          <button
+            type="button"
+            onClick={() =>
+              updateActiveTab({ transport: activeTransport === "connect" ? "grpc-web" : "connect" })
+            }
+            title={
+              activeTransport === "connect"
+                ? "Transport: Connect（新服务）— 点击切换到 gRPC-Web"
+                : "Transport: gRPC-Web（旧服务）— 点击切换到 Connect"
+            }
+            data-tour="transport-toggle"
+            className={cn(
+              "group flex w-[92px] shrink-0 items-center justify-center gap-1 overflow-hidden rounded-md border px-1.5 py-1 font-mono text-[10px] transition-colors",
+              activeTransport === "connect"
+                ? "border-primary/60 bg-primary text-primary-foreground hover:bg-primary/85"
+                : "border-border bg-transparent text-muted-foreground hover:border-primary/40 hover:bg-accent/40 hover:text-foreground",
+            )}
+          >
+            <ArrowLeftRight className="h-3 w-3 shrink-0 opacity-60 transition-transform duration-200 group-hover:rotate-180 group-hover:opacity-100" />
+            {/* key remount replays the swap-in animation on each flip */}
+            <span key={activeTransport} className="animate-transport-swap">
+              {activeTransport === "connect" ? "CONNECT" : "GRPC-WEB"}
+            </span>
+          </button>
+        ) : (
+          <Badge variant="outline" className="shrink-0 font-mono text-[10px] gap-1">
+            {isRest ? <Globe className="h-3 w-3" /> : <Server className="h-3 w-3" />}
+            {tab.protocolTab.toUpperCase()}
+          </Badge>
+        )}
 
         {isRest && (
           <Select

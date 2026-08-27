@@ -33,6 +33,7 @@ import {
   Sparkles,
   Settings2,
   ChevronRight,
+  ArrowLeftRight,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { writeClipboard } from "@/lib/clipboard";
@@ -95,6 +96,8 @@ export function SettingsDialog({
   const setUserName = useAppStore((s) => s.setUserName);
   const [draftName, setDraftName] = useState(userName);
   const maxHistorySize = useAppStore((s) => s.maxHistorySize);
+  const defaultWebTransport = useAppStore((s) => s.defaultWebTransport);
+  const setDefaultWebTransport = useAppStore((s) => s.setDefaultWebTransport);
   const setMaxHistorySize = useAppStore((s) => s.setMaxHistorySize);
   const defaultHeaders = useAppStore((s) => s.defaultHeaders);
   const setDefaultHeaders = useAppStore((s) => s.setDefaultHeaders);
@@ -108,8 +111,6 @@ export function SettingsDialog({
     server_name: string;
     bundled_server_path: string | null;
     node_path: string | null;
-    server_healthy: boolean;
-    server_health_error: string | null;
     claude_desktop_config_path: string | null;
     claude_desktop_configured: boolean;
     claude_code_config_path: string | null;
@@ -135,6 +136,24 @@ export function SettingsDialog({
     }
   }, []);
 
+  // Server health is the slow probe (spawns node, up to 1.5s) — fired
+  // without waiting so the dialog renders instantly; the badge updates to
+  // ready/failed when the result lands.
+  const [mcpHealth, setMcpHealth] = useState<"checking" | "ok" | "failed">("checking");
+  const [mcpHealthError, setMcpHealthError] = useState<string | null>(null);
+  const refreshMcpHealth = useCallback(async () => {
+    setMcpHealth("checking");
+    setMcpHealthError(null);
+    try {
+      const h = await invoke<{ healthy: boolean; error: string | null }>("mcp_server_health");
+      setMcpHealth(h.healthy ? "ok" : "failed");
+      setMcpHealthError(h.error);
+    } catch (err) {
+      setMcpHealth("failed");
+      setMcpHealthError(String(err));
+    }
+  }, []);
+
   const handleMcpInstall = async () => {
     setMcpInstallState("installing");
     setMcpInstallMsg("");
@@ -148,6 +167,8 @@ export function SettingsDialog({
       setMcpInstallMsg(String(err));
       setMcpInstallState("error");
     }
+    // Fire-and-forget: the health badge fills in when the probe lands.
+    void refreshMcpHealth();
   };
 
   const mcpNodePath = mcpStatus?.node_path ?? "<node>";
@@ -170,16 +191,18 @@ export function SettingsDialog({
   const mcpClaudeConfigured = Boolean(mcpStatus?.claude_desktop_configured);
   const mcpClaudeCodeConfigured = Boolean(mcpStatus?.claude_code_configured);
   const mcpCodexConfigured = Boolean(mcpStatus?.codex_configured);
-  const mcpServerHealthy = Boolean(mcpStatus?.server_healthy);
+  const mcpServerHealthy = mcpHealth === "ok";
   const mcpAllConfigured = mcpClaudeConfigured && mcpClaudeCodeConfigured && mcpCodexConfigured;
   const mcpReady = mcpAllConfigured && mcpServerHealthy;
-  const mcpServerCheckFailed = mcpStatus !== null && !mcpServerHealthy;
+  const mcpServerCheckFailed = mcpHealth === "failed";
   const mcpPartiallyConfigured =
     !mcpAllConfigured && (mcpClaudeConfigured || mcpClaudeCodeConfigured || mcpCodexConfigured);
   const mcpStatusLabel = mcpReady
     ? "MCP Ready"
     : mcpServerCheckFailed
       ? "Server Check Failed"
+      : mcpAllConfigured && mcpHealth === "checking"
+      ? "Checking Server…"
       : mcpPartiallyConfigured
       ? "Partial Setup"
       : "Manual Setup";
@@ -195,8 +218,9 @@ export function SettingsDialog({
   };
   useEffect(() => {
     getVersion().then(setAppVersion).catch(() => setAppVersion("unknown"));
-    refreshMcpStatus();
-  }, [refreshMcpStatus]);
+    void refreshMcpStatus();
+    void refreshMcpHealth();
+  }, [refreshMcpStatus, refreshMcpHealth]);
 
   useEffect(() => {
     if (initialSection !== "mcp") return;
@@ -262,6 +286,7 @@ export function SettingsDialog({
           rest: s.restActiveEnvId,
         },
         defaultHeaders: s.defaultHeaders,
+        defaultWebTransport: s.defaultWebTransport,
         maxHistorySize: s.maxHistorySize,
         theme: s.theme,
         userName: s.userName,
@@ -305,6 +330,9 @@ export function SettingsDialog({
         for (const p of ["grpc-web", "grpc", "sdk", "rest"] as ProtocolTab[]) {
           if (data.defaultHeaders[p]) s.setDefaultHeaders(p, data.defaultHeaders[p]);
         }
+      }
+      if (data.defaultWebTransport === "grpc-web" || data.defaultWebTransport === "connect") {
+        s.setDefaultWebTransport(data.defaultWebTransport);
       }
       if (typeof data.maxHistorySize === "number") s.setMaxHistorySize(data.maxHistorySize);
       if (data.theme) s.setTheme(data.theme);
@@ -588,13 +616,13 @@ export function SettingsDialog({
 
             {((!mcpStatus?.bundled_server_path && mcpStatus !== null) ||
               (!mcpStatus?.node_path && mcpStatus !== null) ||
-              (mcpServerCheckFailed && mcpStatus?.server_health_error)) && (
+              (mcpServerCheckFailed && mcpHealthError)) && (
               <p className="mt-2 text-[11px] text-amber-500">
-                {!mcpStatus?.node_path
+                {mcpStatus !== null && !mcpStatus.node_path
                   ? "Node.js not detected — install from nodejs.org first."
-                  : !mcpStatus?.bundled_server_path
+                  : mcpStatus !== null && !mcpStatus.bundled_server_path
                     ? "Bundled MCP server missing — rebuild the app."
-                    : `MCP server check failed — ${mcpStatus.server_health_error}`}
+                    : `MCP server check failed — ${mcpHealthError}`}
               </p>
             )}
 
@@ -622,11 +650,13 @@ export function SettingsDialog({
             {mcpInstallState === "success" && (
               <p className={cn(
                 "mt-2 text-[11px]",
-                mcpServerHealthy ? "text-emerald-500" : "text-amber-500",
+                mcpServerCheckFailed ? "text-amber-500" : "text-emerald-500",
               )}>
                 {mcpServerHealthy
                   ? "✓ Configured Claude Desktop, Claude Code and Codex CLI. Penguin MCP server checked. Restart the clients to load it."
-                  : `Configured clients, but MCP server check failed: ${mcpStatus?.server_health_error ?? "unknown error"}`}
+                  : mcpServerCheckFailed
+                    ? `Configured clients, but MCP server check failed: ${mcpHealthError ?? "unknown error"}`
+                    : "✓ Configured Claude Desktop, Claude Code and Codex CLI. Verifying MCP server… / 正在检查服务…"}
               </p>
             )}
             {mcpInstallState === "error" && mcpInstallMsg && (
@@ -754,6 +784,41 @@ export function SettingsDialog({
                   </pre>
                 </div>
               </div>
+            </div>
+          </div>
+
+          {/* Default Transport for new gRPC-Web tabs — full row so the cards
+              below keep their 2×2 pairing. */}
+          <div className="rounded-lg border border-border bg-muted/20 p-4 md:col-span-2">
+            <h3 className="text-sm font-medium text-foreground flex items-center gap-1.5">
+              <ArrowLeftRight className="h-3.5 w-3.5" />
+              Default Transport / 默认传输协议
+            </h3>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              New gRPC-Web tabs start on this transport. 每个请求仍可在 URL 栏单独切换。
+            </p>
+            <div className="mt-3 flex gap-2">
+              {(
+                [
+                  { value: "grpc-web", label: "gRPC-Web", note: "旧服务" },
+                  { value: "connect", label: "Connect", note: "新服务" },
+                ] as const
+              ).map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => setDefaultWebTransport(option.value)}
+                  className={cn(
+                    "flex-1 rounded-md px-3 py-1.5 text-center text-xs font-medium transition-colors",
+                    defaultWebTransport === option.value
+                      ? "bg-primary text-primary-foreground"
+                      : "bg-muted text-muted-foreground hover:bg-accent"
+                  )}
+                >
+                  {option.label}
+                  <span className="ml-1 opacity-70">· {option.note}</span>
+                </button>
+              ))}
             </div>
           </div>
 

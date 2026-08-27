@@ -5,7 +5,7 @@ import { useEnvironments } from "@/hooks/useEnvironments";
 import { interpolate } from "@/lib/environment-store";
 import { logger } from "@/lib/logger";
 import { isEmptyAuthHeader } from "@/lib/header-utils";
-import { computeServicePath } from "@penguin/core";
+import { computeServicePath, computeConnectServicePath } from "@penguin/core";
 import { generatePenguinRequestId, PENGUIN_REQUEST_ID_HEADER } from "@/lib/penguin-request-id";
 import { Button } from "@/components/ui/button";
 import { Plus, X, RotateCcw, Copy, Braces, Bookmark, Check, FileText, Terminal, Ban, Code2 } from "lucide-react";
@@ -142,6 +142,7 @@ export function RequestPanel() {
       requestBody: tab.requestBody,
       restMethod: isRest ? tab.restMethod : undefined,
       restBodyMode: isRest ? tab.restBodyMode : undefined,
+      transport: tab.protocolTab === "grpc-web" ? tab.transport : undefined,
       selectedMethod: isRest ? null : tab.selectedMethod,
     };
     addHistory(entry);
@@ -163,9 +164,17 @@ export function RequestPanel() {
           metadata: mergedMetadata,
         });
       } else if (protocol === "grpc-web" && tab.selectedMethod) {
-        const servicePath = tab.pathOverride ?? computeServicePath(tab.selectedMethod.fullName);
-        const { callGrpcWeb } = await import("@/lib/grpc-web-client");
-        result = await callGrpcWeb({
+        // The tab's transport picks the wire protocol: classic gRPC-Web
+        // framing under the gateway package prefix, or Connect unary at the
+        // root — old and new servers coexist per environment.
+        const useConnect = (tab.transport ?? "grpc-web") === "connect";
+        const servicePath =
+          tab.pathOverride ??
+          (useConnect
+            ? computeConnectServicePath(tab.selectedMethod.fullName)
+            : computeServicePath(tab.selectedMethod.fullName));
+        const { callGrpcWeb, callConnect } = await import("@/lib/grpc-web-client");
+        result = await (useConnect ? callConnect : callGrpcWeb)({
           url: resolvedUrl,
           servicePath,
           body: tab.requestBody,
@@ -302,6 +311,7 @@ export function RequestPanel() {
       requestBody: tab.requestBody,
       restMethod: isRest ? tab.restMethod : undefined,
       restBodyMode: isRest ? tab.restBodyMode : undefined,
+      transport: tab.protocolTab === "grpc-web" ? tab.transport : undefined,
       response: tab.response,
       selectedMethod: isRest ? null : tab.selectedMethod,
     };
@@ -340,7 +350,12 @@ export function RequestPanel() {
     const resolvedUrl = interpolate(tab.targetUrl, activeEnv);
     const selectedMethod = tab.selectedMethod;
     if (!selectedMethod) return;
-    const servicePath = tab.pathOverride ?? computeServicePath(selectedMethod.fullName);
+    const useConnect = tab.protocolTab === "grpc-web" && (tab.transport ?? "grpc-web") === "connect";
+    const servicePath =
+      tab.pathOverride ??
+      (useConnect
+        ? computeConnectServicePath(selectedMethod.fullName)
+        : computeServicePath(selectedMethod.fullName));
     const fullUrl = `${resolvedUrl.replace(/\/$/, "")}${servicePath}`;
 
     // Mirror the live send path: tab metadata only (no re-merge of defaults),
@@ -353,7 +368,12 @@ export function RequestPanel() {
       .map((m) => `  -H '${m.key}: ${m.value}'`)
       .join(" \\\n");
 
-    const contentTypeH = `  -H 'Content-Type: application/json'`;
+    // Connect unary accepts the JSON codec directly — content-type
+    // application/json plus the protocol-version header is a valid request,
+    // so the exported curl stays copy-paste runnable for both transports.
+    const contentTypeH = useConnect
+      ? `  -H 'Content-Type: application/json' \\\n  -H 'Connect-Protocol-Version: 1'`
+      : `  -H 'Content-Type: application/json'`;
     const allHeaders = headers
       ? `${contentTypeH} \\\n${headers}`
       : contentTypeH;

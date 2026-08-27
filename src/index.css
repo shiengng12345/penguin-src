@@ -269,3 +269,26 @@ body {
 ::-webkit-scrollbar-thumb:hover {
   background: var(--color-muted-foreground);
 }
+
+/* URL-bar transport flip button: the incoming label slides up into place. */
+@keyframes transport-swap {
+  from {
+    transform: translateY(65%);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.animate-transport-swap {
+  display: inline-block;
+  animation: transport-swap 180ms ease-out;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-transport-swap {
+    animation: none;
+  }
+}
