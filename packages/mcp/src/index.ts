@@ -46,6 +46,7 @@ import {
   type Protocol,
 } from "./penguin-paths.js";
 import { parseServicesForPackage } from "./parse-services.js";
+import { PENGUIN_REQUEST_ID_HEADER, generatePenguinRequestId } from "./request-id.js";
 import {
   installPackageViaNpm,
   makeLoadModule,
@@ -60,6 +61,9 @@ import {
   type DesktopProtocol,
 } from "./app-db.js";
 import {
+  attachRequestId,
+  buildDefaultHeaders,
+  requireCallTarget,
   serviceCallability,
   serviceNameMatches,
   validateCompareEnvironmentNames,
@@ -109,17 +113,23 @@ function asMetadata(headers: Record<string, string> | undefined): MetadataEntry[
   return Object.entries(headers).map(([k, v]) => ({ key: k, value: v, enabled: true }));
 }
 
-// Map environment variables to the conventional HTTP headers backend services
-// expect. Penguin's desktop UI lets users override default headers in the
-// desktop Settings panel — those overrides are stored in the app database and aren't visible here,
-// so we only emit headers derivable from the config-declared variables.
-function buildDefaultHeaders(variables: Record<string, string>): Record<string, string> {
-  const out: Record<string, string> = {};
-  const tag = variables.X_ENV_TAG?.trim();
-  if (tag) out["x-env-tag"] = tag;
-  const token = variables.TOKEN?.trim();
-  if (token) out["authorization"] = token.startsWith("Bearer ") ? token : `Bearer ${token}`;
-  return out;
+// Shared by call_method: resolve {url, defaultHeaders} from an environment
+// name the same way the resolve_environment tool does, so callers can pass
+// environmentName instead of chaining resolve_environment → call_method.
+function resolveEnvironmentTarget(
+  protocol: Protocol,
+  environmentName: string,
+): { environment: EnvironmentEntry; url: string; defaultHeaders: Record<string, string> } {
+  const cfg = readConfig();
+  const env = findEnvironment(cfg, protocol, environmentName);
+  if (!env) {
+    const available = (getSection(cfg, protocol).environments ?? []).map((e) => e.name);
+    const hint = available.length
+      ? ` Available: ${available.join(", ")}.`
+      : " No environments configured for this protocol — add some to .penguin/config.json.";
+    throw new Error(`Environment ${environmentName} not found for ${protocol}.${hint}`);
+  }
+  return { environment: env, url: env.variables.URL ?? "", defaultHeaders: buildDefaultHeaders(env.variables) };
 }
 
 function findService(protocol: Protocol, packageName: string, serviceName: string) {
@@ -622,13 +632,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: "call_method",
       description:
-        "Invoke an RPC method on the live backend. Recommended routing: pass `packageName` + `serviceName` + `methodName` — MCP will resolve the protocol-specific routing fields. Legacy `servicePath` works directly for native grpc; grpc-web still requires `packageName` to load the generated client module. URL is the env target (use resolve_environment to fetch it).",
+        "Invoke an RPC method on the live backend in one call — no separate resolve_environment step needed. Recommended routing: pass `packageName` + `serviceName` + `methodName` — MCP will resolve the protocol-specific routing fields. Legacy `servicePath` works directly for native grpc; grpc-web still requires `packageName` to load the generated client module. Pass `environmentName` (from list_environments) to auto-resolve the target url and default headers (x-env-tag, authorization); pass `url` directly to bypass environment lookup. The result's `headers` always includes the real `x-penguin-id` correlation id that was actually sent with this request — never guess or synthesize one.",
       inputSchema: {
         type: "object",
-        required: ["protocol", "url", "body"],
+        required: ["protocol", "body"],
         properties: {
           protocol: { type: "string", enum: ["grpc-web", "grpc", "sdk"] },
-          url: { type: "string" },
+          environmentName: {
+            type: "string",
+            description:
+              "Environment name from list_environments. Resolves url + default headers (x-env-tag, authorization) automatically; explicit `url`/`headers` override the resolved values. Either this or `url` is required.",
+          },
+          url: { type: "string", description: "Explicit target URL. Either this or `environmentName` is required." },
           packageName: { type: "string", description: "e.g. @snsoft/auth-grpc-web" },
           serviceName: { type: "string", description: "Short or fullName, e.g. 'Auth'" },
           methodName: { type: "string", description: "Case-insensitive, e.g. 'lookupNationalId'" },
@@ -637,7 +652,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           headers: {
             type: "object",
             additionalProperties: { type: "string" },
-            description: "Extra HTTP headers, e.g. {x-env-tag: brazil, platform-id: 550}",
+            description: "Extra HTTP headers, e.g. {x-env-tag: brazil, platform-id: 550}. Override resolved environment defaults.",
           },
         },
       },
@@ -798,22 +813,16 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
 
     if (name === "resolve_environment") {
       const protocol = a.protocol as Protocol;
-      const envName = a.environmentName as string;
-      const cfg = readConfig();
-      const env = findEnvironment(cfg, protocol, envName);
-      if (!env) {
-        const available = (getSection(cfg, protocol).environments ?? []).map((e) => e.name);
-        const hint = available.length
-          ? ` Available: ${available.join(", ")}.`
-          : " No environments configured for this protocol — add some to .penguin/config.json.";
-        throw new Error(`Environment ${envName} not found for ${protocol}.${hint}`);
-      }
+      const { environment: env, url, defaultHeaders } = resolveEnvironmentTarget(
+        protocol,
+        a.environmentName as string,
+      );
       return jsonResult({
         protocol,
         name: env.name,
-        url: env.variables.URL ?? "",
+        url,
         variables: env.variables,
-        defaultHeaders: buildDefaultHeaders(env.variables),
+        defaultHeaders,
       });
     }
 
@@ -886,7 +895,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       const body = (a.body as string) ?? "{}";
       preflightJsonBody(body);
       const headers = a.headers as Record<string, string> | undefined;
-      const metadata = asMetadata(headers);
       const cfg = readConfig();
       // Resolve routing once — the same RPC is invoked across every env.
       const routing = resolveCallRouting({
@@ -908,6 +916,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
                 : `Environment ${envName} not found for ${protocol}`,
             };
           }
+          // Each environment gets its own correlation id — same as separate
+          // desktop-UI sends would each generate their own.
+          const requestId = generatePenguinRequestId();
+          const metadata = asMetadata(attachRequestId(headers, PENGUIN_REQUEST_ID_HEADER, requestId));
           try {
             const response = await invokeRpc({
               protocol,
@@ -916,10 +928,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
               metadata,
               ...routing,
             });
+            const guarded = applyResponseGuard(response);
             return {
               environment: envName,
               url: env.variables.URL,
-              response: applyResponseGuard(response),
+              response: {
+                ...guarded,
+                headers: attachRequestId(guarded.headers, PENGUIN_REQUEST_ID_HEADER, requestId),
+              },
             };
           } catch (err) {
             return {
@@ -935,7 +951,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
 
     if (name === "call_method") {
       const protocol = a.protocol as Protocol;
-      const metadata = asMetadata(a.headers as Record<string, string> | undefined);
+      const environmentName = a.environmentName as string | undefined;
+      const explicitUrl = a.url as string | undefined;
+      requireCallTarget(explicitUrl, environmentName);
+      const resolvedEnv = environmentName ? resolveEnvironmentTarget(protocol, environmentName) : undefined;
+      const url = explicitUrl ?? resolvedEnv!.url;
+      const headers = { ...(resolvedEnv?.defaultHeaders ?? {}), ...(a.headers as Record<string, string> | undefined) };
+      const requestId = generatePenguinRequestId();
+      // Always generated fresh, overriding any caller-supplied value — matches
+      // the desktop send pipeline's "manually-entered x-penguin-id is replaced"
+      // behavior in src/components/request/RequestPanel.tsx.
+      const metadata = asMetadata(attachRequestId(headers, PENGUIN_REQUEST_ID_HEADER, requestId));
       const body = (a.body as string) ?? "{}";
       preflightJsonBody(body);
       const routing = resolveCallRouting({
@@ -947,12 +973,18 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       });
       const result = await invokeRpc({
         protocol,
-        url: a.url as string,
+        url,
         body,
         metadata,
         ...routing,
       });
-      return jsonResult(applyResponseGuard(result));
+      const guarded = applyResponseGuard(result);
+      return jsonResult({
+        ...guarded,
+        environment: resolvedEnv?.environment.name,
+        url,
+        headers: attachRequestId(guarded.headers, PENGUIN_REQUEST_ID_HEADER, requestId),
+      });
     }
 
     throw new Error(
