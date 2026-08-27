@@ -61,3 +61,8 @@ packages/mcp/bundle/
 
 # Vendor download cache (node binaries + native prebuilds)
 .cache/
+
+# stray tsc outputs compiled next to sources (dist/ is the real build dir)
+packages/*/src/*.js
+packages/*/src/*.js.map
+/-R
