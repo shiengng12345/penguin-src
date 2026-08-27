@@ -138,7 +138,11 @@ function addParseDuration(
   if (timings) timings[key] += performance.now() - startedAt;
 }
 
-export const KNOWLEDGE_PARSER_VERSION = "tree-sitter-wasm-v6-member-receivers";
+// v7: TSX extraction gained jsx-component / jsx-callback dynamic-dispatch
+// refs (renders / invokes_dynamic edges). Bumping forces existing indexes to
+// reprocess on their next index run — without it, checkpoint-skipped files
+// silently lack the new edges forever.
+export const KNOWLEDGE_PARSER_VERSION = "tree-sitter-wasm-v7-jsx-dynamic-edges";
 export const KNOWLEDGE_RESOLVER_VERSION = "resolver-v4-import-scoped-qualified";
 
 // In-process index task lock: one active task per repo+branch+checkout (§8.3).
