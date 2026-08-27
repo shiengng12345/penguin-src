@@ -261,6 +261,61 @@ test("buildExplorePack reports a missing target without disguising it as an empt
   store.close();
 });
 
+test("buildExplorePack surfaces ambiguous candidates instead of just a match count", () => {
+  const { store, repoId, main } = seed();
+  const otherRepoId = store.registerRepo({ name: "auth", rootPath: "/work/auth" });
+  const otherMain = store.registerBranch({ repoId: otherRepoId, name: "main", status: "live" });
+  const duplicateA = store.upsertNode({
+    nodeType: "symbol",
+    identityKey: `${repoId}::a.ts::Service.run`,
+    title: "run",
+    repoId,
+  });
+  const duplicateB = store.upsertNode({
+    nodeType: "symbol",
+    identityKey: `${otherRepoId}::b.ts::Service.run`,
+    title: "run",
+    repoId: otherRepoId,
+  });
+  store.upsertSymbolVersion({
+    nodeId: duplicateA,
+    branchId: main,
+    commitSha: "c0",
+    filePath: "a.ts",
+    lang: "ts",
+    kind: "method",
+    contentHash: "a",
+  });
+  store.upsertSymbolVersion({
+    nodeId: duplicateB,
+    branchId: otherMain,
+    commitSha: "c0",
+    filePath: "b.ts",
+    lang: "ts",
+    kind: "method",
+    contentHash: "b",
+  });
+
+  const pack = buildExplorePack(store, "Service.run");
+  assert.ok(
+    pack.diagnostics.some((message) => message.includes("ambiguous target: 2 matches")),
+    "keeps the human-readable diagnostic",
+  );
+  // The caller needs the actual candidates to disambiguate and retry
+  // directly — a bare count forces a guess-and-recheck loop.
+  assert.ok(Array.isArray(pack.ambiguousCandidates));
+  assert.equal(pack.ambiguousCandidates.length, 2);
+  assert.deepEqual(
+    new Set(pack.ambiguousCandidates.map((candidate) => candidate.nodeId)),
+    new Set([duplicateA, duplicateB]),
+  );
+  assert.deepEqual(
+    new Set(pack.ambiguousCandidates.map((candidate) => candidate.filePath)),
+    new Set(["a.ts", "b.ts"]),
+  );
+  store.close();
+});
+
 test("buildExplorePack promotes an endpoint handler as the source-bearing implementation", () => {
   const { store, main, login } = seed();
   const endpoint = store.upsertNode({

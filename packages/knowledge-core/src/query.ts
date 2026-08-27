@@ -2168,6 +2168,10 @@ export interface ExplorePack {
     totalEdges: number;
   };
   diagnostics: string[];
+  // Structured counterpart to the "ambiguous target: N matches" diagnostics
+  // string — callers need the actual candidates (nodeId/filePath/branch) to
+  // disambiguate and retry directly, not just a count to guess against.
+  ambiguousCandidates?: SymbolCandidate[];
   queryDiagnostics: QueryDiagnostics;
   // Set ONLY when no revision/branchId was supplied by the caller and the
   // underlying context/flow queries silently answered against the repo's live
@@ -2259,6 +2263,7 @@ export function buildExplorePack(
     provenance: rows,
     confidence: { level, minimum, inferredEdges, totalEdges },
     diagnostics: [...new Set(diagnostics)],
+    ...(context.ambiguous ? { ambiguousCandidates: context.ambiguous } : {}),
     ...(scopeFallback ? { scopeFallback } : {}),
     queryDiagnostics: buildQueryDiagnostics(
       store,
