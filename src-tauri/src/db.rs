@@ -14,6 +14,11 @@ fn open_product_db_at(path: &Path) -> Result<Connection, String> {
         fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
     let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    // Wait for writer locks instead of failing instantly with SQLITE_BUSY —
+    // the startup wal_checkpoint(TRUNCATE) can hold the writer lock for a
+    // while on a large WAL, and every command opens its own connection.
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|e| e.to_string())?;
     conn.execute_batch(
         r#"
         PRAGMA journal_mode = WAL;

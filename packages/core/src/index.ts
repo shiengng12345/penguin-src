@@ -58,3 +58,4 @@ export {
   buildSdkScript,
   type SdkCallParams,
 } from "./sdk-client.js";
+export { PENGUIN_REQUEST_ID_HEADER, generatePenguinRequestId } from "./request-id.js";

@@ -550,6 +550,12 @@ export function ResponsePanel() {
         </div>
       </div>
 
+      {tab.response.bodyTruncated && (
+        <div className="border-b border-border bg-amber-500/10 px-4 py-1.5 text-[11px] text-amber-600 dark:text-amber-400">
+          Restored preview is truncated — the full response is in History. 恢复的响应为截断预览，完整内容见历史记录。
+        </div>
+      )}
+
       {grpcStatusSummary && (
         <div className="border-b border-border bg-destructive/5 px-4 py-3">
           <div className="flex flex-wrap items-center gap-2">

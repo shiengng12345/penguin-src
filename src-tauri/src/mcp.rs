@@ -198,10 +198,24 @@ fn copy_if_different(src: &Path, dest: &Path) -> Result<bool, String> {
             return Ok(false);
         }
     }
-    let tmp = dest.with_extension("tmp");
+    // Unique tmp name: several callers (startup sync, mcp_status, install)
+    // can copy the same file concurrently; a shared ".tmp" name lets one
+    // thread rename the other's file away mid-write (rare spurious ENOENT).
+    let tmp = dest.with_extension(format!("tmp.{}.{}", std::process::id(), rand_suffix()));
     std::fs::write(&tmp, &src_bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, dest).map_err(|e| format!("rename {}: {e}", dest.display()))?;
     Ok(true)
+}
+
+// Cheap uniqueness for tmp names — thread id hash + time; no crypto needed.
+fn rand_suffix() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.subsec_nanos() as u64)
+        .unwrap_or(0);
+    let tid = format!("{:?}", std::thread::current().id());
+    nanos ^ (tid.len() as u64) << 20
 }
 
 // Recursive copy that dereferences symlinks (so the stable per-user copy is

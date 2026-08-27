@@ -158,13 +158,15 @@ export function tabsForPersistence(tabs: RequestTab[]): RequestTab[] {
   return tabs.map((tab) => {
     const body = tab.response?.body;
     if (typeof body !== "string" || body.length <= PERSISTED_RESPONSE_BODY_LIMIT) return tab;
+    // Clean slice + structured flag — NEVER prose appended into the body: a
+    // marker string silently corrupts anything the user copies/re-sends from
+    // the restored tab, and no tool can detect it reliably.
     return {
       ...tab,
       response: {
         ...tab.response!,
-        body:
-          body.slice(0, PERSISTED_RESPONSE_BODY_LIMIT) +
-          `\n… [response truncated for tab persistence — ${body.length} chars total; full response in History]`,
+        body: body.slice(0, PERSISTED_RESPONSE_BODY_LIMIT),
+        bodyTruncated: true,
       },
     };
   });

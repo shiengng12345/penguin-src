@@ -56,6 +56,10 @@ export interface ResponseState {
   headers: Record<string, string>;
   duration: number;
   error?: string;
+  // True when `body` is a truncated preview (e.g. tab-state persistence caps
+  // large bodies) — the full response lives in request history. Machine-
+  // readable on purpose: consumers must never have to sniff prose markers.
+  bodyTruncated?: boolean;
 }
 
 export interface ConnectMessageType {

@@ -14,7 +14,23 @@ async function loadTs(relativePath) {
 const { requireCallTarget, buildDefaultHeaders, attachRequestId } = await loadTs(
   "../packages/mcp/src/mcp-input-validation.ts",
 );
-const { PENGUIN_REQUEST_ID_HEADER, generatePenguinRequestId } = await loadTs("../packages/mcp/src/request-id.ts");
+// The real generator now lives in @penguin/core (mcp/src/request-id.ts is a
+// re-export, unresolvable inside a data: module) — transpile the CORE source
+// and pin the re-export by content so the indirection can't silently drift.
+const { PENGUIN_REQUEST_ID_HEADER, generatePenguinRequestId } = await loadTs(
+  "../packages/core/src/request-id.ts",
+);
+
+test("mcp request-id module re-exports the shared core implementation", async () => {
+  const source = await readFile(
+    new URL("../packages/mcp/src/request-id.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(
+    source,
+    /export \{ PENGUIN_REQUEST_ID_HEADER, generatePenguinRequestId \} from "@penguin\/core";/,
+  );
+});
 
 test("call_method requires either url or environmentName", () => {
   assert.throws(() => requireCallTarget(undefined, undefined), /requires either `url` or `environmentName`/);

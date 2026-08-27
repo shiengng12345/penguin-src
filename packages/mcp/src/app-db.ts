@@ -106,6 +106,7 @@ function readSqliteRows(
   dbPath: string,
   sql: string,
   params: string[] = [],
+  cliTimeoutMs = SQLITE_CLI_TIMEOUT_MS,
 ): Record<string, unknown>[] {
   if (!existsSync(dbPath)) return [];
 
@@ -125,16 +126,25 @@ function readSqliteRows(
     }
   }
 
-  // CLI fallback: inline the (internal, never user-supplied) parameters and
-  // enforce a hard timeout so a slow child kills itself instead of the server.
-  let inlined = sql;
-  for (const param of params) inlined = inlined.replace("?", sqlQuote(param));
+  // CLI fallback: inline parameters positionally and enforce a hard timeout
+  // so a slow child kills itself instead of the server. Split-and-join, NOT
+  // sequential String.replace: a parameter VALUE containing "?" would swallow
+  // the next placeholder, and replace() would expand $-patterns in values.
+  const sqlParts = sql.split("?");
+  if (sqlParts.length - 1 !== params.length) {
+    throw new Error(
+      `SQLite read failed for ${dbPath}: placeholder/parameter count mismatch (${sqlParts.length - 1} vs ${params.length})`,
+    );
+  }
+  const inlined = sqlParts
+    .map((part, i) => (i === 0 ? part : sqlQuote(params[i - 1]) + part))
+    .join("");
   try {
     const raw = execFileSync(sqliteBinary(), ["-json", dbPath, inlined], {
       encoding: "utf8",
       maxBuffer: SQLITE_MAX_BUFFER,
       stdio: ["ignore", "pipe", "ignore"],
-      timeout: SQLITE_CLI_TIMEOUT_MS,
+      timeout: cliTimeoutMs,
       killSignal: "SIGKILL",
     }).trim();
     if (!raw) return [];
@@ -293,6 +303,7 @@ export function filterStoredRequests(
 export function readAppValues(
   dbPath = penguinDbPath(),
   keys: readonly string[],
+  cliTimeoutMs?: number,
 ): Record<string, string> {
   const wanted = keys.filter((key) => key && !isSensitiveAppValueKey(key));
   if (wanted.length === 0) return {};
@@ -301,6 +312,7 @@ export function readAppValues(
     dbPath,
     `SELECT key, value FROM app_kv WHERE key IN (${placeholders})`,
     [...wanted],
+    cliTimeoutMs,
   );
   const values: Record<string, string> = {};
   for (const row of rows) {
@@ -341,7 +353,11 @@ function readHistoryEntries(dbPath: string): Record<string, unknown>[] {
   } catch {
     // Table missing (pre-v1.9 desktop) — fall through to the legacy blob.
   }
-  const values = readAppValues(dbPath, [APP_VALUE_KEYS.history]);
+  // Legacy pre-v1.9 blob: the whole history is ONE app_kv value that can run
+  // to several MB. Through the CLI fallback that's the known quadratic-escape
+  // hot spot, so give this specific read a longer leash than the 10s default —
+  // slow-but-finishes beats a hard SIGKILL for a migration-era read.
+  const values = readAppValues(dbPath, [APP_VALUE_KEYS.history], 30_000);
   return parseJsonArray(values[APP_VALUE_KEYS.history]);
 }
 

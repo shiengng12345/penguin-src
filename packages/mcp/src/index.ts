@@ -283,37 +283,57 @@ function resolveCallRouting(args: {
 // fields, so defaultBody is unaffected.
 const ENUM_PREVIEW_VALUES = 15;
 
-function trimFieldEnums(fields: FieldInfo[]): FieldInfo[] {
+// Truncation is STRUCTURED, never in-band prose: a "… +N more" string inside
+// enumValues looks like a legal enum member to an agent (and its absence from
+// enumNumbers contradicts it). Consumers check enumValuesTruncated/Total.
+type TrimmedFieldInfo = Omit<FieldInfo, "fields" | "map"> & {
+  enumValuesTruncated?: boolean;
+  enumValuesTotal?: number;
+  fields?: TrimmedFieldInfo[];
+  map?: NonNullable<FieldInfo["map"]> & {
+    valueFields?: TrimmedFieldInfo[];
+    valueEnumValuesTruncated?: boolean;
+    valueEnumValuesTotal?: number;
+  };
+};
+
+function trimFieldEnums(fields: FieldInfo[]): TrimmedFieldInfo[] {
   return fields.map((field) => {
-    const next: FieldInfo = { ...field };
-    if (next.enumValues && next.enumValues.length > ENUM_PREVIEW_VALUES) {
-      const total = next.enumValues.length;
-      const preview = next.enumValues.slice(0, ENUM_PREVIEW_VALUES);
-      next.enumValues = [...preview, `… +${total - ENUM_PREVIEW_VALUES} more (${total} values total)`];
-      if (next.enumNumbers) {
+    const next: TrimmedFieldInfo = { ...field, fields: undefined, map: undefined };
+    if (field.enumValues && field.enumValues.length > ENUM_PREVIEW_VALUES) {
+      const preview = field.enumValues.slice(0, ENUM_PREVIEW_VALUES);
+      next.enumValues = preview;
+      next.enumValuesTruncated = true;
+      next.enumValuesTotal = field.enumValues.length;
+      if (field.enumNumbers) {
         next.enumNumbers = Object.fromEntries(
-          Object.entries(next.enumNumbers).filter(([key]) => preview.includes(key)),
+          Object.entries(field.enumNumbers).filter(([key]) => preview.includes(key)),
         );
       }
     }
-    if (next.fields) next.fields = trimFieldEnums(next.fields);
-    if (next.map) {
-      const map = { ...next.map };
-      if (map.valueFields) map.valueFields = trimFieldEnums(map.valueFields);
-      if (map.valueEnumValues && map.valueEnumValues.length > ENUM_PREVIEW_VALUES) {
-        const total = map.valueEnumValues.length;
-        map.valueEnumValues = [
-          ...map.valueEnumValues.slice(0, ENUM_PREVIEW_VALUES),
-          `… +${total - ENUM_PREVIEW_VALUES} more (${total} values total)`,
-        ];
+    if (field.fields) next.fields = trimFieldEnums(field.fields);
+    else delete next.fields;
+    if (field.map) {
+      const map: NonNullable<TrimmedFieldInfo["map"]> = { ...field.map, valueFields: undefined };
+      if (field.map.valueFields) map.valueFields = trimFieldEnums(field.map.valueFields);
+      else delete map.valueFields;
+      if (field.map.valueEnumValues && field.map.valueEnumValues.length > ENUM_PREVIEW_VALUES) {
+        map.valueEnumValues = field.map.valueEnumValues.slice(0, ENUM_PREVIEW_VALUES);
+        map.valueEnumValuesTruncated = true;
+        map.valueEnumValuesTotal = field.map.valueEnumValues.length;
       }
       next.map = map;
+    } else {
+      delete next.map;
     }
     return next;
   });
 }
 
-function trimMethodEnums(method: ProtoMethod): ProtoMethod {
+function trimMethodEnums(method: ProtoMethod): Omit<ProtoMethod, "requestFields" | "responseFields"> & {
+  requestFields: TrimmedFieldInfo[];
+  responseFields: TrimmedFieldInfo[];
+} {
   return {
     ...method,
     requestFields: trimFieldEnums(method.requestFields),

@@ -49,15 +49,22 @@ test("small response bodies persist untouched", async () => {
   assert.ok(PERSISTED_RESPONSE_BODY_LIMIT >= 64 * 1024);
 });
 
-test("oversized response bodies are truncated with a marker", async () => {
+test("oversized response bodies truncate to a clean slice + structured flag", async () => {
   const { tabsForPersistence, PERSISTED_RESPONSE_BODY_LIMIT } = await loadHelpers();
   const bigBody = "z".repeat(PERSISTED_RESPONSE_BODY_LIMIT * 8);
   const [out] = tabsForPersistence([tab(bigBody)]);
-  assert.ok(out.response.body.length < PERSISTED_RESPONSE_BODY_LIMIT + 200);
-  assert.match(out.response.body, /truncated for tab persistence/);
-  assert.match(out.response.body, /full response in History/);
+  // Clean prefix slice — NO prose marker inside the body (a marker silently
+  // corrupts anything copied/re-sent from the restored tab).
+  assert.equal(out.response.body, bigBody.slice(0, PERSISTED_RESPONSE_BODY_LIMIT));
+  assert.equal(out.response.bodyTruncated, true);
   // The rest of the response stays intact.
   assert.equal(out.response.statusCode, 200);
+});
+
+test("small responses never carry the truncation flag", async () => {
+  const { tabsForPersistence } = await loadHelpers();
+  const [out] = tabsForPersistence([tab("tiny")]);
+  assert.equal(out.response.bodyTruncated, undefined);
 });
 
 test("tabs without responses are untouched", async () => {
