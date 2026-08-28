@@ -44,6 +44,16 @@ export class ParsePool {
   private readonly inFlight = new Map<number, { worker: Worker; pending: Pending }>();
   private nextId = 1;
   private closed = false;
+  // Unref'd workers do not keep the event loop alive, so a main thread whose
+  // only pending work is a worker reply has nothing ref'd and Node exits 0
+  // mid-index: `penguin rebuild` returned success after 3 seconds having
+  // written nothing, and every test passed because `node --test` supplies
+  // handles of its own. This timer is the one ref'd handle, held for exactly
+  // as long as a parse is outstanding. Ref'ing the worker instead does not
+  // work: worker.ref() also refs the underlying MessagePort and worker.unref()
+  // does not release it, so a leaked pool would hang the process forever.
+  private keepAlive: ReturnType<typeof setInterval> | null = null;
+  private keepAliveJobs = 0;
 
   static resolveSize(options: ParsePoolOptions | undefined, fileCount: number): number {
     const configured = Number(process.env.PENGUIN_PARSE_WORKERS ?? options?.size ?? NaN);
@@ -63,13 +73,22 @@ export class ParsePool {
 
   constructor(size: number) {
     for (let index = 0; index < size; index += 1) {
-      const worker = new Worker(new URL("./parse-worker.js", import.meta.url));
-      worker.unref();
+      let worker: Worker;
+      try {
+        worker = new Worker(new URL("./parse-worker.js", import.meta.url));
+      } catch {
+        // A missing or unreadable worker file (it was absent from the packaged
+        // bundle for a whole release) must leave a pool of size 0, which
+        // parse() handles by parsing in-process. Throwing here would abort the
+        // whole index instead of costing it some speed.
+        continue;
+      }
       worker.on("message", (message: { type: string; id: number; ok: boolean; extracted?: ExtractedFile; message?: string }) => {
         if (message.type !== "parsed") return;
         const entry = this.inFlight.get(message.id);
         if (!entry) return;
         this.inFlight.delete(message.id);
+        this.releaseKeepAlive();
         this.idle.push(entry.worker);
         if (message.ok && message.extracted) entry.pending.resolve(message.extracted);
         else entry.pending.reject(new Error(message.message ?? "parse worker failed"));
@@ -83,6 +102,7 @@ export class ParsePool {
           if (entry.worker !== worker) continue;
           this.inFlight.delete(id);
           entry.pending.reject(error instanceof Error ? error : new Error(String(error)));
+          this.releaseKeepAlive();
         }
         const at = this.workers.indexOf(worker);
         if (at >= 0) this.workers.splice(at, 1);
@@ -90,6 +110,27 @@ export class ParsePool {
         if (idleAt >= 0) this.idle.splice(idleAt, 1);
         this.drain();
       });
+      worker.on("exit", () => {
+        // terminate() and a crashed thread both land here, and 'error' does not
+        // always precede it. Anything this worker was holding must fail so
+        // parse() can fall back, rather than await a reply that will never come.
+        for (const [id, entry] of this.inFlight) {
+          if (entry.worker !== worker) continue;
+          this.inFlight.delete(id);
+          entry.pending.reject(new Error("parse worker exited"));
+          this.releaseKeepAlive();
+        }
+        const at = this.workers.indexOf(worker);
+        if (at >= 0) this.workers.splice(at, 1);
+        const idleAt = this.idle.indexOf(worker);
+        if (idleAt >= 0) this.idle.splice(idleAt, 1);
+        this.drain();
+      });
+      // AFTER the listeners: attaching a 'message' handler re-refs the worker's
+      // MessagePort, so unref'ing first leaves the port holding the event loop
+      // open and a pool nobody closed hangs the process. What keeps Node alive
+      // during an actual parse is `keepAlive` — see the note on that field.
+      worker.unref();
       this.workers.push(worker);
       this.idle.push(worker);
     }
@@ -99,12 +140,40 @@ export class ParsePool {
     return this.workers.length;
   }
 
+  private acquireKeepAlive(): void {
+    this.keepAliveJobs += 1;
+    // A parse is milliseconds; the interval never actually fires in practice.
+    if (!this.keepAlive) this.keepAlive = setInterval(() => {}, 60_000);
+  }
+
+  private releaseKeepAlive(): void {
+    this.keepAliveJobs = Math.max(0, this.keepAliveJobs - 1);
+    if (this.keepAliveJobs === 0 && this.keepAlive) {
+      clearInterval(this.keepAlive);
+      this.keepAlive = null;
+    }
+  }
+
+  /** With no workers left, anything still queued would never be dispatched:
+   * its promise never settles, the caller awaits forever, and with nothing
+   * ref'd the process exits 0 in the middle of the index. Reject instead —
+   * parse() catches and parses in-process. */
+  private failQueueIfUnusable(): void {
+    if (this.workers.length > 0) return;
+    const stranded = this.queue.splice(0, this.queue.length);
+    for (const job of stranded) {
+      job.pending.reject(new Error("no parse worker available"));
+    }
+  }
+
   private drain(): void {
+    this.failQueueIfUnusable();
     while (!this.closed && this.idle.length > 0 && this.queue.length > 0) {
       const worker = this.idle.pop()!;
       const job = this.queue.shift()!;
       const id = this.nextId++;
       this.inFlight.set(id, { worker, pending: job.pending });
+      this.acquireKeepAlive();
       worker.postMessage({ type: "parse", id, ...job.task });
     }
   }
@@ -122,6 +191,12 @@ export class ParsePool {
 
   async close(): Promise<void> {
     this.closed = true;
+    this.inFlight.clear();
+    this.keepAliveJobs = 0;
+    if (this.keepAlive) {
+      clearInterval(this.keepAlive);
+      this.keepAlive = null;
+    }
     const workers = [...this.workers];
     this.workers.length = 0;
     this.idle.length = 0;

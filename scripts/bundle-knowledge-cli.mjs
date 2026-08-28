@@ -17,8 +17,22 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const entry = join(repoRoot, "packages/knowledge-cli/dist/bin.js");
 const outdir = join(repoRoot, "packages/knowledge-cli/bundle");
 const outfile = join(outdir, "penguin.mjs");
-const workerEntry = join(repoRoot, "packages/knowledge-cli/dist/query-worker.js");
-const workerOutfile = join(outdir, "query-worker.js");
+// Every worker_threads entry the CLI can spawn must be bundled beside
+// penguin.mjs: the pool resolves it as `./parse-worker.js` relative to
+// import.meta.url, which in the bundle is this directory. parse-worker.js was
+// missing here, so the packaged CLI's parallel parsing never ran — and worse,
+// the failed spawn left the parse queue unsettled and the process exited 0
+// mid-index.
+const workerBuilds = [
+  {
+    entry: join(repoRoot, "packages/knowledge-cli/dist/query-worker.js"),
+    outfile: join(outdir, "query-worker.js"),
+  },
+  {
+    entry: join(repoRoot, "packages/knowledge-indexer/dist/parse-worker.js"),
+    outfile: join(outdir, "parse-worker.js"),
+  },
+];
 
 mkdirSync(outdir, { recursive: true });
 
@@ -49,27 +63,29 @@ await build({
   logLevel: "info",
 });
 
-await build({
-  entryPoints: [workerEntry],
-  outfile: workerOutfile,
-  bundle: true,
-  platform: "node",
-  format: "esm",
-  target: "node18",
-  external: ["better-sqlite3"],
-  banner: {
-    js: [
-      "import { createRequire as __pgvCreateRequire } from 'node:module';",
-      "import { fileURLToPath as __pgvFileURLToPath } from 'node:url';",
-      "import { dirname as __pgvDirname } from 'node:path';",
-      "const require = __pgvCreateRequire(import.meta.url);",
-      "const __filename = __pgvFileURLToPath(import.meta.url);",
-      "const __dirname = __pgvDirname(__filename);",
-    ].join("\n"),
-  },
-  logLevel: "info",
-});
+for (const { entry: workerEntry, outfile: workerOutfile } of workerBuilds) {
+  await build({
+    entryPoints: [workerEntry],
+    outfile: workerOutfile,
+    bundle: true,
+    platform: "node",
+    format: "esm",
+    target: "node18",
+    external: ["better-sqlite3"],
+    banner: {
+      js: [
+        "import { createRequire as __pgvCreateRequire } from 'node:module';",
+        "import { fileURLToPath as __pgvFileURLToPath } from 'node:url';",
+        "import { dirname as __pgvDirname } from 'node:path';",
+        "const require = __pgvCreateRequire(import.meta.url);",
+        "const __filename = __pgvFileURLToPath(import.meta.url);",
+        "const __dirname = __pgvDirname(__filename);",
+      ].join("\n"),
+    },
+    logLevel: "info",
+  });
+  chmodSync(workerOutfile, 0o755);
+}
 
 chmodSync(outfile, 0o755);
-chmodSync(workerOutfile, 0o755);
 console.log(`[bundle] wrote ${outfile}`);

@@ -47,3 +47,41 @@ test("self-contained MCP bundle executes its bounded knowledge worker", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// The bundle only ships the worker files the bundler is told about. parse-worker
+// was missing for a release: parallel parsing silently never ran in the packaged
+// CLI, and the failed spawns left `penguin rebuild` exiting 0 having written
+// nothing. Derive the expectation from the source instead of restating it — a
+// new `new Worker("./x.js")` anywhere in the CLI's dependency tree fails here
+// until the bundler emits x.js.
+test("every worker the bundled CLI can spawn ships beside it", async () => {
+  const { readFileSync, readdirSync, statSync } = await import("node:fs");
+  const cliBundle = resolve("packages/knowledge-cli/bundle");
+
+  const spawned = new Set();
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir)) {
+      if (entry === "node_modules" || entry === "dist" || entry === "bundle") continue;
+      const full = join(dir, entry);
+      if (statSync(full).isDirectory()) {
+        walk(full);
+        continue;
+      }
+      if (!/\.ts$/.test(entry) || /\.d\.ts$/.test(entry)) continue;
+      const source = readFileSync(full, "utf8");
+      for (const match of source.matchAll(/new Worker\(\s*new URL\(\s*"\.\/([\w.-]+)\.js"/g)) {
+        spawned.add(`${match[1]}.js`);
+      }
+    }
+  };
+  walk(resolve("packages"));
+
+  assert.ok(spawned.size > 0, "found no worker spawns to check — the scan is broken, not the bundle");
+  for (const file of spawned) {
+    assert.equal(
+      existsSync(join(cliBundle, file)),
+      true,
+      `${file} is spawned as a worker but is not in the CLI bundle — add it to workerBuilds in scripts/bundle-knowledge-cli.mjs`,
+    );
+  }
+});
