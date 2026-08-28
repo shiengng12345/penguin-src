@@ -69,7 +69,7 @@ export interface StorageRepoRow {
 
 export interface MaintenanceState {
   running: boolean;
-  action: "collect" | "vacuum" | null;
+  action: "collect" | "vacuum" | "analyze" | null;
   startedAt: string | null;
 }
 
@@ -103,7 +103,6 @@ const MAINTENANCE_LOCK_KEY = "knowledge_maintenance_lock";
 const MAINTENANCE_LAST_KEY = "knowledge_maintenance_last";
 const MAINTENANCE_LOCK_MAX_AGE_MS = 60 * 60_000;
 const INDEX_LOCK_MAX_AGE_MS = 30 * 60_000;
-const TABLES_CACHE_TTL_MS = 10 * 60_000;
 
 function statBytes(path: string): number | null {
   try {
@@ -254,14 +253,43 @@ function categorizeTable(name: string): StorageTableCategory {
   return "other";
 }
 
-// dbstat walks every page of a multi-GB database (1-3s) — cache per DB file
-// so footer-adjacent polling never pays it twice inside the TTL.
-const tablesCache = new Map<string, { at: number; section: StorageTablesSection | null }>();
+// dbstat walks EVERY page of the database: measured at 24s on the real
+// 6.3GB index, which froze the Storage page on "reading storage info…" for
+// the whole request. It must never run on a read path. The breakdown is
+// computed after indexing (analyzeStorageTables) and persisted; the report
+// only reads that row and states how old it is.
+const TABLES_META_KEY = "knowledge_storage_tables";
 
-function tablesSection(store: KnowledgeStore, ttlMs: number): StorageTablesSection | null {
-  const key = store.db.name;
-  const cached = tablesCache.get(key);
-  if (cached && Date.now() - cached.at < ttlMs) return cached.section;
+function persistedTables(store: KnowledgeStore): StorageTablesSection | null {
+  try {
+    const row = store.db.prepare("SELECT value FROM meta WHERE key=?").get(TABLES_META_KEY) as { value: string } | undefined;
+    return row ? (JSON.parse(row.value) as StorageTablesSection) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Compute the dbstat breakdown and persist it. Expensive (full page scan) —
+ * call it where the caller is already paying for heavy work (after an
+ * index/rebuild, or from the explicit "analyze" maintenance action), never
+ * from a query the UI is waiting on.
+ */
+export function analyzeStorageTables(store: KnowledgeStore): StorageTablesSection | null {
+  const section = computeTablesSection(store);
+  if (section) {
+    try {
+      store.db
+        .prepare("INSERT INTO meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+        .run(TABLES_META_KEY, JSON.stringify(section));
+    } catch {
+      // observability only
+    }
+  }
+  return section;
+}
+
+function computeTablesSection(store: KnowledgeStore): StorageTablesSection | null {
   let section: StorageTablesSection | null = null;
   try {
     // Join through sqlite_master so an index's pages are attributed to its
@@ -288,7 +316,6 @@ function tablesSection(store: KnowledgeStore, ttlMs: number): StorageTablesSecti
   } catch {
     section = null;
   }
-  tablesCache.set(key, { at: Date.now(), section });
   return section;
 }
 
@@ -353,7 +380,7 @@ export function maintenanceState(store: KnowledgeStore): MaintenanceState {
 }
 
 export interface MaintenanceResult {
-  action: "collect" | "vacuum";
+  action: "collect" | "vacuum" | "analyze";
   startedAt: string;
   finishedAt: string;
   // collect: aggregate counts across repos. vacuum: bytes reclaimed.
@@ -390,8 +417,10 @@ function activeIndexLock(store: KnowledgeStore): boolean {
 }
 
 export interface BuildStorageReportOptions {
-  // Test hook: dbstat cache TTL (default 10 minutes).
-  tablesTtlMs?: number;
+  /** Compute the dbstat breakdown inline instead of reading the persisted
+   *  one. Full page scan (24s on a 6.3GB index) — tests and the explicit
+   *  analyze action only, never a request the UI is waiting on. */
+  computeTables?: boolean;
 }
 
 export function buildStorageReport(store: KnowledgeStore, options: BuildStorageReportOptions = {}): StorageReport {
@@ -403,7 +432,7 @@ export function buildStorageReport(store: KnowledgeStore, options: BuildStorageR
     files,
     health: evaluateStorageHealth(files, weeklyDeltaBytes),
     growth: { weeklyDeltaBytes, samples: recentSamples(store) },
-    tables: tablesSection(store, options.tablesTtlMs ?? TABLES_CACHE_TTL_MS),
+    tables: options.computeTables ? analyzeStorageTables(store) : persistedTables(store),
     gc: {
       lastRun: lastGcRun(store),
       hotFeatureLimit: DEFAULT_REVISION_RETENTION.maxHotFeatureViews,
@@ -418,8 +447,8 @@ export function buildStorageReport(store: KnowledgeStore, options: BuildStorageR
 // resident runtime (its single-threaded dispatch already serializes DB
 // maintenance against queries); the meta lock additionally excludes other
 // processes (CLI, MCP) and refuses to run while an index is in flight.
-export function runStorageMaintenance(store: KnowledgeStore, action: "collect" | "vacuum"): MaintenanceResult {
-  if (action !== "collect" && action !== "vacuum") {
+export function runStorageMaintenance(store: KnowledgeStore, action: "collect" | "vacuum" | "analyze"): MaintenanceResult {
+  if (action !== "collect" && action !== "vacuum" && action !== "analyze") {
     throw Object.assign(new Error("MAINTENANCE_ACTION_INVALID"), { code: "MAINTENANCE_ACTION_INVALID" });
   }
   if (activeIndexLock(store)) {
@@ -455,6 +484,11 @@ export function runStorageMaintenance(store: KnowledgeStore, action: "collect" |
         totals.facts += applied.collectedFactIds.length;
       }
       result = { action, startedAt, finishedAt: new Date().toISOString(), collected: totals, error: null };
+    } else if (action === "analyze") {
+      // Full dbstat page scan (~24s on a 6.3GB index) — deliberately behind
+      // an explicit action and the maintenance lock, never on a read path.
+      analyzeStorageTables(store);
+      result = { action, startedAt, finishedAt: new Date().toISOString(), error: null };
     } else {
       const before = readStorageFileSizes(store).totalBytes;
       // Fold the WAL first: VACUUM rewrites the main file but leaves a huge
@@ -490,10 +524,12 @@ export function runStorageMaintenance(store: KnowledgeStore, action: "collect" |
   }
   persistMaintenanceResult(store, result);
   releaseMaintenanceLock(store);
-  // Sizes just changed; refresh the day's sample and invalidate the tables
-  // cache so the next report reflects the new layout immediately.
-  tablesCache.delete(store.db.name);
+  // Sizes just changed; refresh the day's sample. A vacuum also rewrites the
+  // page layout, so the persisted breakdown is now wrong — recompute it here
+  // (the caller already accepted a long-running maintenance action) rather
+  // than letting the Storage page show pre-vacuum numbers.
   recordDailySample(store, readStorageFileSizes(store));
+  if (action === "vacuum") analyzeStorageTables(store);
   return result;
 }
 

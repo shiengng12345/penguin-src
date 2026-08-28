@@ -68,6 +68,7 @@ import {
   canonicalPathForCheck,
   RevisionResolutionError,
   compileKnowledgeDsl,
+  analyzeStorageTables,
   recordStorageSample,
   resolveQueryScope,
   resolveRepoForPath,
@@ -959,6 +960,9 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
             // someone opening the Storage page — otherwise the weekly-delta
             // signal stays blank for exactly the users who never look.
             recordStorageSample(store);
+            // dbstat is a full page scan; indexing is already the heavy path, so
+            // pay it here instead of making the Storage page wait 24s for it.
+            analyzeStorageTables(store);
             const gcPlan = planRevisionCollection(store, report.repoId);
             const gc = applyRevisionCollection(store, gcPlan, { trigger: "auto" });
             const collected =

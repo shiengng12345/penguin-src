@@ -354,7 +354,7 @@ export interface StorageGcRun {
   error: string | null;
 }
 export interface StorageMaintenanceResult {
-  action: "collect" | "vacuum";
+  action: "collect" | "vacuum" | "analyze";
   startedAt: string;
   finishedAt: string;
   collected?: { snapshots: number; resolutionSets: number; sourceBlobs: number; facts: number };
@@ -368,7 +368,7 @@ export interface StorageReport {
   growth: { weeklyDeltaBytes: number | null; samples: Array<{ date: string; totalBytes: number; walBytes: number }> };
   tables: { computedAt: string; categories: Array<{ key: StorageTableCategory; bytes: number }> } | null;
   gc: { lastRun: StorageGcRun | null; hotFeatureLimit: number; trigramEnabled: boolean };
-  maintenance: { running: boolean; action: "collect" | "vacuum" | null; startedAt: string | null; lastResult: StorageMaintenanceResult | null };
+  maintenance: { running: boolean; action: "collect" | "vacuum" | "analyze" | null; startedAt: string | null; lastResult: StorageMaintenanceResult | null };
   repos: Array<{ repoId: string; repoName: string; snapshots: number; files: number; lastIndexedAt: string | null }>;
 }
 
@@ -378,7 +378,7 @@ export function knowledgeStorageReport(options: KnowledgeRequestOptions = {}): P
 
 // Mutating; long-running for vacuum (the resident runtime holds the response
 // until done). Callers own the spinner/disable UX — no client-side cache.
-export function knowledgeMaintenance(action: "collect" | "vacuum", options: KnowledgeRequestOptions = {}): Promise<StorageMaintenanceResult> {
+export function knowledgeMaintenance(action: "collect" | "vacuum" | "analyze", options: KnowledgeRequestOptions = {}): Promise<StorageMaintenanceResult> {
   return canonicalQuery<StorageMaintenanceResult>("knowledge.maintenance", { action }, options.signal);
 }
 

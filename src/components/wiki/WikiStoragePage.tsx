@@ -73,7 +73,7 @@ function Card({ title, children, className }: { title: string; children: React.R
 export function WikiStoragePage() {
   const [report, setReport] = useState<StorageReport | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [busyAction, setBusyAction] = useState<"collect" | "vacuum" | null>(null);
+  const [busyAction, setBusyAction] = useState<"collect" | "vacuum" | "analyze" | null>(null);
   const [actionNotice, setActionNotice] = useState<string | null>(null);
   const generationRef = useRef(0);
 
@@ -98,7 +98,7 @@ export function WikiStoragePage() {
   }, [refresh]);
 
   const runAction = useCallback(
-    (action: "collect" | "vacuum") => {
+    (action: "collect" | "vacuum" | "analyze") => {
       setBusyAction(action);
       setActionNotice(null);
       knowledgeMaintenance(action)
@@ -107,6 +107,8 @@ export function WikiStoragePage() {
             setActionNotice(`回收完成：清掉 ${result.collected.snapshots} 个快照、${result.collected.resolutionSets} 个解析集、${result.collected.sourceBlobs} 个内容块`);
           } else if (action === "vacuum") {
             setActionNotice(`压实完成：释放了 ${formatBytes(result.reclaimedBytes ?? 0)}`);
+          } else if (action === "analyze") {
+            setActionNotice("表大小已重新统计");
           }
         })
         .catch((actionError) => {
@@ -203,7 +205,18 @@ export function WikiStoragePage() {
                 <div className="mt-1 text-[11px] text-muted-foreground">数据截至 {formatRelativeTime(tables.computedAt)}</div>
               </div>
             ) : (
-              <div className="text-sm text-muted-foreground">表级统计不可用</div>
+              <div className="flex flex-col items-start gap-2 text-sm text-muted-foreground">
+                <span>还没统计过（全库扫描，约需十几秒）</span>
+                <button
+                  type="button"
+                  disabled={running}
+                  onClick={() => runAction("analyze")}
+                  className="flex h-7 items-center gap-1.5 rounded-md border border-border px-2 text-xs text-foreground hover:bg-accent disabled:opacity-40"
+                >
+                  {busyAction === "analyze" ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+                  现在统计
+                </button>
+              </div>
             )}
           </Card>
 

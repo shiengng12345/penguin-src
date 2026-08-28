@@ -2,7 +2,7 @@ import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { Worker } from "node:worker_threads";
 import { CAPABILITIES, capabilityHash } from "@penguin/knowledge-contracts";
-import { getSourceHit, compactIndexStatus, buildStatusPanel, buildStorageReport, runStorageMaintenance, SCHEMA_VERSION } from "@penguin/knowledge-core";
+import { getSourceHit, compactIndexStatus, buildStatusPanel, buildStorageReport, runStorageMaintenance, serviceGraph, SCHEMA_VERSION } from "@penguin/knowledge-core";
 import { runCli, type CliDeps } from "./index.js";
 import { dispatchQueryFrame, encodeFrame, parseFrame, queryHello } from "./query-protocol.js";
 
@@ -323,6 +323,28 @@ export async function runQueryServer(deps: CliDeps, input = process.stdin, outpu
     }
     throw error;
   }
+  // The CLI bridge reuses the resident connection instead of opening one per
+  // call. SQLite's page cache and the store's own query caches are
+  // per-connection, and on a multi-GB index that is the difference between
+  // 1.0s and 15ms for the same service-graph query — a fresh connection per
+  // request made every Wiki interaction pay the cold-read cost again.
+  //
+  // A Proxy, not Object.create: a prototype-based wrapper sends every cache
+  // WRITE to the throwaway child object, so the shared store never actually
+  // warms up (measured: still ~1s on the second call). Reflect with `store`
+  // as the receiver keeps reads and writes on the real instance; only
+  // close() is swallowed, so a read verb's own cleanup cannot take the
+  // resident connection down with it.
+  const borrowedStore = new Proxy(store, {
+    get(target, property, _receiver) {
+      if (property === "close") return () => {};
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+    set(target, property, value) {
+      return Reflect.set(target, property, value, target);
+    },
+  }) as typeof store;
   const cancelled = new Set<string>();
   const active = new Map<string, AbortController>();
   const executionQueue = new QueryExecutionQueue();
@@ -336,6 +358,22 @@ export async function runQueryServer(deps: CliDeps, input = process.stdin, outpu
   });
   caches.prepare("SELECT 1");
   output.write(encodeFrame(queryHello(SCHEMA_VERSION)));
+  // Warm the graph pages shortly after handshake. The first service-graph
+  // query on a multi-GB index costs ~1.6s of cold page reads and then ~45ms
+  // forever after, and opening the Wiki's Graph tab is usually the first
+  // thing that pays it. Doing it here moves that cost off the user's click:
+  // a request arriving mid-warmup queues behind it and waits no longer than
+  // it would have anyway. Delayed so the handshake and any immediate request
+  // go first; failures are irrelevant (this is a cache, not a result).
+  if (process.env.PENGUIN_QUERY_NO_WARMUP !== "1") {
+    setTimeout(() => {
+      try {
+        serviceGraph(store);
+      } catch {
+        // warmup only
+      }
+    }, 1_500).unref();
+  }
   const rl = createInterface({ input });
   const tasks: Promise<void>[] = [];
   let framingErrors = 0;
@@ -347,7 +385,7 @@ export async function runQueryServer(deps: CliDeps, input = process.stdin, outpu
     if (capabilityId === "knowledge.storage_report") return buildStorageReport(store);
     if (capabilityId === "knowledge.maintenance") {
       const action = (value as { action?: string } | undefined)?.action;
-      if (action !== "collect" && action !== "vacuum") {
+      if (action !== "collect" && action !== "vacuum" && action !== "analyze") {
         throw Object.assign(new Error("MAINTENANCE_ACTION_INVALID"), { code: "MAINTENANCE_ACTION_INVALID" });
       }
       // Synchronous on purpose: the runtime's dispatch loop is the DB
@@ -389,7 +427,12 @@ export async function runQueryServer(deps: CliDeps, input = process.stdin, outpu
       // panel's retry). Direct CLI usage is unaffected — it doesn't go
       // through this bridge.
       const lines: string[] = [];
-      const exitCode = await runCli(args, { ...deps, out: (line) => lines.push(line), err: (line) => lines.push(line) });
+      const exitCode = await runCli(args, {
+        ...deps,
+        openStore: () => borrowedStore,
+        out: (line) => lines.push(line),
+        err: (line) => lines.push(line),
+      });
       if (exitCode === 4) {
         // reportScopeResolutionError (command-dispatch.ts), in --json mode
         // (forced above), emits exactly one machine-parseable line:

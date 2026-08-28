@@ -49,7 +49,7 @@ test("buildStorageReport returns file sizes, samples once per day, and never thr
 
 test("dbstat table categories are present and human-mappable", () => {
   const store = openStore();
-  const report = buildStorageReport(store, { tablesTtlMs: 0 });
+  const report = buildStorageReport(store, { computeTables: true });
   assert.ok(report.tables, "dbstat available in bundled better-sqlite3");
   const keys = new Set(report.tables.categories.map((category) => category.key));
   for (const key of keys) {
