@@ -13,19 +13,23 @@ export interface LineIndex {
 
 export function buildLineIndex(_rawBytes: Uint8Array, decodedContent: string): LineIndex {
   const lines: LineIndexEntry[] = [];
-  let startChar = 0;
   const segments = decodedContent.split("\n");
+  let startChar = 0;
+  let startByte = 0;
   for (let index = 0; index < segments.length; index += 1) {
     const segment = segments[index];
     const endChar = startChar + segment.length;
-    lines.push({
-      line: index + 1,
-      startByte: Buffer.byteLength(decodedContent.slice(0, startChar), "utf8"),
-      endByte: Buffer.byteLength(decodedContent.slice(0, endChar), "utf8"),
-      startChar,
-      endChar,
-    });
-    startChar = endChar + (index < segments.length - 1 ? 1 : 0);
+    // Accumulate byte offsets per line instead of re-encoding the whole file
+    // from position zero for every line. The previous form called
+    // Buffer.byteLength(content.slice(0, offset)) twice per line, which is
+    // quadratic in file size: a 134KB / 2914-line source cost 235ms here —
+    // an order of magnitude more than tree-sitter spends parsing it. "\n" is
+    // one byte, so the newline advances char and byte offsets alike.
+    const endByte = startByte + Buffer.byteLength(segment, "utf8");
+    lines.push({ line: index + 1, startByte, endByte, startChar, endChar });
+    const newline = index < segments.length - 1 ? 1 : 0;
+    startChar = endChar + newline;
+    startByte = endByte + newline;
   }
   return { offsetEncoding: "utf8_normalized", lines };
 }
