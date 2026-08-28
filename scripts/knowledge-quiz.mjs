@@ -83,8 +83,12 @@ for (const target of callerTargets) {
     kind: "callers",
     question: `In ${repo.name}, which functions call \`${target.name}\` (defined in ${target.filePath})? List every caller with its file.`,
     expected: callers.map((c) => `${c.filePath}:${c.name}`),
-    verify: `rg -n --no-heading '\\b${target.name}\\s*\\(' ${repo.rootPath} | grep -v '${target.filePath}'`,
-    checks: "Every caller the index lists should appear in the ripgrep output. Extra ripgrep hits are usually same-name symbols in other scopes — read them before calling them missing edges.",
+    // Do NOT exclude the defining file: a helper is very often called by its
+    // own siblings, and filtering that file out makes a correct 8-caller
+    // answer look like 1. (Caught while grading a real quiz.) The definition
+    // line itself is dropped instead, so what remains is call sites only.
+    verify: `rg -n --no-heading '\\b${target.name}\\s*\\(' ${repo.rootPath} | grep -vE '(const|function|export)\\s+${target.name}\\b'`,
+    checks: "Every caller the index lists should appear in the ripgrep output, INCLUDING calls inside the defining file. Extra hits are often a same-named symbol in another file — check the path before calling anything a missed edge.",
   });
 }
 

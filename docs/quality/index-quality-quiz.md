@@ -1,7 +1,7 @@
 # Penguin index-quality quiz — questions
 
 > Self-contained: reading this is enough to start.
-> Repo: `FPMS-CCMS` (`/Users/shieng/Desktop/Projects/FPMS-CCMS`) · 10 questions · 2026-08-28
+> Repo: `FPMS-NT` (`/Users/shieng/Desktop/Projects/fpmsnt`) · 12 questions · 2026-08-28
 > The answers are deliberately NOT in this file (see index-quality-answers.md),
 > so you cannot check yourself — answer honestly.
 
@@ -37,50 +37,60 @@ confidence: high / medium / low — if low, say what the index was missing
 
 ## Q1 · callers
 
-In FPMS-CCMS, which functions call `clearMultipleSearchStates` (defined in src/common/useSearchState.ts)? List every caller with its file.
+In FPMS-NT, which functions call `CMSGenBaseResponse` (defined in apps/promotion/src/budget/budget-base-response.ts)? List every caller with its file.
 
 
 ## Q2 · callers
 
-In FPMS-CCMS, which functions call `convertAction` (defined in src/utils/formUtils.ts)? List every caller with its file.
+In FPMS-NT, which functions call `addPlayerFreeSpin` (defined in apps/promotion/src/free-spin/processors/add-free-spin/add-free-spin-processor.ts)? List every caller with its file.
 
 
 ## Q3 · callers
 
-In FPMS-CCMS, which functions call `fetchPlayerLevelsForDisplay` (defined in src/views/PlayerManagement/services/playerService.ts)? List every caller with its file.
+In FPMS-NT, which functions call `addPlayerMudDisbursement` (defined in apps/promotion/src/mud/processors/add-mud/add-mud-processor.ts)? List every caller with its file.
 
 
 ## Q4 · callers
 
-In FPMS-CCMS, which functions call `fetchProbabilityConfigItem` (defined in src/views/MarketingCampaign/MarketingCampaignConfiguration/ProbabilityConfigItem/hooks/useProbabilityConfigItemData.ts)? List every caller with its file.
+In FPMS-NT, which functions call `catchGrpcError` (defined in libs/tools/src/client-grpc/promotion-client-grpc.ts)? List every caller with its file.
 
 
 ## Q5 · callees
 
-In FPMS-CCMS, what does `AmbassadorInfoForm` (src/views/AmbassadorManagement/AmbassadorInfo/AmbassadorInfoForm.tsx) call? Name each callee and where it lives.
+In FPMS-NT, what does `accumulatePlayerDeposit` (apps/riskControl/src/antiAddiction/deposit-limit.service.ts) call? Name each callee and where it lives.
 
 
 ## Q6 · callees
 
-In FPMS-CCMS, what does `ArticlesForm` (src/views/JackpotWinningArticleManagement/Articles/ArticlesForm.tsx) call? Name each callee and where it lives.
+In FPMS-NT, what does `applyOpenPromoCode` (apps/promotion/src/promo-code/promo-code.processor.ts) call? Name each callee and where it lives.
 
 
 ## Q7 · callees
 
-In FPMS-CCMS, what does `BestRouteSuggestionList` (src/views/GameManagement/BestRouteSuggestion/index.tsx) call? Name each callee and where it lives.
+In FPMS-NT, what does `createLeaderBoardRewardProposal` (apps/promotion/src/leaderboard/leaderboard.processor.ts) call? Name each callee and where it lives.
 
 
-## Q8 · file_symbols
+## Q8 · endpoint
 
-In FPMS-CCMS, list every function/class/method defined in src/components/ui/CustomInput.tsx.
-
-
-## Q9 · file_symbols
-
-In FPMS-CCMS, list every function/class/method defined in src/utils/navTreeUtils.ts.
+In FPMS-NT, trace the endpoint `GET /healthcheck`: which handler serves it, and what does that handler call next?
 
 
-## Q10 · file_symbols
+## Q9 · endpoint
 
-In FPMS-CCMS, list every function/class/method defined in src/views/AmbassadorManagement/hooks/useAmbassadorVideoUpload.test.ts.
+In FPMS-NT, trace the endpoint `POST /internal/vip-cohort/retention-risk`: which handler serves it, and what does that handler call next?
+
+
+## Q10 · endpoint
+
+In FPMS-NT, trace the endpoint `POST /promotion/GetPlayerFreeSpinInfo`: which handler serves it, and what does that handler call next?
+
+
+## Q11 · file_symbols
+
+In FPMS-NT, list every function/class/method defined in apps/livechat/src/processor/liveChatBot/livechat-bot-processor.ts.
+
+
+## Q12 · file_symbols
+
+In FPMS-NT, list every function/class/method defined in apps/livechat/src/processor/liveChatConversation/livechat-convo-processor.ts.
 
