@@ -3,7 +3,7 @@ import { readFileSync, statSync } from "node:fs";
 import { basename, dirname, extname, relative, resolve as pathResolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { SCHEMA_VERSION, GitTopologyStore, FileFactStore, ResolutionStore, SourceStore, SourceSnapshotStore, resolveBranchBase, type KnowledgeStore, type ParsedFileFact, type ParsedEdge, type SnapshotOverlayEntry, type SourceSnapshotOverlayEntry } from "@penguin/knowledge-core";
-import { extractSymbols, type ExtractedFile, type ExtractedSymbol } from "./extract.js";
+import { extractSymbols, EXTRACT_MAX_BYTES, type ExtractedFile, type ExtractedSymbol } from "./extract.js";
 import { ParsePool } from "./parse-pool.js";
 import { extractFieldAccesses } from "./field-access.js";
 import { extractIacFacts } from "./iac.js";
@@ -1120,14 +1120,26 @@ export async function indexRepo(input: {
     const parsePoolSize = ParsePool.resolveSize(undefined, files.length);
     const parsePool = parsePoolSize > 0 ? new ParsePool(parsePoolSize) : null;
     const PREFETCH_BATCH = 64;
+    // The window is bounded by BYTES as well as by file count. Counting only
+    // files assumes they are all small: a repo with 58 generated .js data blobs
+    // averaging 46MB put 64 of them in memory at once and killed the process
+    // with a 4GB heap. The byte cap is what actually protects the heap; the
+    // file count just keeps the window short on ordinary repos.
+    const PREFETCH_MAX_BYTES = 24 * 1024 * 1024;
     let prefetched = new Map<string, { source: string; contentHash: string; extracted: Promise<ExtractedFile> }>();
     const prefetchFrom = (startIndex: number): void => {
       if (!parsePool) return;
       prefetched = new Map();
+      let prefetchedBytes = 0;
       for (let i = startIndex; i < Math.min(startIndex + PREFETCH_BATCH, files.length); i += 1) {
         const candidate = files[i];
         const lang = langOf(candidate.relPath);
         if (lang === "other") continue; // nothing to parse
+        // Never read a file the extractor will refuse anyway: over its byte
+        // limit it returns a parseError without looking at the content, so
+        // prefetching it costs the whole file in heap for nothing.
+        if (candidate.sizeBytes > EXTRACT_MAX_BYTES) continue;
+        if (prefetchedBytes + candidate.sizeBytes > PREFETCH_MAX_BYTES) break;
         // Cheap mtime/size skip BEFORE reading the file, so an incremental run
         // over an unchanged tree does not parse anything it will discard.
         if (effectiveMode === "incremental") {
@@ -1143,6 +1155,7 @@ export async function indexRepo(input: {
         } catch {
           continue; // the loop will surface the real read error in context
         }
+        prefetchedBytes += Buffer.byteLength(source, "utf8");
         prefetched.set(candidate.relPath, {
           source,
           contentHash: sha256(source),

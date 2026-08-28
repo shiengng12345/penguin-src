@@ -70,7 +70,11 @@ export interface ExtractedLogSite {
   enclosingQualifiedName: string | null;
 }
 
-const DEFAULT_MAX_BYTES = 1_000_000;
+/** Files above this are not parsed — the extractor returns a parseError without
+ * reading the content. Exported so callers can avoid loading a file that is
+ * going to be refused. */
+export const EXTRACT_MAX_BYTES = 1_000_000;
+const DEFAULT_MAX_BYTES = EXTRACT_MAX_BYTES;
 
 function sha256(input: string): string {
   return createHash("sha256").update(input, "utf8").digest("hex");
