@@ -1,11 +1,11 @@
 import { parentPort, workerData } from "node:worker_threads";
 import type { SearchRequest, SearchResponse } from "@penguin/knowledge-contracts";
-import { KnowledgeStore, resolveRevisionContext, searchKnowledge } from "@penguin/knowledge-core";
+import { KnowledgeStore, resolveRevisionContext, searchKnowledge, serviceGraph } from "@penguin/knowledge-core";
 
 interface WorkerRequest {
   type: "run";
   id: string;
-  capabilityId: "knowledge.search";
+  capabilityId: "knowledge.search" | "knowledge.warmup";
   input: SearchRequest;
 }
 
@@ -78,9 +78,17 @@ function runSearch(input: SearchRequest): SearchResponse {
 }
 
 parentPort.on("message", (request: WorkerRequest) => {
-  if (request.type !== "run" || request.capabilityId !== "knowledge.search") return;
+  if (request.type !== "run") return;
+  if (request.capabilityId !== "knowledge.search" && request.capabilityId !== "knowledge.warmup") return;
   try {
-    const result = runSearch(request.input);
+    // Warmup runs the graph query for its side effect on the OS page cache,
+    // which is process-wide: the resident connection then reads those pages
+    // from memory instead of disk. Doing it HERE rather than on the main
+    // thread matters — better-sqlite3 is synchronous, so a main-thread
+    // warmup makes a click that lands mid-warmup wait for it to finish.
+    const result = request.capabilityId === "knowledge.warmup"
+      ? { warmed: serviceGraph(store).nodes.length }
+      : runSearch(request.input);
     parentPort!.postMessage({ type: "result", id: request.id, ok: true, result });
   } catch (error) {
     parentPort!.postMessage({

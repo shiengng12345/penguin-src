@@ -2,7 +2,7 @@ import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { Worker } from "node:worker_threads";
 import { CAPABILITIES, capabilityHash } from "@penguin/knowledge-contracts";
-import { getSourceHit, compactIndexStatus, buildStatusPanel, buildStorageReport, runStorageMaintenance, serviceGraph, SCHEMA_VERSION } from "@penguin/knowledge-core";
+import { getSourceHit, compactIndexStatus, buildStatusPanel, buildStorageReport, runStorageMaintenance, SCHEMA_VERSION } from "@penguin/knowledge-core";
 import { runCli, type CliDeps } from "./index.js";
 import { dispatchQueryFrame, encodeFrame, parseFrame, queryHello } from "./query-protocol.js";
 
@@ -358,22 +358,34 @@ export async function runQueryServer(deps: CliDeps, input = process.stdin, outpu
   });
   caches.prepare("SELECT 1");
   output.write(encodeFrame(queryHello(SCHEMA_VERSION)));
-  // Warm the graph pages shortly after handshake. The first service-graph
-  // query on a multi-GB index costs ~1.6s of cold page reads and then ~45ms
-  // forever after, and opening the Wiki's Graph tab is usually the first
-  // thing that pays it. Doing it here moves that cost off the user's click:
-  // a request arriving mid-warmup queues behind it and waits no longer than
-  // it would have anyway. Delayed so the handshake and any immediate request
-  // go first; failures are irrelevant (this is a cache, not a result).
-  if (process.env.PENGUIN_QUERY_NO_WARMUP !== "1") {
-    setTimeout(() => {
-      try {
-        serviceGraph(store);
-      } catch {
-        // warmup only
-      }
-    }, 1_500).unref();
-  }
+  // Warm the graph pages immediately, in a worker. The first service-graph
+  // query on a multi-GB index costs ~1.6s of cold page reads and ~25ms after
+  // that, and opening the Wiki's Graph tab is usually what pays it.
+  //
+  // Two things learned the hard way: (1) a main-thread warmup blocks, because
+  // better-sqlite3 is synchronous — a click landing mid-warmup waits for it,
+  // so a DELAYED main-thread warmup is worse than none (it creates a window
+  // where the user pays the delay AND the scan). The worker has its own
+  // connection and the OS page cache it fills is process-wide, so the
+  // resident connection reads from memory afterwards without ever blocking.
+  // (2) No delay: starting at once shrinks the window where a click can
+  // still hit cold pages.
+  //
+  // (3) A request arriving mid-warmup must WAIT for it, not race it. Letting
+  // both run concurrently had each connection cold-reading the same pages and
+  // fighting for I/O: an immediate click measured 3.4s, worse than the 1.6s
+  // it costs with no warmup at all. Awaiting turns that into 1.6s + a warm
+  // 25ms query, while a click a couple of seconds later pays only the 25ms.
+  let graphWarmup: Promise<unknown> | null = process.env.PENGUIN_QUERY_NO_WARMUP === "1"
+    ? null
+    : queryWorkers.run("knowledge.warmup", {}).catch(() => undefined);
+  const awaitWarmup = async (): Promise<void> => {
+    if (!graphWarmup) return;
+    const pending = graphWarmup;
+    await pending;
+    // Only the first caller clears it; later ones fall straight through.
+    if (graphWarmup === pending) graphWarmup = null;
+  };
   const rl = createInterface({ input });
   const tasks: Promise<void>[] = [];
   let framingErrors = 0;
@@ -427,6 +439,9 @@ export async function runQueryServer(deps: CliDeps, input = process.stdin, outpu
       // panel's retry). Direct CLI usage is unaffected — it doesn't go
       // through this bridge.
       const lines: string[] = [];
+      // Graph/context/flow verbs all read the same page range the warmup is
+      // pulling in; racing it is strictly slower than waiting for it.
+      await awaitWarmup();
       const exitCode = await runCli(args, {
         ...deps,
         openStore: () => borrowedStore,
