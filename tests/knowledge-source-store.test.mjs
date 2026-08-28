@@ -29,7 +29,6 @@ test("SourceStore deduplicates content-addressed blobs and indexes source facts 
   });
   assert.equal(typeof factId, "string");
   assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM source_blobs").get().n, 1);
-  assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM source_fts").get().n, 1);
   assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM source_path_fts").get().n, 1);
   store.close();
 });

@@ -37,10 +37,6 @@ export interface PutSourceFactInput {
   coverage: SourceCoverageInput;
 }
 
-function lexicalText(content: string): string {
-  return content.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[\s_\-./:]+/g, " ");
-}
-
 function trigrams(content: string): string[] {
   const chars = [...content];
   if (chars.length < 3) return [];
@@ -77,8 +73,6 @@ export class SourceStore {
         const trigramInsert = this.store.db.prepare("INSERT INTO source_blob_trigrams(source_blob_id,trigram) VALUES (?,?)");
         for (const trigram of trigrams(input.decodedContent)) trigramInsert.run(id, trigram);
       }
-      this.store.db.prepare("INSERT INTO source_fts(rowid,content) VALUES (?,?)").run(id, input.decodedContent);
-      this.store.db.prepare("INSERT INTO source_lexical_fts(rowid,content) VALUES (?,?)").run(id, lexicalText(input.decodedContent));
       return id;
     });
     return tx() as number;

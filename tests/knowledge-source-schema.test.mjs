@@ -20,11 +20,14 @@ test("fresh database creates schema v10 source corpus tables and indexes", () =>
     "source_facts",
     "file_fact_sources",
     "effective_snapshot_sources",
-    "source_fts",
-    "source_lexical_fts",
     "source_path_fts",
   ]) {
     assert.ok(store.db.prepare("SELECT 1 FROM sqlite_master WHERE name=?").get(name), name + " missing");
+  }
+  // Retired write-only FTS mirrors: never queried by any search lane, dropped
+  // by migrate() — a fresh DB must not create them, an old DB must lose them.
+  for (const retired of ["source_fts", "source_lexical_fts"]) {
+    assert.equal(store.db.prepare("SELECT 1 FROM sqlite_master WHERE name=?").get(retired), undefined, retired + " should be retired");
   }
   store.close();
 });
@@ -55,6 +58,5 @@ test("source corpus integrity queries remain orphan-free after migration", () =>
   assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM source_facts sf LEFT JOIN source_blobs b ON b.id=sf.source_blob_id WHERE sf.source_blob_id IS NOT NULL AND b.id IS NULL").get().n, 0);
   assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM effective_snapshot_sources e LEFT JOIN source_facts sf ON sf.id=e.source_fact_id WHERE sf.id IS NULL").get().n, 0);
   assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM file_fact_sources f LEFT JOIN file_facts ff ON ff.id=f.file_fact_id LEFT JOIN source_facts sf ON sf.id=f.source_fact_id WHERE ff.id IS NULL OR sf.id IS NULL").get().n, 0);
-  assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM source_fts f LEFT JOIN source_blobs b ON b.id=f.rowid WHERE b.id IS NULL").get().n, 0);
   store.close();
 });

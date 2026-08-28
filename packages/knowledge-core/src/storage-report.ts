@@ -423,6 +423,15 @@ export function runStorageMaintenance(store: KnowledgeStore, action: "collect" |
         throw Object.assign(new Error("ACTIVE_READERS"), { code: "ACTIVE_READERS" });
       }
       store.db.exec("VACUUM");
+      // VACUUM commits through the WAL, so right after it the -wal file holds
+      // the rewritten pages and total on-disk size hasn't dropped yet — fold
+      // it before measuring or reclaimedBytes reads as 0 (best effort: with
+      // concurrent readers the next natural checkpoint finishes the job).
+      try {
+        store.db.pragma("wal_checkpoint(TRUNCATE)");
+      } catch {
+        // measurement-only cleanup; never fail the vacuum itself
+      }
       const after = readStorageFileSizes(store).totalBytes;
       result = { action, startedAt, finishedAt: new Date().toISOString(), reclaimedBytes: Math.max(0, before - after), error: null };
     }

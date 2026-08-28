@@ -857,8 +857,6 @@ CREATE TABLE IF NOT EXISTS knowledge_size_samples (
   recorded_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_effective_snapshot_sources_fact ON effective_snapshot_sources(source_fact_id);
-CREATE VIRTUAL TABLE IF NOT EXISTS source_fts USING fts5(content, tokenize='unicode61');
-CREATE VIRTUAL TABLE IF NOT EXISTS source_lexical_fts USING fts5(content, tokenize='unicode61');
 CREATE VIRTUAL TABLE IF NOT EXISTS source_path_fts USING fts5(file_path, source_fact_id UNINDEXED, tokenize='unicode61');
 `;
 
@@ -880,7 +878,19 @@ export const SCHEMA_MIGRATIONS = [
 // `from` is the version read from meta; gate future NON-idempotent steps on it
 // (e.g. `if (from < 5) { ...backfill... }`). Additive column adds stay in the
 // idempotent guards below and need no version gate.
+// Retired write-only FTS mirrors (~0.78GB on a 26-repo DB): every blob was
+// indexed into source_fts + source_lexical_fts, but no query path ever
+// MATCHed them — search runs on fts_symbols/fts_identifiers and the
+// verified source scan. Content stays intact in source_blobs, so a future
+// reader could rebuild them; the pages return to the freelist here and to
+// the OS on the next VACUUM. Idempotent: DROP IF EXISTS.
+function dropRetiredTables(db: Database.Database): void {
+  db.exec("DROP TABLE IF EXISTS source_fts");
+  db.exec("DROP TABLE IF EXISTS source_lexical_fts");
+}
+
 function migrate(db: Database.Database, _from: number): void {
+  dropRetiredTables(db);
   const evidenceCols = (db.prepare("PRAGMA table_info(trust_evidence)").all() as { name: string }[]).map((c) => c.name);
   if (!evidenceCols.includes("query_hash")) db.exec("ALTER TABLE trust_evidence ADD COLUMN query_hash TEXT");
   const coverageCols = (db.prepare("PRAGMA table_info(coverage_records)").all() as { name: string }[]).map((c) => c.name);
@@ -1196,6 +1206,10 @@ export function openDatabase(
     if (missingIndexes.length > 0 && options?.allowSchemaMutation !== false) {
       installEdgeReplacementIndexes(db, missingIndexes, options?.onSchemaMaintenance);
     }
+    // Retired tables are EXTRA objects, so isSchemaCurrent stays true and
+    // migrate() never runs for this DB — the cleanup must happen here on the
+    // write path, same contract as the performance indexes above.
+    if (options?.allowSchemaMutation !== false) dropRetiredTables(db);
     return db;
   }
 
