@@ -26,6 +26,9 @@ import {
   listTags,
   repoGraph,
   planRevisionCollection,
+  setTrigramLane,
+  pruneTrigramLane,
+  trigramLaneStatus,
   applyRevisionCollection,
   search,
   searchSource,
@@ -461,6 +464,7 @@ const HELP = `penguin — Penguin Knowledge CLI
   penguin sample <ep> <status> <json>  capture a real response for an endpoint
   penguin samples <endpoint>    captured runtime responses for an endpoint
   penguin deadcode              symbols nothing references (candidates; verify DI/reflection)
+  penguin trigram [on|off|status] [--prune]  literal-search accelerator lane (~1.1GB); off = exact but slower
   penguin why <card-id>         auditable WHY card
   penguin domain <target>       evidence-backed domain claims
   penguin onboarding [repo]     generated onboarding Markdown
@@ -551,6 +555,37 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
 
   if (verb === "__query-server") {
     return runQueryServer(deps);
+  }
+
+  // Trigram lane control (see knowledge-core/src/trigram-lane.ts): the lane
+  // is a ~1.1GB pure accelerator for literal source search — off = slower
+  // bounded scan, never wrong results.
+  if (verb === "trigram") {
+    if (!deps.storeExists()) { deps.err("no knowledge database — run `penguin init` first"); return 3; }
+    const store = deps.openStore();
+    try {
+      const sub = pos[0];
+      if (sub === "on" || sub === "off") {
+        setTrigramLane(store, sub === "on");
+        let pruned = 0;
+        if (sub === "off" && flags.includes("--prune")) pruned = pruneTrigramLane(store);
+        const status = trigramLaneStatus(store);
+        emit(deps, json,
+          `trigram lane ${sub}${pruned ? ` — pruned ${pruned} rows (run \`penguin trigram vacuum\` to reclaim disk)` : ""}${sub === "on" && status.rows === 0 ? " — existing blobs have no trigrams; run `penguin rebuild` to backfill" : ""}`,
+          { ...status, pruned });
+        return 0;
+      }
+      if (sub === "vacuum") {
+        store.db.exec("VACUUM");
+        emit(deps, json, "vacuumed", { ok: true });
+        return 0;
+      }
+      const status = trigramLaneStatus(store);
+      emit(deps, json,
+        `trigram lane: ${status.enabled ? "on" : "off"}${status.explicit ? "" : " (implicit)"} · ${status.rows} rows — literal search is ${status.enabled ? "accelerated" : "exact but slower (bounded scan)"}`,
+        status);
+      return 0;
+    } finally { store.close(); }
   }
 
   if (verb === "artifact") {

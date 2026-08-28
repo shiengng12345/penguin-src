@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { KnowledgeStore } from "./store.js";
 import { canonicalJson, sha256Hex } from "./canonical.js";
+import { trigramLaneEnabled } from "./trigram-lane.js";
 import { buildLineIndex } from "./line-index.js";
 import { WhyCardStore } from "./why-card.js";
 
@@ -69,8 +70,13 @@ export class SourceStore {
         "INSERT INTO source_blob_lines(source_blob_id,line_number,start_byte,end_byte,start_char,end_char) VALUES (?,?,?,?,?,?)",
       );
       for (const line of lineIndex.lines) lineInsert.run(id, line.line, line.startByte, line.endByte, line.startChar, line.endChar);
-      const trigramInsert = this.store.db.prepare("INSERT INTO source_blob_trigrams(source_blob_id,trigram) VALUES (?,?)");
-      for (const trigram of trigrams(input.decodedContent)) trigramInsert.run(id, trigram);
+      // Trigram lane is optional (see trigram-lane.ts): skipping the inserts
+      // only slows literal search down to the bounded full scan — the
+      // downstream verifier keeps results exact either way.
+      if (trigramLaneEnabled(this.store)) {
+        const trigramInsert = this.store.db.prepare("INSERT INTO source_blob_trigrams(source_blob_id,trigram) VALUES (?,?)");
+        for (const trigram of trigrams(input.decodedContent)) trigramInsert.run(id, trigram);
+      }
       this.store.db.prepare("INSERT INTO source_fts(rowid,content) VALUES (?,?)").run(id, input.decodedContent);
       this.store.db.prepare("INSERT INTO source_lexical_fts(rowid,content) VALUES (?,?)").run(id, lexicalText(input.decodedContent));
       return id;

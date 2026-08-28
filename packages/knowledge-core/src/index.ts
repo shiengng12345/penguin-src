@@ -126,6 +126,7 @@ export { ResolutionStore, type ResolvedEdgeFact, type ResolutionSetRecord } from
 export { ResolutionProviderChain, type ResolutionProvider, type ResolutionProviderKind, type ResolutionRequest, type ResolutionResult, type ResolutionTarget } from "./resolution-provider.js";
 export { applyRuntimeDispatchObservation, resolveDispatch, resolveFrameworkDispatch, type DispatchImplementation, type DispatchRequest, type DispatchResolution, type DispatchTarget, type FrameworkDispatchAdapter, type RuntimeDispatchObservation } from "./dispatch-resolution.js";
 export { DEFAULT_REVISION_RETENTION, planRevisionCollection, applyRevisionCollection, type RevisionRetentionPolicy, type RevisionCollectionPlan, type RevisionCollectionApplyResult } from "./revision-retention.js";
+export { trigramLaneEnabled, setTrigramLane, pruneTrigramLane, trigramLaneStatus, TRIGRAM_LANE_META_KEY } from "./trigram-lane.js";
 export { openRevisionView, type RevisionView, type RevisionFileRow, type RevisionSymbolRow, type RevisionEdgeFilter, type RevisionEdgeRow } from "./revision-view.js";
 export { CodeVersionResolver, type CodeVersionRequest, type CodeVersionResolution, type CodeVersionResolverDeps } from "./code-version-resolver.js";
 export { resolveBranchBase, type BranchBaseInput, type BranchBaseReason, type BranchBaseResolution } from "./branch-base.js";

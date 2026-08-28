@@ -1,5 +1,6 @@
 import { createRequire } from "node:module";
 import type { KnowledgeStore } from "./store.js";
+import { trigramLaneEnabled } from "./trigram-lane.js";
 import { locateSourceRange, sourceSnippet } from "./source-snippet.js";
 import type { ResolvedRevisionScope, SourceSearchOccurrence } from "./source-search.js";
 
@@ -33,7 +34,9 @@ function rows(store: KnowledgeStore, scope: ResolvedRevisionScope, literal: stri
   const chars = [...literal];
   const grams = new Set<string>();
   for (let i = 0; i + 3 <= chars.length; i += 1) grams.add(chars.slice(i, i + 3).join(""));
-  if (grams.size > 0) { const list = [...grams]; sql += ` AND e.source_blob_id IN (SELECT source_blob_id FROM source_blob_trigrams WHERE trigram IN (${list.map(() => "?").join(",")}) GROUP BY source_blob_id HAVING COUNT(DISTINCT trigram)=?)`; params.push(...list, list.length); }
+  // Trigram prefilter is an accelerator only — with the lane off the regex
+  // engine below still scans and matches every scoped blob exactly.
+  if (grams.size > 0 && trigramLaneEnabled(store)) { const list = [...grams]; sql += ` AND e.source_blob_id IN (SELECT source_blob_id FROM source_blob_trigrams WHERE trigram IN (${list.map(() => "?").join(",")}) GROUP BY source_blob_id HAVING COUNT(DISTINCT trigram)=?)`; params.push(...list, list.length); }
   if (scope.repoId) { sql += " AND EXISTS (SELECT 1 FROM source_facts sf WHERE sf.id=e.source_fact_id AND sf.repo_id=?)"; params.push(scope.repoId); }
   return store.db.prepare(sql).all(...params) as Array<{ sourceFactId: string; blobId: number; contentHash: string; filePath: string; content: string }>;
 }

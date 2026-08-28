@@ -1,5 +1,6 @@
 import type { NormalizedSearchRequest, SearchMode } from "@penguin/knowledge-contracts";
 import type { KnowledgeStore } from "./store.js";
+import { trigramLaneEnabled } from "./trigram-lane.js";
 import { locateSourceRange, sourceSnippet, type SourceLocation } from "./source-snippet.js";
 
 export interface ResolvedRevisionScope { snapshotId: string; repoId?: string; }
@@ -38,6 +39,9 @@ function occurrences(content: string, query: string, mode: SearchMode, caseSensi
 type ScopeSourceRow = { sourceFactId: string; blobId: number; contentHash: string; filePath: string; content: string };
 
 function candidateBlobIds(store: KnowledgeStore, scope: ResolvedRevisionScope, query: string): Set<number> | null {
+  // Lane off → null → the same bounded full scan used for un-prefilterable
+  // queries below; the final verifier keeps results exact, just slower.
+  if (!trigramLaneEnabled(store)) return null;
   const grams = trigrams(query);
   // An unbounded placeholder list is both slower and easier to abuse than a
   // bounded full scan. The final verifier still guarantees correctness.
