@@ -904,6 +904,30 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
             `${verb}: ${report.branchName} — ${report.parsed} parsed, ${report.skipped} skipped, ${report.deleted} deleted, ${report.renamed} renamed, ${report.errors} errors`,
             report);
         }
+        // Auto-GC: the retention framework existed but only ran via the
+        // manual `penguin revisions gc` verb, so unreferenced resolution sets
+        // and cold snapshots accumulated forever. Run the same guarded
+        // plan+apply after every index/rebuild — idempotent, protected by
+        // pin/live/reference/grace rules, skippable with --no-gc.
+        if (!flags.includes("--no-gc")) {
+          try {
+            const gcPlan = planRevisionCollection(store, report.repoId);
+            const gc = applyRevisionCollection(store, gcPlan);
+            const collected =
+              gc.collectedSnapshotIds.length
+              + gc.collectedResolutionSetIds.length
+              + gc.collectedSourceBlobIds.length
+              + gc.collectedFactIds.length;
+            if (collected > 0) {
+              emit(deps, json,
+                `gc: collected ${gc.collectedSnapshotIds.length} snapshots, ${gc.collectedResolutionSetIds.length} resolution sets, ${gc.collectedSourceBlobIds.length} source blobs`,
+                { gc });
+            }
+          } catch {
+            // GC must never fail an index run; `penguin revisions gc` remains
+            // for diagnosis when this silently skips.
+          }
+        }
       }
       return 0;
     } catch (e) {

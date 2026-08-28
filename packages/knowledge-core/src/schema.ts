@@ -229,10 +229,11 @@ CREATE TABLE IF NOT EXISTS edges (
   evidence_id TEXT,                       -- links to trust_evidence backing this edge
   boundary TEXT                           -- di | interface | callback | event, or NULL
 );
-CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src);
-CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst);
 -- Composite indexes for the hot traversal shapes (who_calls/calls_of/backlinks
 -- filter by endpoint + edge_type + status; repoGraph by branch + status).
+-- Single-column idx_edges_src/idx_edges_dst were dropped (2026-08-28): the
+-- composite indexes below serve bare src=?/dst=? lookups via their prefix
+-- (EXPLAIN-verified SEARCH, not SCAN) and the pair cost 220MB of pure overlap.
 CREATE INDEX IF NOT EXISTS idx_edges_dst_type_status ON edges(dst, edge_type, status);
 CREATE INDEX IF NOT EXISTS idx_edges_src_type_status ON edges(src, edge_type, status);
 CREATE INDEX IF NOT EXISTS idx_edges_branch_status ON edges(branch_id, status);
@@ -1103,6 +1104,17 @@ export function openDatabase(
     db.pragma("wal_checkpoint(PASSIVE)");
   } catch {
     // read-only filesystems / concurrent writers — never block an open on this
+  }
+  // Drop the superseded single-column edge indexes on existing DBs (new DBs
+  // never create them). Prefix rule: the composite (src|dst, edge_type,
+  // status) indexes serve bare src=?/dst=? searches, so this is a pure
+  // 220MB overlap removal — safe to run on every open, no version gate.
+  if (options?.allowSchemaMutation !== false) {
+    try {
+      db.exec("DROP INDEX IF EXISTS idx_edges_src; DROP INDEX IF EXISTS idx_edges_dst;");
+    } catch {
+      // read-only opens (MCP workers) skip this; the desktop/CLI owner drops it
+    }
   }
   // 有意不开 foreign_keys：删库后 Ledger 先重放（§2.1 三源重建），
   // 此时被引用的 nodes 尚未由上层索引器重建——引用完整性由
