@@ -143,7 +143,7 @@ function addParseDuration(
 // refs (renders / invokes_dynamic edges). Bumping forces existing indexes to
 // reprocess on their next index run — without it, checkpoint-skipped files
 // silently lack the new edges forever.
-export const KNOWLEDGE_PARSER_VERSION = "tree-sitter-wasm-v7-jsx-dynamic-edges";
+export const KNOWLEDGE_PARSER_VERSION = "tree-sitter-wasm-v8-wrapper-allowlist";
 export const KNOWLEDGE_RESOLVER_VERSION = "resolver-v5-external-import-bindings";
 
 // In-process index task lock: one active task per repo+branch+checkout (§8.3).

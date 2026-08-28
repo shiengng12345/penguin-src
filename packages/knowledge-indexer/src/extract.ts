@@ -8,6 +8,7 @@ import { extractGrpcClientCalls, type GrpcClientCall } from "./grpc-client.js";
 import { collectIdentifierNode, type IdentifierEntry } from "./identifiers.js";
 import { extractChannelBindings, type ExtractedChannelBinding } from "./channels.js";
 import type { Lang } from "./registry.js";
+import { wrappedFunctionVerdict } from "./wrapper-functions.js";
 
 export interface ExtractedSymbol {
   qualifiedName: string;
@@ -273,6 +274,15 @@ export async function extractSymbols(input: {
 
     if (def && nameCap) {
       const kind = def.name.slice("definition.".length);
+      // `const X = call(callback)` is only a function when the call returns
+      // one. The tags query cannot tell — it matches any call taking a
+      // callback — so the callee is checked here against an allowlist. Without
+      // this, every `.filter()`/`.find()`/`renderHook()` bound to a const was
+      // indexed as a function (11.6% of all function symbols).
+      if (kind === "function") {
+        const verdict = wrappedFunctionVerdict(def.node);
+        if (verdict?.wrapped && !verdict.returnsFunction) continue;
+      }
       let qn = qualifiedNameFor(def.node, nameCap.node.text, scopeNodes);
       // Object-property functions with no enclosing class scope (pair-extracted
       // `method`s — e.g. every NestJS provider's `useFactory`/`useValue`) get a
