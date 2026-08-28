@@ -312,7 +312,7 @@ export interface RepoStatusPanel {
 }
 
 export interface StatusPanel {
-  db: { connected: true; schemaVersion: number };
+  db: { connected: true; schemaVersion: number; sizeBytes: number | null; walBytes: number | null };
   repos: RepoStatusPanel[];
 }
 
@@ -331,6 +331,52 @@ export function knowledgeStatusPanel(options: KnowledgeRequestOptions = {}): Pro
   });
   statusPanelCache = { expiresAt: now + STATUS_PANEL_CACHE_TTL_MS, promise };
   return promise;
+}
+
+// Storage page payload — mirrors packages/knowledge-core/src/storage-report.ts EXACTLY.
+export type StorageHealthLevel = "ok" | "warn" | "critical";
+export type StorageTableCategory = "graph_edges" | "source_content" | "fts" | "vectors" | "symbols" | "other";
+export interface StorageGcRun {
+  repoId: string | null;
+  triggerKind: string;
+  startedAt: string;
+  finishedAt: string;
+  cooledSnapshots: number;
+  collectedSnapshots: number;
+  collectedResolutionSets: number;
+  collectedFacts: number;
+  collectedSourceFacts: number;
+  collectedSourceBlobs: number;
+  skipped: number;
+  error: string | null;
+}
+export interface StorageMaintenanceResult {
+  action: "collect" | "vacuum";
+  startedAt: string;
+  finishedAt: string;
+  collected?: { snapshots: number; resolutionSets: number; sourceBlobs: number; facts: number };
+  reclaimedBytes?: number;
+  error: string | null;
+}
+export interface StorageReport {
+  computedAt: string;
+  files: { dbBytes: number | null; walBytes: number | null; shmBytes: number | null; totalBytes: number };
+  health: { level: StorageHealthLevel; reasons: string[]; walRatio: number | null; weeklyDeltaBytes: number | null };
+  growth: { weeklyDeltaBytes: number | null; samples: Array<{ date: string; totalBytes: number; walBytes: number }> };
+  tables: { computedAt: string; categories: Array<{ key: StorageTableCategory; bytes: number }> } | null;
+  gc: { lastRun: StorageGcRun | null; hotFeatureLimit: number; trigramEnabled: boolean };
+  maintenance: { running: boolean; action: "collect" | "vacuum" | null; startedAt: string | null; lastResult: StorageMaintenanceResult | null };
+  repos: Array<{ repoId: string; repoName: string; snapshots: number; files: number; lastIndexedAt: string | null }>;
+}
+
+export function knowledgeStorageReport(options: KnowledgeRequestOptions = {}): Promise<StorageReport> {
+  return canonicalQuery<StorageReport>("knowledge.storage_report", {}, options.signal);
+}
+
+// Mutating; long-running for vacuum (the resident runtime holds the response
+// until done). Callers own the spinner/disable UX — no client-side cache.
+export function knowledgeMaintenance(action: "collect" | "vacuum", options: KnowledgeRequestOptions = {}): Promise<StorageMaintenanceResult> {
+  return canonicalQuery<StorageMaintenanceResult>("knowledge.maintenance", { action }, options.signal);
 }
 
 export function knowledgeNode(idOrName: string, options: KnowledgeRequestOptions = {}): Promise<KnowledgeNodeDetail> {

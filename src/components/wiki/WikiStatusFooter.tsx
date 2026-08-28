@@ -7,6 +7,28 @@ interface WikiStatusFooterProps {
   // context (e.g. a repo/branch selected in the browse tree). Falls back to
   // the first repo in the panel — fine for the common single-repo case.
   repoId?: string;
+  // Click-through from the size chip to the Storage tab.
+  onOpenStorage?: () => void;
+}
+
+// Footer-side mirror of storage-report.ts's WAL health rule (ratio, with an
+// absolute floor so small DBs don't warn on a normal-sized WAL). Duplicated
+// rather than shared: the footer only has the two stat numbers the status
+// panel carries, not a full storage report.
+function sizeTone(sizeBytes: number | null, walBytes: number | null): "ok" | "warn" | "critical" {
+  if (sizeBytes == null || walBytes == null) return "ok";
+  const dbBytes = sizeBytes - walBytes;
+  if (walBytes < 256 * 1024 * 1024 || dbBytes <= 0) return "ok";
+  const ratio = walBytes / dbBytes;
+  if (ratio >= 0.15) return "critical";
+  if (ratio >= 0.05) return "warn";
+  return "ok";
+}
+
+function formatSize(bytes: number | null): string | null {
+  if (bytes == null) return null;
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(1)} GB`;
+  return `${Math.max(1, Math.round(bytes / 1024 ** 2))} MB`;
 }
 
 const POLL_INTERVAL_MS = 30_000;
@@ -49,7 +71,7 @@ function pickRepo(repos: RepoStatusPanel[], repoId?: string): RepoStatusPanel | 
 // SQLite · Workspace Penguin" that lied whenever the DB was actually
 // unreachable). Self-fetching: mount, every 30s, and on window focus — a
 // fetch failure always renders "DB: Unavailable", never a fake green dot.
-export function WikiStatusFooter({ repoId }: WikiStatusFooterProps) {
+export function WikiStatusFooter({ repoId, onOpenStorage }: WikiStatusFooterProps) {
   const [panel, setPanel] = useState<StatusPanel | null>(null);
   const [failed, setFailed] = useState(false);
   // Distinguishes "the resident runtime refuses to migrate a stale schema"
@@ -152,6 +174,24 @@ export function WikiStatusFooter({ repoId }: WikiStatusFooterProps) {
         <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
         DB: Connected (v{panel.db.schemaVersion})
       </span>
+      {formatSize(panel.db.sizeBytes) && (() => {
+        const tone = sizeTone(panel.db.sizeBytes, panel.db.walBytes);
+        return (
+          <button
+            type="button"
+            onClick={onOpenStorage}
+            disabled={!onOpenStorage}
+            title={panel.db.walBytes != null ? `WAL ${formatSize(panel.db.walBytes)} — 点击查看存储详情` : "点击查看存储详情"}
+            className={cn(
+              "rounded px-1 tabular-nums",
+              tone === "critical" ? "text-red-300" : tone === "warn" ? "text-amber-300" : "text-muted-foreground",
+              onOpenStorage ? "hover:bg-accent hover:text-foreground" : "cursor-default",
+            )}
+          >
+            {formatSize(panel.db.sizeBytes)}
+          </button>
+        );
+      })()}
       {repo ? (
         <>
           <span className="text-muted-foreground">·</span>
