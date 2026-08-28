@@ -10,7 +10,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 // Tool definitions stay pure. DB-backed handlers are initialized only on a
 // knowledge request; QueryWorkerPool itself creates no SQLite connection in
 // this process because each bounded query opens its store inside a worker.
-import { KNOWLEDGE_TOOL_DEFS, LOG_INVESTIGATION_TOOL_DEFS, isKnowledgeTool } from "./knowledge-tool-defs.js";
+import { KNOWLEDGE_TOOL_DEFS, MCP_LISTED_TOOL_DEFS, LOG_INVESTIGATION_TOOL_DEFS, isKnowledgeTool } from "./knowledge-tool-defs.js";
 export { KNOWLEDGE_TOOL_DEFS } from "./knowledge-tool-defs.js";
 import { CAPABILITIES, capabilityHash } from "@penguin/knowledge-contracts";
 import {
@@ -20,6 +20,13 @@ import {
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import {
+  checkGeneration,
+  createGenerationState,
+  generationMeta,
+  generationNotice,
+  manifestPath,
+} from "./generation-watch.js";
 import { QueryWorkerPool } from "../../knowledge-cli/src/query-server.js";
 import {
   callGrpcWeb,
@@ -399,12 +406,31 @@ function jsonResult(value: unknown, isError = false) {
     : null;
   const text = searchSummary ?? JSON.stringify(enriched, null, 2);
   const structuredContent = Array.isArray(enriched) ? { items: enriched } : (enriched && typeof enriched === "object" ? enriched : { result: enriched });
+  // Update propagation (1.16.2): a long-lived stdio server keeps serving the
+  // old build after an app update. `_meta` carries the machine-readable
+  // signal on every call while outdated; the notice text is appended to
+  // `content` ONCE per session because a search result's text is replaced by
+  // a summary line, which would otherwise swallow the warning entirely.
+  const meta = generationMeta(generationState);
+  const notice = !generationState.noticeDelivered ? generationNotice(generationState) : null;
+  if (notice) generationState.noticeDelivered = true;
   return {
     isError: isError || undefined,
-    content: [{ type: "text", text }],
+    content: notice
+      ? [{ type: "text", text }, { type: "text", text: `[penguin] ${notice}` }]
+      : [{ type: "text", text }],
     structuredContent,
+    ...(meta ? { _meta: meta } : {}),
   };
 }
+
+// Tier ranks for tools/list ordering — see MCP_LISTED_TOOL_DEFS.
+const LISTED_TOOL_ORDER = new Map(MCP_LISTED_TOOL_DEFS.map((tool, index) => [tool.name, index]));
+
+// Recorded at startup; refreshed by a single stat() per tool call.
+const generationState = createGenerationState();
+const generationManifestFile = manifestPath();
+const generationMtime = { value: -1 };
 
 // Cap the response body MCP returns to AI tools. Backend list endpoints can
 // emit megabytes of JSON, which blows through context windows and triggers
@@ -531,7 +557,9 @@ const server = new Server(
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
-    ...KNOWLEDGE_TOOL_DEFS,
+    // Listing surface only — the full manifest (every canonical capability)
+    // stays callable and is returned by knowledge_capabilities.
+    ...MCP_LISTED_TOOL_DEFS,
     ...LOG_INVESTIGATION_TOOL_DEFS,
     {
       name: "mcp_health",
@@ -776,12 +804,24 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
         },
       },
     },
-  ].sort((a, b) => a.name.localeCompare(b.name)),
+  ].sort((a, b) => {
+    // The knowledge tools arrive pre-ordered by tier (entry point first);
+    // alphabetising the whole list buried knowledge_explore in the middle of
+    // the a-to-z run, which is precisely the discovery problem this ordering
+    // exists to fix. Keep that order, then sort everything else by name.
+    const rankA = LISTED_TOOL_ORDER.get(a.name);
+    const rankB = LISTED_TOOL_ORDER.get(b.name);
+    if (rankA !== undefined && rankB !== undefined) return rankA - rankB;
+    if (rankA !== undefined) return -1;
+    if (rankB !== undefined) return 1;
+    return a.name.localeCompare(b.name);
+  }),
 }));
 
 server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
   const { name, arguments: args = {} } = request.params;
   const a = args as Record<string, unknown>;
+  checkGeneration(generationState, generationManifestFile, generationMtime);
 
   try {
     if (isKnowledgeTool(name)) {
@@ -808,7 +848,15 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
         nodeVersion: process.version,
         platform: process.platform,
         cwd: process.cwd(),
-        status: "ok",
+        status: generationState.outdated ? "outdated" : "ok",
+        // Always present so a user (or agent) checking health sees whether
+        // this process is still serving a superseded build.
+        serverGeneration: {
+          runningBuildId: generationState.startupBuildId,
+          availableBuildId: generationState.currentBuildId,
+          outdated: generationState.outdated,
+          ...(generationState.outdated ? { action: generationNotice(generationState) } : {}),
+        },
         queryRuntime: {
           workers: Number(process.env.PENGUIN_MCP_QUERY_WORKERS ?? 2),
           hardTimeoutMs: Number(process.env.PENGUIN_MCP_QUERY_TIMEOUT_MS ?? 15_000),

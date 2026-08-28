@@ -320,6 +320,179 @@ pub(crate) fn sync_stable_mcp_server_on_startup<R: tauri::Runtime>(app: tauri::A
     });
 }
 
+// Generation identity: FNV-1a over the whole staged payload, not just
+// index.js. Hashing only the entry point was wrong: index.js can be
+// byte-identical while knowledge-worker.js or the vendored node_modules
+// change, and the `.ready` short-circuit would then keep serving the OLD
+// worker under a build id that claims to be current. Path names are folded
+// in too, so an added or removed file also moves the id.
+fn hash_path_into(hash: &mut u64, path: &Path, rel: &str) {
+    for byte in rel.as_bytes() {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(0x100000001b3);
+    }
+    if let Ok(bytes) = std::fs::read(path) {
+        for byte in &bytes {
+            *hash ^= u64::from(*byte);
+            *hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+}
+
+fn hash_tree_into(hash: &mut u64, dir: &Path, prefix: &str) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    // Sort for a deterministic id — read_dir order is filesystem-defined.
+    let mut paths: Vec<PathBuf> = entries.filter_map(Result::ok).map(|e| e.path()).collect();
+    paths.sort();
+    for path in paths {
+        let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let rel = format!("{prefix}/{name}");
+        if path.is_dir() {
+            hash_tree_into(hash, &path, &rel);
+        } else {
+            hash_path_into(hash, &path, &rel);
+        }
+    }
+}
+
+fn generation_build_id(index_js: &Path) -> Result<String, String> {
+    let dist = index_js
+        .parent()
+        .ok_or_else(|| format!("no parent for {}", index_js.display()))?;
+    let stable_dir = dist
+        .parent()
+        .ok_or_else(|| format!("no stable dir for {}", index_js.display()))?;
+    let mut hash = 0xcbf29ce484222325_u64;
+    hash_tree_into(&mut hash, dist, "dist");
+    hash_path_into(&mut hash, &stable_dir.join("package.json"), "package.json");
+    hash_path_into(&mut hash, &stable_dir.join("node"), "node");
+    hash_tree_into(&mut hash, &stable_dir.join("node_modules"), "node_modules");
+    Ok(format!("{hash:016x}"))
+}
+
+fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
+    let tmp = path.with_extension(format!("tmp.{}.{}", std::process::id(), rand_suffix()));
+    std::fs::write(&tmp, content).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", path.display()))
+}
+
+// Staged generation layout (1.16.2 update-propagation design):
+//   ~/.penguin/mcp/generations/<buildId>/{dist,package.json,node,node_modules}
+//   ~/.penguin/mcp/current -> generations/<buildId>     (atomic symlink swap)
+//   ~/.penguin/mcp/manifest.json                        (written LAST — READY signal)
+// A server launched from current/ never sees a half-copied mix of two app
+// versions (the in-place legacy sync could hand a running server a NEW
+// worker bundle against its OLD index.js on the next worker spawn). The
+// manifest is what long-lived servers stat per tool call to learn an update
+// landed. Legacy dist/ stays synced so configs written by older builds keep
+// working until they are rewritten to current/.
+fn stage_mcp_generation(dir: &Path, build_id: &str, app_version: &str) -> Result<PathBuf, String> {
+    let gen_dir = dir.join("generations").join(build_id);
+    let ready = gen_dir.join(".ready");
+    if !ready.exists() {
+        copy_dir_recursive(&dir.join("dist"), &gen_dir.join("dist"))?;
+        if dir.join("package.json").exists() {
+            copy_if_different(&dir.join("package.json"), &gen_dir.join("package.json"))?;
+        }
+        if dir.join("node_modules").is_dir() {
+            copy_dir_recursive(&dir.join("node_modules"), &gen_dir.join("node_modules"))?;
+        }
+        if dir.join("node").exists() {
+            copy_if_different(&dir.join("node"), &gen_dir.join("node"))?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                if let Ok(meta) = std::fs::metadata(gen_dir.join("node")) {
+                    let mut perms = meta.permissions();
+                    perms.set_mode(0o755);
+                    let _ = std::fs::set_permissions(gen_dir.join("node"), perms);
+                }
+            }
+        }
+        std::fs::write(&ready, build_id).map_err(|e| e.to_string())?;
+    }
+    // Unix publishes through an atomic symlink swap; elsewhere the generation
+    // directory itself is the pointer. Either way the manifest is written —
+    // an early return without it would leave running servers with no update
+    // signal at all, silently defeating the whole mechanism.
+    #[cfg(unix)]
+    let current = {
+        let current = dir.join("current");
+        let tmp = dir.join(format!("current.tmp.{}.{}", std::process::id(), rand_suffix()));
+        let _ = std::fs::remove_file(&tmp);
+        std::os::unix::fs::symlink(&gen_dir, &tmp).map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, &current).map_err(|e| e.to_string())?;
+        current
+    };
+    #[cfg(not(unix))]
+    let current = gen_dir.clone();
+
+    write_atomic(
+        &dir.join("manifest.json"),
+        &format!(
+            "{}\n",
+            serde_json::json!({
+                "buildId": build_id,
+                "appVersion": app_version,
+                "syncedAt": chrono_free_timestamp(),
+            })
+        ),
+    )?;
+    prune_old_generations(&dir.join("generations"), build_id);
+    Ok(current)
+}
+
+// ISO-ish timestamp without pulling a chrono dependency.
+fn chrono_free_timestamp() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let secs = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    format!("epoch:{secs}")
+}
+
+// Retention for superseded generations. A count-based rule ("keep one
+// predecessor") deletes a generation that a still-running MCP server is
+// executing from as soon as two updates land in a row — that server's next
+// worker spawn resolves a deleted path and every knowledge tool starts
+// failing. Age is the safer proxy for "nobody can still be running this":
+// keep anything touched within the grace window, and never fewer than two
+// predecessors regardless of age.
+const GENERATION_GRACE_SECS: u64 = 14 * 24 * 60 * 60;
+const GENERATION_MIN_KEPT: usize = 2;
+
+fn prune_old_generations(generations_dir: &Path, keep_build_id: &str) {
+    let Ok(entries) = std::fs::read_dir(generations_dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let mut others: Vec<(std::time::SystemTime, PathBuf)> = entries
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy() != keep_build_id)
+        .filter_map(|entry| {
+            let path = entry.path();
+            entry.metadata().ok().and_then(|m| m.modified().ok()).map(|t| (t, path))
+        })
+        .collect();
+    others.sort_by(|a, b| b.0.cmp(&a.0));
+    for (index, (modified, path)) in others.into_iter().enumerate() {
+        if index < GENERATION_MIN_KEPT {
+            continue;
+        }
+        let stale = now
+            .duration_since(modified)
+            .map(|age| age.as_secs() > GENERATION_GRACE_SECS)
+            .unwrap_or(false);
+        if stale {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}
+
+// Single-flight: startup sync, mcp_status, install, and health check can all
+// race here; concurrent stagers would fight over the symlink and tmp names.
+static STABLE_SYNC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 // Resolves BOTH the stable server path and the node binary to launch it with.
 // Prefers the vendored runtime (known-good Node ABI, matches the shipped
 // better-sqlite3 prebuild) over guessing at a system Node — see
@@ -327,6 +500,7 @@ pub(crate) fn sync_stable_mcp_server_on_startup<R: tauri::Runtime>(app: tauri::A
 fn ensure_stable_mcp_server<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
 ) -> Result<(PathBuf, Option<PathBuf>), String> {
+    let _guard = STABLE_SYNC_LOCK.lock().map_err(|_| "stable sync lock poisoned".to_string())?;
     let bundled = bundled_mcp_server_path(app)?;
     let dir = stable_mcp_dir().ok_or("No home directory")?;
     let server = sync_stable_mcp_files(&bundled, &dir)?;
@@ -334,7 +508,23 @@ fn ensure_stable_mcp_server<R: tauri::Runtime>(
         Some(runtime_dir) => Some(sync_stable_mcp_runtime(&runtime_dir, &dir)?),
         None => None,
     };
-    Ok((server, node))
+    // Stage the generation on top of the legacy layout; on any staging error
+    // fall back to the legacy paths so an update never bricks the server.
+    let version = app.package_info().version.to_string();
+    match generation_build_id(&server).and_then(|id| stage_mcp_generation(&dir, &id, &version)) {
+        Ok(current) => {
+            let staged_server = current.join("dist").join("index.js");
+            let staged_node = current.join("node");
+            Ok((
+                staged_server,
+                if staged_node.exists() { Some(staged_node) } else { node },
+            ))
+        }
+        Err(error) => {
+            eprintln!("mcp generation staging failed (using legacy layout): {error}");
+            Ok((server, node))
+        }
+    }
 }
 
 fn claude_desktop_configured_at(cfg_path: &Path) -> bool {
@@ -910,6 +1100,160 @@ mod mcp_config_tests {
     use super::*;
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn scratch_dir(label: &str) -> PathBuf {
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("pengvi-{label}-{nonce}"));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // Stage a legacy-layout stable dir the way sync_stable_mcp_files leaves it.
+    fn seed_legacy_layout(dir: &Path, server_body: &str) {
+        fs::create_dir_all(dir.join("dist")).unwrap();
+        fs::write(dir.join("dist").join("index.js"), server_body).unwrap();
+        fs::write(dir.join("dist").join("knowledge-worker.js"), "worker").unwrap();
+        fs::write(dir.join("package.json"), "{\"type\":\"module\"}").unwrap();
+    }
+
+    #[test]
+    fn generation_build_id_tracks_server_content() {
+        // Two identically-populated stable dirs hash the same; changing the
+        // entry point in one moves only that id.
+        let left = scratch_dir("genid-left");
+        let right = scratch_dir("genid-right");
+        seed_legacy_layout(&left, "console.log(1)");
+        seed_legacy_layout(&right, "console.log(1)");
+        let left_index = left.join("dist").join("index.js");
+        let right_index = right.join("dist").join("index.js");
+        assert_eq!(
+            generation_build_id(&left_index).unwrap(),
+            generation_build_id(&right_index).unwrap(),
+            "identical payloads must produce the same generation"
+        );
+        fs::write(&right_index, "console.log(2)").unwrap();
+        assert_ne!(
+            generation_build_id(&left_index).unwrap(),
+            generation_build_id(&right_index).unwrap()
+        );
+        fs::remove_dir_all(&left).unwrap();
+        fs::remove_dir_all(&right).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn staging_publishes_current_and_writes_the_manifest_last() {
+        let dir = scratch_dir("stage");
+        seed_legacy_layout(&dir, "export const v = 1;");
+        let current = stage_mcp_generation(&dir, "build-one", "1.16.2").unwrap();
+
+        // current/ resolves to a complete generation, and the manifest — the
+        // READY marker a running server stats — names that build.
+        assert!(current.join("dist").join("index.js").exists());
+        assert!(current.join("dist").join("knowledge-worker.js").exists());
+        let manifest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(manifest["buildId"], "build-one");
+        assert_eq!(manifest["appVersion"], "1.16.2");
+        assert!(dir.join("generations").join("build-one").join(".ready").exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restaging_the_same_build_is_idempotent_and_new_builds_swap_current() {
+        let dir = scratch_dir("stage-swap");
+        seed_legacy_layout(&dir, "export const v = 1;");
+        stage_mcp_generation(&dir, "build-one", "1.16.2").unwrap();
+        stage_mcp_generation(&dir, "build-one", "1.16.2").unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join("manifest.json")).unwrap().matches("build-one").count(),
+            1,
+            "manifest is rewritten, not appended"
+        );
+
+        // A new app build stages beside the old one and flips current/.
+        seed_legacy_layout(&dir, "export const v = 2;");
+        let current = stage_mcp_generation(&dir, "build-two", "1.16.3").unwrap();
+        assert_eq!(
+            fs::read_to_string(current.join("dist").join("index.js")).unwrap(),
+            "export const v = 2;"
+        );
+        let manifest: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+        assert_eq!(manifest["buildId"], "build-two");
+        // The superseded generation survives one round — a server launched
+        // from it may still be running.
+        assert!(dir.join("generations").join("build-one").exists());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn generation_id_covers_workers_and_runtime_not_just_the_entry_point() {
+        let dir = scratch_dir("genid-tree");
+        seed_legacy_layout(&dir, "export const v = 1;");
+        let index = dir.join("dist").join("index.js");
+        let first = generation_build_id(&index).unwrap();
+
+        // index.js untouched, sibling worker changed: hashing only the entry
+        // point would report the same build and the `.ready` short-circuit
+        // would keep serving the OLD worker.
+        fs::write(dir.join("dist").join("knowledge-worker.js"), "worker v2").unwrap();
+        assert_ne!(generation_build_id(&index).unwrap(), first, "worker change must move the id");
+
+        // Vendored runtime counts too (an ABI bump ships new node_modules).
+        let second = generation_build_id(&index).unwrap();
+        fs::create_dir_all(dir.join("node_modules").join("better-sqlite3")).unwrap();
+        fs::write(dir.join("node_modules").join("better-sqlite3").join("x.node"), "abi127").unwrap();
+        assert_ne!(generation_build_id(&index).unwrap(), second, "runtime change must move the id");
+
+        // Deterministic for identical content.
+        let third = generation_build_id(&index).unwrap();
+        assert_eq!(generation_build_id(&index).unwrap(), third);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn recent_generations_survive_pruning_so_a_running_server_keeps_its_files() {
+        let dir = scratch_dir("stage-prune");
+        for (index, build) in ["b1", "b2", "b3", "b4"].iter().enumerate() {
+            seed_legacy_layout(&dir, &format!("v{index}"));
+            stage_mcp_generation(&dir, build, "1.0.0").unwrap();
+        }
+
+        let generations = dir.join("generations");
+        // Every generation here is seconds old, so none is past the grace
+        // window: a count-based rule would have deleted b1/b2 out from under
+        // any MCP server still executing from them.
+        for build in ["b1", "b2", "b3", "b4"] {
+            assert!(generations.join(build).exists(), "{build} pruned too early");
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generations_past_the_grace_window_are_pruned_below_the_floor() {
+        let dir = scratch_dir("stage-prune-old");
+        let generations = dir.join("generations");
+        // Three aged predecessors: the two newest are kept by the floor, the
+        // oldest is past the grace window and collectable.
+        for build in ["old1", "old2", "old3"] {
+            let gen = generations.join(build);
+            fs::create_dir_all(&gen).unwrap();
+            fs::write(gen.join(".ready"), build).unwrap();
+            let aged = std::time::SystemTime::now() - std::time::Duration::from_secs(GENERATION_GRACE_SECS + 3600);
+            let times = fs::FileTimes::new().set_modified(aged);
+            fs::File::options().write(true).open(gen.join(".ready")).unwrap().set_times(times).unwrap();
+            let dir_handle = fs::File::open(&gen).unwrap();
+            let _ = dir_handle.set_times(times);
+        }
+        prune_old_generations(&generations, "active");
+        let surviving = fs::read_dir(&generations).unwrap().count();
+        assert!(surviving <= GENERATION_MIN_KEPT, "aged extras pruned, floor respected");
+        fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn detected_local_clients_matches_what_is_installed() {

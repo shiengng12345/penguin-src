@@ -17,6 +17,17 @@ interface ReleaseWelcomeDialogProps {
 export function ReleaseWelcomeDialog({ onOpenMcpSettings }: ReleaseWelcomeDialogProps) {
   const [version, setVersion] = useState<string | null>(null);
   const [mcpRefreshState, setMcpRefreshState] = useState<McpRefreshState>("refreshing");
+  // Update-propagation funnel (1.16.2): a user who never turns auto-check on
+  // only learns about a new build by chance. This is the moment they are
+  // already thinking about updates, so offer the opt-in here. Reads/writes
+  // the same persisted key Settings → App Updates uses.
+  const [autoCheck, setAutoCheck] = useState<boolean>(
+    () => getPersistedValue(APP_VALUE_KEYS.autoCheckForUpdates) === "1",
+  );
+  const toggleAutoCheck = useCallback((next: boolean) => {
+    setAutoCheck(next);
+    setPersistedValue(APP_VALUE_KEYS.autoCheckForUpdates, next ? "1" : "0");
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -114,6 +125,22 @@ export function ReleaseWelcomeDialog({ onOpenMcpSettings }: ReleaseWelcomeDialog
               </p>
             </div>
           </div>
+
+          <label className="flex cursor-pointer items-start gap-2 rounded-lg border border-border/60 bg-background/40 p-3 hover:bg-accent/30">
+            <input
+              type="checkbox"
+              className="mt-0.5 h-3.5 w-3.5 shrink-0 cursor-pointer accent-primary"
+              checked={autoCheck}
+              onChange={(event) => toggleAutoCheck(event.target.checked)}
+            />
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-medium text-foreground">Check for updates automatically</p>
+              <p className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+                So the next release finds you instead of the other way around. Change it any time in
+                Settings → App Updates.
+              </p>
+            </div>
+          </label>
 
           <div className="flex justify-end gap-2">
             <Button variant="ghost" size="sm" onClick={acknowledge}>
