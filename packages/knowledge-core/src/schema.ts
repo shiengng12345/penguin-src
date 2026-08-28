@@ -1093,6 +1093,17 @@ export function openDatabase(
   const db = new (loadDatabaseCtor())(path);
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
+  // WAL hygiene: long-lived readers (MCP workers, watcher, desktop) starve
+  // checkpoints, and without a size limit the WAL once grew to 16GB against a
+  // 6GB main DB. The limit auto-truncates at checkpoint time; the passive
+  // checkpoint folds whatever the last writer left behind — best-effort, a
+  // busy moment just means the next open gets it.
+  db.pragma("journal_size_limit = 268435456"); // 256MB
+  try {
+    db.pragma("wal_checkpoint(PASSIVE)");
+  } catch {
+    // read-only filesystems / concurrent writers — never block an open on this
+  }
   // 有意不开 foreign_keys：删库后 Ledger 先重放（§2.1 三源重建），
   // 此时被引用的 nodes 尚未由上层索引器重建——引用完整性由
   // 「账本 + 全量重建流程」保证，不靠 SQLite 外键（D4）。
