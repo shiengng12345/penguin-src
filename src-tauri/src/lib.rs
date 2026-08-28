@@ -231,6 +231,10 @@ pub fn run() {
             // so app updates reach Claude/Codex without the user opening
             // Settings. Idempotent (copy-if-different), off the main thread.
             mcp::sync_stable_mcp_server_on_startup(app.handle().clone());
+            // Bring back the repos the user chose to live-index — watchers are
+            // killed on app exit, and before this nothing restarted them, so
+            // every launch silently ran with a progressively staler graph.
+            knowledge::restore_watch_autostart(app.handle().clone());
             // Runtime Manager: if the persisted policy is "on startup", the
             // frontend calls runtime_set_prevent_sleep after hydrating settings.
             // No blocking DB read here — startup stays fast. (Frontend drives.)

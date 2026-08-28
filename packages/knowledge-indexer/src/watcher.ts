@@ -29,7 +29,11 @@ export function startWatcher(input: {
   debounceMs?: number;
   onRun?: (report: IndexReport) => void;
 }): WatcherHandle {
-  const debounceMs = input.debounceMs ?? 2000;
+  // 500ms: long enough to coalesce an editor save burst (format-on-save,
+  // multi-file refactor writes land within ~100-300ms), short enough that an
+  // agent asking about code it just wrote gets a fresh graph. The old 2s
+  // default was the single largest contributor to "edit → stale answer".
+  const debounceMs = input.debounceMs ?? 500;
   const status: WatcherStatus = { watching: false, queued: 0, runs: 0, lastIndexedAt: null, lastError: null };
 
   let timer: ReturnType<typeof setTimeout> | null = null;

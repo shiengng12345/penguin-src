@@ -1947,6 +1947,68 @@ pub(crate) fn knowledge_watch_status(
         .collect()
 }
 
+// Which repos the user chose to watch, persisted so an app restart brings
+// the watchers back without re-toggling — before this, every launch silently
+// started with live indexing OFF for every repo, which is the freshness gap
+// agents feel the most. repoId → rootPath.
+fn watch_autostart_path() -> Result<PathBuf, String> {
+    dirs::home_dir()
+        .map(|home| home.join(".penguin").join("watch-autostart.json"))
+        .ok_or_else(|| "home directory unavailable for watch autostart".to_string())
+}
+
+fn read_watch_autostart() -> HashMap<String, String> {
+    let Ok(path) = watch_autostart_path() else {
+        return HashMap::new();
+    };
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn persist_watch_autostart(repo_id: &str, root_path: Option<&str>) {
+    let Ok(path) = watch_autostart_path() else {
+        return;
+    };
+    let mut entries = read_watch_autostart();
+    match root_path {
+        Some(root) => {
+            entries.insert(repo_id.to_string(), root.to_string());
+        }
+        None => {
+            entries.remove(repo_id);
+        }
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(serialized) = serde_json::to_string_pretty(&entries) {
+        let _ = std::fs::write(path, serialized);
+    }
+}
+
+// App-startup restore for the persisted watch set. Off the main thread; each
+// spawn is idempotent (lease + is_running dedupe), a repo whose checkout
+// moved or vanished is skipped and dropped from the persisted set.
+pub(crate) fn restore_watch_autostart<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    std::thread::spawn(move || {
+        for (repo_id, root_path) in read_watch_autostart() {
+            if !Path::new(&root_path).is_dir() {
+                persist_watch_autostart(&repo_id, None);
+                continue;
+            }
+            let registry = app.state::<WatchRegistry>();
+            if registry.is_running(&repo_id) {
+                continue;
+            }
+            if let Err(error) = start_watch_child(&app, &registry, repo_id.clone(), root_path) {
+                eprintln!("watch autostart ({repo_id}) failed: {error}");
+            }
+        }
+    });
+}
+
 #[tauri::command]
 pub(crate) fn knowledge_watch_toggle<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
@@ -1957,11 +2019,22 @@ pub(crate) fn knowledge_watch_toggle<R: tauri::Runtime>(
 ) -> Result<bool, String> {
     if !enable {
         registry.stop(&repo_id);
+        persist_watch_autostart(&repo_id, None);
         return Ok(false);
     }
+    persist_watch_autostart(&repo_id, Some(&root_path));
     if registry.is_running(&repo_id) {
         return Ok(true);
     }
+    start_watch_child(&app, &registry, repo_id, root_path)
+}
+
+fn start_watch_child<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    registry: &WatchRegistry,
+    repo_id: String,
+    root_path: String,
+) -> Result<bool, String> {
     use std::io::{BufRead, BufReader};
     use std::process::Stdio;
     use tauri::Emitter;
@@ -1978,7 +2051,7 @@ pub(crate) fn knowledge_watch_toggle<R: tauri::Runtime>(
         Err(message) => return Err(message),
     };
 
-    let inv = match resolve_invocation(&app) {
+    let inv = match resolve_invocation(app) {
         Ok(inv) => inv,
         Err(error) => {
             let _ = std::fs::remove_file(&lease_path);
