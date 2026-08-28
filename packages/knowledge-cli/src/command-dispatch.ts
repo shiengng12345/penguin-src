@@ -1831,8 +1831,20 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           return 0;
         }
         case "deadcode": {
-          const d = deadCode(store, { limit: 100 });
-          emit(deps, json, `${d.candidates.length} candidate(s) — ${d.note}\n` + d.candidates.slice(0, 40).map((c) => `  ${c.title}`).join("\n"), d);
+          // Same filters the MCP surface has: an unscoped list across every
+          // indexed repo is not something anyone can act on.
+          const d = deadCode(store, {
+            limit: Number(optionValue("limit") ?? 100),
+            repo: optionValue("repo"),
+            path: optionValue("path") ?? pos[0],
+            branchId: optionValue("branch") ? store.getBranch(
+              (store.db.prepare("SELECT id FROM repos WHERE id=? OR name=? LIMIT 1").get(optionValue("repo") ?? "", optionValue("repo") ?? "") as { id: string } | undefined)?.id ?? "",
+              String(optionValue("branch")),
+            )?.id : undefined,
+          });
+          const line = (c: typeof d.candidates[number]) =>
+            `  ${c.title}${c.filePath ? ` — ${c.filePath}:${c.startLine ?? "?"}` : ""}`;
+          emit(deps, json, `${d.candidates.length} candidate(s) — ${d.note}\n` + d.candidates.slice(0, 40).map(line).join("\n"), d);
           return 0;
         }
         case "compare": {
