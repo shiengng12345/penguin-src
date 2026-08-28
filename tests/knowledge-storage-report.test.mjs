@@ -8,6 +8,7 @@ import {
   buildStorageReport,
   evaluateStorageHealth,
   runStorageMaintenance,
+  recordStorageSample,
   maintenanceState,
   planRevisionCollection,
   applyRevisionCollection,
@@ -175,5 +176,45 @@ test("status panel carries cheap size fields", async () => {
   const panel = buildStatusPanel(store);
   assert.ok(panel.db.sizeBytes > 0);
   assert.notEqual(panel.db.walBytes, undefined);
+  store.close();
+});
+
+test("reclaimable free pages are reported and flagged once they are worth a vacuum", () => {
+  const store = openStore();
+  const sizes = buildStorageReport(store).files;
+  assert.equal(typeof sizes.reclaimableBytes, "number", "freelist is measurable");
+
+  const quiet = evaluateStorageHealth(
+    { dbBytes: 5 * GB, walBytes: 1 * MB, shmBytes: 0, totalBytes: 5 * GB, reclaimableBytes: 8 * MB },
+    null,
+  );
+  assert.equal(quiet.level, "ok");
+  // The FTS retirement freed 776MB into the freelist — exactly this case.
+  const loaded = evaluateStorageHealth(
+    { dbBytes: 7 * GB, walBytes: 1 * MB, shmBytes: 0, totalBytes: 7 * GB, reclaimableBytes: 776 * MB },
+    null,
+  );
+  assert.equal(loaded.level, "warn");
+  assert.ok(loaded.reasons.includes("reclaimable"));
+  store.close();
+});
+
+test("recordStorageSample writes history without building a full report", () => {
+  const store = openStore();
+  recordStorageSample(store);
+  assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM knowledge_size_samples").get().n, 1);
+  recordStorageSample(store);
+  assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM knowledge_size_samples").get().n, 1, "one row per day");
+  store.close();
+});
+
+test("maintenance claim is atomic: a live lock is respected and never clobbered", () => {
+  const store = openStore();
+  store.db
+    .prepare("INSERT INTO meta(key,value) VALUES ('knowledge_maintenance_lock', ?)")
+    .run(JSON.stringify({ pid: process.pid, action: "collect", startedAt: new Date().toISOString() }));
+  assert.throws(() => runStorageMaintenance(store, "vacuum"), /MAINTENANCE_IN_PROGRESS/);
+  const lock = JSON.parse(store.db.prepare("SELECT value FROM meta WHERE key='knowledge_maintenance_lock'").get().value);
+  assert.equal(lock.action, "collect", "loser must not overwrite the winner's claim");
   store.close();
 });

@@ -17,6 +17,8 @@ export interface StorageFileSizes {
   walBytes: number | null;
   shmBytes: number | null;
   totalBytes: number;
+  /** Free pages held inside the db file — returned to the OS by VACUUM. */
+  reclaimableBytes: number | null;
 }
 
 export type StorageHealthLevel = "ok" | "warn" | "critical";
@@ -95,6 +97,7 @@ const WAL_RATIO_CRITICAL = 0.15;
 const WAL_FLOOR_BYTES = 256 * 1024 * 1024;
 const WEEKLY_DELTA_WARN_BYTES = 500 * 1024 * 1024;
 const WEEKLY_DELTA_CRITICAL_BYTES = 2 * 1024 * 1024 * 1024;
+const RECLAIMABLE_HINT_BYTES = 512 * 1024 * 1024;
 
 const MAINTENANCE_LOCK_KEY = "knowledge_maintenance_lock";
 const MAINTENANCE_LAST_KEY = "knowledge_maintenance_last";
@@ -135,12 +138,35 @@ export function readStorageFileSizes(store: KnowledgeStore): StorageFileSizes {
   const dbBytes = dbPath ? statBytes(dbPath) : null;
   const walBytes = dbPath ? statBytes(`${dbPath}-wal`) : null;
   const shmBytes = dbPath ? statBytes(`${dbPath}-shm`) : null;
+  let reclaimableBytes: number | null = null;
+  try {
+    const freePages = Number(store.db.pragma("freelist_count", { simple: true }));
+    const pageSize = Number(store.db.pragma("page_size", { simple: true }));
+    if (Number.isFinite(freePages) && Number.isFinite(pageSize)) reclaimableBytes = freePages * pageSize;
+  } catch {
+    // pragma unavailable — the rest of the report is still valid
+  }
   return {
     dbBytes,
     walBytes,
     shmBytes,
     totalBytes: (dbBytes ?? 0) + (walBytes ?? 0) + (shmBytes ?? 0),
+    reclaimableBytes,
   };
+}
+
+/**
+ * Record today's size sample without building a whole report. Called after
+ * index/rebuild so growth history accrues from normal use — sampling only
+ * when someone opens the Storage page would leave the weekly-delta signal
+ * blank for exactly the users who never look.
+ */
+export function recordStorageSample(store: KnowledgeStore): void {
+  try {
+    recordDailySample(store, readStorageFileSizes(store));
+  } catch {
+    // observability only
+  }
 }
 
 // One row per calendar day, updated in place on later calls the same day —
@@ -203,6 +229,12 @@ export function evaluateStorageHealth(files: StorageFileSizes, weeklyDeltaBytes:
   if (weeklyDeltaBytes != null) {
     if (weeklyDeltaBytes >= WEEKLY_DELTA_CRITICAL_BYTES) escalate("critical", "growth_rate");
     else if (weeklyDeltaBytes >= WEEKLY_DELTA_WARN_BYTES) escalate("warn", "growth_rate");
+  }
+  // Free pages sit inside the file until a VACUUM hands them back. Retiring
+  // the FTS mirrors freed 776MB this way — without surfacing it, a user who
+  // never opens this page keeps paying for space nothing is using.
+  if (files.reclaimableBytes != null && files.reclaimableBytes >= RECLAIMABLE_HINT_BYTES) {
+    escalate("warn", "reclaimable");
   }
   return { level, reasons, walRatio, weeklyDeltaBytes };
 }
@@ -393,13 +425,23 @@ export function runStorageMaintenance(store: KnowledgeStore, action: "collect" |
   if (activeIndexLock(store)) {
     throw Object.assign(new Error("INDEX_IN_PROGRESS"), { code: "INDEX_IN_PROGRESS" });
   }
-  if (maintenanceState(store).running) {
+  const startedAt = new Date().toISOString();
+  // Atomic claim. Reading the lock and then writing it as two statements let
+  // a CLI and an MCP process both observe "free" and both proceed — two
+  // concurrent GC/VACUUM runs interleaving deletes on the same database. The
+  // claim runs inside one transaction and only writes when the existing row
+  // is absent or provably dead, so exactly one caller wins.
+  const claimed = store.db.transaction((): boolean => {
+    const current = maintenanceState(store);
+    if (current.running) return false;
+    store.db
+      .prepare("INSERT INTO meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
+      .run(MAINTENANCE_LOCK_KEY, JSON.stringify({ pid: process.pid, action, startedAt } satisfies MaintenanceLock));
+    return true;
+  })();
+  if (!claimed) {
     throw Object.assign(new Error("MAINTENANCE_IN_PROGRESS"), { code: "MAINTENANCE_IN_PROGRESS" });
   }
-  const startedAt = new Date().toISOString();
-  store.db
-    .prepare("INSERT INTO meta(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value")
-    .run(MAINTENANCE_LOCK_KEY, JSON.stringify({ pid: process.pid, action, startedAt } satisfies MaintenanceLock));
   let result: MaintenanceResult;
   try {
     if (action === "collect") {

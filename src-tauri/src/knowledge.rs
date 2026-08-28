@@ -1967,10 +1967,16 @@ fn read_watch_autostart() -> HashMap<String, String> {
         .unwrap_or_default()
 }
 
+// Serialises the read-modify-write. The bulk "watch all repos" button fires
+// one toggle per repo in parallel; unguarded, each would read the same old
+// map and the last write would drop every sibling's entry.
+static WATCH_AUTOSTART_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn persist_watch_autostart(repo_id: &str, root_path: Option<&str>) {
     let Ok(path) = watch_autostart_path() else {
         return;
     };
+    let _guard = WATCH_AUTOSTART_LOCK.lock();
     let mut entries = read_watch_autostart();
     match root_path {
         Some(root) => {
@@ -1984,7 +1990,12 @@ fn persist_watch_autostart(repo_id: &str, root_path: Option<&str>) {
         let _ = std::fs::create_dir_all(parent);
     }
     if let Ok(serialized) = serde_json::to_string_pretty(&entries) {
-        let _ = std::fs::write(path, serialized);
+        // Write-then-rename: a crash mid-write must not leave a truncated
+        // file that reads back as "no repos were being watched".
+        let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+        if std::fs::write(&tmp, serialized).is_ok() && std::fs::rename(&tmp, &path).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
     }
 }
 

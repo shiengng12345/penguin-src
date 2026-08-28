@@ -17,7 +17,8 @@ export interface ClaudeHookOptions {
 }
 
 export interface ClaudeHookDeps {
-  runPenguin(args: string[], timeoutMs: number): Promise<unknown>;
+  /** `signal` aborts once the hook's own deadline passes — see runClaudeHook. */
+  runPenguin(args: string[], timeoutMs: number, signal?: AbortSignal): Promise<unknown>;
   markTargetSeen?(target: string): void;
 }
 
@@ -117,7 +118,13 @@ export async function readBoundedHookInput(
 function truncate(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
   if (maxChars <= 1) return text.slice(0, maxChars);
-  return `${text.slice(0, maxChars - 1)}…`;
+  // Cut on a code point, never mid-surrogate: slicing UTF-16 units can strip
+  // the low half of an emoji or CJK-extension character, and the lone high
+  // surrogate becomes U+FFFD once the hook output is encoded as UTF-8.
+  const head = text.slice(0, maxChars - 1);
+  const lastUnit = head.charCodeAt(head.length - 1);
+  const safe = lastUnit >= 0xd800 && lastUnit <= 0xdbff ? head.slice(0, -1) : head;
+  return `${safe}…`;
 }
 
 // Alternates, in priority order: grpc:: names, file paths, dotted symbols,
@@ -129,9 +136,19 @@ function truncate(text: string, maxChars: number): string {
 const PROMPT_TARGET_PATTERN = /\bgrpc::[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+\b|\b[A-Za-z0-9_./-]+\.(?:ts|tsx|js|jsx|mjs|cjs|rs|go|py|java|kt|proto)\b|\b[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+\b|\/[A-Za-z0-9_./:{}-]+|\b[A-Za-z_$][a-z0-9$]*[A-Z][\w$]*\b|\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g;
 const COMMON_PROSE_DOTTED_TOKENS = new Set(["e.g", "i.e", "etc."]);
 
+// Bare identifiers shorter than this are almost always prose or a variable
+// name too generic to resolve ("user", "id", "cfg") — each one costs a DB
+// query on the hook's 800ms budget for a result that gets filtered anyway.
+const MIN_BARE_IDENTIFIER_LENGTH = 6;
+
 export function selectPromptTargets(prompt: string): string[] {
   const matches = prompt.match(PROMPT_TARGET_PATTERN) ?? [];
-  return [...new Set(matches.filter((match) => !COMMON_PROSE_DOTTED_TOKENS.has(match)))].slice(0, 4);
+  const useful = matches.filter((match) => {
+    if (COMMON_PROSE_DOTTED_TOKENS.has(match)) return false;
+    const bare = !/[.\/:]/.test(match);
+    return !bare || match.length >= MIN_BARE_IDENTIFIER_LENGTH;
+  });
+  return [...new Set(useful)].slice(0, 4);
 }
 
 export function selectPromptTarget(prompt: string): string | null {
@@ -194,9 +211,20 @@ export function packHasSignal(pack: ExplorePack): boolean {
     || (pack.invokedDynamicallyBy ?? []).length > 0
     || (pack.invokesDynamic ?? []).length > 0
     || pack.blastRadius.length > 0
+    // A sparse pack can still be worth injecting: a resolved call path or a
+    // covering test means the target WAS found, just with few relations.
+    // Diagnostics and staleness deliberately do NOT count on their own — an
+    // unindexed prose word produces both ("not indexed", trust_unavailable)
+    // and would put noise back into every prompt.
+    || pack.callPath.length > 0
+    || pack.tests.length > 0
     || (pack.ambiguousCandidates?.length ?? 0) > 0,
   );
 }
+
+// Head-of-implementation lines carried in compact mode. Twelve covers most
+// small functions outright while leaving room for relations inside 2KB.
+const COMPACT_FOCUS_LINES = 12;
 
 function signatureLine(code: string): string {
   for (const line of code.split("\n")) {
@@ -234,8 +262,22 @@ export function renderExploreHookCompact(
   ];
   const focusSource = pack.sources.find((source) => source.role === "focus") ?? pack.sources[0];
   if (focusSource) {
-    const signature = signatureLine(focusSource.code);
-    lines.push(`focus: ${focusSource.filePath}:${focusSource.startLine}-${focusSource.endLine}${signature ? ` — ${signature}` : ""}`);
+    lines.push(`focus: ${focusSource.filePath}:${focusSource.startLine}-${focusSource.endLine}`);
+    // Include the opening lines of the implementation, not just the
+    // signature. A summary of shape ("who calls this") cannot answer "why
+    // does this return the wrong value", and an agent that finds the context
+    // plausible often will not spend a second tool call to fetch the body.
+    // Head-of-body fits the budget and covers the common small function.
+    const head = focusSource.code.split("\n").slice(0, COMPACT_FOCUS_LINES);
+    const clipped = focusSource.code.split("\n").length > COMPACT_FOCUS_LINES;
+    if (head.length > 0) {
+      lines.push(
+        `\`\`\`${focusSource.lang ?? "text"}`,
+        head.join("\n"),
+        clipped ? "… (truncated — knowledge_explore returns the full body)" : "",
+        "```",
+      );
+    }
   }
   if (pack.callPath.length > 1) {
     lines.push(`call path: ${pack.callPath.slice(0, 8).map((step) => step.title).join(" → ")}`);
@@ -325,14 +367,24 @@ export async function runClaudeHook(
     }
     const targets = selectPromptTargets(options.prompt ?? "");
     if (targets.length === 0) return "";
-    const packs = await within(
-      Promise.all(targets.map(async (target) => {
-        const pack = await deps.runPenguin(["explore", target, "--json"], timeoutMs) as ExplorePack;
-        deps.markTargetSeen?.(target);
-        return { target, pack };
-      })),
-      timeoutMs,
-    );
+    // Abandoning the hook on timeout used to leave its explore queries running:
+    // every subsequent prompt piled on another batch against the same SQLite
+    // file. Signal cancellation so a slow query stops doing work the moment
+    // its output can no longer be used.
+    const controller = new AbortController();
+    let packs: Array<{ target: string; pack: ExplorePack }>;
+    try {
+      packs = await within(
+        Promise.all(targets.map(async (target) => {
+          const pack = await deps.runPenguin(["explore", target, "--json"], timeoutMs, controller.signal) as ExplorePack;
+          deps.markTargetSeen?.(target);
+          return { target, pack };
+        })),
+        timeoutMs,
+      );
+    } finally {
+      controller.abort();
+    }
     const rendered = mode === "compact" ? packs.filter(({ pack }) => packHasSignal(pack)) : packs;
     return truncate(
       rendered

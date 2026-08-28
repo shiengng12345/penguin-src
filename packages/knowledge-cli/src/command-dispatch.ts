@@ -68,6 +68,7 @@ import {
   canonicalPathForCheck,
   RevisionResolutionError,
   compileKnowledgeDsl,
+  recordStorageSample,
   resolveQueryScope,
   resolveRepoForPath,
   ScopeResolutionError,
@@ -841,7 +842,12 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
         // source blocks for setups that want the old behavior.
         { event, prompt, sessionId, seenTargets, mode: flags.includes("--full") ? "full" : "compact" },
         {
-          runPenguin: async (args) => {
+          runPenguin: async (args, _timeoutMs, signal) => {
+            // These run in-process against an open store, so the only useful
+            // cancellation point is before starting: once the hook's deadline
+            // has passed its output is discarded anyway, and skipping the
+            // remaining targets keeps a slow prompt from queueing DB work.
+            if (signal?.aborted) throw new Error("hook cancelled");
             if (args[0] === "status") return compactIndexStatus(store);
             if (args[0] === "explore" && typeof args[1] === "string") {
               return buildExplorePack(store, args[1]);
@@ -949,6 +955,10 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
         // pin/live/reference/grace rules, skippable with --no-gc.
         if (!flags.includes("--no-gc")) {
           try {
+            // Growth history accrues from normal indexing, not only from
+            // someone opening the Storage page — otherwise the weekly-delta
+            // signal stays blank for exactly the users who never look.
+            recordStorageSample(store);
             const gcPlan = planRevisionCollection(store, report.repoId);
             const gc = applyRevisionCollection(store, gcPlan, { trigger: "auto" });
             const collected =

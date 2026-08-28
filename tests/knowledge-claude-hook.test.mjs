@@ -238,22 +238,126 @@ test("repeated session target (--full) emits relations without repeating full so
   assert.match(text, /Screen/);
 });
 
-test("UserPromptSubmit defaults to compact: pointers + signature, never source bodies", async () => {
+test("UserPromptSubmit defaults to compact: focus body head + pointers, no neighbour source", async () => {
   const text = await runClaudeHook(
     { event: "user-prompt-submit", prompt: "inspect Foo.run" },
     { runPenguin: async () => exploreFixture() },
   );
-  // Signature line and location survive; the body and code fences do not.
   assert.match(text, /compact/);
   assert.match(text, /src\/foo\.ts:10-12/);
+  // The focus implementation itself is carried — a map of callers cannot
+  // answer "why does this return the wrong value", and an agent that finds
+  // the context plausible often won't spend a second call to fetch the body.
   assert.match(text, /export function run\(\)/);
-  assert.doesNotMatch(text, /```/);
-  assert.doesNotMatch(text, /return save\(\)/);
+  assert.match(text, /return save\(\)/);
   assert.match(text, /callers\(1\): Screen/);
   assert.match(text, /calls\(1\): save/);
   // Tells the agent where the full source lives.
   assert.match(text, /knowledge_explore|penguin explore/);
   assert.ok(text.length <= 2_000, `compact stayed within budget (${text.length})`);
+});
+
+test("compact carries only the head of a long focus body, and says so", () => {
+  const long = {
+    ...exploreFixture("Long.run"),
+    sources: [{
+      nodeId: "foo",
+      title: "Long.run",
+      role: "focus",
+      filePath: "src/long.ts",
+      startLine: 1,
+      endLine: 40,
+      lang: "ts",
+      code: Array.from({ length: 40 }, (_, i) => `  const line${i} = ${i};`).join("\n"),
+      truncated: false,
+    }],
+  };
+  const text = renderExploreHookCompact("Long.run", long);
+  assert.match(text, /const line0 = 0;/);
+  assert.match(text, /const line11 = 11;/);
+  assert.doesNotMatch(text, /const line12 = 12;/, "cuts at the 12-line head");
+  assert.match(text, /truncated — knowledge_explore returns the full body/);
+  assert.ok(text.length <= 2_000);
+});
+
+test("compact truncation never splits a surrogate pair", () => {
+  const emoji = {
+    ...exploreFixture("Emoji.run"),
+    diagnostics: [`${"🐧".repeat(400)}`],
+  };
+  const text = renderExploreHookCompact("Emoji.run", emoji, 300);
+  assert.ok(text.length <= 300);
+  // A lone high surrogate would encode as U+FFFD once written as UTF-8.
+  assert.doesNotMatch(text, /�/);
+  for (let i = 0; i < text.length; i += 1) {
+    const unit = text.charCodeAt(i);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      const next = text.charCodeAt(i + 1);
+      assert.ok(next >= 0xdc00 && next <= 0xdfff, `unpaired high surrogate at ${i}`);
+    }
+  }
+});
+
+test("sparse-but-real packs survive; unresolved prose still does not", async () => {
+  // Only a call path and a covering test — the target WAS found.
+  const sparse = {
+    ...exploreFixture("Sparse.run"),
+    focus: null,
+    implementation: null,
+    callers: [],
+    calls: [],
+    sources: [],
+    callPath: [
+      { depth: 0, nodeId: "a", title: "Entry", nodeType: "symbol", via: "root" },
+      { depth: 1, nodeId: "b", title: "Sparse.run", nodeType: "symbol", via: "calls" },
+    ],
+    tests: [{ nodeId: "t", title: "sparse.test.ts", nodeType: "test" }],
+  };
+  const kept = await runClaudeHook(
+    { event: "user-prompt-submit", prompt: "inspect Sparse.run" },
+    { runPenguin: async () => sparse },
+  );
+  assert.match(kept, /Entry → Sparse\.run/);
+
+  // Diagnostics and staleness alone are NOT signal: an unindexed prose word
+  // produces both, and would put noise back into every prompt.
+  const noise = {
+    ...sparse,
+    callPath: [],
+    tests: [],
+    diagnostics: ['"Roadmap" not indexed'],
+    freshness: { stale: true, reason: "trust_unavailable", indexedAt: null, coverageGaps: [] },
+  };
+  const dropped = await runClaudeHook(
+    { event: "user-prompt-submit", prompt: "update the Roadmap" },
+    { runPenguin: async () => noise },
+  );
+  assert.equal(dropped, "");
+});
+
+test("bare identifiers below the length floor are not queried", () => {
+  // Each target costs a DB query on an 800ms budget; short generic names
+  // resolve to noise if they resolve at all.
+  assert.deepEqual(selectPromptTargets("check the user and cfg values"), []);
+  assert.deepEqual(selectPromptTargets("check buildStatusPanel now"), ["buildStatusPanel"]);
+  // Dotted/path/route forms are explicit enough to keep at any length.
+  assert.deepEqual(selectPromptTargets("see a.b"), ["a.b"]);
+});
+
+test("hook timeout aborts in-flight explore queries instead of leaving them running", async () => {
+  const signals = [];
+  const text = await runClaudeHook(
+    { event: "user-prompt-submit", prompt: "inspect Foo.run and Bar.run", timeoutMs: 20 },
+    {
+      runPenguin: (_args, _timeoutMs, signal) => {
+        signals.push(signal);
+        return new Promise(() => {}); // never settles
+      },
+    },
+  );
+  assert.match(text, /unavailable/);
+  assert.ok(signals.length > 0, "queries received a signal");
+  for (const signal of signals) assert.equal(signal.aborted, true, "abandoned queries are cancelled");
 });
 
 test("compact rendering surfaces call path, blast radius, tests, and ui relations", () => {

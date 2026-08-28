@@ -363,7 +363,7 @@ export interface StorageMaintenanceResult {
 }
 export interface StorageReport {
   computedAt: string;
-  files: { dbBytes: number | null; walBytes: number | null; shmBytes: number | null; totalBytes: number };
+  files: { dbBytes: number | null; walBytes: number | null; shmBytes: number | null; totalBytes: number; reclaimableBytes: number | null };
   health: { level: StorageHealthLevel; reasons: string[]; walRatio: number | null; weeklyDeltaBytes: number | null };
   growth: { weeklyDeltaBytes: number | null; samples: Array<{ date: string; totalBytes: number; walBytes: number }> };
   tables: { computedAt: string; categories: Array<{ key: StorageTableCategory; bytes: number }> } | null;

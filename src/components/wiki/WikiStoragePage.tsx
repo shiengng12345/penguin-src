@@ -26,6 +26,7 @@ const HEALTH_TEXT = { ok: "text-emerald-300", warn: "text-amber-300", critical: 
 const REASON_LABEL: Record<string, string> = {
   wal_ratio: "WAL 日志相对主库偏大",
   growth_rate: "本周增长过快",
+  reclaimable: "有可回收空间,点「压实数据库」拿回",
 };
 
 const MAINTENANCE_ERROR_LABEL: Record<string, string> = {
