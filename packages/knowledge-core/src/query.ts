@@ -1491,6 +1491,12 @@ export interface ContextPack {
   notes: ContextBrief[]; // notes linked to the focus
   importers: ContextBrief[]; // files importing the focus's file
   signals: string[]; // risk/attention heuristics
+  // Relations whose real size exceeded `limit`, named by their field above
+  // (e.g. ["calls","callers"]). A list at exactly `limit` is otherwise
+  // indistinguishable from a complete one, so a consumer cannot tell whether
+  // to re-query with a higher limit — the same reason `sourcesOmitted` names
+  // dropped source blocks instead of returning a short array silently.
+  truncated: string[];
   // Populated ONLY when `target` matched 2+ symbols and no single focus could
   // be chosen; null (not []) otherwise, so callers can tell "ambiguous" apart
   // from "zero matches" — both used to look identical (silent empty focus).
@@ -1525,6 +1531,7 @@ export function buildContextPack(
     invokedDynamicallyBy: [], invokesDynamic: [], remoteCalls: [], invokedBy: [],
     referencedBy: [], usesTypes: [],
     routes: [], tests: [], errors: [], envs: [], notes: [], importers: [], signals: [],
+    truncated: [],
     ambiguous: null, assemblyError: null,
   };
   let resolution: SymbolResolution;
@@ -1565,28 +1572,42 @@ function buildContextPackBody(
   const scopeFallback = !explicitBranchId && branchId ? { branchId } : undefined;
   const bx = branchId ? " AND (branch_id = ? OR branch_id IS NULL)" : "";
   const snapshotRevision = options?.revision && !options.revision.snapshotId.startsWith("legacy:") ? options.revision : null;
+  // Relation lists cut at `limit` used to be indistinguishable from complete
+  // ones: a caller could not tell 25-of-25 from 25-of-500, so an agent reading
+  // `calls` would reason as if it had seen everything. Every relation now
+  // fetches limit+1 rows and names itself in `truncated` when the extra row
+  // exists — the same contract `sourcesOmitted` already gives source blocks.
+  const truncatedRelations = new Set<string>();
+  const capped = (relation: string, rows: { id: string }[]) => {
+    if (rows.length > limit) truncatedRelations.add(relation);
+    return rows.slice(0, limit);
+  };
   const snapshotIds = (type: string, direction: "in" | "out") => snapshotEdgePairsForNodes(
     store,
     snapshotRevision!,
     [focusId],
-    { edgeTypes: [type], direction, limit },
+    { edgeTypes: [type], direction, limit: limit + 1 },
   )
-    .map((edge) => direction === "in" ? edge.src : edge.dst).filter((id): id is string => Boolean(id)).map((id) => ({ id })).slice(0, limit);
-  const inEdges = (type: string) =>
+    .map((edge) => direction === "in" ? edge.src : edge.dst).filter((id): id is string => Boolean(id)).map((id) => ({ id })).slice(0, limit + 1);
+  const inEdges = (relation: string, type: string) => capped(
+    relation,
     snapshotRevision ? snapshotIds(type, "in") : store.db.prepare(`SELECT DISTINCT src AS id FROM edges WHERE dst=? AND edge_type=? AND ${active}${bx} LIMIT ?`)
-      .all(...(branchId ? [focusId, type, branchId, limit] : [focusId, type, limit])) as { id: string }[];
-  const outEdges = (type: string) =>
+      .all(...(branchId ? [focusId, type, branchId, limit + 1] : [focusId, type, limit + 1])) as { id: string }[],
+  );
+  const outEdges = (relation: string, type: string) => capped(
+    relation,
     snapshotRevision ? snapshotIds(type, "out") : store.db.prepare(`SELECT DISTINCT dst AS id FROM edges WHERE src=? AND edge_type=? AND dst IS NOT NULL AND ${active}${bx} LIMIT ?`)
-      .all(...(branchId ? [focusId, type, branchId, limit] : [focusId, type, limit])) as { id: string }[];
+      .all(...(branchId ? [focusId, type, branchId, limit + 1] : [focusId, type, limit + 1])) as { id: string }[],
+  );
 
-  const callers = inEdges("calls");
-  const calls = outEdges("calls");
-  const renderedBy = inEdges("renders");
-  const renders = outEdges("renders");
-  const invokedDynamicallyBy = inEdges("invokes_dynamic");
-  const invokesDynamic = outEdges("invokes_dynamic");
+  const callers = inEdges("callers", "calls");
+  const calls = outEdges("calls", "calls");
+  const renderedBy = inEdges("renderedBy", "renders");
+  const renders = outEdges("renders", "renders");
+  const invokedDynamicallyBy = inEdges("invokedDynamicallyBy", "invokes_dynamic");
+  const invokesDynamic = outEdges("invokesDynamic", "invokes_dynamic");
   // Cross-service: gRPC endpoints this focus invokes (branch-less edges pass bx).
-  const remoteCalls = outEdges("invokes");
+  const remoteCalls = outEdges("remoteCalls", "invokes");
   // Cross-service reverse: symbols in OTHER services that invoke an endpoint this
   // focus handles (focus ← handles ← endpoint ← invokes ← caller). Endpoints are
   // global + edges branch-less, so no branch scoping here.
@@ -1594,22 +1615,22 @@ function buildContextPackBody(
     .prepare(`SELECT DISTINCT src AS id FROM edges WHERE dst=? AND edge_type='handles' AND ${active}`)
     .all(focusId) as { id: string }[];
   const invokedBy = handledEndpoints.length
-    ? (store.db
+    ? capped("invokedBy", store.db
         .prepare(
           `SELECT DISTINCT src AS id FROM edges
            WHERE edge_type='invokes' AND ${active} AND src != ?
            AND dst IN (${handledEndpoints.map(() => "?").join(",")}) LIMIT ?`,
         )
-        .all(focusId, ...handledEndpoints.map((e) => e.id), limit) as { id: string }[])
+        .all(focusId, ...handledEndpoints.map((e) => e.id), limit + 1) as { id: string }[])
     : [];
-  const referencedBy = inEdges("references");
-  const usesTypes = outEdges("references");
-  const tests = inEdges("tests");
-  const errors = outEdges("throws").map((r) => nodeBrief(store, r.id).title);
-  const envs = outEdges("uses").map((r) => nodeBrief(store, r.id).title);
+  const referencedBy = inEdges("referencedBy", "references");
+  const usesTypes = outEdges("usesTypes", "references");
+  const tests = inEdges("tests", "tests");
+  const errors = outEdges("errors", "throws").map((r) => nodeBrief(store, r.id).title);
+  const envs = outEdges("envs", "uses").map((r) => nodeBrief(store, r.id).title);
 
   // routes: directly handled, or handled by a caller (route → handler → focus).
-  const directRoutes = inEdges("handles");
+  const directRoutes = inEdges("routes", "handles");
   const callerIds = callers.map((c) => c.id);
   const routeSet = new Map<string, "direct" | "caller">();
   for (const r of directRoutes) routeSet.set(nodeBrief(store, r.id).title, "direct");
@@ -1686,6 +1707,7 @@ function buildContextPackBody(
     notes,
     importers,
     signals,
+    truncated: [...truncatedRelations].sort(),
     ambiguous: null,
     assemblyError: null,
     ...(scopeFallback ? { scopeFallback } : {}),
@@ -2272,6 +2294,8 @@ export interface ExplorePack {
    * dropped for budget is named in `sourcesOmitted`. */
   sources: SourceBlock[];
   sourcesOmitted: string[];
+  /** Relations whose real size exceeded the limit, named by field. */
+  truncated: string[];
   // Structured counterpart to the "ambiguous target: N matches" diagnostics
   // string — callers need the actual candidates (nodeId/filePath/branch) to
   // disambiguate and retry directly, not just a count to guess against.
@@ -2449,6 +2473,9 @@ export function buildExplorePack(
     diagnostics: [...new Set(diagnostics)],
     sources,
     sourcesOmitted,
+    // Relations cut at the limit, named. Explore is what agents call, so the
+    // honesty contract has to survive the hop from ContextPack to here.
+    truncated: effectiveContext.truncated ?? [],
     ...(context.ambiguous ? { ambiguousCandidates: context.ambiguous } : {}),
     ...(!context.ambiguous && searchCandidates ? { ambiguousCandidates: searchCandidates } : {}),
     ...(scopeFallback ? { scopeFallback } : {}),
