@@ -1134,6 +1134,14 @@ export function openDatabase(
   const db = new (loadDatabaseCtor())(path);
   db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
+  // synchronous=NORMAL, not the SQLite default FULL. Under WAL, FULL fsyncs on
+  // every commit, and indexing commits several times PER FILE — measured at
+  // 38.9s of pure transaction overhead on a 1116-file repo. NORMAL syncs at
+  // checkpoint instead, which under WAL cannot corrupt the database: the only
+  // exposure is losing the last commits to an OS crash or power loss, and this
+  // is a rebuildable index (penguin index restores it). OFF would remove even
+  // that guarantee and is never used.
+  db.pragma("synchronous = NORMAL");
   // WAL hygiene: long-lived readers (MCP workers, watcher, desktop) starve
   // checkpoints, and without a size limit the WAL once grew to 16GB against a
   // 6GB main DB. The limit auto-truncates at checkpoint time; the passive
