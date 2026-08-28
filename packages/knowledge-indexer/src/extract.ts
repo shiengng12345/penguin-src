@@ -35,11 +35,25 @@ export interface ExtractedRef {
   enclosingQualifiedName: string | null;
 }
 
+/** One imported local name and the specifier it came from. */
+export interface ExtractedImportBinding {
+  localName: string;
+  specifier: string;
+  /** `import type {...}` — no runtime call can reach this binding. */
+  typeOnly: boolean;
+}
+
 export interface ExtractedFile {
   lang: Lang;
   symbols: ExtractedSymbol[];
   refs: ExtractedRef[];
   fileImports: string[];
+  // localName -> specifier, which fileImports alone cannot express. Without it
+  // the resolver only learns which in-repo FILES a file imports; a bare
+  // specifier like 'react-redux' resolves to no file and disappears, so
+  // `useSelector` looks like an unqualified name and the resolver's
+  // unique-same-repo-hit tier happily binds it to a jest.mock stub.
+  importBindings: ExtractedImportBinding[];
   endpoints: ExtractedEndpoint[]; // NestJS endpoints (gRPC/kafka/http), ts/tsx
   grpcClientCalls: GrpcClientCall[]; // inter-service gRPC client invocations
   identifiers: IdentifierEntry[]; // TS/JS fields and object keys, from this same AST
@@ -203,7 +217,7 @@ export async function extractSymbols(input: {
 }): Promise<ExtractedFile> {
   const lang = input.lang;
   const base: ExtractedFile = {
-    lang, symbols: [], refs: [], fileImports: [], endpoints: [], grpcClientCalls: [],
+    lang, symbols: [], refs: [], fileImports: [], importBindings: [], endpoints: [], grpcClientCalls: [],
     identifiers: [], logSites: [], channels: [], parseError: null,
   };
   const max = input.maxBytes ?? DEFAULT_MAX_BYTES;
@@ -248,6 +262,7 @@ export async function extractSymbols(input: {
   const symbols: ExtractedSymbol[] = [];
   const refs: ExtractedRef[] = [];
   const fileImports: string[] = [];
+  const importBindings: ExtractedImportBinding[] = [];
 
   for (const match of query.matches(tree.rootNode)) {
     const def = match.captures.find((c) => c.name.startsWith("definition."));
@@ -323,6 +338,49 @@ export async function extractSymbols(input: {
       fileImports.push(raw);
       refs.push({ kind: "import", rawName: raw, startLine: source.startPosition.row + 1, enclosingQualifiedName: null });
     });
+
+    // Import BINDINGS: local name -> specifier. fileImports records only the
+    // specifier, so a bare one ('react-redux') resolves to no repo file, drops
+    // out, and the resolver never learns that `useSelector` came from outside
+    // the repo — it then binds the call to whatever same-named symbol exists
+    // in-repo, which in a React codebase is a jest.mock stub in a test file.
+    //
+    // Node shapes verified against the shipped TypeScript grammar:
+    //   import d from "m"                 import_clause > identifier
+    //   import { a, b as c } from "m"     import_clause > named_imports > import_specifier(.name/.alias)
+    //   import * as ns from "m"           import_clause > namespace_import > identifier
+    walk(tree.rootNode, (node) => {
+      if (node.type !== "import_statement") return;
+      const source = node.childForFieldName("source");
+      if (!source) return;
+      const specifier = source.text.replace(/^['"]|['"]$/g, "");
+      if (!specifier) return;
+      // `import type {...}` binds no runtime value, so no call can reach it.
+      const typeOnly = /^import\s+type\b/.test(node.text);
+      const add = (localName: string | undefined | null) => {
+        if (!localName) return;
+        if (importBindings.some((binding) => binding.localName === localName)) return;
+        importBindings.push({ localName, specifier, typeOnly });
+      };
+      for (const clause of node.namedChildren) {
+        if (!clause || clause.type !== "import_clause") continue;
+        for (const child of clause.namedChildren) {
+          if (!child) continue;
+          if (child.type === "identifier") {
+            add(child.text); // default import
+          } else if (child.type === "namespace_import") {
+            const alias = child.namedChildren.find((n) => n?.type === "identifier");
+            add(alias?.text);
+          } else if (child.type === "named_imports") {
+            for (const spec of child.namedChildren) {
+              if (!spec || spec.type !== "import_specifier") continue;
+              // `a as b` binds b; a bare `a` binds a.
+              add((spec.childForFieldName("alias") ?? spec.childForFieldName("name"))?.text);
+            }
+          }
+        }
+      }
+    });
   }
 
   // Keep the long-standing friendly qualified name for unique symbols. Only
@@ -394,7 +452,7 @@ export async function extractSymbols(input: {
     // framework adapters are represented by the same binding extractor, while
     // unresolved/computed names remain candidates instead of becoming joins.
     const channels = extractChannelBindings(input.source, symbols);
-    return { lang, symbols, refs, fileImports, endpoints, grpcClientCalls, identifiers, logSites, channels, parseError: null };
+    return { lang, symbols, refs, fileImports, importBindings, endpoints, grpcClientCalls, identifiers, logSites, channels, parseError: null };
   } finally {
     query?.delete();
     tree?.delete();

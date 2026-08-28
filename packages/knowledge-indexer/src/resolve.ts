@@ -45,6 +45,21 @@ const MAX_BARE_CANDIDATES = 6;
 // same-file (tier 1), exact qualified name (tier 2), or import scoping (tier
 // 3a); we never take a bare-unique or best-guess hit — that is what piled
 // hundreds of edges onto fake `error`/`map`/`get` mega-hubs (P1 precision).
+/** A specifier that cannot name a repo file: a bare package, not a path. */
+export function isExternalPackageSpecifier(specifier: string): boolean {
+  return !specifier.startsWith(".")
+    && !specifier.startsWith("/")
+    && !specifier.startsWith("#"); // Node subpath imports map into the package
+}
+
+/** Test/spec files, by the conventions this codebase actually uses. */
+export function isTestFilePath(filePath: string | null | undefined): boolean {
+  if (!filePath) return false;
+  return /\.(test|spec)\.[^./]+$/i.test(filePath)
+    || /(^|\/)(__tests__|__mocks__)(\/|$)/i.test(filePath)
+    || /(^|\/)e2e(\/|$)/i.test(filePath);
+}
+
 const GENERIC_NAMES = new Set([
   "get", "set", "has", "add", "remove", "delete", "update", "create", "find",
   "list", "map", "filter", "reduce", "forEach", "some", "every", "includes",
@@ -98,6 +113,12 @@ export function resolveRefs(input: {
   // kills the fake mega-hubs that global bare-name best-guessing created.
   currentFile?: string;
   importedFiles?: Set<string>;
+  // localName -> import specifier for this file. `importedFiles` only holds
+  // specifiers that resolved to a repo file, so a bare package name vanishes
+  // and an external hook looks like an unqualified in-repo name. With the
+  // bindings the resolver can tell that the name came from outside the repo
+  // and must not be bound to a same-named local symbol.
+  importBindings?: Map<string, string>;
 }): ResolvedEdges {
   const edges: ParsedEdge[] = [];
   let unresolved = 0;
@@ -208,7 +229,30 @@ export function resolveRefs(input: {
     // would otherwise count as a phantom "candidate", inflating an actually-
     // unique cross-file target into a fake tie (tier 3a/3b would then refuse
     // to resolve, or tier 3c would risk picking the wrong one of the "tie").
-    const candidates = input.lookup.bareNameCandidates(bare).filter((c) => c.id !== src);
+    // An external-package binding means no in-repo definition can be the
+    // target, by construction. Without this the "unique same-repo hit" tier
+    // below binds `useSelector` (from react-redux) to the only same-named
+    // symbol in the repo — a jest.mock stub in a test file — and stores it at
+    // EXTRACTED confidence, so nothing downstream doubts it. That accounted
+    // for 797 of 8,992 call edges in one React repo.
+    //
+    // Deliberately NOT added to unresolvedNames: an external call is
+    // permanently unresolvable, and queueing it would make every pass retry
+    // the same library hooks forever.
+    const externalSpecifier = input.importBindings?.get(bare);
+    if (externalSpecifier !== undefined && isExternalPackageSpecifier(externalSpecifier)) {
+      unresolved += 1;
+      continue;
+    }
+
+    const candidates = input.lookup.bareNameCandidates(bare)
+      .filter((c) => c.id !== src)
+      // Second, independent guard: production code must not resolve to a
+      // symbol defined in a test file. Verified on the real index — the 1,105
+      // such edges there involve 7 symbols, all of them library hooks bound to
+      // mock stubs, and none legitimate. Test callers keep resolving to test
+      // helpers, so the test graph is unaffected.
+      .filter((c) => isTestFilePath(input.currentFile) || !isTestFilePath(c.filePath));
     const generic = GENERIC_NAMES.has(bare);
 
     // tier 3a: narrow to the current file + its imports. An imported symbol is

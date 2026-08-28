@@ -144,7 +144,7 @@ function addParseDuration(
 // reprocess on their next index run — without it, checkpoint-skipped files
 // silently lack the new edges forever.
 export const KNOWLEDGE_PARSER_VERSION = "tree-sitter-wasm-v7-jsx-dynamic-edges";
-export const KNOWLEDGE_RESOLVER_VERSION = "resolver-v4-import-scoped-qualified";
+export const KNOWLEDGE_RESOLVER_VERSION = "resolver-v5-external-import-bindings";
 
 // In-process index task lock: one active task per repo+branch+checkout (§8.3).
 const activeLocks = new Set<string>();
@@ -514,6 +514,13 @@ async function indexFileWithSource(
       refs: extracted.refs, fileSymbols: extracted.symbols,
       fileSymbolIds, lookup: symbolLookup,
       currentFile: p.relPath, importedFiles,
+      // Type-only bindings bind no runtime value, so they can never be the
+      // target of a call and are left out of the map entirely.
+      importBindings: new Map(
+        extracted.importBindings
+          .filter((binding) => !binding.typeOnly)
+          .map((binding) => [binding.localName, binding.specifier]),
+      ),
     });
     // Cap: a file with hundreds of external (node_modules/stdlib) misses would
     // otherwise carry a huge retry list for names that never resolve.
