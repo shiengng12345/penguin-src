@@ -1,6 +1,7 @@
 import type { KnowledgeStore } from "./store.js";
 import { SCHEMA_VERSION } from "./schema.js";
 import { defaultGitReader } from "./query-scope.js";
+import { readStorageFileSizes } from "./storage-report.js";
 
 // The Wiki footer needs a single, never-throwing snapshot of "is what I'm
 // looking at trustworthy": which branch git has checked out, whether the
@@ -28,7 +29,9 @@ export interface RepoStatusPanel {
 }
 
 export interface StatusPanel {
-  db: { connected: true; schemaVersion: number };
+  // sizeBytes/walBytes: three stat() calls, no dbstat — the footer polls this
+  // every 30s and must stay cheap. Null when the file paths can't be read.
+  db: { connected: true; schemaVersion: number; sizeBytes: number | null; walBytes: number | null };
   repos: RepoStatusPanel[];
 }
 
@@ -142,8 +145,17 @@ export function buildStatusPanel(store: KnowledgeStore): StatusPanel {
   const repos = store.db
     .prepare("SELECT id, name, root_path AS rootPath FROM repos ORDER BY name")
     .all() as Array<{ id: string; name: string; rootPath: string }>;
+  let sizeBytes: number | null = null;
+  let walBytes: number | null = null;
+  try {
+    const sizes = readStorageFileSizes(store);
+    sizeBytes = sizes.dbBytes == null ? null : sizes.totalBytes;
+    walBytes = sizes.walBytes;
+  } catch {
+    // never let a stat() failure take down the footer
+  }
   return {
-    db: { connected: true, schemaVersion: SCHEMA_VERSION },
+    db: { connected: true, schemaVersion: SCHEMA_VERSION, sizeBytes, walBytes },
     repos: repos.map((repo) => buildRepoStatusPanel(store, repo)),
   };
 }

@@ -8,6 +8,7 @@ export interface RevisionRetentionPolicy {
 }
 export const DEFAULT_REVISION_RETENTION: RevisionRetentionPolicy = { maxHotFeatureViews: 20, coldAfterDays: 14, deletedBranchRecoveryDays: 30, factGcGraceDays: 7 };
 export interface RevisionCollectionPlan {
+  repoId: string;
   keep: Array<{ snapshotId: string; reasons: string[] }>;
   cool: Array<{ snapshotId: string; reason: string }>;
   collect: Array<{ snapshotId: string; reason: string }>;
@@ -79,10 +80,63 @@ export function planRevisionCollection(store: KnowledgeStore, repoId: string, po
     WHERE b.created_at < ? AND (NOT EXISTS (SELECT 1 FROM source_facts sf WHERE sf.source_blob_id=b.id)
       OR EXISTS (SELECT 1 FROM source_facts sf WHERE sf.source_blob_id=b.id AND sf.repo_id=? AND sf.id IN (${sourceFactParams})))`)
     .all(new Date(Date.now() - policy.factGcGraceDays * 86400000).toISOString(), repoId, ...sourceFactsToCollect) as Array<{ id: number }>).map((row) => row.id);
-  return { keep, cool, collect, factsToCollect, resolutionSetsToCollect, sourceFactsToCollect, sourceBlobsToCollect, policy };
+  return { repoId, keep, cool, collect, factsToCollect, resolutionSetsToCollect, sourceFactsToCollect, sourceBlobsToCollect, policy };
 }
 
-export function applyRevisionCollection(store: KnowledgeStore, plan: RevisionCollectionPlan): RevisionCollectionApplyResult {
+export type RevisionCollectionTrigger = "auto" | "manual" | "maintenance";
+
+// GC history for the Storage page: without a persisted record, every run's
+// outcome evaporated with the process, so "is retention actually working?"
+// was unanswerable from the UI. Recording lives here (not in callers) so the
+// auto-GC after index/rebuild, the manual `revisions gc --apply` verb, and
+// the maintenance capability all land in the same ledger. Recording must
+// never fail collection itself.
+function recordGcRun(
+  store: KnowledgeStore,
+  plan: RevisionCollectionPlan,
+  trigger: RevisionCollectionTrigger,
+  startedAt: string,
+  result: RevisionCollectionApplyResult | null,
+  error: string | null,
+): void {
+  try {
+    store.db.prepare(
+      `INSERT INTO knowledge_gc_runs(repo_id,trigger_kind,started_at,finished_at,cooled_snapshots,collected_snapshots,collected_resolution_sets,collected_facts,collected_source_facts,collected_source_blobs,skipped,error)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+    ).run(
+      plan.repoId ?? null,
+      trigger,
+      startedAt,
+      new Date().toISOString(),
+      result?.cooledSnapshotIds.length ?? 0,
+      result?.collectedSnapshotIds.length ?? 0,
+      result?.collectedResolutionSetIds.length ?? 0,
+      result?.collectedFactIds.length ?? 0,
+      result?.collectedSourceFactIds.length ?? 0,
+      result?.collectedSourceBlobIds.length ?? 0,
+      result?.skipped.length ?? 0,
+      error,
+    );
+  } catch {
+    // A DB opened by an older build may predate knowledge_gc_runs; history
+    // is best-effort observability, never a reason to fail GC.
+  }
+}
+
+export function applyRevisionCollection(store: KnowledgeStore, plan: RevisionCollectionPlan, options: { trigger?: RevisionCollectionTrigger } = {}): RevisionCollectionApplyResult {
+  const startedAt = new Date().toISOString();
+  const trigger = options.trigger ?? "manual";
+  try {
+    const result = applyRevisionCollectionInner(store, plan);
+    recordGcRun(store, plan, trigger, startedAt, result, null);
+    return result;
+  } catch (error) {
+    recordGcRun(store, plan, trigger, startedAt, null, String((error as Error).message ?? error));
+    throw error;
+  }
+}
+
+function applyRevisionCollectionInner(store: KnowledgeStore, plan: RevisionCollectionPlan): RevisionCollectionApplyResult {
   assertSourceCorpusOrphanFree(store);
   const cooledSnapshotIds: string[] = [], collectedSnapshotIds: string[] = [], skipped: RevisionCollectionApplyResult["skipped"] = [];
   const tx = store.db.transaction(() => {

@@ -2,7 +2,7 @@ import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { Worker } from "node:worker_threads";
 import { CAPABILITIES, capabilityHash } from "@penguin/knowledge-contracts";
-import { getSourceHit, compactIndexStatus, buildStatusPanel, SCHEMA_VERSION } from "@penguin/knowledge-core";
+import { getSourceHit, compactIndexStatus, buildStatusPanel, buildStorageReport, runStorageMaintenance, SCHEMA_VERSION } from "@penguin/knowledge-core";
 import { runCli, type CliDeps } from "./index.js";
 import { dispatchQueryFrame, encodeFrame, parseFrame, queryHello } from "./query-protocol.js";
 
@@ -344,6 +344,19 @@ export async function runQueryServer(deps: CliDeps, input = process.stdin, outpu
     if (capabilityId === "knowledge.capabilities") return { schemaVersion: "1", capabilityHash: capabilityHash(CAPABILITIES), capabilities: caches.capabilityRegistry };
     if (capabilityId === "knowledge.index_status") return compactIndexStatus(store);
     if (capabilityId === "knowledge.status_panel") return buildStatusPanel(store);
+    if (capabilityId === "knowledge.storage_report") return buildStorageReport(store);
+    if (capabilityId === "knowledge.maintenance") {
+      const action = (value as { action?: string } | undefined)?.action;
+      if (action !== "collect" && action !== "vacuum") {
+        throw Object.assign(new Error("MAINTENANCE_ACTION_INVALID"), { code: "MAINTENANCE_ACTION_INVALID" });
+      }
+      // Synchronous on purpose: the runtime's dispatch loop is the DB
+      // maintenance queue — a VACUUM briefly stalls concurrent queries
+      // instead of racing them for the write lock.
+      const result = runStorageMaintenance(store, action);
+      caches.invalidate();
+      return result;
+    }
     if (capabilityId === "knowledge.get_hit") {
       const request = value as { snapshotId: string; filePath: string; repoId?: string; startLine?: number; endLine?: number; startByte?: number; contextLines?: number };
       if (!request.snapshotId || !request.filePath) throw Object.assign(new Error("HIT_LOCATOR_REQUIRED"), { code: "HIT_LOCATOR_REQUIRED" });

@@ -947,7 +947,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
         if (!flags.includes("--no-gc")) {
           try {
             const gcPlan = planRevisionCollection(store, report.repoId);
-            const gc = applyRevisionCollection(store, gcPlan);
+            const gc = applyRevisionCollection(store, gcPlan, { trigger: "auto" });
             const collected =
               gc.collectedSnapshotIds.length
               + gc.collectedResolutionSetIds.length

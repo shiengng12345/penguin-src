@@ -82,6 +82,8 @@
 - `semantic_vector_values`
 - `reflection_suggestions`
 - `external_knowledge_sources`
+- `knowledge_gc_runs`
+- `knowledge_size_samples`
 - `source_fts`
 - `source_lexical_fts`
 - `source_path_fts`

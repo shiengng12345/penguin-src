@@ -834,6 +834,28 @@ CREATE TABLE IF NOT EXISTS external_knowledge_sources (
   license_warning TEXT,
   created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS knowledge_gc_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo_id TEXT,
+  trigger_kind TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  finished_at TEXT NOT NULL,
+  cooled_snapshots INTEGER NOT NULL DEFAULT 0,
+  collected_snapshots INTEGER NOT NULL DEFAULT 0,
+  collected_resolution_sets INTEGER NOT NULL DEFAULT 0,
+  collected_facts INTEGER NOT NULL DEFAULT 0,
+  collected_source_facts INTEGER NOT NULL DEFAULT 0,
+  collected_source_blobs INTEGER NOT NULL DEFAULT 0,
+  skipped INTEGER NOT NULL DEFAULT 0,
+  error TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_gc_runs_finished ON knowledge_gc_runs(finished_at);
+CREATE TABLE IF NOT EXISTS knowledge_size_samples (
+  sample_date TEXT PRIMARY KEY,
+  total_bytes INTEGER NOT NULL,
+  wal_bytes INTEGER NOT NULL,
+  recorded_at TEXT NOT NULL
+);
 CREATE INDEX IF NOT EXISTS idx_effective_snapshot_sources_fact ON effective_snapshot_sources(source_fact_id);
 CREATE VIRTUAL TABLE IF NOT EXISTS source_fts USING fts5(content, tokenize='unicode61');
 CREATE VIRTUAL TABLE IF NOT EXISTS source_lexical_fts USING fts5(content, tokenize='unicode61');
@@ -988,6 +1010,14 @@ const OPTIONAL_MAINTENANCE_OBJECT_NAMES = new Set([
   "idx_fts_symbol_rows_node",
   "fts_identifier_rows",
   "idx_fts_identifier_rows_scope",
+  // Storage observability (GC history + daily size samples): read paths in
+  // storage-report.ts degrade to null/empty when these are absent, and every
+  // write to them is best-effort — so a pre-existing current DB must stay
+  // readable (resident runtime, read verbs) until the next write command's
+  // DDL pass creates them.
+  "knowledge_gc_runs",
+  "idx_knowledge_gc_runs_finished",
+  "knowledge_size_samples",
 ]);
 
 /** Tables are derived from the same DDL used by openDatabase. */
