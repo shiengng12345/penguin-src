@@ -29,6 +29,11 @@ const flag = (name, fallback) => {
   return at >= 0 && args[at + 1] && !args[at + 1].startsWith("--") ? args[at + 1] : fallback;
 };
 const asJson = args.includes("--json");
+// --out <dir> writes TWO files: questions (safe to hand an AI) and the answer
+// key. They are separate on purpose — a single file containing both means the
+// AI reads the answers before it answers, and "please ignore that section" is
+// not a control.
+const outDir = flag("out", null);
 const wanted = flag("repo", null);
 const count = Number(flag("count", 12));
 
@@ -181,6 +186,87 @@ const selected = questions.slice(0, count);
 
 if (asJson) {
   console.log(JSON.stringify({ repo: repo.name, rootPath: repo.rootPath, questions: selected }, null, 2));
+  process.exit(0);
+}
+
+if (outDir) {
+  const { mkdirSync, writeFileSync } = await import("node:fs");
+  mkdirSync(outDir, { recursive: true });
+  const today = new Date().toISOString().slice(0, 10);
+
+  const quiz = [
+    `# Penguin index-quality quiz — questions`,
+    ``,
+    `> Self-contained: reading this is enough to start.`,
+    `> Repo: \`${repo.name}\` (\`${repo.rootPath}\`) · ${selected.length} questions · ${today}`,
+    `> The answers are deliberately NOT in this file (see index-quality-answers.md),`,
+    `> so you cannot check yourself — answer honestly.`,
+    ``,
+    `## Your task`,
+    ``,
+    `Measure the quality of a local code index (Penguin). You are not changing code.`,
+    ``,
+    `**Rules**`,
+    ``,
+    `1. Answer using Penguin's MCP tools only, \`knowledge_explore\` first. No grep, no`,
+    `   reading source files, no filling gaps from general knowledge — that would`,
+    `   measure something other than the index.`,
+    `2. Give the COMPLETE list per answer, with \`file:line\`. No examples-only, no "etc".`,
+    `3. **If the tools cannot answer, say so.** This matters most: an honest "not in`,
+    `   the index" is worth more than a lucky guess, because a guess hides the gap`,
+    `   that is exactly what I am measuring. Leave it blank rather than fill it in.`,
+    `4. If a tool reports \`freshness=stale\`, pass that on — do not present stale data`,
+    `   as current.`,
+    `5. Answer each question independently; do not infer later answers from earlier patterns.`,
+    ``,
+    `**Output format** (one block per question)`,
+    ``,
+    "```",
+    `## Q<n>`,
+    `answer:`,
+    `- path/to/file.ts:123 — symbolName`,
+    `- ...`,
+    `tool used: knowledge_explore("...")`,
+    `confidence: high / medium / low — if low, say what the index was missing`,
+    "```",
+    ``,
+    `---`,
+  ];
+  selected.forEach((q, i) => {
+    quiz.push(``, `## Q${i + 1} · ${q.kind}`, ``, q.question, ``);
+  });
+  writeFileSync(join(outDir, "index-quality-quiz.md"), `${quiz.join("\n")}\n`);
+
+  const key = [
+    `# Penguin index-quality quiz — answer key`,
+    ``,
+    `> For comparison only. **Do not hand this to the AI** (questions live in`,
+    `> index-quality-quiz.md). Repo: \`${repo.name}\` · ${today}`,
+    ``,
+    `## How to judge`,
+    ``,
+    `Two different failures, kept apart:`,
+    ``,
+    `| Comparison | Conclusion |`,
+    `|---|---|`,
+    `| AI answer != **index answer** | The agent did not use the tools properly. Its problem, not the index's. |`,
+    `| **index answer** != **verify output** | A real index defect (missed or phantom edge). This is the one worth fixing. |`,
+    ``,
+    `Reading verify output: extra ripgrep hits are often same-name symbols in other`,
+    `scopes. Read them before calling anything a missed edge.`,
+    ``,
+    `---`,
+  ];
+  selected.forEach((q, i) => {
+    key.push(``, `## Q${i + 1} · ${q.kind}`, ``, `**Question**: ${q.question}`, ``,
+      `**Index answer** (${q.expected.length})`, ``);
+    for (const line of q.expected) key.push(`- \`${line}\``);
+    key.push(``, `**Independent verification**`, ``, "```bash", q.verify, "```", ``,
+      `**What to look for**: ${q.checks}`);
+  });
+  writeFileSync(join(outDir, "index-quality-answers.md"), `${key.join("\n")}\n`);
+  console.log(`wrote ${join(outDir, "index-quality-quiz.md")} (give the AI this path)`);
+  console.log(`wrote ${join(outDir, "index-quality-answers.md")} (keep for yourself)`);
   process.exit(0);
 }
 
