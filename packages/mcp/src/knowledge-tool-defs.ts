@@ -180,7 +180,9 @@ export const KNOWLEDGE_TOOL_DEFS = [
       "when `truncated` is false), alongside callers/calls, linear call path, transitive blast radius, tests, routes, edge provenance/confidence, " +
       "freshness, and queryDiagnostics. Fuzzy input is fine: an inexact target falls back to search — a single hit resolves automatically, several " +
       "come back as `ambiguousCandidates` to pick from (retry with the nodeId). Anything dropped for the line budget is named in `sourcesOmitted`. " +
-      "Inspect queryDiagnostics before treating an empty relation as authoritative. Uses the same core result as `penguin explore`.",
+      "Inspect queryDiagnostics before treating an empty relation as authoritative. Uses the same core result as `penguin explore`. " +
+      "Route elsewhere only when this cannot answer: knowledge_search for text/regex across the corpus when you have no symbol name, " +
+      "knowledge_get_hit to expand one search hit, get_architecture for a repo-level overview, index_status when you suspect the index is stale.",
     inputSchema: {
       type: "object",
       required: ["target"],
@@ -345,6 +347,68 @@ for (const tool of KNOWLEDGE_TOOL_DEFS) {
   const capabilityId = (tool as { "x-penguin-capability-id"?: string })["x-penguin-capability-id"];
   if (capabilityId) (tool as { inputSchema: unknown }).inputSchema = canonicalInputSchema(capabilityId);
 }
+
+// ---------------------------------------------------------------------------
+// Listing surface
+//
+// KNOWLEDGE_TOOL_DEFS carries EVERY canonical capability (93 of them are
+// auto-added placeholders above) so parity checks and the dispatcher can see
+// the whole manifest. Publishing all 119 to tools/list was actively harmful:
+// an agent picking a tool had to scan a wall of mostly-unimplemented entries,
+// which is exactly why "call knowledge_explore first" never stuck.
+//
+// tools/list therefore advertises only the hand-written tools, ordered so the
+// single entry point comes first. Nothing is removed: every placeholder stays
+// callable by name (isKnowledgeTool is unchanged) and knowledge_capabilities
+// still returns the full manifest with registration status.
+// ---------------------------------------------------------------------------
+
+// Ordered tiers. Tier 0 is the entry point; later tiers are specialised tools
+// an agent reaches for only after explore, and are labelled as such.
+const TOOL_TIERS: ReadonlyArray<readonly [prefix: string, names: readonly string[]]> = [
+  ["", ["knowledge_explore"]],
+  ["", ["knowledge_search", "knowledge_get_hit", "get_node", "get_architecture", "index_status"]],
+  ["[specialised — knowledge_explore usually answers this first] ", [
+    "explore_graph",
+    "knowledge_graph_query",
+    "find_dead_code",
+    "find_communities",
+    "analyze_repository",
+    "package_dependencies",
+    "dependency_path",
+    "compare_branches",
+    "status_panel",
+  ]],
+  ["[occasional — writes, docs, or maintenance] ", [
+    "write_note",
+    "suggest_links",
+    "list_suggestions",
+    "accept_suggestion",
+    "reject_suggestion",
+    "api_doc_generate",
+    "api_doc_list",
+    "api_doc_show",
+    "api_doc_diff",
+    "set_master_branch",
+    "knowledge_capabilities",
+  ]],
+];
+
+const TIER_BY_NAME = new Map<string, { order: number; prefix: string }>();
+for (const [tier, [prefix, names]] of TOOL_TIERS.entries()) {
+  for (const [index, name] of names.entries()) {
+    TIER_BY_NAME.set(name, { order: tier * 1_000 + index, prefix });
+  }
+}
+
+/** Tools advertised through tools/list — the hand-written set, tier-ordered. */
+export const MCP_LISTED_TOOL_DEFS = KNOWLEDGE_TOOL_DEFS
+  .filter((tool) => TIER_BY_NAME.has(tool.name))
+  .sort((a, b) => TIER_BY_NAME.get(a.name)!.order - TIER_BY_NAME.get(b.name)!.order)
+  .map((tool) => {
+    const prefix = TIER_BY_NAME.get(tool.name)!.prefix;
+    return prefix ? { ...tool, description: `${prefix}${tool.description}` } : tool;
+  });
 
 // Kept as a separate pure module for release-bundle startup, but accepted by
 // the same lazy knowledge dispatcher.

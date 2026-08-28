@@ -603,3 +603,73 @@ test("write_note link_pages records a ledger event; refuses sensitive", () => {
   assert.match(refused.error, /sensitive/);
   store.close();
 });
+
+test("tools/list advertises a tiered, explore-first surface without hiding any capability", async () => {
+  const { MCP_LISTED_TOOL_DEFS } = await loadTools();
+  const listed = MCP_LISTED_TOOL_DEFS.map((tool) => tool.name);
+
+  // The entry point is first, so an agent scanning the list top-down starts
+  // where the routing advice lives.
+  assert.equal(listed[0], "knowledge_explore");
+  assert.match(MCP_LISTED_TOOL_DEFS[0].description, /Default FIRST call/);
+  assert.match(MCP_LISTED_TOOL_DEFS[0].description, /knowledge_search for text\/regex/);
+
+  // 119 defs exist (93 are auto-added canonical placeholders); the listing
+  // surface is only the hand-written tools — that wall of mostly-
+  // unimplemented entries is what drowned the entry point.
+  assert.ok(listed.length < 30, `listed ${listed.length} tools`);
+  assert.ok(KNOWLEDGE_TOOL_DEFS.length > 100, "full manifest still carries every capability");
+
+  // Nothing is removed: every listed tool stays dispatchable, and so do the
+  // placeholders that are no longer advertised.
+  for (const name of listed) assert.ok(isKnowledgeTool(name), name);
+  assert.ok(isKnowledgeTool("knowledge_onboarding_generate"), "unlisted capability still callable");
+
+  // Tier labelling: core tools carry no prefix, later tiers announce
+  // themselves so the agent knows they are not the default move.
+  const byName = new Map(MCP_LISTED_TOOL_DEFS.map((tool) => [tool.name, tool.description]));
+  assert.doesNotMatch(byName.get("knowledge_search"), /^\[/);
+  assert.match(byName.get("find_dead_code"), /^\[specialised/);
+  assert.match(byName.get("api_doc_list"), /^\[occasional/);
+
+  // Ordering is stable and tier-grouped, not source-order.
+  assert.ok(listed.indexOf("knowledge_search") < listed.indexOf("find_dead_code"));
+  assert.ok(listed.indexOf("find_dead_code") < listed.indexOf("api_doc_list"));
+
+  // Descriptions are decorated for the listing only — the shared defs (used
+  // by parity checks and the dispatcher) keep their original text.
+  const shared = KNOWLEDGE_TOOL_DEFS.find((tool) => tool.name === "find_dead_code");
+  assert.doesNotMatch(shared.description, /^\[specialised/);
+});
+
+test("the server's tools/list keeps explore first instead of alphabetising it away", async () => {
+  const { spawn } = await import("node:child_process");
+  const server = spawn(process.execPath, ["packages/mcp/dist/index.js"], {
+    stdio: ["pipe", "pipe", "ignore"],
+  });
+  const done = new Promise((resolve, reject) => {
+    let buffer = "";
+    server.stdout.on("data", (chunk) => {
+      buffer += chunk.toString();
+      for (const line of buffer.split("\n")) {
+        try {
+          const frame = JSON.parse(line);
+          if (frame.id === 2) resolve(frame.result.tools);
+        } catch { /* partial frame */ }
+      }
+    });
+    server.on("error", reject);
+    setTimeout(() => reject(new Error("tools/list timed out")), 20_000).unref?.();
+  });
+  server.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "t", version: "1" } } })}\n`);
+  server.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} })}\n`);
+  const tools = await done;
+  server.kill();
+
+  const names = tools.map((tool) => tool.name);
+  assert.equal(names[0], "knowledge_explore", "entry point leads the list");
+  assert.ok(names.length < 60, `advertised ${names.length} tools`);
+  // Non-knowledge tools still sort alphabetically after the tiered block.
+  const tail = names.slice(names.indexOf("knowledge_capabilities") + 1);
+  assert.deepEqual(tail, [...tail].sort(), "remaining tools stay alphabetical");
+});
