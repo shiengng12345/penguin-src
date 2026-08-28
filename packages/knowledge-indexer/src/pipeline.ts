@@ -144,7 +144,7 @@ function addParseDuration(
 // reprocess on their next index run — without it, checkpoint-skipped files
 // silently lack the new edges forever.
 export const KNOWLEDGE_PARSER_VERSION = "tree-sitter-wasm-v8-wrapper-allowlist";
-export const KNOWLEDGE_RESOLVER_VERSION = "resolver-v5-external-import-bindings";
+export const KNOWLEDGE_RESOLVER_VERSION = "resolver-v6-external-call-facts";
 
 // In-process index task lock: one active task per repo+branch+checkout (§8.3).
 const activeLocks = new Set<string>();
@@ -525,6 +525,30 @@ async function indexFileWithSource(
     // Cap: a file with hundreds of external (node_modules/stdlib) misses would
     // otherwise carry a huge retry list for names that never resolve.
     retryNames = [...new Set(resolved.unresolvedNames)].slice(0, 100);
+    // Persist the external-call facts for this file, replacing its previous
+    // rows in the SAME transaction as the file's edges — a separate write
+    // would leave stale rows behind whenever a file is re-indexed.
+    store.db.prepare("DELETE FROM external_calls WHERE repo_id=? AND branch_id=? AND file_path=?")
+      .run(p.repoId, p.branchId, p.relPath);
+    if (resolved.externalCalls.length > 0) {
+      const insertExternal = store.db.prepare(
+        `INSERT INTO external_calls(repo_id,branch_id,file_path,src_node_id,callee,receiver,specifier,reason,line)
+         VALUES (?,?,?,?,?,?,?,?,?)`,
+      );
+      for (const fact of resolved.externalCalls) {
+        insertExternal.run(
+          p.repoId,
+          p.branchId,
+          p.relPath,
+          fact.enclosingQualifiedName ? fileSymbolIds.get(fact.enclosingQualifiedName) ?? null : null,
+          fact.callee,
+          fact.receiver,
+          fact.specifier,
+          fact.reason,
+          fact.line,
+        );
+      }
+    }
     addParseDuration(p.timings, "referenceResolutionMs", transactionStepStartedAt);
     transactionStepStartedAt = performance.now();
     const structural: ParsedEdge[] = [];
@@ -824,13 +848,24 @@ export type IndexProgressEvent =
 
 export function resolveIndexMode(
   mode: "rebuild" | "incremental",
-  prior: { parser_version?: string | null; indexed_schema_version?: number | null } | undefined,
+  prior: {
+    parser_version?: string | null;
+    resolver_version?: string | null;
+    indexed_schema_version?: number | null;
+  } | undefined,
   parserVersion: string,
   schemaVersion: number,
+  resolverVersion?: string,
 ): "rebuild" | "incremental" {
   if (mode === "rebuild") return "rebuild";
   if (!prior) return "incremental";
   if (prior.parser_version !== parserVersion) return "rebuild";
+  // A resolver-only fix produces different EDGES from the same parse, so it
+  // needs the same rebuild as a parser change. Without this an existing index
+  // silently keeps the old edges: the fix ships, every test passes, and the
+  // real DB never changes. A branch indexed before the column existed reads
+  // null and rebuilds once, which is the safe direction.
+  if (resolverVersion !== undefined && prior.resolver_version !== resolverVersion) return "rebuild";
   if ((prior.indexed_schema_version ?? 0) !== schemaVersion) return "rebuild";
   return "incremental";
 }
@@ -860,7 +895,7 @@ export async function indexRepo(input: {
   // index SUCCEEDS (validation V1 — a failed run must not look trustworthy).
   // Existing branches keep their current status during the run.
   const prior = store.getBranch(repoId, git.branch);
-  const effectiveMode = resolveIndexMode(mode, prior ?? undefined, KNOWLEDGE_PARSER_VERSION, SCHEMA_VERSION);
+  const effectiveMode = resolveIndexMode(mode, prior ?? undefined, KNOWLEDGE_PARSER_VERSION, SCHEMA_VERSION, KNOWLEDGE_RESOLVER_VERSION);
   const branchId = store.registerBranch({
     repoId, name: git.branch, headCommit: git.commit, checkoutPath: git.checkoutPath,
     status: (prior?.status as "live" | "snapshot" | "gone" | undefined) ?? "snapshot",
@@ -1252,8 +1287,9 @@ export async function indexRepo(input: {
       }
     }
     // Parsing is over; release the workers before the remaining stages so a
-    // long index does not sit on idle threads (they are unref'd, so a leaked
-    // pool would not block exit — this is hygiene, not a correctness fix).
+    // long index does not sit on idle threads. Idle workers are unref'd, so a
+    // leaked pool cannot block exit either — but a busy one is ref'd, which is
+    // what stops Node from exiting mid-parse.
     if (parsePool) await parsePool.close();
     prefetched = new Map();
     stageDone(
@@ -1616,6 +1652,7 @@ export async function indexRepo(input: {
       worktreeFingerprint: report.worktreeFingerprint,
       dirtyFiles: report.dirtyFiles,
       parserVersion: report.parserVersion,
+      resolverVersion: KNOWLEDGE_RESOLVER_VERSION,
       schemaVersion: report.schemaVersion,
       staleReason: report.staleReason,
     });

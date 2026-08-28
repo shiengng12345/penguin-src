@@ -17,6 +17,25 @@ export interface ResolvedEdges {
   // signature (defining file not indexed yet). The pipeline retries these
   // files in a second pass once the full symbol table exists.
   unresolvedNames: string[];
+  // Calls that provably reach OUTSIDE the repo, so no in-repo edge can ever
+  // exist for them. Dropping the edge is correct; dropping the FACT is not —
+  // a caller was handed a tidy 10-item callee list for a method whose two
+  // most important calls went to an external SDK, with confidence "high" and
+  // no gap reported. Recording them turns "unknown" from silence into data.
+  externalCalls: ExternalCallFact[];
+}
+
+export interface ExternalCallFact {
+  /** The invoked name (`getProposalData`). */
+  callee: string;
+  /** The local binding it was reached through (`proposalSDK`). */
+  receiver: string | null;
+  /** The import specifier that binding came from (`@fpms/proposal-sdk`). */
+  specifier: string;
+  reason: "external-package";
+  line: number;
+  /** Qualified name of the enclosing symbol, so the fact can be attributed. */
+  enclosingQualifiedName: string | null;
 }
 
 function bareOf(qualifiedName: string): string {
@@ -123,6 +142,7 @@ export function resolveRefs(input: {
   const edges: ParsedEdge[] = [];
   let unresolved = 0;
   const unresolvedNames: string[] = [];
+  const externalCalls: ExternalCallFact[] = [];
 
   const fileByBare = new Map<string, ExtractedSymbol[]>();
   for (const s of input.fileSymbols) {
@@ -241,6 +261,41 @@ export function resolveRefs(input: {
     // the same library hooks forever.
     const externalSpecifier = input.importBindings?.get(bare);
     if (externalSpecifier !== undefined && isExternalPackageSpecifier(externalSpecifier)) {
+      externalCalls.push({
+        callee: bare,
+        receiver: null,
+        specifier: externalSpecifier,
+        reason: "external-package",
+        line: ref.startLine,
+        enclosingQualifiedName: ref.enclosingQualifiedName ?? null,
+      });
+      unresolved += 1;
+      continue;
+    }
+
+    // Member calls on an imported namespace (`proposalSDK.createProposal`)
+    // never matched the check above: it looks up the METHOD name, while the
+    // binding is on the RECEIVER. That is why the SDK calls that carry a
+    // method's core business logic disappeared without a trace.
+    const receiverRoot = ref.memberReceiver?.trim().split(/[.[(]/, 1)[0];
+    const receiverSpecifier = receiverRoot ? input.importBindings?.get(receiverRoot) : undefined;
+    if (
+      ref.kind === "call"
+      && receiverRoot
+      && receiverSpecifier !== undefined
+      && isExternalPackageSpecifier(receiverSpecifier)
+      // A same-file symbol of that name means the receiver is shadowed
+      // locally; local resolution must keep priority over the external guess.
+      && !input.fileSymbolIds.has(receiverRoot)
+    ) {
+      externalCalls.push({
+        callee: bare,
+        receiver: receiverRoot,
+        specifier: receiverSpecifier,
+        reason: "external-package",
+        line: ref.startLine,
+        enclosingQualifiedName: ref.enclosingQualifiedName ?? null,
+      });
       unresolved += 1;
       continue;
     }
@@ -319,5 +374,5 @@ export function resolveRefs(input: {
     }
   }
 
-  return { edges, unresolved, unresolvedNames };
+  return { edges, unresolved, unresolvedNames, externalCalls };
 }

@@ -126,6 +126,7 @@ export interface BranchRow {
   default_branch?: number;
   base_branch_name?: string | null;
   parser_version: string | null;
+  resolver_version: string | null;
   indexed_schema_version?: number | null;
   current_snapshot_id?: string | null;
 }
@@ -414,6 +415,7 @@ export class KnowledgeStore {
     worktreeFingerprint?: string | null;
     dirtyFiles?: string[];
     parserVersion?: string | null;
+    resolverVersion?: string | null;
     schemaVersion?: number | null;
     staleReason?: string | null;
   }): void {
@@ -429,6 +431,7 @@ export class KnowledgeStore {
              indexed_worktree_fingerprint = @worktreeFingerprint,
              indexed_dirty_files = @dirtyFiles,
              parser_version = @parserVersion,
+             resolver_version = @resolverVersion,
              indexed_schema_version = @schemaVersion,
              stale_reason = @staleReason
          WHERE id = @branchId`,
@@ -441,6 +444,7 @@ export class KnowledgeStore {
         worktreeFingerprint: p.worktreeFingerprint ?? null,
         dirtyFiles: JSON.stringify(p.dirtyFiles ?? []),
         parserVersion: p.parserVersion ?? null,
+        resolverVersion: p.resolverVersion ?? null,
         schemaVersion: p.schemaVersion ?? null,
         staleReason: p.staleReason ?? null,
         at: new Date().toISOString(),

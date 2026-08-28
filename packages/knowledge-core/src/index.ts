@@ -179,6 +179,7 @@ export {
   type FlowResult,
   type FlowStep,
   type ContextPack,
+  type ExternalCallGroup,
   type ContextBrief,
   type ExplorePack,
   type GraphMode,

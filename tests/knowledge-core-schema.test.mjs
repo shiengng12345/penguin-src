@@ -116,3 +116,35 @@ test("opening a DB from a newer build fails loud instead of silently downgrading
   first.close();
   assert.throws(() => openDatabase(path), /newer than this build/);
 });
+
+// A column added to the branches DDL but not to isSchemaCurrent's required
+// list makes the whole migration block unreachable: openDatabase declares the
+// schema current, the ALTER never runs, and existing databases silently keep
+// the old shape. That happened with resolver_version — this pins the general
+// case by dropping each migrated column and checking it comes back.
+test("reopening a database restores any dropped branches column", () => {
+  const path = tempDbPath();
+  const migrated = [
+    "pinned",
+    "indexed_worktree_state",
+    "indexed_worktree_fingerprint",
+    "indexed_dirty_files",
+    "parser_version",
+    "resolver_version",
+    "indexed_schema_version",
+    "stale_reason",
+  ];
+  for (const column of migrated) {
+    const before = openDatabase(path);
+    before.exec(`ALTER TABLE branches DROP COLUMN ${column}`);
+    before.close();
+
+    const after = openDatabase(path);
+    const columns = after.prepare("PRAGMA table_info(branches)").all().map((c) => c.name);
+    after.close();
+    assert.ok(
+      columns.includes(column),
+      `${column} was dropped and openDatabase did not restore it — it is missing from isSchemaCurrent's required list, so the migration block is skipped`,
+    );
+  }
+});

@@ -1,4 +1,4 @@
-import type { CompactIndexStatus, ExplorePack } from "@penguin/knowledge-core";
+import type { CompactIndexStatus, ExplorePack, ExternalCallGroup } from "@penguin/knowledge-core";
 import { createHash } from "node:crypto";
 import { dirname, join } from "node:path";
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
@@ -290,6 +290,8 @@ export function renderExploreHookCompact(
     lines.push(`call path: ${pack.callPath.slice(0, 8).map((step) => step.title).join(" → ")}`);
   }
   lines.push(`callers(${pack.callers.length}): ${briefTitles(pack.callers, 5)}; calls(${pack.calls.length}): ${briefTitles(pack.calls, 5)}`);
+  const externalLine = externalCallsLine(pack);
+  if (externalLine) lines.push(externalLine);
   const uiRelations = [
     ...(pack.renderedBy ?? []).map((item) => `rendered-by:${item.title}`),
     ...(pack.renders ?? []).map((item) => `renders:${item.title}`),
@@ -314,6 +316,20 @@ export function renderExploreHookCompact(
   return truncate(lines.join("\n"), maxChars);
 }
 
+/** One compact line naming the packages the calls list could not follow into.
+ * Sits directly under the callers/calls counts because that is the number it
+ * corrects — in a 2KB budget a footer note gets cut, and the count alone reads
+ * as the whole truth. */
+function externalCallsLine(pack: { externalCalls?: ExternalCallGroup[] }): string | null {
+  const groups = pack.externalCalls ?? [];
+  if (groups.length === 0) return null;
+  const count = groups.reduce((sum, group) => sum + group.callees.length, 0);
+  const detail = groups
+    .map((group) => `${group.specifier}(${group.callees.map((c) => c.callee).join(",")})`)
+    .join("; ");
+  return `+${count} unresolved external call(s) — calls list is incomplete: ${truncate(detail, 240)}`;
+}
+
 export function renderExploreHook(
   target: string,
   pack: ExplorePack,
@@ -332,6 +348,8 @@ export function renderExploreHook(
     ...(pack.invokesDynamic ?? []).map((item) => `invokes-dynamic:${item.title}`),
   ];
   if (uiRelations.length > 0) lines.push(`ui relations: ${uiRelations.join(", ")}`);
+  const externalLine = externalCallsLine(pack);
+  if (externalLine) lines.push(externalLine);
   if (pack.diagnostics.length > 0) lines.push(`diagnostics: ${pack.diagnostics.join("; ")}`);
   if (pack.ambiguousCandidates?.length) {
     lines.push(

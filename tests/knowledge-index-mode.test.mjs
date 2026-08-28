@@ -10,3 +10,26 @@ test("schema bump forces rebuild even when parser version matches", () => {
   // No prior branch row (first index) → incremental is fine; pipeline treats it as fresh anyway.
   assert.equal(resolveIndexMode("incremental", undefined, "p1", 14), "incremental");
 });
+
+// A resolver-only fix changes the EDGES derived from an unchanged parse. This
+// rule was missing, so `penguin index` reported "0 parsed, 3333 skipped" and
+// the fix never reached the real database — every test passed regardless.
+test("resolver bump forces rebuild even when parser and schema match", () => {
+  const at = (resolver) => ({ parser_version: "p1", resolver_version: resolver, indexed_schema_version: 14 });
+  assert.equal(resolveIndexMode("incremental", at("r1"), "p1", 14, "r2"), "rebuild");
+  assert.equal(resolveIndexMode("incremental", at("r2"), "p1", 14, "r2"), "incremental");
+});
+
+test("a branch indexed before the column existed rebuilds once", () => {
+  // resolver_version reads null on such a branch. Rebuilding is the safe
+  // direction: its edges came from an unknown resolver.
+  const prior = { parser_version: "p1", resolver_version: null, indexed_schema_version: 14 };
+  assert.equal(resolveIndexMode("incremental", prior, "p1", 14, "r2"), "rebuild");
+});
+
+test("omitting the resolver version leaves the decision unchanged", () => {
+  // Callers that don't pass it (older embedders) must not start rebuilding on
+  // every run just because the branch row has no resolver recorded.
+  const prior = { parser_version: "p1", resolver_version: null, indexed_schema_version: 14 };
+  assert.equal(resolveIndexMode("incremental", prior, "p1", 14), "incremental");
+});

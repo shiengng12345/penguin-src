@@ -1465,6 +1465,11 @@ export interface ContextBrief {
   nodeType: string;
 }
 
+export interface ExternalCallGroup {
+  specifier: string;
+  callees: Array<{ callee: string; receiver: string | null; line: number }>;
+}
+
 export interface ContextPack {
   target: string;
   trust: TrustEnvelope | null;
@@ -1497,6 +1502,16 @@ export interface ContextPack {
   notes: ContextBrief[]; // notes linked to the focus
   importers: ContextBrief[]; // files importing the focus's file
   signals: string[]; // risk/attention heuristics
+  // Calls that provably leave the repo, so no in-repo edge can exist. Recorded
+  // rather than dropped: a caller once got a tidy 10-item callee list for a
+  // method whose two most important calls went to an external SDK, at "high"
+  // confidence with no gap reported. Grouped by specifier so a component
+  // calling 30 library hooks does not produce 30 entries.
+  externalCalls: ExternalCallGroup[];
+  // "Are the lists above complete?" — a different question from confidence,
+  // which says how much to trust the edges that ARE here. Both are needed:
+  // high confidence in an incomplete list is exactly what misled that caller.
+  completeness: { status: "complete" | "partial"; externalCallCount: number };
   // Relations whose real size exceeded `limit`, named by their field above
   // (e.g. ["calls","callers"]). A list at exactly `limit` is otherwise
   // indistinguishable from a complete one, so a consumer cannot tell whether
@@ -1537,6 +1552,7 @@ export function buildContextPack(
     invokedDynamicallyBy: [], invokesDynamic: [], remoteCalls: [], invokedBy: [],
     referencedBy: [], usesTypes: [],
     routes: [], tests: [], errors: [], envs: [], notes: [], importers: [], signals: [],
+    externalCalls: [], completeness: { status: "complete", externalCallCount: 0 },
     truncated: [],
     ambiguous: null, assemblyError: null,
   };
@@ -1583,6 +1599,30 @@ function buildContextPackBody(
   // `calls` would reason as if it had seen everything. Every relation now
   // fetches limit+1 rows and names itself in `truncated` when the extra row
   // exists — the same contract `sourcesOmitted` already gives source blocks.
+  // External-call facts for this focus symbol, grouped by the package they
+  // came from. Falls back to an empty list on an index written before the
+  // table existed, so an old DB degrades quietly instead of throwing.
+  const externalCallRows = (() => {
+    try {
+      return store.db.prepare(
+        `SELECT callee, receiver, specifier, line FROM external_calls
+          WHERE src_node_id=? ORDER BY line`,
+      ).all(focusId) as Array<{ callee: string; receiver: string | null; specifier: string; line: number }>;
+    } catch {
+      return [];
+    }
+  })();
+  const externalCallCount = externalCallRows.length;
+  const externalCallGroups: ExternalCallGroup[] = [...externalCallRows
+    .reduce((groups, row) => {
+      const entry = groups.get(row.specifier) ?? [];
+      entry.push({ callee: row.callee, receiver: row.receiver, line: row.line });
+      groups.set(row.specifier, entry);
+      return groups;
+    }, new Map<string, ExternalCallGroup["callees"]>())]
+    .map(([specifier, callees]) => ({ specifier, callees }))
+    .sort((a, b) => a.specifier.localeCompare(b.specifier));
+
   const truncatedRelations = new Set<string>();
   const capped = (relation: string, rows: { id: string }[]) => {
     if (rows.length > limit) truncatedRelations.add(relation);
@@ -1713,6 +1753,11 @@ function buildContextPackBody(
     notes,
     importers,
     signals,
+    externalCalls: externalCallGroups,
+    completeness: {
+      status: externalCallCount > 0 ? "partial" : "complete",
+      externalCallCount,
+    },
     truncated: [...truncatedRelations].sort(),
     ambiguous: null,
     assemblyError: null,
@@ -1765,6 +1810,21 @@ export function renderContextPackMarkdown(pack: ContextPack): string {
   }
   list("Called by", pack.callers);
   list("Calls", pack.calls);
+  // Right after "Calls", because that is the list these facts qualify — a
+  // reader who has just counted 10 callees needs to learn here, not in a
+  // footer, that two more went into an SDK.
+  if (pack.externalCalls.length) {
+    L.push(`## Calls into external packages (not resolvable to repo symbols)`);
+    for (const g of pack.externalCalls) {
+      const callees = g.callees
+        .map((c) => `\`${c.receiver ? `${c.receiver}.` : ""}${c.callee}\` (line ${c.line})`)
+        .join(", ");
+      L.push(`- **${g.specifier}**: ${callees}`);
+    }
+    L.push("");
+    L.push(`_The "Calls" list above is incomplete: ${pack.completeness.externalCallCount} call(s) leave this repo._`);
+    L.push("");
+  }
   list("Calls remote services (gRPC)", pack.remoteCalls);
   list("Invoked by other services (gRPC)", pack.invokedBy);
   list("Used as a type by", pack.referencedBy);
@@ -1780,6 +1840,11 @@ export function renderContextPackMarkdown(pack: ContextPack): string {
   if (pack.envs.length) {
     L.push(`### Env vars used`);
     for (const e of pack.envs) L.push(`- ${e}`);
+    L.push("");
+  }
+  if (pack.truncated.length) {
+    L.push(`### ⚠ Lists cut off by the result limit`);
+    L.push(`Raise \`limit\` to see the rest of: ${pack.truncated.join(", ")}.`);
     L.push("");
   }
   return L.join("\n");
@@ -2317,6 +2382,9 @@ export interface ExplorePack {
   sourcesOmitted: string[];
   /** Relations whose real size exceeded the limit, named by field. */
   truncated: string[];
+  /** Calls that leave the repo, grouped by package — the calls list's gaps. */
+  externalCalls: ExternalCallGroup[];
+  completeness: { status: "complete" | "partial"; externalCallCount: number };
   // Structured counterpart to the "ambiguous target: N matches" diagnostics
   // string — callers need the actual candidates (nodeId/filePath/branch) to
   // disambiguate and retry directly, not just a count to guess against.
@@ -2398,9 +2466,21 @@ export function buildExplorePack(
     .filter((row) => row.method === "INFERRED")
     .reduce((sum, row) => sum + row.count, 0);
   const minimum = rows.length > 0 ? Math.min(...rows.map((row) => row.confidence)) : 0;
-  const level = inferredEdges === 0 ? "high" : minimum >= 0.5 ? "mixed" : "low";
+  // Unresolvable external calls cap the level below "high". Strictly speaking
+  // confidence measures the edges that ARE here (precision) and completeness
+  // is a separate axis, which `completeness` now reports — but a caller who
+  // sees "high" stops reading, and that is exactly how a 10-item callee list
+  // missing its two most important calls got believed. The cap is the signal
+  // that actually gets seen; `completeness` carries the precise story.
+  const externalCallCount = effectiveContext.completeness?.externalCallCount ?? 0;
+  const level = externalCallCount > 0
+    ? (inferredEdges === 0 ? "mixed" : "low")
+    : inferredEdges === 0 ? "high" : minimum >= 0.5 ? "mixed" : "low";
   const diagnostics = [
     ...context.signals,
+    ...(externalCallCount > 0
+      ? [`${externalCallCount} call(s) go to external packages and cannot be resolved to repo symbols — see externalCalls; the calls list is incomplete`]
+      : []),
     ...(implementationContext?.signals ?? []),
     ...(context.ambiguous ? [`ambiguous target: ${context.ambiguous.length} matches`] : []),
     ...(searchCandidates ? [`ambiguous target: ${searchCandidates.length} search matches`] : []),
@@ -2497,6 +2577,8 @@ export function buildExplorePack(
     // Relations cut at the limit, named. Explore is what agents call, so the
     // honesty contract has to survive the hop from ContextPack to here.
     truncated: effectiveContext.truncated ?? [],
+    externalCalls: effectiveContext.externalCalls ?? [],
+    completeness: effectiveContext.completeness ?? { status: "complete", externalCallCount: 0 },
     ...(context.ambiguous ? { ambiguousCandidates: context.ambiguous } : {}),
     ...(!context.ambiguous && searchCandidates ? { ambiguousCandidates: searchCandidates } : {}),
     ...(scopeFallback ? { scopeFallback } : {}),

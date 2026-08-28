@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS branches (
   indexed_worktree_fingerprint TEXT,
   indexed_dirty_files TEXT NOT NULL DEFAULT '[]',
   parser_version TEXT,
+  resolver_version TEXT,
   indexed_schema_version INTEGER,
   stale_reason TEXT,
   pinned INTEGER NOT NULL DEFAULT 0,
@@ -834,6 +835,26 @@ CREATE TABLE IF NOT EXISTS external_knowledge_sources (
   license_warning TEXT,
   created_at TEXT NOT NULL
 );
+-- Calls that provably leave the repo (an imported external package), so no
+-- in-repo edge can exist for them. Dropping the edge is right; dropping the
+-- fact is not — a caller once received a tidy 10-item callee list for a method
+-- whose two most important calls went to an external SDK, reported at "high"
+-- confidence with no gap. Recorded per file so a file's re-index replaces its
+-- own rows, exactly like edge replacement.
+CREATE TABLE IF NOT EXISTS external_calls (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  repo_id TEXT NOT NULL,
+  branch_id TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  src_node_id TEXT,
+  callee TEXT NOT NULL,
+  receiver TEXT,
+  specifier TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  line INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_external_calls_src ON external_calls(src_node_id);
+CREATE INDEX IF NOT EXISTS idx_external_calls_file ON external_calls(repo_id, branch_id, file_path);
 CREATE TABLE IF NOT EXISTS knowledge_gc_runs (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   repo_id TEXT,
@@ -938,6 +959,13 @@ function migrate(db: Database.Database, _from: number): void {
   if (!branchCols.includes("parser_version")) {
     db.exec("ALTER TABLE branches ADD COLUMN parser_version TEXT");
   }
+  if (!branchCols.includes("resolver_version")) {
+    // Left null on existing branches on purpose: resolveIndexMode reads null
+    // as "unknown resolver" and rebuilds once, which re-derives edges with the
+    // current resolver. Backfilling the current version instead would declare
+    // old edges up to date and skip the rebuild that fixes them.
+    db.exec("ALTER TABLE branches ADD COLUMN resolver_version TEXT");
+  }
   if (!branchCols.includes("indexed_schema_version")) {
     db.exec("ALTER TABLE branches ADD COLUMN indexed_schema_version INTEGER");
   }
@@ -1028,6 +1056,9 @@ const OPTIONAL_MAINTENANCE_OBJECT_NAMES = new Set([
   "knowledge_gc_runs",
   "idx_knowledge_gc_runs_finished",
   "knowledge_size_samples",
+  "external_calls",
+  "idx_external_calls_src",
+  "idx_external_calls_file",
 ]);
 
 /** Tables are derived from the same DDL used by openDatabase. */
@@ -1070,6 +1101,7 @@ function isSchemaCurrent(
     "indexed_worktree_fingerprint",
     "indexed_dirty_files",
     "parser_version",
+    "resolver_version",
     "indexed_schema_version",
     "stale_reason",
     "pinned",
