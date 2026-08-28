@@ -223,7 +223,17 @@ export function resolveSymbolMatches(
     .all(raw, `%::${raw}`, `%.${raw}`) as { id: string }[];
   if (rows.length === 0) return { kind: "none" };
   if (rows.length === 1) return { kind: "unique", nodeId: rows[0].id };
-  return { kind: "ambiguous", candidates: rows.slice(0, MAX_AMBIGUOUS_CANDIDATES).map((row) => symbolCandidateOf(store, row.id, scope)) };
+  const candidates = rows.slice(0, MAX_AMBIGUOUS_CANDIDATES).map((row) => symbolCandidateOf(store, row.id, scope));
+  // A name is only genuinely ambiguous between symbols that actually EXIST
+  // somewhere. The title query above deliberately admits nodes with no
+  // symbol_versions row — placeholders created from an unresolved reference
+  // — and those were dragging real, locatable symbols into "ambiguous, pick
+  // one" answers that no caller could act on ("buildStatusPanel" resolved to
+  // its real definition plus one empty shell). When exactly one candidate
+  // has a location, that is the answer.
+  const located = candidates.filter((candidate) => candidate.filePath);
+  if (located.length === 1) return { kind: "unique", nodeId: located[0].nodeId };
+  return { kind: "ambiguous", candidates };
 }
 
 // Shared renderer for an ambiguous SymbolResolution — used by `context`/`node`

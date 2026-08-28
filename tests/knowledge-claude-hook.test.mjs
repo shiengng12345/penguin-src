@@ -404,3 +404,18 @@ test("hook session state persists only bounded target hashes", () => {
   assert.doesNotMatch(raw, /session-secret-value|Foo\.run/);
   assert.match(raw, /targetHashes/);
 });
+
+test("a stale index warns that the injected line range may have shifted", () => {
+  const stale = {
+    ...exploreFixture("Drifted.run"),
+    freshness: { stale: true, reason: "worktree_dirty", indexedAt: "yesterday", coverageGaps: [] },
+  };
+  const text = renderExploreHookCompact("Drifted.run", stale);
+  assert.match(text, /freshness=stale reason=worktree_dirty/);
+  // The body is read from disk at the line range the INDEX recorded, so a
+  // stale index can show a neighbour — never present that as verified.
+  assert.match(text, /line range below may have shifted/);
+
+  const fresh = renderExploreHookCompact("Fresh.run", exploreFixture("Fresh.run"));
+  assert.doesNotMatch(fresh, /may have shifted/, "no scare text when the index is current");
+});

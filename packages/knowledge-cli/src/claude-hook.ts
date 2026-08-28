@@ -271,6 +271,13 @@ export function renderExploreHookCompact(
     const head = focusSource.code.split("\n").slice(0, COMPACT_FOCUS_LINES);
     const clipped = focusSource.code.split("\n").length > COMPACT_FOCUS_LINES;
     if (head.length > 0) {
+      // The body is read from disk at the line range the INDEX recorded. With
+      // a stale index those lines can have shifted, so the snippet may start
+      // mid-declaration or show a neighbour. Say so rather than presenting
+      // possibly-misaligned code as if it were verified.
+      if (pack.freshness.stale) {
+        lines.push("(index is stale — the line range below may have shifted; verify before editing)");
+      }
       lines.push(
         `\`\`\`${focusSource.lang ?? "text"}`,
         head.join("\n"),
