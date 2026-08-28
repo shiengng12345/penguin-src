@@ -1,0 +1,166 @@
+import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import { KnowledgeStore, deadCode } from "../packages/knowledge-core/dist/index.js";
+
+// find_dead_code advertised only `limit` while agents naturally passed `repo`
+// and `path`. Nothing rejected them and nothing used them, so a question about
+// one repo was answered from all 25 — and the answer looked scoped.
+
+function seed() {
+  const dir = mkdtempSync(join(tmpdir(), "pk-dead-"));
+  const store = KnowledgeStore.open({ dbPath: join(dir, "k.db"), ledgerPath: join(dir, "l.jsonl") });
+
+  const repos = {};
+  for (const name of ["alpha", "beta"]) {
+    const repoId = store.registerRepo({ name, rootPath: `/${name}` });
+    const branchId = store.registerBranch({ repoId, name: "main", status: "live" });
+    store.recordBranchIndexed({ branchId, commit: "c0" });
+    repos[name] = { repoId, branchId };
+  }
+
+  const add = (repo, name, filePath, { status = "fresh", branchId } = {}) => {
+    const { repoId } = repos[repo];
+    const nodeId = store.upsertNode({
+      nodeType: "symbol",
+      identityKey: `${repoId}::${filePath}::${name}`,
+      title: name,
+      repoId,
+    });
+    store.upsertSymbolVersion({
+      nodeId,
+      branchId: branchId ?? repos[repo].branchId,
+      filePath,
+      startLine: 1,
+      endLine: 5,
+      kind: "function",
+      status,
+      commitSha: "c0",
+      lang: "ts",
+      contentHash: `h-${name}`,
+    });
+    return nodeId;
+  };
+
+  // alpha: one unreferenced symbol under apps/, one under libs/, and one that
+  // IS called (so it must never be a candidate).
+  const orphanApp = add("alpha", "orphanInApp", "apps/promotion/src/orphan.ts");
+  add("alpha", "orphanInLib", "libs/shared/src/orphan.ts");
+  const livingTarget = add("alpha", "livingTarget", "apps/promotion/src/living.ts");
+  const caller = add("alpha", "caller", "apps/promotion/src/caller.ts");
+  store.replaceFileEdges({
+    branchId: repos.alpha.branchId,
+    filePath: "apps/promotion/src/caller.ts",
+    edges: [{ src: caller, dst: livingTarget, edgeType: "calls", origin: "parser", method: "EXTRACTED" }],
+  });
+
+  // beta: its own orphan, which an alpha-scoped question must not return.
+  add("beta", "orphanInBeta", "src/orphan.ts");
+
+  return { store, repos, orphanApp };
+}
+
+test("without a repo the result says so instead of implying a scope", () => {
+  const { store } = seed();
+  const result = deadCode(store);
+  assert.equal(result.scope.repo, null);
+  assert.match(result.note, /every indexed repo/, "an unscoped answer must admit it is unscoped");
+  const titles = result.candidates.map((c) => c.title);
+  assert.ok(titles.includes("orphanInApp"));
+  assert.ok(titles.includes("orphanInBeta"), "unscoped really does span repos");
+  store.close();
+});
+
+test("repo scopes the candidates and is reported back", () => {
+  const { store } = seed();
+  const result = deadCode(store, { repo: "alpha" });
+  const titles = result.candidates.map((c) => c.title);
+  assert.ok(titles.includes("orphanInApp"));
+  assert.ok(titles.includes("orphanInLib"));
+  assert.ok(!titles.includes("orphanInBeta"), `beta leaked into an alpha query: ${JSON.stringify(titles)}`);
+  assert.equal(result.scope.repo, "alpha");
+  assert.match(result.note, /repo alpha/);
+  store.close();
+});
+
+test("path narrows to a prefix", () => {
+  const { store } = seed();
+  const titles = deadCode(store, { repo: "alpha", path: "apps/promotion" }).candidates.map((c) => c.title);
+  // `caller` belongs here too: nothing calls IT, so it is a candidate on the
+  // same rule. What must not appear is anything outside the prefix.
+  assert.deepEqual(titles.sort(), ["caller", "orphanInApp"]);
+  store.close();
+});
+
+test("a path prefix is matched literally, not as a LIKE pattern", () => {
+  // A real path containing _ or % would otherwise act as a wildcard.
+  const { store } = seed();
+  const result = deadCode(store, { repo: "alpha", path: "apps/pro_otion" });
+  assert.deepEqual(result.candidates, [], "_ must not match any character");
+  store.close();
+});
+
+test("a called symbol is never a candidate", () => {
+  const { store } = seed();
+  const titles = deadCode(store, { repo: "alpha" }).candidates.map((c) => c.title);
+  assert.ok(!titles.includes("livingTarget"), "a symbol with an inbound call edge is not dead");
+  store.close();
+});
+
+test("a superseded symbol version is not reported as dead", () => {
+  // Stale rows have no inbound edges, so counting them makes every symbol that
+  // ever moved look dead forever. This is the same trap that made a fake-symbol
+  // measurement read 623 when the real number was 1.
+  const { store, repos } = seed();
+  const nodeId = store.upsertNode({
+    nodeType: "symbol",
+    identityKey: `${repos.alpha.repoId}::moved`,
+    title: "movedAway",
+    repoId: repos.alpha.repoId,
+  });
+  store.upsertSymbolVersion({
+    nodeId,
+    branchId: repos.alpha.branchId,
+    filePath: "apps/promotion/src/old.ts",
+    startLine: 1,
+    endLine: 5,
+    kind: "function",
+    status: "stale",
+    commitSha: "c0",
+    lang: "ts",
+    contentHash: "h-moved",
+  });
+  const titles = deadCode(store, { repo: "alpha" }).candidates.map((c) => c.title);
+  assert.ok(!titles.includes("movedAway"), "stale versions must not count as dead code");
+  store.close();
+});
+
+test("candidates carry their coordinates", () => {
+  const { store } = seed();
+  const candidates = deadCode(store, { repo: "alpha", path: "apps/promotion" }).candidates;
+  const candidate = candidates.find((c) => c.title === "orphanInApp");
+  assert.equal(candidate.filePath, "apps/promotion/src/orphan.ts");
+  assert.equal(candidate.startLine, 1);
+  assert.equal(candidate.endLine, 5);
+  store.close();
+});
+
+test("truncation is reported, not silent", () => {
+  const { store } = seed();
+  const result = deadCode(store, { repo: "alpha", limit: 1 });
+  assert.equal(result.candidates.length, 1);
+  assert.equal(result.truncated, true);
+  assert.match(result.note, /raise limit/);
+  store.close();
+});
+
+test("an unknown repo is an empty answer that names the problem", () => {
+  const { store } = seed();
+  const result = deadCode(store, { repo: "no-such-repo" });
+  assert.deepEqual(result.candidates, []);
+  assert.match(result.note, /no indexed repo matches/);
+  assert.equal(result.truncated, false);
+  store.close();
+});

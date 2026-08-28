@@ -64,7 +64,7 @@ import {
   ScopeResolutionError,
   type ResolvedQueryScope,
 } from "@penguin/knowledge-core";
-import { CAPABILITIES, capabilityHash, listMcpRegistrations, CAPABILITY_ALIASES } from "@penguin/knowledge-contracts";
+import { CAPABILITIES, capabilityHash, listMcpRegistrations, CAPABILITY_ALIASES, canonicalInputSchema } from "@penguin/knowledge-contracts";
 import { analyzeRepository } from "./repository-analysis.js";
 import { preflightSearchTerms } from "./log-investigation-preflight.js";
 import { readConfig } from "./config.js";
@@ -281,6 +281,52 @@ function knowledgePreflight(store: KnowledgeStore | null): KnowledgeEvidencePref
         ? [{ gapId: "gap_knowledge_no_match", code: "knowledge_no_match", message: "No matching Knowledge/Wiki facts were found during preflight; this is not proof that the code or incident does not exist.", targetIds: targets.map((target) => target.targetId), evidenceIds: [] }]
         : [];
       return { collectedAt: new Date().toISOString(), facts, gaps, targetHints: [], evidence };
+    },
+  };
+}
+
+
+/** Tools whose advertised inputSchema is known to list EVERY argument their
+ * handler reads. Only these reject unknown arguments.
+ *
+ * Not every tool qualifies: knowledge_search, for instance, deliberately accepts
+ * flat MCP aliases (include_sensitive and friends) that its canonical capability
+ * schema does not list, so enforcing there would reject working callers rather
+ * than catch mistakes. Adding a tool here means having checked its handler reads
+ * nothing outside its schema — the schema becomes a promise, not a hint. */
+// Declared here rather than read from KNOWLEDGE_TOOL_DEFS: that module is kept
+// out of this one's import graph on purpose (it must not pull in core). A parity
+// test asserts these lists match the advertised schemas, so drift fails loudly
+// instead of quietly rejecting a real argument.
+export const STRICT_TOOL_ARGUMENTS: Record<string, string[]> = {
+  find_dead_code: ["limit", "repo", "path", "branch"],
+  knowledge_dead_code: ["limit", "repo", "path", "branch"],
+};
+
+/** Reject arguments a tool does not accept, instead of ignoring them.
+ *
+ * The schemas already said `additionalProperties: false`, but nothing enforced
+ * it: an agent passing `repo` to a tool with no repo filter got a whole-graph
+ * answer that looked scoped. A silently dropped filter is worse than an error,
+ * because the caller believes the scope it asked for. */
+export function unsupportedArguments(
+  toolName: string,
+  input: Record<string, unknown>,
+): { error: { code: string; message: string; retryable: boolean; unsupported: string[]; accepted: string[] } } | null {
+  const accepted = STRICT_TOOL_ARGUMENTS[toolName];
+  if (!accepted) return null;
+  const unsupported = Object.keys(input).filter((key) => !accepted.includes(key));
+  if (unsupported.length === 0) return null;
+  return {
+    error: {
+      code: "UNSUPPORTED_FILTER",
+      message:
+        `${toolName} does not accept ${unsupported.map((key) => `\`${key}\``).join(", ")}`
+        + ` — it would have been ignored, and the answer would have looked scoped when it was not.`
+        + ` Accepted: ${accepted.join(", ")}.`,
+      retryable: false,
+      unsupported,
+      accepted,
     },
   };
 }
@@ -575,6 +621,10 @@ export function handleKnowledgeTool(
   store: KnowledgeStore | null,
   options: KnowledgeToolOptions = {},
 ): unknown {
+  // Before anything else: an argument the capability does not accept would
+  // otherwise be dropped, and the caller would trust a scope it never got.
+  const unsupported = unsupportedArguments(name, a);
+  if (unsupported) return unsupported;
   if (name === "api_doc_list" || name === "api_doc_show" || name === "api_doc_diff") {
     const root = process.env.PENGUIN_API_DOC_PREVIEWS ?? join(homedir(), ".penguin", "knowledge", "api-docs", "previews");
     const previews = new ApiDocPreviewStore(root);
@@ -860,6 +910,10 @@ export function handleKnowledgeTool(
         revision: revision.context,
         depth: a.depth as number | undefined,
         limit: a.limit as number | undefined,
+        // Let the caller decide what it pays for: relations only when it is
+        // mapping the graph, a raised ceiling when it is reading a long body.
+        includeSources: a.include_sources as boolean | undefined,
+        maxSourceLines: a.max_source_lines as number | undefined,
       });
       return { ...result, ...(revision.context ? { revision: revision.context } : {}), ...scopeEnvelopeFields(revision.scope) };
     }
@@ -916,8 +970,26 @@ export function handleKnowledgeTool(
       return architecture(store);
     case "find_communities":
       return communities(store, { limit: a.limit as number | undefined, minSize: a.min_size as number | undefined });
-    case "find_dead_code":
-      return deadCode(store, { limit: a.limit as number | undefined });
+    case "find_dead_code": {
+      // repo/path were previously accepted-and-ignored; they now scope the query.
+      const branchName = a.branch != null ? String(a.branch) : undefined;
+      let branchId: string | undefined;
+      if (branchName && a.repo != null) {
+        const repoRow = store.db
+          .prepare("SELECT id FROM repos WHERE id=? OR name=? LIMIT 1")
+          .get(String(a.repo), String(a.repo)) as { id: string } | undefined;
+        branchId = repoRow ? store.getBranch(repoRow.id, branchName)?.id : undefined;
+        if (repoRow && !branchId) {
+          return { error: { code: "SCOPE_NOT_INDEXED", message: `branch "${branchName}" is not indexed for repo "${String(a.repo)}"`, retryable: false } };
+        }
+      }
+      return deadCode(store, {
+        limit: a.limit as number | undefined,
+        repo: a.repo != null ? String(a.repo) : undefined,
+        path: a.path != null ? String(a.path) : undefined,
+        branchId,
+      });
+    }
     case "knowledge_callers":
     case "knowledge_callees":
     case "knowledge_impact": {

@@ -301,8 +301,17 @@ export const KNOWLEDGE_TOOL_DEFS = [
     name: "find_dead_code",
     description:
       "Symbols with zero incoming calls/invokes/references edges — candidate dead code. A candidate can be a false positive (dynamic dispatch, " +
-      "public API, reflection) — treat as leads to verify, not a deletion list.",
-    inputSchema: { type: "object", properties: { limit: { type: "number" } } },
+      "public API, reflection) — treat as leads to verify, not a deletion list. Scope with repo and path: without repo the answer spans every " +
+      "indexed repo, and the returned `scope` field says which one you got.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        limit: { type: "number" },
+        repo: { type: "string", description: "Repo name or id" },
+        path: { type: "string", description: "Repo-relative path prefix, e.g. apps/promotion/src" },
+        branch: { type: "string" },
+      },
+    },
   },
 ];
 

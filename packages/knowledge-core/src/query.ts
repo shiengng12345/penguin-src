@@ -499,9 +499,26 @@ export interface GraphResult {
   scopeFallback?: { branchId: string };
 }
 
-function nodeBrief(store: KnowledgeStore, id: string) {
+function nodeBrief(store: KnowledgeStore, id: string): ContextBrief {
   const n = store.getNode(id);
-  return { nodeId: id, title: n?.title ?? id, nodeType: n?.node_type ?? "unknown" };
+  // Coordinates travel WITH the relation. A callers list of bare names forces a
+  // second lookup per entry just to open the file, and an agent that skips
+  // those lookups ends up guessing where the code is.
+  const at = store.db
+    .prepare(
+      `SELECT file_path AS filePath, start_line AS startLine, end_line AS endLine
+         FROM symbol_versions WHERE node_id=? AND status='fresh'
+        ORDER BY start_line LIMIT 1`,
+    )
+    .get(id) as { filePath: string | null; startLine: number | null; endLine: number | null } | undefined;
+  return {
+    nodeId: id,
+    title: n?.title ?? id,
+    nodeType: n?.node_type ?? "unknown",
+    ...(at?.filePath ? { filePath: at.filePath } : {}),
+    ...(at?.startLine != null ? { startLine: at.startLine } : {}),
+    ...(at?.endLine != null ? { endLine: at.endLine } : {}),
+  };
 }
 
 // The live branch of a node's repo — the default "which branch am I answering
@@ -1463,6 +1480,10 @@ export interface ContextBrief {
   nodeId: string;
   title: string;
   nodeType: string;
+  /** Repo-relative path of the symbol's fresh definition, when it has one. */
+  filePath?: string;
+  startLine?: number;
+  endLine?: number;
 }
 
 export interface ExternalCallGroup {
@@ -1535,16 +1556,22 @@ export interface ContextPack {
 }
 
 function briefsFrom(store: KnowledgeStore, rows: Array<{ id: string }>): ContextBrief[] {
-  return rows.map((r) => {
-    const b = nodeBrief(store, r.id);
-    return { nodeId: b.nodeId, title: b.title, nodeType: b.nodeType };
-  });
+  // Pass the brief through whole — dropping to the three name fields here is
+  // what made every relation list coordinate-free.
+  return rows.map((r) => nodeBrief(store, r.id));
+}
+
+export interface PackSourceOptions {
+  /** false returns relations only, with each drop named in sourcesOmitted. */
+  includeSources?: boolean;
+  /** Total line ceiling for the pack's source blocks (default 800). */
+  maxSourceLines?: number;
 }
 
 export function buildContextPack(
   store: KnowledgeStore,
   target: string,
-  options?: { branchId?: string; revision?: RevisionContext; limit?: number },
+  options?: { branchId?: string; revision?: RevisionContext; limit?: number } & PackSourceOptions,
 ): ContextPack {
   const limit = options?.limit ?? 25;
   const empty: ContextPack = {
@@ -2261,9 +2288,7 @@ function nodeBriefStep(store: KnowledgeStore, id: string, revisionId = "live") {
   const b = nodeBrief(store, id);
   const source = store.db.prepare("SELECT b.repo_id AS repoId,sv.file_path AS filePath,sv.start_line AS startLine,sv.end_line AS endLine FROM symbol_versions sv JOIN branches b ON b.id=sv.branch_id WHERE sv.node_id=? AND sv.status='fresh' ORDER BY sv.start_line LIMIT 1").get(id) as { repoId: string | null; filePath: string | null; startLine: number | null; endLine: number | null } | undefined;
   return {
-    nodeId: b.nodeId,
-    title: b.title,
-    nodeType: b.nodeType,
+    ...b,
     ...(source?.repoId && source.filePath && source.startLine != null ? { source: { repoId: source.repoId, filePath: source.filePath, startLine: source.startLine, ...(source.endLine != null ? { endLine: source.endLine } : {}), revisionId } } : {}),
   };
 }
@@ -2403,7 +2428,7 @@ export interface ExplorePack {
 export function buildExplorePack(
   store: KnowledgeStore,
   target: string,
-  options?: { branchId?: string; revision?: RevisionContext; depth?: number; limit?: number },
+  options?: { branchId?: string; revision?: RevisionContext; depth?: number; limit?: number } & PackSourceOptions,
 ): ExplorePack {
   let context = buildContextPack(store, target, options);
   let flow = buildFlow(store, target, options);
@@ -2494,9 +2519,14 @@ export function buildExplorePack(
   // callees and callers. Budget keeps one pack safely inside a tool-result;
   // every drop is NAMED in sourcesOmitted — silent truncation reads as
   // "covered everything" when it didn't.
-  const SOURCE_BUDGET_LINES = 800;
-  const FOCUS_MAX_LINES = 400;
-  const NEIGHBOR_MAX_LINES = 120;
+  // The budget is a default, not a law: a caller that only wants the relation
+  // graph should not pay 800 lines of code for it, and one auditing a large
+  // function needs to raise the ceiling rather than get a silently clipped body.
+  // Both were previously fixed constants with no way to say either.
+  const includeSources = options?.includeSources !== false;
+  const SOURCE_BUDGET_LINES = includeSources ? Math.max(0, options?.maxSourceLines ?? 800) : 0;
+  const FOCUS_MAX_LINES = Math.min(400, SOURCE_BUDGET_LINES);
+  const NEIGHBOR_MAX_LINES = Math.min(120, SOURCE_BUDGET_LINES);
   const NEIGHBOR_COUNT = 3;
   const sources: SourceBlock[] = [];
   const sourcesOmitted: string[] = [];
@@ -2509,8 +2539,12 @@ export function buildExplorePack(
     maxLines: number,
   ): void => {
     if (!nodeId || seenSourceIds.has(nodeId)) return;
+    if (!includeSources) {
+      sourcesOmitted.push(`${role} ${title} (source omitted: includeSources=false)`);
+      return;
+    }
     if (budgetLeft <= 0) {
-      sourcesOmitted.push(`${role} ${title} (line budget exhausted)`);
+      sourcesOmitted.push(`${role} ${title} (line budget exhausted at ${SOURCE_BUDGET_LINES} lines — raise maxSourceLines)`);
       return;
     }
     const block = readSourceBlock(store, nodeId, Math.min(maxLines, budgetLeft));
@@ -2954,19 +2988,104 @@ export function endpointSamples(store: KnowledgeStore, endpoint: string): Respon
 
 // —— dead code: symbols nothing references (best-effort; DI/reflection/entry
 // points inflate false positives → callers must treat as candidates) ——
-export interface DeadCodeResult { candidates: ContextBrief[]; note: string }
-export function deadCode(store: KnowledgeStore, options?: { limit?: number }): DeadCodeResult {
+export interface DeadCodeResult {
+  candidates: ContextBrief[];
+  note: string;
+  /** What the answer actually covers, so a filtered result is not mistaken for
+   * a whole-graph one. */
+  scope: { repo: string | null; path: string | null; branch: string | null };
+  /** True when the limit cut the list — the rest exists, it just was not returned. */
+  truncated: boolean;
+}
+
+export interface DeadCodeOptions {
+  limit?: number;
+  /** Repo name or id. Without it the answer spans every indexed repo, which for
+   * a multi-repo install is a list nobody can act on. */
+  repo?: string;
+  /** Repo-relative path prefix, e.g. "apps/promotion/src". */
+  path?: string;
+  branchId?: string;
+}
+
+export function deadCode(store: KnowledgeStore, options?: DeadCodeOptions): DeadCodeResult {
   const limit = options?.limit ?? 100;
+
+  // A repo can be named or addressed by id; a name that matches nothing is an
+  // empty result rather than a silent whole-graph scan.
+  let repoId: string | null = null;
+  let repoLabel: string | null = null;
+  if (options?.repo) {
+    const row = store.db
+      .prepare("SELECT id, name FROM repos WHERE id=? OR name=? LIMIT 1")
+      .get(options.repo, options.repo) as { id: string; name: string } | undefined;
+    if (!row) {
+      return {
+        candidates: [],
+        note: `no indexed repo matches "${options.repo}" — check \`penguin status\` for the indexed repo names.`,
+        scope: { repo: options.repo, path: options.path ?? null, branch: options.branchId ?? null },
+        truncated: false,
+      };
+    }
+    repoId = row.id;
+    repoLabel = row.name;
+  }
+
+  // Scope to ONE branch's fresh symbols. Without this the candidate list mixes
+  // every branch of every repo and, worse, counts superseded symbol_versions
+  // rows: a symbol that moved keeps its stale row, that row has no inbound
+  // edges, and it shows up as dead code forever.
+  const branchId = options?.branchId
+    ?? (repoId
+      ? (store.db
+          .prepare("SELECT id FROM branches WHERE repo_id=? AND status='live' ORDER BY last_indexed_at DESC LIMIT 1")
+          .get(repoId) as { id: string } | undefined)?.id ?? null
+      : null);
+
+  const where: string[] = ["n.node_type='symbol'", "sv.status='fresh'"];
+  const params: unknown[] = [];
+  if (repoId) { where.push("n.repo_id=?"); params.push(repoId); }
+  if (branchId) { where.push("sv.branch_id=?"); params.push(branchId); }
+  if (options?.path) {
+    // Prefix match on the repo-relative path. LIKE would treat _ and % in a
+    // real path as wildcards, so compare the prefix directly.
+    where.push("substr(sv.file_path, 1, ?) = ?");
+    params.push(options.path.length, options.path);
+  }
+
   const rows = store.db.prepare(
-    `SELECT n.id AS id FROM nodes n
-      WHERE n.node_type='symbol'
+    `SELECT DISTINCT n.id AS id, sv.file_path AS filePath, sv.start_line AS startLine, sv.end_line AS endLine
+       FROM nodes n
+       JOIN symbol_versions sv ON sv.node_id = n.id
+      WHERE ${where.join(" AND ")}
         AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.dst=n.id AND e.status='active'
                           AND e.edge_type IN ('calls','references','handles','tests'))
+      ORDER BY sv.file_path, sv.start_line
       LIMIT ?`,
-  ).all(limit) as { id: string }[];
+  ).all(...params, limit + 1) as Array<{ id: string; filePath: string | null; startLine: number | null; endLine: number | null }>;
+
+  const truncated = rows.length > limit;
+  const scopeNote = repoLabel || options?.path
+    ? ` Scope: ${[repoLabel && `repo ${repoLabel}`, options?.path && `under ${options.path}`].filter(Boolean).join(", ")}.`
+    : " Scope: every indexed repo — pass repo/path to get a list you can act on.";
+
   return {
-    candidates: rows.map((r) => { const b = nodeBrief(store, r.id); return { nodeId: b.nodeId, title: b.title, nodeType: b.nodeType }; }),
-    note: "no inbound calls/references/handles/tests — verify: DI, reflection, framework magic, dynamic import, and public entry points are false positives.",
+    candidates: rows.slice(0, limit).map((r) => {
+      const brief = nodeBrief(store, r.id);
+      return {
+        nodeId: brief.nodeId,
+        title: brief.title,
+        nodeType: brief.nodeType,
+        filePath: r.filePath ?? undefined,
+        startLine: r.startLine ?? undefined,
+        endLine: r.endLine ?? undefined,
+      };
+    }),
+    note: "no inbound calls/references/handles/tests — verify: DI, reflection, framework magic, dynamic import, and public entry points are false positives."
+      + scopeNote
+      + (truncated ? ` More than ${limit} candidates exist; raise limit to see the rest.` : ""),
+    scope: { repo: repoLabel, path: options?.path ?? null, branch: branchId },
+    truncated,
   };
 }
 

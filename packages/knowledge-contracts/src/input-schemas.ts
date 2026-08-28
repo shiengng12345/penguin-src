@@ -65,7 +65,7 @@ const SCHEMAS: Record<string, KnowledgeInputSchema> = {
   "knowledge.get_hit": object({ snapshot_id: string(), file_path: string(), start_line: number(), end_line: number(), start_byte: number(), context_lines: number(), original_revision_id: string(), caller_workspace_id: string() }, ["snapshot_id", "file_path"]),
   "knowledge.graph.query": object({ request: { type: "object" }, start: { type: "object" }, traverse: { type: "array" }, project: { type: "array" }, limit: number(), scope: { type: "object" } }, ["start", "traverse", "project", "limit"]),
   "knowledge.context": object({ target: string(), repo: string(), branch: string(), commit_sha: string(), snapshot_id: string(), depth: number(), limit: number(), allow_fallback: boolean() }, ["target"]),
-  "knowledge.explore": object({ target: string(), repo: string(), branch: string(), commit_sha: string(), snapshot_id: string(), depth: number(), limit: number(), allow_fallback: boolean() }, ["target"]),
+  "knowledge.explore": object({ target: string(), repo: string(), branch: string(), commit_sha: string(), snapshot_id: string(), depth: number(), limit: number(), allow_fallback: boolean(), include_sources: { type: "boolean", description: "false returns relations only; each omission is named in sourcesOmitted" }, max_source_lines: number() }, ["target"]),
   "knowledge.locate": object({ target: string(), repo: string(), branch: string(), commit_sha: string(), snapshot_id: string(), depth: number(), limit: number(), allow_fallback: boolean() }, ["target"]),
   "knowledge.flow": object({ target: string(), repo: string(), branch: string(), commit_sha: string(), snapshot_id: string(), allow_fallback: boolean() }, ["target"]),
   "knowledge.affected": object({ files: { type: "array", items: string() }, file: string(), path: string(), repo: string(), branch: string(), commit_sha: string(), snapshot_id: string(), allow_fallback: boolean() }),
@@ -87,6 +87,9 @@ const SCHEMAS: Record<string, KnowledgeInputSchema> = {
   "knowledge.memory.remember": object({ class: string(), repo_id: string(), workspace_id: string(), global: boolean(), subject: string(), body: string(), source: { type: "array" }, confidence: number(), retention: string() }, ["subject", "body"]),
   "knowledge.memory.recall": object({ repo_id: string(), workspace_id: string() }),
   "knowledge.memory.forget": object({ id: string(), confirmed: boolean() }, ["id"]),
+  // Declared because they are now implemented: an agent asking for one repo's
+  // dead code used to get every repo's, with nothing saying so.
+  "knowledge.dead_code": object({ limit: number(), repo: string("Repo name or id — without it the answer spans every indexed repo"), path: string("Repo-relative path prefix, e.g. apps/promotion/src"), branch: string() }),
   "knowledge.artifact.import": object({ artifact_base64: string(), base_database_base64: string(), capability_hash: string(), confirmed: boolean() }, ["artifact_base64"]),
 };
 

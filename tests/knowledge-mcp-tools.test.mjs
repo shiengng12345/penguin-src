@@ -45,7 +45,7 @@ async function loadTools() {
   await build({ entryPoints: [new URL("../packages/mcp/src/knowledge-tool-defs.ts", import.meta.url).pathname], bundle: true, format: "esm", platform: "node", outfile: defs });
   return { ...(await import(`file://${defs}`)), ...(await import(`file://${handler}`)) };
 }
-const { KNOWLEDGE_TOOL_DEFS, isKnowledgeTool, handleKnowledgeTool, runKnowledgeTool, createMutationConfirmationToken, mutationGuard } = await loadTools();
+const { KNOWLEDGE_TOOL_DEFS, isKnowledgeTool, handleKnowledgeTool, runKnowledgeTool, createMutationConfirmationToken, mutationGuard, unsupportedArguments, STRICT_TOOL_ARGUMENTS } = await loadTools();
 
 function seed() {
   const dir = mkdtempSync(join(tmpdir(), "pk-mcp-"));
@@ -55,6 +55,12 @@ function seed() {
   const login = store.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::login`, title: "login", repoId });
   const caller = store.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::caller`, title: "caller", repoId });
   store.indexSymbolText({ nodeId: login, name: "login", signature: "(req)" });
+  for (const [nodeId, title] of [[login, "login"], [caller, "caller"]]) {
+    store.upsertSymbolVersion({
+      nodeId, branchId: branch, commitSha: "c0", filePath: "a.ts", lang: "ts",
+      kind: "function", contentHash: `h_${title}`, status: "fresh", startLine: 1, endLine: 3,
+    });
+  }
   store.replaceFileEdges({ branchId: branch, filePath: "a.ts", edges: [
     { src: caller, dst: login, edgeType: "calls", origin: "parser", method: "EXTRACTED" },
   ] });
@@ -674,4 +680,78 @@ test("the server's tools/list keeps explore first instead of alphabetising it aw
   // Non-knowledge tools still sort alphabetically after the tiered block.
   const tail = names.slice(names.indexOf("knowledge_capabilities") + 1);
   assert.deepEqual(tail, [...tail].sort(), "remaining tools stay alphabetical");
+});
+
+// —— arguments a tool does not accept ————————————————————————————————
+// The schemas said additionalProperties: false, but nothing enforced it. An
+// agent passing a filter the tool lacks got the unfiltered answer with no hint
+// its scope had been dropped: a wrong answer that reads as right, which is
+// worse than an error. find_dead_code is the case that surfaced it — `repo` and
+// `path` were accepted and ignored.
+
+test("an argument the tool does not accept is refused, not ignored", () => {
+  const result = unsupportedArguments("find_dead_code", { repo: "alpha", package: "x" });
+  assert.ok(result, "an undeclared argument must not pass silently");
+  assert.equal(result.error.code, "UNSUPPORTED_FILTER");
+  assert.deepEqual(result.error.unsupported, ["package"]);
+  assert.ok(result.error.message.includes("package"), "the message must name the argument");
+  assert.ok(result.error.accepted.includes("repo"), "the caller needs to know what IS accepted");
+  assert.equal(result.error.retryable, false, "retrying the same call cannot help");
+});
+
+test("dead_code accepts every filter it now implements", () => {
+  assert.equal(unsupportedArguments("find_dead_code", { repo: "alpha", path: "apps/", limit: 10, branch: "main" }), null);
+  assert.equal(unsupportedArguments("find_dead_code", {}), null, "an empty input cannot contain an unsupported key");
+});
+
+test("tools whose MCP surface takes more than their schema declares stay permissive", () => {
+  // knowledge_search deliberately accepts flat aliases its canonical schema
+  // does not list. Enforcing there would reject working callers rather than
+  // catch mistakes, so strictness is opt-in per tool.
+  assert.equal(unsupportedArguments("knowledge_search", { query: "x", include_sensitive: false }), null);
+  const { store } = seed();
+  const searched = handleKnowledgeTool("knowledge_search", { query: "turnstile", include_sensitive: false }, store);
+  assert.ok(Array.isArray(searched.results), "search must still answer");
+  store.close();
+});
+
+test("the dispatcher refuses the call, not just the helper", () => {
+  // unsupportedArguments passing in isolation proves nothing if the dispatcher
+  // never calls it.
+  const { store } = seed();
+  const result = handleKnowledgeTool("find_dead_code", { limit: 5, package: "nope" }, store);
+  assert.equal(result.error?.code, "UNSUPPORTED_FILTER", `got ${JSON.stringify(result).slice(0, 200)}`);
+  store.close();
+});
+
+test("find_dead_code scopes by repo and path through MCP", () => {
+  const { store } = seed();
+  const scoped = handleKnowledgeTool("find_dead_code", { repo: "r", path: "a.ts" }, store);
+  assert.equal(scoped.scope.repo, "r", "the answer reports the scope it used");
+  assert.ok(scoped.candidates.some((c) => c.title === "caller"), "caller has no inbound edges");
+  assert.ok(!scoped.candidates.some((c) => c.title === "login"), "login is called");
+  assert.ok(scoped.candidates.every((c) => c.filePath), "candidates carry coordinates");
+
+  const missed = handleKnowledgeTool("find_dead_code", { repo: "r", path: "other/" }, store);
+  assert.deepEqual(missed.candidates, [], "a prefix that matches nothing returns nothing");
+
+  const unknown = handleKnowledgeTool("find_dead_code", { repo: "no-such-repo" }, store);
+  assert.match(unknown.note, /no indexed repo matches/);
+  store.close();
+});
+
+test("a strict tool's allowlist matches the schema it advertises", () => {
+  // The allowlist is hand-written because the tool-def module is deliberately
+  // outside knowledge-tools' import graph. Drift here would reject an argument
+  // the tool publicly promises to accept, so it must fail as a test, not in
+  // front of a caller.
+  for (const [toolName, accepted] of Object.entries(STRICT_TOOL_ARGUMENTS)) {
+    const def = KNOWLEDGE_TOOL_DEFS.find((tool) => tool.name === toolName);
+    if (!def) continue; // alias name not published as its own tool
+    assert.deepEqual(
+      [...accepted].sort(),
+      Object.keys(def.inputSchema.properties ?? {}).sort(),
+      `${toolName}'s strict allowlist and advertised schema disagree`,
+    );
+  }
 });

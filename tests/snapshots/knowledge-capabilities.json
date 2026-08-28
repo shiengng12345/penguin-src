@@ -2162,6 +2162,13 @@
             },
             "allow_fallback": {
               "type": "boolean"
+            },
+            "include_sources": {
+              "type": "boolean",
+              "description": "false returns relations only; each omission is named in sourcesOmitted"
+            },
+            "max_source_lines": {
+              "type": "number"
             }
           },
           "required": [
@@ -2494,8 +2501,23 @@
         "inputSchemaId": "knowledge.dead_code.input.v2",
         "inputSchema": {
           "type": "object",
-          "properties": {},
-          "additionalProperties": true
+          "properties": {
+            "limit": {
+              "type": "number"
+            },
+            "repo": {
+              "type": "string",
+              "description": "Repo name or id — without it the answer spans every indexed repo"
+            },
+            "path": {
+              "type": "string",
+              "description": "Repo-relative path prefix, e.g. apps/promotion/src"
+            },
+            "branch": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
         },
         "outputSchemaId": "knowledge.dead_code.output.v2"
       },
@@ -5534,6 +5556,13 @@
             },
             "allow_fallback": {
               "type": "boolean"
+            },
+            "include_sources": {
+              "type": "boolean",
+              "description": "false returns relations only; each omission is named in sourcesOmitted"
+            },
+            "max_source_lines": {
+              "type": "number"
             }
           },
           "required": [
@@ -5866,8 +5895,23 @@
         "inputSchemaId": "knowledge.dead_code.input.v2",
         "inputSchema": {
           "type": "object",
-          "properties": {},
-          "additionalProperties": true
+          "properties": {
+            "limit": {
+              "type": "number"
+            },
+            "repo": {
+              "type": "string",
+              "description": "Repo name or id — without it the answer spans every indexed repo"
+            },
+            "path": {
+              "type": "string",
+              "description": "Repo-relative path prefix, e.g. apps/promotion/src"
+            },
+            "branch": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
         },
         "outputSchemaId": "knowledge.dead_code.output.v2"
       },
