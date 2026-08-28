@@ -24,8 +24,11 @@ export function WikiOnboarding({ onRefresh, onClose }: { onRefresh: () => void; 
   // global CLAUDE.md/AGENTS.md guidance. `done` carries the per-item summary.
   const [cliReady, setCliReady] = useState<boolean | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
-  const [hookSessionStart, setHookSessionStart] = useState(false);
-  const [hookPromptSubmit, setHookPromptSubmit] = useState(false);
+  // Default ON: the prompt hook is what makes Penguin context reach the
+  // agent without the agent having to ask — the whole point of the AI
+  // integration step. Users who don't want injection untick before applying.
+  const [hookSessionStart, setHookSessionStart] = useState(true);
+  const [hookPromptSubmit, setHookPromptSubmit] = useState(true);
   const [hookBusy, setHookBusy] = useState(false);
   const [hookResult, setHookResult] = useState<{ state: "ok" | "warn" | "fail"; text: string } | null>(null);
   // Per-item outcome — machines differ (shell, which AI clients are installed,
@@ -97,6 +100,14 @@ export function WikiOnboarding({ onRefresh, onClose }: { onRefresh: () => void; 
         setHookResult({
           state: "ok",
           text: hooks.written ? "Penguin hooks 已移除" : "Penguin hooks 已是关闭状态",
+        });
+      } else if (hooks.conflicts.length > 0) {
+        // Another context injector (e.g. codegraph) is installed alongside —
+        // both will fire on every prompt and double the injected tokens.
+        // Penguin never removes third-party hooks; tell the user to pick one.
+        setHookResult({
+          state: "warn",
+          text: `Penguin hooks 已启用:${hooks.enabled.join("、")}。检测到其他上下文注入 hook(${hooks.conflicts.join(" / ")})—— 两个同时注入会重复耗 token,建议在 ${hooks.settings_path} 里停用其一`,
         });
       } else {
         setHookResult({

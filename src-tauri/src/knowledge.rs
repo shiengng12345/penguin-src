@@ -638,6 +638,41 @@ fn is_penguin_managed_hook(value: &serde_json::Value) -> bool {
         .is_some_and(|command| command.contains(PENGUIN_HOOK_MARKER))
 }
 
+// Third-party prompt/session hooks already installed (e.g. a codegraph
+// prompt-hook). Penguin never removes them — reconcile only touches
+// penguin-managed entries — but the UI must be able to tell the user "two
+// context injectors will both fire and waste tokens; pick one". Invalid or
+// absent settings simply report no conflicts.
+fn third_party_context_hooks(existing: &str) -> Vec<String> {
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(existing) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for event in ["SessionStart", "UserPromptSubmit"] {
+        let Some(groups) = root.get("hooks").and_then(|hooks| hooks.get(event)).and_then(serde_json::Value::as_array) else {
+            continue;
+        };
+        for group in groups {
+            let Some(commands) = group.get("hooks").and_then(serde_json::Value::as_array) else {
+                continue;
+            };
+            for command in commands {
+                if is_penguin_managed_hook(command) {
+                    continue;
+                }
+                if let Some(text) = command.get("command").and_then(serde_json::Value::as_str) {
+                    let brief: String = text.chars().take(80).collect();
+                    let entry = format!("{event}: {brief}");
+                    if !found.contains(&entry) {
+                        found.push(entry);
+                    }
+                }
+            }
+        }
+    }
+    found
+}
+
 // Reconcile only Penguin-owned command hooks inside Claude Code settings.
 // Unknown top-level fields, event groups, matchers, and third-party commands
 // are preserved. Invalid JSON is an error so callers never overwrite it.
@@ -731,6 +766,10 @@ pub struct HookSetupResult {
     pub written: bool,
     pub settings_path: String,
     pub enabled: Vec<&'static str>,
+    // Non-penguin SessionStart/UserPromptSubmit hook commands found in the
+    // settings (preserved, never removed) — surfaced so the UI can warn about
+    // duplicate context injection.
+    pub conflicts: Vec<String>,
 }
 
 fn atomic_write_preserving_permissions(
@@ -793,6 +832,7 @@ fn setup_claude_hooks_at(
     };
     let next = reconcile_claude_hooks(&existing, session_start, user_prompt_submit)?;
     let written = next.is_some();
+    let conflicts = third_party_context_hooks(&existing);
     if let Some(next) = next {
         atomic_write_preserving_permissions(settings_path, &next)?;
     }
@@ -808,6 +848,7 @@ fn setup_claude_hooks_at(
         written,
         settings_path: settings_path.display().to_string(),
         enabled,
+        conflicts,
     })
 }
 
@@ -827,6 +868,7 @@ pub(crate) fn knowledge_agent_hook_setup(
             written: false,
             settings_path: settings.display().to_string(),
             enabled: Vec::new(),
+            conflicts: Vec::new(),
         });
     }
     setup_claude_hooks_at(&settings, session_start, user_prompt_submit)
@@ -1130,6 +1172,24 @@ mod tests {
     #[test]
     fn invalid_claude_settings_are_never_rewritten() {
         assert!(reconcile_claude_hooks("{broken", true, true).is_err());
+    }
+
+    #[test]
+    fn third_party_context_hooks_are_reported_but_never_removed() {
+        let existing = r#"{
+          "hooks": {
+            "UserPromptSubmit": [
+              {"hooks":[{"type":"command","command":"codegraph prompt-hook"}]},
+              {"hooks":[{"type":"command","command":"penguin hook user-prompt-submit --managed-by=penguin"}]}
+            ],
+            "PreToolUse": [{"hooks":[{"type":"command","command":"rtk hook claude"}]}]
+          }
+        }"#;
+        let conflicts = super::third_party_context_hooks(existing);
+        // PreToolUse is not a context injector — only prompt/session events count.
+        assert_eq!(conflicts, vec!["UserPromptSubmit: codegraph prompt-hook".to_string()]);
+        assert_eq!(super::third_party_context_hooks("{broken"), Vec::<String>::new());
+        assert_eq!(super::third_party_context_hooks("{}"), Vec::<String>::new());
     }
 
     #[test]

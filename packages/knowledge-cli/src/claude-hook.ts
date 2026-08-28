@@ -10,6 +10,10 @@ export interface ClaudeHookOptions {
   maxChars?: number;
   sessionId?: string;
   seenTargets?: ReadonlySet<string>;
+  // "compact" (default): relations + signatures + file:line pointers, ≤2KB —
+  // the agent pulls full source itself via knowledge_explore when it wants
+  // it. "full": legacy verbatim source blocks (penguin hook ... --full).
+  mode?: "compact" | "full";
 }
 
 export interface ClaudeHookDeps {
@@ -116,7 +120,13 @@ function truncate(text: string, maxChars: number): string {
   return `${text.slice(0, maxChars - 1)}…`;
 }
 
-const PROMPT_TARGET_PATTERN = /\bgrpc::[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+\b|\b[A-Za-z0-9_./-]+\.(?:ts|tsx|js|jsx|mjs|cjs|rs|go|py|java|kt|proto)\b|\b[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+\b|\/[A-Za-z0-9_./:{}-]+/g;
+// Alternates, in priority order: grpc:: names, file paths, dotted symbols,
+// routes, then BARE code identifiers — camelCase/PascalCase with an internal
+// capital (buildStatusPanel, RepoStatusPanel) and snake_case with an
+// underscore (resolve_branch_base). Plain prose words match neither bare
+// form, and any false positive that still slips through resolves to an
+// empty ExplorePack, which the compact renderer drops (see packHasSignal).
+const PROMPT_TARGET_PATTERN = /\bgrpc::[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+\b|\b[A-Za-z0-9_./-]+\.(?:ts|tsx|js|jsx|mjs|cjs|rs|go|py|java|kt|proto)\b|\b[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+\b|\/[A-Za-z0-9_./:{}-]+|\b[A-Za-z_$][a-z0-9$]*[A-Z][\w$]*\b|\b[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b/g;
 const COMMON_PROSE_DOTTED_TOKENS = new Set(["e.g", "i.e", "etc."]);
 
 export function selectPromptTargets(prompt: string): string[] {
@@ -161,6 +171,98 @@ async function within<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
 function relationTitles(pack: ExplorePack, key: "callers" | "calls"): string {
   const titles = pack[key].map((item) => item.title).filter(Boolean);
   return titles.length > 0 ? titles.join(", ") : "none indexed";
+}
+
+function briefTitles(items: Array<{ title: string }>, max: number): string {
+  if (items.length === 0) return "none indexed";
+  const titles = items.slice(0, max).map((item) => item.title).filter(Boolean);
+  const extra = items.length > max ? ` (+${items.length - max} more)` : "";
+  return `${titles.join(", ")}${extra}`;
+}
+
+// A pack with nothing resolved (no focus, no relations, no candidates) is a
+// false-positive target — injecting "target=GitHub: not indexed" into every
+// prompt that mentions a brand name is pure noise. Compact mode drops these.
+export function packHasSignal(pack: ExplorePack): boolean {
+  return Boolean(
+    pack.focus
+    || pack.sources.length > 0
+    || pack.callers.length > 0
+    || pack.calls.length > 0
+    || (pack.renderedBy ?? []).length > 0
+    || (pack.renders ?? []).length > 0
+    || (pack.invokedDynamicallyBy ?? []).length > 0
+    || (pack.invokesDynamic ?? []).length > 0
+    || pack.blastRadius.length > 0
+    || (pack.ambiguousCandidates?.length ?? 0) > 0,
+  );
+}
+
+function signatureLine(code: string): string {
+  for (const line of code.split("\n")) {
+    const trimmed = line.trim();
+    // Skip punctuation-only lines (a stale index range can start on a bare
+    // "}" when the file shifted under it) — a brace tells the agent nothing.
+    if (trimmed && /[\p{L}\p{N}]/u.test(trimmed)) return truncate(trimmed, 160);
+  }
+  return "";
+}
+
+// Compact prompt injection: everything the agent needs to DECIDE (what this
+// is, who touches it, where it lives) in ≤2KB, never the source bodies — the
+// agent pulls those itself via knowledge_explore / `penguin explore` only
+// when it actually needs them. Injecting full source into every prompt is
+// what makes hook-based context expensive; pointers are almost always enough.
+export function renderExploreHookCompact(
+  target: string,
+  pack: ExplorePack,
+  maxChars = 2_000,
+): string {
+  // Ambiguous-only pack (nothing resolved, only candidates): one line, no
+  // node ids. A prose word matching 18 symbols must not dump a candidate
+  // table into every prompt; an agent that cares can explore a precise name.
+  const resolvedNothing = !pack.focus && pack.sources.length === 0 && pack.callers.length === 0 && pack.calls.length === 0;
+  if (resolvedNothing && pack.ambiguousCandidates?.length) {
+    return truncate(
+      `[Penguin] "${target}" is ambiguous (${pack.ambiguousCandidates.length} matches) — if relevant, call knowledge_explore with a more specific name.`,
+      maxChars,
+    );
+  }
+  const lines = [
+    `[Penguin explore context] target=${target} (compact — full source: MCP knowledge_explore or \`penguin explore ${target}\`)`,
+    `freshness=${pack.freshness.stale ? "stale" : "fresh"}${pack.freshness.reason ? ` reason=${pack.freshness.reason}` : ""}`,
+  ];
+  const focusSource = pack.sources.find((source) => source.role === "focus") ?? pack.sources[0];
+  if (focusSource) {
+    const signature = signatureLine(focusSource.code);
+    lines.push(`focus: ${focusSource.filePath}:${focusSource.startLine}-${focusSource.endLine}${signature ? ` — ${signature}` : ""}`);
+  }
+  if (pack.callPath.length > 1) {
+    lines.push(`call path: ${pack.callPath.slice(0, 8).map((step) => step.title).join(" → ")}`);
+  }
+  lines.push(`callers(${pack.callers.length}): ${briefTitles(pack.callers, 5)}; calls(${pack.calls.length}): ${briefTitles(pack.calls, 5)}`);
+  const uiRelations = [
+    ...(pack.renderedBy ?? []).map((item) => `rendered-by:${item.title}`),
+    ...(pack.renders ?? []).map((item) => `renders:${item.title}`),
+    ...(pack.invokedDynamicallyBy ?? []).map((item) => `dynamic-by:${item.title}`),
+    ...(pack.invokesDynamic ?? []).map((item) => `invokes-dynamic:${item.title}`),
+  ];
+  if (uiRelations.length > 0) lines.push(`ui relations: ${truncate(uiRelations.join(", "), 300)}`);
+  if (pack.blastRadius.length > 0) lines.push(`blast radius(${pack.blastRadius.length}): ${briefTitles(pack.blastRadius, 5)}`);
+  if (pack.tests.length > 0) lines.push(`tests(${pack.tests.length}): ${briefTitles(pack.tests, 4)}`);
+  const otherFiles = pack.sources
+    .filter((source) => source !== focusSource)
+    .slice(0, 4)
+    .map((source) => `${source.filePath}:${source.startLine}-${source.endLine} (${source.role})`);
+  if (otherFiles.length > 0) lines.push(`related files: ${otherFiles.join(", ")}`);
+  if (pack.diagnostics.length > 0) lines.push(`diagnostics: ${truncate(pack.diagnostics.join("; "), 300)}`);
+  if (pack.ambiguousCandidates?.length) {
+    lines.push(
+      "ambiguous candidates: "
+      + pack.ambiguousCandidates.map((candidate) => `${candidate.title} [${candidate.nodeId}]`).join(", "),
+    );
+  }
+  return truncate(lines.join("\n"), maxChars);
 }
 
 export function renderExploreHook(
@@ -210,8 +312,9 @@ export async function runClaudeHook(
   deps: ClaudeHookDeps,
 ): Promise<string> {
   const isSessionStart = options.event === "session-start";
+  const mode = options.mode ?? "compact";
   const timeoutMs = options.timeoutMs ?? (isSessionStart ? 800 : 800);
-  const maxChars = options.maxChars ?? (isSessionStart ? 900 : 6_000);
+  const maxChars = options.maxChars ?? (isSessionStart ? 900 : mode === "compact" ? 2_000 : 6_000);
   try {
     if (isSessionStart) {
       const status = await within(
@@ -230,12 +333,15 @@ export async function runClaudeHook(
       })),
       timeoutMs,
     );
+    const rendered = mode === "compact" ? packs.filter(({ pack }) => packHasSignal(pack)) : packs;
     return truncate(
-      packs
-        .map(({ target, pack }) => renderExploreHook(target, pack, {
-          includeSource: !options.seenTargets?.has(target),
-          maxChars,
-        }))
+      rendered
+        .map(({ target, pack }) => mode === "compact"
+          ? renderExploreHookCompact(target, pack, maxChars)
+          : renderExploreHook(target, pack, {
+            includeSource: !options.seenTargets?.has(target),
+            maxChars,
+          }))
         .join("\n\n"),
       maxChars,
     );

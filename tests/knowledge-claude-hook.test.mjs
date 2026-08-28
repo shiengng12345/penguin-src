@@ -7,12 +7,58 @@ import {
   hashHookTarget,
   loadHookSessionState,
   readBoundedHookInput,
+  renderExploreHookCompact,
   renderSessionStart,
   runClaudeHook,
   saveHookSessionState,
   selectPromptTarget,
   selectPromptTargets,
 } from "../packages/knowledge-cli/dist/claude-hook.js";
+
+test("bare camelCase and snake_case identifiers are prompt targets; prose words are not", () => {
+  assert.deepEqual(selectPromptTargets("who calls buildStatusPanel?"), ["buildStatusPanel"]);
+  assert.deepEqual(selectPromptTargets("trace RepoStatusPanel and resolve_branch_base"), ["RepoStatusPanel", "resolve_branch_base"]);
+  assert.equal(selectPromptTarget("please summarize the meeting notes for today"), null);
+});
+
+test("compact mode drops targets that resolved to nothing (prose false positives)", async () => {
+  const empty = {
+    ...exploreFixture("GitHub"),
+    focus: null,
+    implementation: null,
+    callers: [],
+    calls: [],
+    sources: [],
+    blastRadius: [],
+    diagnostics: ["\"GitHub\" not indexed"],
+  };
+  const text = await runClaudeHook(
+    { event: "user-prompt-submit", prompt: "push it to GitHub please" },
+    { runPenguin: async () => empty },
+  );
+  assert.equal(text, "");
+});
+
+test("ambiguous-only pack renders one line without node ids", async () => {
+  const ambiguous = {
+    ...exploreFixture("GitHub"),
+    focus: null,
+    implementation: null,
+    callers: [],
+    calls: [],
+    sources: [],
+    blastRadius: [],
+    diagnostics: ["ambiguous target: 18 matches"],
+    ambiguousCandidates: Array.from({ length: 18 }, (_, i) => ({ nodeId: `node_${i}`, title: "github", filePath: "x", branch: "main" })),
+  };
+  const text = await runClaudeHook(
+    { event: "user-prompt-submit", prompt: "push it to GitHub" },
+    { runPenguin: async () => ambiguous },
+  );
+  assert.match(text, /"GitHub" is ambiguous \(18 matches\)/);
+  assert.doesNotMatch(text, /node_/);
+  assert.ok(text.length < 200);
+});
 
 test("Claude prompt hook selects only explicit code targets", () => {
   assert.equal(selectPromptTarget("hello, summarize this idea"), null);
@@ -163,10 +209,10 @@ test("UserPromptSubmit extracts all bounded explicit targets", () => {
   );
 });
 
-test("UserPromptSubmit queries Explore and renders verbatim source as Markdown", async () => {
+test("UserPromptSubmit --full renders verbatim source as Markdown", async () => {
   const calls = [];
   const text = await runClaudeHook(
-    { event: "user-prompt-submit", prompt: "inspect Foo.run", maxChars: 6_000 },
+    { event: "user-prompt-submit", prompt: "inspect Foo.run", maxChars: 6_000, mode: "full" },
     { runPenguin: async (args) => { calls.push(args); return exploreFixture(); } },
   );
   assert.deepEqual(calls, [["explore", "Foo.run", "--json"]]);
@@ -176,19 +222,68 @@ test("UserPromptSubmit queries Explore and renders verbatim source as Markdown",
   assert.doesNotMatch(text, /"sources"\s*:/);
 });
 
-test("repeated session target emits relations without repeating full source", async () => {
+test("repeated session target (--full) emits relations without repeating full source", async () => {
   const text = await runClaudeHook(
     {
       event: "user-prompt-submit",
       sessionId: "s1",
       seenTargets: new Set(["Foo.run"]),
       prompt: "inspect Foo.run",
+      mode: "full",
     },
     { runPenguin: async () => exploreFixture() },
   );
   assert.match(text, /already provided|relations/i);
   assert.doesNotMatch(text, /export function run/);
   assert.match(text, /Screen/);
+});
+
+test("UserPromptSubmit defaults to compact: pointers + signature, never source bodies", async () => {
+  const text = await runClaudeHook(
+    { event: "user-prompt-submit", prompt: "inspect Foo.run" },
+    { runPenguin: async () => exploreFixture() },
+  );
+  // Signature line and location survive; the body and code fences do not.
+  assert.match(text, /compact/);
+  assert.match(text, /src\/foo\.ts:10-12/);
+  assert.match(text, /export function run\(\)/);
+  assert.doesNotMatch(text, /```/);
+  assert.doesNotMatch(text, /return save\(\)/);
+  assert.match(text, /callers\(1\): Screen/);
+  assert.match(text, /calls\(1\): save/);
+  // Tells the agent where the full source lives.
+  assert.match(text, /knowledge_explore|penguin explore/);
+  assert.ok(text.length <= 2_000, `compact stayed within budget (${text.length})`);
+});
+
+test("compact rendering surfaces call path, blast radius, tests, and ui relations", () => {
+  const pack = {
+    ...exploreFixture("Pay.charge"),
+    callPath: [
+      { depth: 0, nodeId: "a", title: "Route", nodeType: "endpoint", via: "root" },
+      { depth: 1, nodeId: "b", title: "Pay.charge", nodeType: "symbol", via: "calls" },
+      { depth: 2, nodeId: "c", title: "Ledger.write", nodeType: "symbol", via: "calls" },
+    ],
+    blastRadius: Array.from({ length: 7 }, (_, i) => ({ nodeId: `n${i}`, title: `Dep${i}`, nodeType: "symbol" })),
+    tests: [{ nodeId: "t", title: "pay.test.ts", nodeType: "test" }],
+    renderedBy: [{ nodeId: "u", title: "CheckoutPage", nodeType: "component" }],
+  };
+  const text = renderExploreHookCompact("Pay.charge", pack);
+  assert.match(text, /call path: Route → Pay\.charge → Ledger\.write/);
+  assert.match(text, /blast radius\(7\): Dep0, Dep1, Dep2, Dep3, Dep4 \(\+2 more\)/);
+  assert.match(text, /tests\(1\): pay\.test\.ts/);
+  assert.match(text, /rendered-by:CheckoutPage/);
+});
+
+test("compact rendering respects the character budget on oversized packs", () => {
+  const pack = {
+    ...exploreFixture("Big.run"),
+    callers: Array.from({ length: 50 }, (_, i) => ({ nodeId: `c${i}`, title: `VeryLongCallerName${i}`, nodeType: "symbol" })),
+    diagnostics: ["x".repeat(2_000)],
+  };
+  const text = renderExploreHookCompact("Big.run", pack, 2_000);
+  assert.ok(text.length <= 2_000);
+  assert.match(text, /callers\(50\):.*\(\+45 more\)/);
 });
 
 test("hook session state persists only bounded target hashes", () => {

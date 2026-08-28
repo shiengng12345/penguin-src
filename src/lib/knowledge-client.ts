@@ -121,6 +121,9 @@ export interface HookSetupResult {
   written: boolean;
   settings_path: string;
   enabled: Array<"SessionStart" | "UserPromptSubmit">;
+  // Third-party SessionStart/UserPromptSubmit hooks found in settings —
+  // preserved by setup, listed so the UI can warn about double injection.
+  conflicts: string[];
 }
 
 export async function knowledgeAgentHookSetup(

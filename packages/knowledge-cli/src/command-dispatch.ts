@@ -836,7 +836,10 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
     const store = deps.openStore();
     try {
       const output = await runClaudeHook(
-        { event, prompt, sessionId, seenTargets },
+        // Compact by default (≤2KB pointers; the agent fetches source via
+        // knowledge_explore when it needs it); --full restores verbatim
+        // source blocks for setups that want the old behavior.
+        { event, prompt, sessionId, seenTargets, mode: flags.includes("--full") ? "full" : "compact" },
         {
           runPenguin: async (args) => {
             if (args[0] === "status") return compactIndexStatus(store);
