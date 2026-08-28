@@ -614,10 +614,12 @@ test("tools/list advertises a tiered, explore-first surface without hiding any c
   assert.match(MCP_LISTED_TOOL_DEFS[0].description, /Default FIRST call/);
   assert.match(MCP_LISTED_TOOL_DEFS[0].description, /knowledge_search for text\/regex/);
 
-  // 119 defs exist (93 are auto-added canonical placeholders); the listing
-  // surface is only the hand-written tools — that wall of mostly-
-  // unimplemented entries is what drowned the entry point.
-  assert.ok(listed.length < 30, `listed ${listed.length} tools`);
+  // The listing is curated, not minimal. An earlier version asserted <30 here
+  // and that number was the bug: it was met by hiding 44 implemented read-only
+  // capabilities (file_symbols, callers, callees, flow, affected...), which
+  // cost an agent two unanswerable questions. The ceiling now guards against
+  // drifting back toward the unreadable 119, not against completeness.
+  assert.ok(listed.length <= 60, `listed ${listed.length} tools — re-tier rather than append`);
   assert.ok(KNOWLEDGE_TOOL_DEFS.length > 100, "full manifest still carries every capability");
 
   // Nothing is removed: every listed tool stays dispatchable, and so do the
@@ -668,7 +670,7 @@ test("the server's tools/list keeps explore first instead of alphabetising it aw
 
   const names = tools.map((tool) => tool.name);
   assert.equal(names[0], "knowledge_explore", "entry point leads the list");
-  assert.ok(names.length < 60, `advertised ${names.length} tools`);
+  assert.ok(names.length <= 90, `advertised ${names.length} tools (knowledge + log + rpc surfaces)`);
   // Non-knowledge tools still sort alphabetically after the tiered block.
   const tail = names.slice(names.indexOf("knowledge_capabilities") + 1);
   assert.deepEqual(tail, [...tail].sort(), "remaining tools stay alphabetical");

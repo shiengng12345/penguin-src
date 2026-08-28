@@ -981,8 +981,39 @@ export function handleKnowledgeTool(
       if (!branch) return { error: "branch not found" };
       return listIndexedFiles(store, repoId, branch.id);
     }
-    case "knowledge_file_symbols":
-      return listFileSymbols(store, String(a.branch_id ?? a.branch ?? ""), String(a.file_path ?? a.path ?? ""));
+    case "knowledge_file_symbols": {
+      // Previously this passed a bare branch_id straight through, so a caller
+      // who supplied {repo, path} — the natural shape, and the one a sibling
+      // tool like knowledge_files takes — got an empty branch string and an
+      // empty array back. Silence for a file that HAS symbols is the worst
+      // possible answer: it reads as "nothing defined here".
+      const filePath = String(a.file_path ?? a.path ?? "");
+      if (!filePath) return { error: "file_path (or path) is required" };
+      const explicitBranch = a.branch_id == null ? "" : String(a.branch_id);
+      if (explicitBranch) return listFileSymbols(store, explicitBranch, filePath);
+      const repoSelector = String(a.repo ?? "");
+      if (!repoSelector) {
+        return { error: "repo (or branch_id) is required to scope the file — a bare path is ambiguous across repos" };
+      }
+      const repoId = store.resolveRepoIds(repoSelector)[0];
+      if (!repoId) return { error: `repo not found: ${repoSelector}` };
+      // getBranch needs an exact name, so an unspecified branch has to fall
+      // back to the repo's live one — otherwise the natural {repo, path} call
+      // fails with "branch not found" for a repo that is indexed just fine.
+      const branchId = a.branch != null
+        ? store.getBranch(repoId, String(a.branch))?.id
+        : (store.db.prepare(
+            "SELECT id FROM branches WHERE repo_id=? AND status='live' ORDER BY last_indexed_at DESC LIMIT 1",
+          ).get(repoId) as { id: string } | undefined)?.id;
+      if (!branchId) {
+        return {
+          error: a.branch != null
+            ? `branch not found: ${String(a.branch)}`
+            : `no live branch indexed for ${repoSelector} — run penguin index first`,
+        };
+      }
+      return listFileSymbols(store, branchId, filePath);
+    }
     case "knowledge_tag_list":
       return listTags(store);
     case "knowledge_response_sample_list":

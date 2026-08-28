@@ -351,33 +351,72 @@ for (const tool of KNOWLEDGE_TOOL_DEFS) {
 // ---------------------------------------------------------------------------
 // Listing surface
 //
-// KNOWLEDGE_TOOL_DEFS carries EVERY canonical capability (93 of them are
-// auto-added placeholders above) so parity checks and the dispatcher can see
-// the whole manifest. Publishing all 119 to tools/list was actively harmful:
-// an agent picking a tool had to scan a wall of mostly-unimplemented entries,
-// which is exactly why "call knowledge_explore first" never stuck.
+// KNOWLEDGE_TOOL_DEFS carries EVERY canonical capability so parity checks and
+// the dispatcher see the whole manifest. Publishing all 119 to tools/list was
+// harmful — an agent had to scan a wall of entries, which is why "call
+// knowledge_explore first" never stuck.
 //
-// tools/list therefore advertises only the hand-written tools, ordered so the
-// single entry point comes first. Nothing is removed: every placeholder stays
-// callable by name (isKnowledgeTool is unchanged) and knowledge_capabilities
-// still returns the full manifest with registration status.
+// But the first pass at this cut too deep. It kept only the hand-written
+// tools, on the assumption that the auto-generated entries were mostly
+// unimplemented placeholders. They are not: 98 capabilities have real MCP
+// handlers, and 44 read-only ones (callers, callees, flow, affected, path,
+// files, file_symbols, locate, impact, the graph views...) became
+// undiscoverable. An agent asked to enumerate a file's symbols tried five
+// tools and gave up, while knowledge_file_symbols sat there working.
+//
+// So the listing now carries every read-only capability an agent would
+// reasonably reach for, tiered by how often it is the right next call, with
+// knowledge_explore still first. Write and maintenance capabilities stay
+// unlisted (they remain callable by name, and knowledge_capabilities still
+// returns the full manifest) — the goal is a short path to the right tool,
+// not the shortest possible list.
 // ---------------------------------------------------------------------------
 
 // Ordered tiers. Tier 0 is the entry point; later tiers are specialised tools
 // an agent reaches for only after explore, and are labelled as such.
 const TOOL_TIERS: ReadonlyArray<readonly [prefix: string, names: readonly string[]]> = [
   ["", ["knowledge_explore"]],
-  ["", ["knowledge_search", "knowledge_get_hit", "get_node", "get_architecture", "index_status"]],
+  ["", [
+    "knowledge_search",
+    "knowledge_get_hit",
+    "get_node",
+    "knowledge_file_symbols", // "what is defined in this file" — a primitive
+    "knowledge_files",
+    "get_architecture",
+    "index_status",
+  ]],
+  ["[targeted — use when explore returned too much or the wrong thing] ", [
+    // Single-relation queries. Explore returns all relations at once, which is
+    // usually right, but a caller that wants only the callers of one symbol
+    // should not have to pay for (and read past) everything else.
+    "knowledge_callers",
+    "knowledge_callees",
+    "knowledge_impact",
+    "knowledge_affected",
+    "knowledge_flow",
+    "knowledge_path",
+    "knowledge_locate",
+    "knowledge_context",
+    "knowledge_explain",
+    "knowledge_coverage",
+  ]],
   ["[specialised — knowledge_explore usually answers this first] ", [
     "explore_graph",
     "knowledge_graph_query",
+    "knowledge_service_graph",
+    "knowledge_local_graph",
+    "knowledge_repository_graph",
     "find_dead_code",
     "find_communities",
     "analyze_repository",
     "package_dependencies",
     "dependency_path",
     "compare_branches",
+    "knowledge_snapshot_list",
+    "knowledge_timeline",
+    "knowledge_recent",
     "status_panel",
+    "knowledge_doctor",
   ]],
   ["[occasional — writes, docs, or maintenance] ", [
     "write_note",
@@ -390,6 +429,12 @@ const TOOL_TIERS: ReadonlyArray<readonly [prefix: string, names: readonly string
     "api_doc_show",
     "api_doc_diff",
     "set_master_branch",
+    "knowledge_note_list",
+    "knowledge_note_backlinks",
+    "knowledge_tag_list",
+    "knowledge_why_get",
+    "knowledge_saved_query_list",
+    "knowledge_saved_query_run",
     "knowledge_capabilities",
   ]],
 ];

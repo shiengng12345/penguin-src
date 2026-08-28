@@ -1170,6 +1170,11 @@ export interface FileSymbolRow {
   nodeId: string;
   title: string;
   kind: string;
+  // Without coordinates a caller has to re-query every symbol just to find
+  // out where it is — one agent spent 13 extra calls (and pulled in 860-line
+  // method bodies) recovering line numbers that were one join away.
+  startLine: number | null;
+  endLine: number | null;
   status: string; // fresh | stale
 }
 
@@ -1184,13 +1189,14 @@ export function listFileSymbols(
     : revisionBranchId(branchIdOrOptions);
   if (!branchId) return [];
   if (typeof branchIdOrOptions !== "string" && branchIdOrOptions.revision && !branchIdOrOptions.revision.snapshotId.startsWith("legacy:")) {
-    return openRevisionView(store, branchIdOrOptions.revision).symbolVersions().filter((row) => row.filePath === filePath).map((row) => ({ nodeId: row.nodeId, title: row.title, kind: row.kind, status: "fresh" }));
+    return openRevisionView(store, branchIdOrOptions.revision).symbolVersions().filter((row) => row.filePath === filePath).map((row) => ({ nodeId: row.nodeId, title: row.title, kind: row.kind, startLine: row.startLine ?? null, endLine: row.endLine ?? null, status: "fresh" }));
   }
   return store.db
     .prepare(
-      `SELECT sv.node_id AS nodeId, n.title AS title, sv.kind AS kind, sv.status AS status
+      `SELECT sv.node_id AS nodeId, n.title AS title, sv.kind AS kind,
+              sv.start_line AS startLine, sv.end_line AS endLine, sv.status AS status
        FROM symbol_versions sv JOIN nodes n ON n.id = sv.node_id
-       WHERE sv.branch_id=? AND sv.file_path=? ORDER BY n.title`,
+       WHERE sv.branch_id=? AND sv.file_path=? ORDER BY sv.start_line, n.title`,
     )
     .all(branchId, filePath) as FileSymbolRow[];
 }
@@ -2157,13 +2163,28 @@ export function buildFlow(
   if (steps.length === 1) {
     const node = store.getNode(focus);
     const isEndpoint = node?.node_type === "endpoint";
+    // A FILE node with defines/imports is not a leaf, and saying so sent one
+    // agent through five other tools before it gave up on listing that file's
+    // symbols. Count what the node actually has and point at the tool that
+    // enumerates it.
+    const isFile = node?.node_type === "file";
+    const fileEdges = isFile
+      ? store.db.prepare(
+          `SELECT edge_type AS type, COUNT(*) AS n FROM edges
+            WHERE src=? AND status='active' AND edge_type IN ('defines','imports') GROUP BY edge_type`,
+        ).all(focus) as Array<{ type: string; n: number }>
+      : [];
+    const defines = fileEdges.find((row) => row.type === "defines")?.n ?? 0;
+    const imports = fileEdges.find((row) => row.type === "imports")?.n ?? 0;
     return {
       target, trust: trustEnvelopeForBranch(store, branchId), root, steps, ...enrichment,
       diagnostic: {
         reason: isEndpoint ? "endpoint_no_handler" : "no_outgoing_edges",
         message: isEndpoint
           ? `Endpoint "${root.title}" is indexed but has no \`handles\` edge to a handler yet — the provider service may not be indexed, or its @GrpcMethod handler wasn't recognized.`
-          : `"${root.title}" is indexed but has no outgoing calls/references — it may be a terminal/leaf symbol, or its callees aren't indexed.`,
+          : isFile && (defines > 0 || imports > 0)
+            ? `"${root.title}" is a FILE node with ${defines} defined symbol(s) and ${imports} import(s), but files carry no outgoing calls/references of their own — call knowledge_file_symbols(repo, path) to enumerate what it defines.`
+            : `"${root.title}" is indexed but has no outgoing calls/references — it may be a terminal/leaf symbol, or its callees aren't indexed.`,
       },
       ...(scopeFallback ? { scopeFallback } : {}),
     };
