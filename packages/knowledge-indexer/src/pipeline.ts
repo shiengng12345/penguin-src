@@ -4,6 +4,7 @@ import { basename, dirname, extname, relative, resolve as pathResolve } from "no
 import { performance } from "node:perf_hooks";
 import { SCHEMA_VERSION, GitTopologyStore, FileFactStore, ResolutionStore, SourceStore, SourceSnapshotStore, resolveBranchBase, type KnowledgeStore, type ParsedFileFact, type ParsedEdge, type SnapshotOverlayEntry, type SourceSnapshotOverlayEntry } from "@penguin/knowledge-core";
 import { extractSymbols, type ExtractedFile, type ExtractedSymbol } from "./extract.js";
+import { ParsePool } from "./parse-pool.js";
 import { extractFieldAccesses } from "./field-access.js";
 import { extractIacFacts } from "./iac.js";
 import { grpcEndpointKey } from "./grpc-client.js";
@@ -1068,7 +1069,49 @@ export async function indexRepo(input: {
     }>();
     const seen = new Set<string>();
     let done = 0;
+    // Parallel read-ahead parse. Parsing is CPU-bound tree-sitter/WASM work and
+    // the write side is a single SQLite writer, so the only thing worth
+    // parallelising is the parse — done here in a worker pool, one batch ahead
+    // of the serial write loop below. Purely an accelerator: every entry is
+    // optional, and a miss (pool disabled, worker died, file not prefetched)
+    // falls through to the original in-loop read + parse.
+    const parsePoolSize = ParsePool.resolveSize(undefined, files.length);
+    const parsePool = parsePoolSize > 0 ? new ParsePool(parsePoolSize) : null;
+    const PREFETCH_BATCH = 64;
+    let prefetched = new Map<string, { source: string; contentHash: string; extracted: Promise<ExtractedFile> }>();
+    const prefetchFrom = (startIndex: number): void => {
+      if (!parsePool) return;
+      prefetched = new Map();
+      for (let i = startIndex; i < Math.min(startIndex + PREFETCH_BATCH, files.length); i += 1) {
+        const candidate = files[i];
+        const lang = langOf(candidate.relPath);
+        if (lang === "other") continue; // nothing to parse
+        // Cheap mtime/size skip BEFORE reading the file, so an incremental run
+        // over an unchanged tree does not parse anything it will discard.
+        if (effectiveMode === "incremental") {
+          const previous = store.getFileCheckpoint(repoId, branchId, candidate.relPath);
+          if (
+            previous && previous.status !== "error"
+            && previous.mtime_ms === candidate.mtimeMs && previous.size_bytes === candidate.sizeBytes
+          ) continue;
+        }
+        let source: string;
+        try {
+          source = readFileSync(candidate.absPath, "utf8");
+        } catch {
+          continue; // the loop will surface the real read error in context
+        }
+        prefetched.set(candidate.relPath, {
+          source,
+          contentHash: sha256(source),
+          extracted: parsePool.parse({ lang, source, relPath: candidate.relPath }),
+        });
+      }
+    };
+    let fileIndex = 0;
     for (const file of files) {
+      if (parsePool && fileIndex % PREFETCH_BATCH === 0) prefetchFrom(fileIndex);
+      fileIndex += 1;
       report.scanned += 1;
       seen.add(file.relPath);
       done += 1;
@@ -1109,8 +1152,9 @@ export async function indexRepo(input: {
       }
 
       parseStepStartedAt = performance.now();
-      const source = readFileSync(file.absPath, "utf8");
-      const contentHash = sha256(source);
+      const ready = prefetched.get(file.relPath);
+      const source = ready?.source ?? readFileSync(file.absPath, "utf8");
+      const contentHash = ready?.contentHash ?? sha256(source);
       addParseDuration(report.timings.parse, "sourceReadMs", parseStepStartedAt);
 
       // hash unchanged (touch / format-revert) → refresh checkpoint mtime, skip parse
@@ -1129,6 +1173,10 @@ export async function indexRepo(input: {
       }
 
       reprocessedFiles.add(file.relPath);
+      // The worker's result, when this file was prefetched. A rejected parse
+      // resolves to undefined so indexFileWithSource parses in-process and
+      // reports the error through its normal path.
+      const preExtracted = ready ? await ready.extracted.catch(() => undefined) : undefined;
       const r = await indexFileWithSource(store, {
         repoId, branchId, commit: commitForFile(file.relPath), relPath: file.relPath,
         absPath: file.absPath, rootPath: scanRoot,
@@ -1138,6 +1186,7 @@ export async function indexRepo(input: {
         timings: report.timings.parse,
         pass: "first",
         deferEdgesOnUnresolved: true,
+        ...(preExtracted ? { preExtracted } : {}),
       });
       store.db.prepare("UPDATE coverage_records SET parser_status=?,parser_language=?,parser_version=?,parser_error=?,updated_at=? WHERE repo_id=? AND file_path=?").run(
         r.error ? "failed" : langOf(file.relPath) === "other" ? "unsupported" : "parsed",
@@ -1195,6 +1244,11 @@ export async function indexRepo(input: {
         if (!r2.error && r2.fileFactId) targetManifest.set(file.relPath, r2.fileFactId);
       }
     }
+    // Parsing is over; release the workers before the remaining stages so a
+    // long index does not sit on idle threads (they are unref'd, so a leaked
+    // pool would not block exit — this is hygiene, not a correctness fix).
+    if (parsePool) await parsePool.close();
+    prefetched = new Map();
     stageDone(
       "parse",
       `${report.parsed} parsed · ${report.skipped} unchanged` +
