@@ -1,10 +1,10 @@
 # Evaluate a local code index — and tell me what you actually think
 
-> **Round 5 · 2026-08-29 · build `5dfb9a54`**
-> Four earlier rounds found eleven defects, all fixed. Their reports are in this
-> directory. **The Part A questions are new this round** — rounds two through
-> four unknowingly re-asked round one's set, because the generator was
-> deterministic; it now takes a seed. See "What changed since the last round" below before you start, so
+> **Round 6 · 2026-08-30 · build `69e601e7`**
+> Five earlier rounds found twelve defects, all fixed. Their reports are in
+> this directory. The Part A questions are new again this round — the
+> generator takes a seed, and rounds five and six share one question of
+> fourteen. See "What changed since the last round" below before you start, so
 > you spend the evaluation on new ground rather than re-finding what is done.
 
 You are being asked to use a code knowledge index called **Penguin**, judge how
@@ -152,9 +152,11 @@ index-evaluation-gpt-5-round3.md     (round 3)
 index-evaluation-opus-5-round3.md    (round 3)
 index-evaluation-gpt-5-round4.md     (round 4)
 index-evaluation-opus-5-round4.md    (round 4)
+index-evaluation-gpt-5-round5.md     (round 5)
+index-evaluation-opus-5-round5.md    (round 5)
 ```
 
-So a fifth GPT-5 run writes `index-evaluation-gpt-5-round5.md`. If your name is
+So a sixth GPT-5 run writes `index-evaluation-gpt-5-round6.md`. If your name is
 already taken at the round you picked, go up a round — never replace a file that
 is there.
 
@@ -182,6 +184,12 @@ what that number is based on — the score without the reason is not useful to m
 | **Usability** — how much work to get an answer you can act on? | /100 | |
 | **Speed vs grep + reading files** — is it actually faster? | /100 | |
 | **Overall** — would you install this? | /100 | |
+
+Round five scored it 62 overall — accuracy 64, completeness 52, honesty 63,
+usability 54, speed 80 — and a second model independently put completeness
+lowest and speed highest. Score what you find, not what you think I want to
+hear: a number that drifts up while the same complaints repeat would be the one
+signal here I could not trust.
 
 Use this scale so the numbers mean the same thing across rounds:
 
@@ -228,7 +236,7 @@ again — or not.
 
 ## What changed since the last round
 
-Eleven defects reported by earlier reviewers have been fixed across four rounds.
+Twelve defects reported by earlier reviewers have been fixed across five rounds.
 If you hit any of these, it is a regression worth reporting loudly; if it works,
 one line is enough — do not spend the evaluation re-testing them.
 
@@ -246,6 +254,13 @@ From rounds one and two:
 - `architecture --repo` no longer dumps all 26 repos, and `repograph` ranks on
   calls/references/invokes/handles with the degree reported per node, instead of
   counting imports and putting `.spec.ts` files at the top.
+
+From round five:
+
+- `flow` renders the tree it actually traversed. Steps carry `parentNodeId`, so
+  a step nests under the node it really hangs off. Before this the renderer
+  indented by depth alone and showed a TypeScript interface as the caller of
+  thirteen functions.
 
 From round four:
 

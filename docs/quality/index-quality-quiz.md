@@ -37,17 +37,17 @@ confidence: high / medium / low — if low, say what the index was missing
 
 ## Q1 · callers
 
-In FPMS-NT, which functions call `claimPeriod` (defined in apps/promotion/src/modules/realtime-task/services/realtime-task.service.ts)? List every caller with its file.
+In FPMS-NT, which functions call `getColorLandEventConfigByIdFromCache` (defined in apps/promotion/src/modules/color-land/services/color-land-event-config.service.ts)? List every caller with its file.
 
 
 ## Q2 · callees
 
-In FPMS-NT, what does `updatePlayerProfile` (libs/tools/src/processor/player/player-processor.ts) call? Name each callee and where it lives.
+In FPMS-NT, what does `claimColorLandTaskReward` (apps/promotion/src/modules/color-land/processors/claim-color-land-task-reward.processor.ts) call? Name each callee and where it lives.
 
 
 ## Q3 · file_symbols
 
-In FPMS-NT, list every function/class/method defined in apps/promotion/src/reward-grant/reward-grant.types.ts.
+In FPMS-NT, list every function/class/method defined in apps/provider/src/game-provider/frontend/frontend-game-provider.processor.ts.
 
 
 ## Q4 · dead_code
@@ -57,50 +57,50 @@ In FPMS-NT, which symbols under `apps/admin/` have NO incoming calls or referenc
 
 ## Q5 · callers
 
-In FPMS-NT, which functions call `coercePbIntEnum` (defined in apps/user-engagement/src/app-push/backend-app-push/app-push-pb-mappers.ts)? List every caller with its file.
+In FPMS-NT, which functions call `getCredit` (defined in apps/payment/libs/utils/cpmsServices.ts)? List every caller with its file.
 
 
 ## Q6 · callees
 
-In FPMS-NT, what does `validateForCreate` (apps/promotion/src/modules/growth-task/services/task-config-validator.ts) call? Name each callee and where it lives.
+In FPMS-NT, what does `createGrowthTaskMissionsForPlayer` (apps/promotion/src/special-event/services/special-event-mission.service.ts) call? Name each callee and where it lives.
 
 
 ## Q7 · file_symbols
 
-In FPMS-NT, list every function/class/method defined in apps/promotion/src/skin-fragment/controllers/skin-fragment-admin.controller.ts.
+In FPMS-NT, list every function/class/method defined in apps/riskControl/src/antiAddiction/deposit-limit-state.service.ts.
 
 
 ## Q8 · callers
 
-In FPMS-NT, which functions call `deleteMany` (defined in libs/common/base-repository/base-repository.ts)? List every caller with its file.
+In FPMS-NT, which functions call `getEventEndTtlSeconds` (defined in apps/promotion/src/modules/milyonaryo-jackpot/services/milyonaryo-winner-query.service.ts)? List every caller with its file.
 
 
 ## Q9 · callees
 
-In FPMS-NT, what does `_findAvailableAgentAndJoinRoom` (apps/livechat/src/processor/liveChatAgent/livechat-agent-processor.ts) call? Name each callee and where it lives.
+In FPMS-NT, what does `executeForEventV2` (apps/promotion/src/free-spin/processors/create-event-free-spin/create-event-free-spin.service.ts) call? Name each callee and where it lives.
 
 
 ## Q10 · file_symbols
 
-In FPMS-NT, list every function/class/method defined in apps/promotion/src/special-event/controllers/special-event-admin.controller.ts.
+In FPMS-NT, list every function/class/method defined in libs/tools/src/client-grpc/provider-client-grpc/provider-client-grpc.ts.
 
 
 ## Q11 · callers
 
-In FPMS-NT, which functions call `findOneByPlatformId` (defined in libs/tools/src/repositories/player/fpms/admin/platform/platform.repository.ts)? List every caller with its file.
+In FPMS-NT, which functions call `getGameImageUrl` (defined in libs/tools/src/client-grpc/cms-client-grpc.ts)? List every caller with its file.
 
 
 ## Q12 · callees
 
-In FPMS-NT, what does `callBackToUser` (apps/user-engagement/src/callback/processors/callback.processor.ts) call? Name each callee and where it lives.
+In FPMS-NT, what does `executeSuccess` (apps/offline-casino/src/proposal-executors/offline-casino-transaction.executor.ts) call? Name each callee and where it lives.
 
 
 ## Q13 · file_symbols
 
-In FPMS-NT, list every function/class/method defined in apps/promotion/src/winsday-billion/services/boost-claim.service.ts.
+In FPMS-NT, list every function/class/method defined in libs/tools/src/message-dispatcher/message-dispatcher.ts.
 
 
 ## Q14 · callers
 
-In FPMS-NT, which functions call `findPlayerProgress` (defined in apps/promotion/src/modules/player-progress/services/player-mission.progress.service.ts)? List every caller with its file.
+In FPMS-NT, which functions call `getLiveDrawEvents` (defined in apps/promotion/src/repositories/live-draw-events.repository.ts)? List every caller with its file.
 

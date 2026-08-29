@@ -19,73 +19,72 @@ scopes. Read them before calling anything a missed edge.
 
 ## Q1 · callers
 
-**Question**: In FPMS-NT, which functions call `claimPeriod` (defined in apps/promotion/src/modules/realtime-task/services/realtime-task.service.ts)? List every caller with its file.
+**Question**: In FPMS-NT, which functions call `getColorLandEventConfigByIdFromCache` (defined in apps/promotion/src/modules/color-land/services/color-land-event-config.service.ts)? List every caller with its file.
 
 **Index answer** (7)
 
-- `apps/promotion/src/modules/realtime-task/services/realtime-task-budget.service.ts:checkAndDeductBudget`
-- `apps/promotion/src/modules/realtime-task/services/realtime-task.service.ts:enroll`
-- `apps/promotion/src/modules/realtime-task/services/realtime-task.service.ts:findCycleTask`
-- `apps/promotion/src/modules/realtime-task/services/realtime-task.service.ts:getPlayerTaskBanner`
-- `apps/promotion/src/modules/realtime-task/services/realtime-task.service.ts:getPlayerTaskView`
-- `apps/promotion/src/modules/realtime-task/services/realtime-task.service.ts:markTaskBannerSeen`
-- `apps/promotion/src/modules/realtime-task/services/realtime-task.service.ts:resolveLevelUpMultiplier`
+- `apps/promotion/src/modules/color-land/processors/color-land-player-auxiliary.processor.ts:dailyShareMission`
+- `apps/promotion/src/modules/color-land/processors/color-land-player-auxiliary.processor.ts:playerDailyShareMissionBoosts`
+- `apps/promotion/src/modules/color-land/processors/get-player-color-land-rewards-summary.processor.ts:getPlayerColorLandRewardsSummary`
+- `apps/promotion/src/modules/color-land/services/color-land-event-config.service.ts:getActiveEventConfigByObjId`
+- `apps/promotion/src/modules/color-land/services/color-land.service.ts:getDiceConfigByConditionType`
+- `apps/promotion/src/modules/color-land/services/color-land.service.ts:getPlayerColorLandProgress`
+- `apps/promotion/src/modules/color-land/services/player-color-land-progress.service.ts:getPlayerColorLandEvents`
 
 **Independent verification**
 
 ```bash
-rg -n --no-heading '\bclaimPeriod\s*\(' /Users/shieng/Desktop/Projects/fpmsnt | grep -vE '(const|function|export)\s+claimPeriod\b'
+rg -n --no-heading '\bgetColorLandEventConfigByIdFromCache\s*\(' /Users/shieng/Desktop/Projects/fpmsnt | grep -vE '(const|function|export)\s+getColorLandEventConfigByIdFromCache\b'
 ```
 
 **What to look for**: Every caller the index lists should appear in the ripgrep output, INCLUDING calls inside the defining file. Extra hits are often a same-named symbol in another file — check the path before calling anything a missed edge.
 
 ## Q2 · callees
 
-**Question**: In FPMS-NT, what does `updatePlayerProfile` (libs/tools/src/processor/player/player-processor.ts) call? Name each callee and where it lives.
+**Question**: In FPMS-NT, what does `claimColorLandTaskReward` (apps/promotion/src/modules/color-land/processors/claim-color-land-task-reward.processor.ts) call? Name each callee and where it lives.
 
-**Index answer** (9)
+**Index answer** (8)
 
-- `libs/common/common.ts:isAdult`
-- `libs/tools/src/multi-transaction/multi-transaction.service.ts:withTransaction`
-- `libs/tools/src/processor/aws/aws-processor.ts:uploadPhotoId`
-- `libs/tools/src/processor/phone/phone-processor.ts:encrypt`
-- `libs/tools/src/processor/player/player-processor.ts:checkAndUpdateIsCompleteInfo`
-- `libs/tools/src/processor/player/player-processor.ts:isPlayerTypeForbidEditProfileFields`
-- `libs/tools/src/repositories/player/fpms/player/player-info/player-info-repository.ts:update`
-- `libs/tools/src/repositories/player/player-history-update-email/player-history-update-email-repository.ts:bindEmailToPlayer`
-- `libs/tools/src/utils/string-utilities/normalize-name.ts:normalizeName`
+- `apps/promotion/src/modules/color-land/processors/claim-color-land-task-reward.processor.ts:mapClaimedTicket`
+- `apps/promotion/src/modules/color-land/processors/claim-color-land-task-reward.processor.ts:resolveAndAdvanceCellLevel`
+- `apps/promotion/src/modules/color-land/redis/color-land-redis.service.ts:decrementPlayerMissionListCount`
+- `apps/promotion/src/modules/color-land/services/color-land-reward.service.ts:dispatchReward`
+- `apps/promotion/src/modules/color-land/transformers/color-land.transformer.ts:toData`
+- `apps/promotion/src/modules/color-land/transformers/color-land.transformer.ts:toError`
+- `apps/promotion/src/modules/event-reward-tickets/event-reward-tickets.service.ts:getTicketByObjId`
+- `apps/promotion/src/modules/event-reward-tickets/event-reward-tickets.service.ts:updateTicket`
 
 **Independent verification**
 
 ```bash
-sed -n '/updatePlayerProfile/,/^}/p' /Users/shieng/Desktop/Projects/fpmsnt/libs/tools/src/processor/player/player-processor.ts
+sed -n '/claimColorLandTaskReward/,/^}/p' /Users/shieng/Desktop/Projects/fpmsnt/apps/promotion/src/modules/color-land/processors/claim-color-land-task-reward.processor.ts
 ```
 
 **What to look for**: Read the function body in the verify output and confirm each listed callee really is invoked there.
 
 ## Q3 · file_symbols
 
-**Question**: In FPMS-NT, list every function/class/method defined in apps/promotion/src/reward-grant/reward-grant.types.ts.
+**Question**: In FPMS-NT, list every function/class/method defined in apps/provider/src/game-provider/frontend/frontend-game-provider.processor.ts.
 
 **Index answer** (12)
 
-- `AdapterDispatchResult (interface)`
-- `FreeSpinGrantPayload (interface)`
-- `GrantBase (interface)`
-- `GrantResult (interface)`
-- `GrantRewardRequest (type)`
-- `GrantStatus (type)`
-- `MudGrantPayload (interface)`
-- `PlayerLevelMaintainGrantPayload (interface)`
-- `PlayerLevelUpGrantPayload (interface)`
-- `PromoCodeGrantPayload (interface)`
-- `RewardAdapter (interface)`
-- `RewardGrantType (type)`
+- `FrontendGameProviderProcessor (class)`
+- `addFavoriteGame (method)`
+- `constructor (method)`
+- `deleteFavoriteGame (method)`
+- `filteredResult (function)`
+- `getFavoriteGames (method)`
+- `getLoginURL (method)`
+- `getPlatformSpecificProviderStatus (method)`
+- `getRecentPlayedGames (method)`
+- `transferProm (function)`
+- `transferToProvider (method)`
+- `verifyInvitationCode (method)`
 
 **Independent verification**
 
 ```bash
-rg -n --no-heading '^\s*(export\s+)?(async\s+)?(function|class|const\s+\w+\s*=\s*(async\s*)?\()|^\s*(public|private|protected)?\s*\w+\s*\(' /Users/shieng/Desktop/Projects/fpmsnt/apps/promotion/src/reward-grant/reward-grant.types.ts
+rg -n --no-heading '^\s*(export\s+)?(async\s+)?(function|class|const\s+\w+\s*=\s*(async\s*)?\()|^\s*(public|private|protected)?\s*\w+\s*\(' /Users/shieng/Desktop/Projects/fpmsnt/apps/provider/src/game-provider/frontend/frontend-game-provider.processor.ts
 ```
 
 **What to look for**: A declaration in the file that the index does not list is a missed symbol. This is the check that catches parser gaps in a language.
@@ -133,239 +132,238 @@ rg -n --no-heading '\buseFactory\b' /Users/shieng/Desktop/Projects/fpmsnt | head
 
 ## Q5 · callers
 
-**Question**: In FPMS-NT, which functions call `coercePbIntEnum` (defined in apps/user-engagement/src/app-push/backend-app-push/app-push-pb-mappers.ts)? List every caller with its file.
+**Question**: In FPMS-NT, which functions call `getCredit` (defined in apps/payment/libs/utils/cpmsServices.ts)? List every caller with its file.
 
 **Index answer** (7)
 
-- `apps/user-engagement/src/app-push/backend-app-push/app-push-pb-mappers.ts:requirePbIntEnum`
-- `apps/user-engagement/src/app-push/backend-app-push/backend-app-push.service.ts:_executeMulticastMission`
-- `apps/user-engagement/src/app-push/backend-app-push/backend-app-push.service.ts:_executeOneMission`
-- `apps/user-engagement/src/app-push/backend-app-push/backend-app-push.service.ts:_executeTopicMission`
-- `apps/user-engagement/src/app-push/backend-app-push/backend-app-push.service.ts:buildScheduleSummary`
-- `apps/user-engagement/src/app-push/backend-app-push/backend-app-push.service.ts:pauseAppPushMission`
-- `apps/user-engagement/src/app-push/backend-app-push/backend-app-push.service.ts:retryAppPushMission`
+- `apps/payment/src/mud/processor/internal-processor.ts:getPlayerMud`
+- `apps/payment/src/mud/services/mud-admin.service.ts:fetchPlayerMudMap`
+- `apps/payment/src/mud/services/mud-admin.service.ts:getPlayerMud`
+- `apps/payment/src/mud/services/mud-operation.service.ts:hasAvailableMud`
+- `apps/payment/src/mud/services/player-disbursement/player-disbursement-service.ts:getActivePlayerDisbursements`
+- `apps/payment/src/mud/services/player-disbursement/player-disbursement-service.ts:getTotalMudRemaining`
+- `apps/payment/src/payment/payment.service.ts:getPlayerCredit`
 
 **Independent verification**
 
 ```bash
-rg -n --no-heading '\bcoercePbIntEnum\s*\(' /Users/shieng/Desktop/Projects/fpmsnt | grep -vE '(const|function|export)\s+coercePbIntEnum\b'
+rg -n --no-heading '\bgetCredit\s*\(' /Users/shieng/Desktop/Projects/fpmsnt | grep -vE '(const|function|export)\s+getCredit\b'
 ```
 
 **What to look for**: Every caller the index lists should appear in the ripgrep output, INCLUDING calls inside the defining file. Extra hits are often a same-named symbol in another file — check the path before calling anything a missed edge.
 
 ## Q6 · callees
 
-**Question**: In FPMS-NT, what does `validateForCreate` (apps/promotion/src/modules/growth-task/services/task-config-validator.ts) call? Name each callee and where it lives.
+**Question**: In FPMS-NT, what does `createGrowthTaskMissionsForPlayer` (apps/promotion/src/special-event/services/special-event-mission.service.ts) call? Name each callee and where it lives.
 
-**Index answer** (9)
+**Index answer** (8)
 
-- `apps/promotion/src/modules/growth-task/services/task-config-validator.ts:validateAudienceXor`
-- `apps/promotion/src/modules/growth-task/services/task-config-validator.ts:validateCreateStatus`
-- `apps/promotion/src/modules/growth-task/services/task-config-validator.ts:validateFreeSpinPlatformId`
-- `apps/promotion/src/modules/growth-task/services/task-config-validator.ts:validateFrequencies`
-- `apps/promotion/src/modules/growth-task/services/task-config-validator.ts:validateNameAndDisplayName`
-- `apps/promotion/src/modules/growth-task/services/task-config-validator.ts:validatePopupCopy`
-- `apps/promotion/src/modules/growth-task/services/task-config-validator.ts:validateRewards`
-- `apps/promotion/src/modules/growth-task/services/task-config-validator.ts:validateTaskDaysAndSubTasks`
-- `apps/promotion/src/modules/growth-task/services/task-config-validator.ts:validateTimeWindow`
+- `apps/promotion/libs/redis/promotion-redis/promotion-redis.service.ts:getPlayerVipLevelFromTargetGroup`
+- `apps/promotion/libs/redis/promotion-redis/promotion-redis.service.ts:hasLoggedInToday`
+- `apps/promotion/libs/redis/promotion-redis/promotion-redis.service.ts:hasTaskIn30Days`
+- `apps/promotion/libs/redis/promotion-redis/promotion-redis.service.ts:isTaskEnded`
+- `apps/promotion/libs/redis/promotion-redis/promotion-redis.service.ts:setLoggedInToday`
+- `apps/promotion/src/special-event/services/special-event-mission.service.ts:createNewGrowthTaskForPlayer`
+- `apps/promotion/src/special-event/services/special-event-mission.service.ts:setTaskEndedRedisKeyIfDay9OrLater`
+- `apps/promotion/src/special-event/services/special-event-mission.service.ts:updateDailyLoginTask`
 
 **Independent verification**
 
 ```bash
-sed -n '/validateForCreate/,/^}/p' /Users/shieng/Desktop/Projects/fpmsnt/apps/promotion/src/modules/growth-task/services/task-config-validator.ts
+sed -n '/createGrowthTaskMissionsForPlayer/,/^}/p' /Users/shieng/Desktop/Projects/fpmsnt/apps/promotion/src/special-event/services/special-event-mission.service.ts
 ```
 
 **What to look for**: Read the function body in the verify output and confirm each listed callee really is invoked there.
 
 ## Q7 · file_symbols
 
-**Question**: In FPMS-NT, list every function/class/method defined in apps/promotion/src/skin-fragment/controllers/skin-fragment-admin.controller.ts.
+**Question**: In FPMS-NT, list every function/class/method defined in apps/riskControl/src/antiAddiction/deposit-limit-state.service.ts.
 
 **Index answer** (12)
 
-- `SkinFragmentAdminController (class)`
+- `DepositLimitStateService (class)`
+- `accumulatePlayerDeposit (method)`
+- `buildStateEvaluateResult (method)`
+- `calculateLimitStatus (method)`
 - `constructor (method)`
-- `createActivity (method)`
-- `flattenCvErrors (function)`
-- `getActivity (method)`
-- `listActivities (method)`
-- `listFragmentLedger (method)`
-- `listRedemptions (method)`
-- `pbToLedgerSource (function)`
-- `runAutoEndJob (method)`
-- `toDate (function)`
-- `updateActivity (method)`
+- `evaluateState (method)`
+- `evaluateStateAndResetIfPeriodExpired (method)`
+- `getRuntimeContext (method)`
+- `mockUpdateLastDepositAmountUpdateTime (method)`
+- `notifyStateChanged (method)`
+- `resetStateViewIfPeriodExpired (method)`
+- `resetStateViewIfSystemDisable (method)`
 
 **Independent verification**
 
 ```bash
-rg -n --no-heading '^\s*(export\s+)?(async\s+)?(function|class|const\s+\w+\s*=\s*(async\s*)?\()|^\s*(public|private|protected)?\s*\w+\s*\(' /Users/shieng/Desktop/Projects/fpmsnt/apps/promotion/src/skin-fragment/controllers/skin-fragment-admin.controller.ts
+rg -n --no-heading '^\s*(export\s+)?(async\s+)?(function|class|const\s+\w+\s*=\s*(async\s*)?\()|^\s*(public|private|protected)?\s*\w+\s*\(' /Users/shieng/Desktop/Projects/fpmsnt/apps/riskControl/src/antiAddiction/deposit-limit-state.service.ts
 ```
 
 **What to look for**: A declaration in the file that the index does not list is a missed symbol. This is the check that catches parser gaps in a language.
 
 ## Q8 · callers
 
-**Question**: In FPMS-NT, which functions call `deleteMany` (defined in libs/common/base-repository/base-repository.ts)? List every caller with its file.
+**Question**: In FPMS-NT, which functions call `getEventEndTtlSeconds` (defined in apps/promotion/src/modules/milyonaryo-jackpot/services/milyonaryo-winner-query.service.ts)? List every caller with its file.
 
 **Index answer** (7)
 
-- `apps/livechat/src/database/liveChatConversationDB/livechat-convo-repository.ts:removeConversationData`
-- `apps/livechat/src/database/liveChatFaqRepoDB/livechat-faq-repository.ts:removeFaq`
-- `apps/livechat/src/database/liveChatFaqSubCategoryDB/livechat-faq-subcategory-repository.ts:removeFaqSubCategory`
-- `apps/promotion/src/modules/growth-task/repositories/task-user-target-list.repository.ts:bulkDeleteTickets`
-- `apps/promotion/src/physical-gift/repositories/hotel-voucher.repository.ts:deleteByCodes`
-- `libs/tools/src/repositories/user-engagement/app-push/app-push-token.repository.ts:deleteManyByTokens`
-- `libs/tools/src/repositories/user-engagement/pwa-subscription/pwa-subscription-repository.ts:deleteAuthBatch`
+- `apps/promotion/src/modules/milyonaryo-jackpot/services/milyonaryo-winner-query.service.ts:bootstrapTotalPrizeIfNeeded`
+- `apps/promotion/src/modules/milyonaryo-jackpot/services/milyonaryo-winner-query.service.ts:bootstrapWinnerCountIfNeeded`
+- `apps/promotion/src/modules/milyonaryo-jackpot/services/milyonaryo-winner-query.service.ts:incrementTotalPrize`
+- `apps/promotion/src/modules/milyonaryo-jackpot/services/milyonaryo-winner-query.service.ts:incrementTotalWinnerCount`
+- `apps/promotion/src/modules/milyonaryo-jackpot/services/milyonaryo-winner-query.service.ts:refreshRecentWinnersCache`
+- `apps/promotion/src/modules/milyonaryo-jackpot/services/milyonaryo-winner-query.service.ts:refreshTotalPrizeCache`
+- `apps/promotion/src/modules/milyonaryo-jackpot/services/milyonaryo-winner-query.service.ts:refreshTotalWinnerCountCache`
 
 **Independent verification**
 
 ```bash
-rg -n --no-heading '\bdeleteMany\s*\(' /Users/shieng/Desktop/Projects/fpmsnt | grep -vE '(const|function|export)\s+deleteMany\b'
+rg -n --no-heading '\bgetEventEndTtlSeconds\s*\(' /Users/shieng/Desktop/Projects/fpmsnt | grep -vE '(const|function|export)\s+getEventEndTtlSeconds\b'
 ```
 
 **What to look for**: Every caller the index lists should appear in the ripgrep output, INCLUDING calls inside the defining file. Extra hits are often a same-named symbol in another file — check the path before calling anything a missed edge.
 
 ## Q9 · callees
 
-**Question**: In FPMS-NT, what does `_findAvailableAgentAndJoinRoom` (apps/livechat/src/processor/liveChatAgent/livechat-agent-processor.ts) call? Name each callee and where it lives.
+**Question**: In FPMS-NT, what does `executeForEventV2` (apps/promotion/src/free-spin/processors/create-event-free-spin/create-event-free-spin.service.ts) call? Name each callee and where it lives.
 
 **Index answer** (8)
 
-- `apps/livechat/src/liveChatRedis/liveChatRedis.service.ts:agentHmget`
-- `apps/livechat/src/liveChatRedis/liveChatRedis.service.ts:get`
-- `apps/livechat/src/liveChatRedis/liveChatRedis.service.ts:set`
-- `apps/livechat/src/liveChatRedis/liveChatRedis.service.ts:zrange`
-- `apps/livechat/src/processor/liveChatAgent/livechat-agent-processor.ts:_agentAutoJoinRoom`
-- `apps/livechat/src/processor/liveChatAgent/livechat-agent-processor.ts:addChatTransferLog`
-- `apps/livechat/src/processor/liveChatMatrix/livechat-matrix-processor.ts:_isMemberInRoom`
-- `apps/livechat/src/processor/liveChatMatrix/livechat-matrix-processor.ts:inviteUser`
+- `apps/promotion/src/free-spin/processors/create-event-free-spin/create-event-free-spin.service.ts:applyMultiplier`
+- `apps/promotion/src/free-spin/processors/create-event-free-spin/create-event-free-spin.service.ts:buildErrorResponse`
+- `apps/promotion/src/free-spin/processors/create-event-free-spin/create-event-free-spin.service.ts:fetchGameInfoMap`
+- `apps/promotion/src/free-spin/processors/create-event-free-spin/create-event-free-spin.service.ts:generateEventId`
+- `apps/promotion/src/free-spin/processors/create-event-free-spin/create-event-free-spin.service.ts:getMultiplier`
+- `apps/promotion/src/free-spin/services/create-free-spin-config/create-free-spin-config.service.ts:createFreeSpinConfig`
+- `apps/promotion/src/repositories/event-v2.repository.ts:getEventV2s`
+- `apps/promotion/src/repositories/event-v2.repository.ts:updateFreeSpinConfig`
 
 **Independent verification**
 
 ```bash
-sed -n '/_findAvailableAgentAndJoinRoom/,/^}/p' /Users/shieng/Desktop/Projects/fpmsnt/apps/livechat/src/processor/liveChatAgent/livechat-agent-processor.ts
+sed -n '/executeForEventV2/,/^}/p' /Users/shieng/Desktop/Projects/fpmsnt/apps/promotion/src/free-spin/processors/create-event-free-spin/create-event-free-spin.service.ts
 ```
 
 **What to look for**: Read the function body in the verify output and confirm each listed callee really is invoked there.
 
 ## Q10 · file_symbols
 
-**Question**: In FPMS-NT, list every function/class/method defined in apps/promotion/src/special-event/controllers/special-event-admin.controller.ts.
+**Question**: In FPMS-NT, list every function/class/method defined in libs/tools/src/client-grpc/provider-client-grpc/provider-client-grpc.ts.
 
 **Index answer** (12)
 
-- `SpecialEventAdminController (class)`
+- `Game (interface)`
+- `GetPlayerRecentGamesWithGroupingRes (interface)`
+- `InternalProviderService (interface)`
+- `MatchFields (interface)`
+- `Pagination (interface)`
+- `PaginationBaseResponse (interface)`
+- `PlayerRecentGameRecord (interface)`
+- `ProviderClientGrpc (class)`
+- `catchGrpcError (method)`
 - `constructor (method)`
-- `queryLuckyDealRecords (method)`
-- `queryMilyonaryoJackpotReport (method)`
-- `queryPalayokRewardRecords (method)`
-- `queryPlayerMissionProgress (method)`
-- `queryRedPacketRecords (method)`
-- `queryRewardRecords (method)`
-- `queryRewardTicketRecords (method)`
-- `queryWinsdayBillionReport (method)`
-- `queryWinsdayBoostRelationReport (method)`
-- `sameInitiator (function)`
+- `getPlayerRecentGamesWithGrouping (method)`
+- `onModuleInit (method)`
 
 **Independent verification**
 
 ```bash
-rg -n --no-heading '^\s*(export\s+)?(async\s+)?(function|class|const\s+\w+\s*=\s*(async\s*)?\()|^\s*(public|private|protected)?\s*\w+\s*\(' /Users/shieng/Desktop/Projects/fpmsnt/apps/promotion/src/special-event/controllers/special-event-admin.controller.ts
+rg -n --no-heading '^\s*(export\s+)?(async\s+)?(function|class|const\s+\w+\s*=\s*(async\s*)?\()|^\s*(public|private|protected)?\s*\w+\s*\(' /Users/shieng/Desktop/Projects/fpmsnt/libs/tools/src/client-grpc/provider-client-grpc/provider-client-grpc.ts
 ```
 
 **What to look for**: A declaration in the file that the index does not list is a missed symbol. This is the check that catches parser gaps in a language.
 
 ## Q11 · callers
 
-**Question**: In FPMS-NT, which functions call `findOneByPlatformId` (defined in libs/tools/src/repositories/player/fpms/admin/platform/platform.repository.ts)? List every caller with its file.
+**Question**: In FPMS-NT, which functions call `getGameImageUrl` (defined in libs/tools/src/client-grpc/cms-client-grpc.ts)? List every caller with its file.
 
 **Index answer** (7)
 
-- `apps/admin/src/config/config.service.ts:getConfigV2`
-- `apps/admin/src/jackpot/jackpot.service.ts:getPlatformObjId`
-- `apps/promotion/src/modules/realtime-task/services/realtime-task-config.resolver.ts:findLevel`
-- `apps/promotion/src/reward-grant/services/reward-grant-popup.service.ts:platformObjId`
-- `apps/promotion/src/special-event/services/special-event-mission.service.ts:sendTaskCompletionNotifications`
-- `apps/recommend/src/recommend.service.ts:getPlatform`
-- `apps/user-engagement/src/pwa-notification/pwa-notification.service.ts:sendPWANotificationToPulsar`
+- `apps/promotion/src/ccms-promotion/lucky-deal/lucky-deal.service.ts:fetchGameInfoFromCms`
+- `apps/promotion/src/ccms-promotion/promotion.service.ts:fetchGameInfoFromCms`
+- `apps/promotion/src/ccms-promotion/promotion.service.ts:resolveFreeBetGameInfo`
+- `apps/promotion/src/ccms-promotion/promotion.service.ts:resolveFreeSpinGameInfo`
+- `apps/promotion/src/free-spin/processors/create-event-free-spin/create-event-free-spin.service.ts:fetchGameInfoFromCms`
+- `apps/promotion/src/free-spin/processors/get-player-free-spin-info.processor.ts:fetchAllGameInfoCached`
+- `apps/promotion/src/free-spin/v2/processors/get-player-free-spin-info/services/game-info-fetcher.service.ts:fetchAllGameInfoCached`
 
 **Independent verification**
 
 ```bash
-rg -n --no-heading '\bfindOneByPlatformId\s*\(' /Users/shieng/Desktop/Projects/fpmsnt | grep -vE '(const|function|export)\s+findOneByPlatformId\b'
+rg -n --no-heading '\bgetGameImageUrl\s*\(' /Users/shieng/Desktop/Projects/fpmsnt | grep -vE '(const|function|export)\s+getGameImageUrl\b'
 ```
 
 **What to look for**: Every caller the index lists should appear in the ripgrep output, INCLUDING calls inside the defining file. Extra hits are often a same-named symbol in another file — check the path before calling anything a missed edge.
 
 ## Q12 · callees
 
-**Question**: In FPMS-NT, what does `callBackToUser` (apps/user-engagement/src/callback/processors/callback.processor.ts) call? Name each callee and where it lives.
+**Question**: In FPMS-NT, what does `executeSuccess` (apps/offline-casino/src/proposal-executors/offline-casino-transaction.executor.ts) call? Name each callee and where it lives.
 
 **Index answer** (8)
 
-- `apps/user-engagement/src/callback/processors/callback.processor.ts:checkRateLimits`
-- `apps/user-engagement/src/callback/processors/callback.processor.ts:logCallbackSuccess`
-- `apps/user-engagement/src/callback/services/callback-queue.service.ts:addCallbackToQueue`
-- `libs/tools/src/client-grpc/player-client-grpc/player-client-grpc.ts:getPlayerInfoInternal`
-- `libs/tools/src/manager/fpms-platform-cache/fpms-platform-cache-manager.ts:getPlatformByPlatformId`
-- `libs/tools/src/repositories/player/fpms/admin/black-and-white-list/black-and-white-list.repository.ts:getBlacklistCallbackIpAddress`
-- `libs/tools/src/repositories/player/fpms/admin/black-and-white-list/black-and-white-list.repository.ts:getBlacklistPhoneNumber`
-- `libs/tools/src/services/phone-cipher/phone-cipher.service.ts:encrypt`
+- `apps/offline-casino/libs/utils/offline-casino-proposal.constants.ts:isRollingProgramProposalType`
+- `apps/offline-casino/src/proposal-executors/offline-casino-transaction.executor.ts:buildSuccessResponse`
+- `apps/offline-casino/src/proposal-executors/offline-casino-transaction.executor.ts:executeRollingProgramSuccess`
+- `apps/offline-casino/src/proposal-executors/offline-casino-transaction.executor.ts:resolveDirection`
+- `libs/tools/src/client-grpc/payment-client-grpc/payment-client-grpc.ts:AddPlayerCredit`
+- `libs/tools/src/client-grpc/payment-client-grpc/payment-client-grpc.ts:CreateLandbaseProposal`
+- `libs/tools/src/client-grpc/payment-client-grpc/payment-client-grpc.ts:DeductPlayerCredit`
+- `libs/tools/src/processor/dos-reward/dos-reward-processor.ts:redeemPlayerLuckyCoins`
 
 **Independent verification**
 
 ```bash
-sed -n '/callBackToUser/,/^}/p' /Users/shieng/Desktop/Projects/fpmsnt/apps/user-engagement/src/callback/processors/callback.processor.ts
+sed -n '/executeSuccess/,/^}/p' /Users/shieng/Desktop/Projects/fpmsnt/apps/offline-casino/src/proposal-executors/offline-casino-transaction.executor.ts
 ```
 
 **What to look for**: Read the function body in the verify output and confirm each listed callee really is invoked there.
 
 ## Q13 · file_symbols
 
-**Question**: In FPMS-NT, list every function/class/method defined in apps/promotion/src/winsday-billion/services/boost-claim.service.ts.
+**Question**: In FPMS-NT, list every function/class/method defined in libs/tools/src/message-dispatcher/message-dispatcher.ts.
 
 **Index answer** (12)
 
-- `BoostClaimService (class)`
-- `ClaimBoostResult (interface)`
-- `claim (method)`
+- `DispatchMessageData (interface)`
+- `MessageDispatcher (class)`
+- `MessageDispatcherServiceName (enum)`
+- `PlayerMeta (interface)`
+- `ProposalData (interface)`
 - `constructor (method)`
-- `fail (function)`
-- `grantAndCache (method)`
-- `option (function)`
-- `option (function)`
-- `optionDetail (method)`
-- `optionDetailFromConfig (method)`
-- `replay (method)`
-- `toResult (method)`
+- `contentModifier (method)`
+- `dispatchMessagesForPromoCode (method)`
+- `dispatchMessagesInternal (method)`
+- `notifyMessage (method)`
+- `renderTemplateAndSendMessage (method)`
+- `sendMessage (method)`
 
 **Independent verification**
 
 ```bash
-rg -n --no-heading '^\s*(export\s+)?(async\s+)?(function|class|const\s+\w+\s*=\s*(async\s*)?\()|^\s*(public|private|protected)?\s*\w+\s*\(' /Users/shieng/Desktop/Projects/fpmsnt/apps/promotion/src/winsday-billion/services/boost-claim.service.ts
+rg -n --no-heading '^\s*(export\s+)?(async\s+)?(function|class|const\s+\w+\s*=\s*(async\s*)?\()|^\s*(public|private|protected)?\s*\w+\s*\(' /Users/shieng/Desktop/Projects/fpmsnt/libs/tools/src/message-dispatcher/message-dispatcher.ts
 ```
 
 **What to look for**: A declaration in the file that the index does not list is a missed symbol. This is the check that catches parser gaps in a language.
 
 ## Q14 · callers
 
-**Question**: In FPMS-NT, which functions call `findPlayerProgress` (defined in apps/promotion/src/modules/player-progress/services/player-mission.progress.service.ts)? List every caller with its file.
+**Question**: In FPMS-NT, which functions call `getLiveDrawEvents` (defined in apps/promotion/src/repositories/live-draw-events.repository.ts)? List every caller with its file.
 
 **Index answer** (7)
 
-- `apps/promotion/src/modules/color-land/processors/color-land-player-auxiliary.processor.ts:dailyShareMission`
-- `apps/promotion/src/modules/color-land/processors/get-player-color-land-rewards-summary.processor.ts:getPlayerColorLandRewardsSummary`
-- `apps/promotion/src/modules/color-land/services/color-land.service.ts:getDiceConfigByConditionType`
-- `apps/promotion/src/modules/color-land/services/color-land.service.ts:getPlayerColorLandProgress`
-- `apps/promotion/src/modules/color-land/services/color-land.service.ts:getPlayerFirstRemainingDiceToday`
-- `apps/promotion/src/modules/color-land/services/player-color-land-progress.service.ts:getPlayerCellCurrentLevel`
-- `apps/promotion/src/pulsar/colorland/bet-dice-count/bet-dice-count.consumer.ts:handleMessage`
+- `apps/promotion/src/modules/live-draw-events/live-draw-events.service.ts:findNextCurrentRoundEvent`
+- `apps/promotion/src/modules/live-draw-events/live-draw-events.service.ts:getEventByBetDateAndPrizeTierKey`
+- `apps/promotion/src/modules/live-draw-events/live-draw-events.service.ts:getEventByEventId`
+- `apps/promotion/src/modules/live-draw-events/live-draw-events.service.ts:getTodayLiveDrawEvents`
+- `apps/promotion/src/modules/live-draw-events/live-draw-events.service.ts:getTomorrowLiveDrawEvents`
+- `apps/promotion/src/modules/live-draw-tickets/live-draw-tickets.service.ts:buildNotActivatedTickets`
+- `apps/promotion/src/modules/live-draw-tickets/live-draw-tickets.service.ts:getLuckyDrawRewardList`
 
 **Independent verification**
 
 ```bash
-rg -n --no-heading '\bfindPlayerProgress\s*\(' /Users/shieng/Desktop/Projects/fpmsnt | grep -vE '(const|function|export)\s+findPlayerProgress\b'
+rg -n --no-heading '\bgetLiveDrawEvents\s*\(' /Users/shieng/Desktop/Projects/fpmsnt | grep -vE '(const|function|export)\s+getLiveDrawEvents\b'
 ```
 
 **What to look for**: Every caller the index lists should appear in the ripgrep output, INCLUDING calls inside the defining file. Extra hits are often a same-named symbol in another file — check the path before calling anything a missed edge.
