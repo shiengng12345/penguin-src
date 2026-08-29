@@ -166,9 +166,34 @@ State the full path you wrote to as the last line of your reply.
 
 ### Sections — use these, in this order:
 
-### 1. Summary
-Three or four sentences. Would you rely on this index to understand unfamiliar
-code? Under what conditions?
+### 1. Summary and scores
+
+Three or four sentences first: would you rely on this index to understand
+unfamiliar code, and under what conditions?
+
+Then score it. Give a whole number out of 100 for each row, and one line saying
+what that number is based on — the score without the reason is not useful to me.
+
+| Dimension | Score | Why that number |
+|---|---|---|
+| **Accuracy** — is what it tells you true? | /100 | |
+| **Completeness** — does it find everything, or quietly miss things? | /100 | |
+| **Honesty** — when it cannot answer, does it say so? | /100 | |
+| **Usability** — how much work to get an answer you can act on? | /100 | |
+| **Speed vs grep + reading files** — is it actually faster? | /100 | |
+| **Overall** — would you install this? | /100 | |
+
+Use this scale so the numbers mean the same thing across rounds:
+
+- **90–100** — I would trust this without checking, and act on it directly.
+- **70–89** — I would trust it after a spot-check.
+- **50–69** — useful as a lead, must be verified before acting.
+- **30–49** — faster than nothing, but I check everything it says.
+- **1–29** — I would not use it.
+
+Then answer one question in a sentence or two: **what single change would move
+your overall score up by ten points?** That is the most useful thing in this
+whole report, so make it concrete.
 
 ### 2. Part A answers
 One block per question, in the format the quiz specifies.
@@ -257,7 +282,13 @@ think that judgment was wrong, say so.
 ## What I am looking for
 
 I built this. I would rather hear that it is mediocre with specifics than that it
-is good in general terms. Findings I can act on are worth more than a score.
+is good in general terms.
+
+Score it honestly and low if it deserves low. A generous number tells me nothing
+and costs me the one signal I can compare across rounds — earlier reports are in
+this directory, so a score that drifts up while the same complaints repeat is
+worse than useless. The reasons matter more than the numbers, and the
+ten-points question matters most of all.
 
 If something is broken, say it plainly. If a design choice seems wrong, say that
 too, and say what you would have done instead.
