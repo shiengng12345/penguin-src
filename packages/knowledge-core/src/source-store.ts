@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { KnowledgeStore } from "./store.js";
 import { canonicalJson, sha256Hex } from "./canonical.js";
 import { trigramLaneEnabled } from "./trigram-lane.js";
+import { packLineIndex } from "./line-offsets.js";
 import { buildLineIndex } from "./line-index.js";
 import { WhyCardStore } from "./why-card.js";
 
@@ -88,10 +89,10 @@ export class SourceStore {
         input.decodedContent, new Date().toISOString(),
       );
       const id = Number(inserted.lastInsertRowid);
-      const lineInsert = this.store.db.prepare(
-        "INSERT INTO source_blob_lines(source_blob_id,line_number,start_byte,end_byte,start_char,end_char) VALUES (?,?,?,?,?,?)",
-      );
-      for (const line of lineIndex.lines) lineInsert.run(id, line.line, line.startByte, line.endByte, line.startChar, line.endChar);
+      const packed = packLineIndex(lineIndex);
+      this.store.db.prepare(
+        "INSERT INTO source_blob_line_offsets(source_blob_id,line_count,total_chars,total_bytes,start_chars,start_bytes) VALUES (?,?,?,?,?,?)",
+      ).run(id, packed.lineCount, packed.totalChars, packed.totalBytes, packed.startChars, packed.startBytes);
       // Trigram lane is optional (see trigram-lane.ts): skipping the inserts
       // only slows literal search down to the bounded full scan — the
       // downstream verifier keeps results exact either way.

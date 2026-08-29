@@ -1,14 +1,17 @@
 import type { KnowledgeStore } from "./store.js";
 import { sanitizeUntrustedText } from "./content-safety.js";
+import { readLineOffsets, lineAtChar, lineAtByte, lineEntry } from "./line-offsets.js";
 
 export interface SourceLocation { startLine: number; endLine: number; startByte: number; endByte: number; }
 
 export function locateSourceRange(store: KnowledgeStore, blobId: number, content: string, startChar: number, endChar: number): SourceLocation {
   const startByte = Buffer.byteLength(content.slice(0, startChar), "utf8");
   const endByte = Buffer.byteLength(content.slice(0, endChar), "utf8");
-  const start = store.db.prepare("SELECT line_number FROM source_blob_lines WHERE source_blob_id=? AND start_char<=? AND end_char>=? ORDER BY line_number LIMIT 1").get(blobId, startChar, startChar) as { line_number: number } | undefined;
-  const end = store.db.prepare("SELECT line_number FROM source_blob_lines WHERE source_blob_id=? AND start_char<=? AND end_char>=? ORDER BY line_number DESC LIMIT 1").get(blobId, Math.max(startChar, endChar - 1), Math.max(startChar, endChar - 1)) as { line_number: number } | undefined;
-  return { startLine: start?.line_number ?? 1, endLine: end?.line_number ?? start?.line_number ?? 1, startByte, endByte };
+  const offsets = readLineOffsets(store, blobId);
+  if (!offsets) return { startLine: 1, endLine: 1, startByte, endByte };
+  const startLine = lineAtChar(offsets, startChar);
+  const endLine = lineAtChar(offsets, Math.max(startChar, endChar - 1));
+  return { startLine, endLine: Math.max(startLine, endLine), startByte, endByte };
 }
 
 export function sourceSnippet(content: string, startChar: number, endChar: number, contextLines = 2, maxBytes = 4096): string {
@@ -31,17 +34,23 @@ export function getSourceHit(store: KnowledgeStore, request: SourceHitRequest): 
     FROM effective_snapshot_sources e JOIN source_facts f ON f.id=e.source_fact_id JOIN source_blobs b ON b.id=f.source_blob_id
     WHERE e.snapshot_id=? AND e.file_path=? AND (? IS NULL OR f.repo_id=?)`).get(request.snapshotId, request.filePath, request.repoId ?? null, request.repoId ?? null) as { sourceFactId: string; repoId: string; blobId: number; content: string; coverage: string | null } | undefined;
   if (!row) return null;
+  const offsets = readLineOffsets(store, row.blobId);
+  if (!offsets) return null;
   const start = request.startByte !== undefined
-    ? store.db.prepare("SELECT line_number,start_char,end_char,start_byte FROM source_blob_lines WHERE source_blob_id=? AND start_byte<=? ORDER BY line_number DESC LIMIT 1").get(row.blobId, request.startByte) as { line_number: number; start_char: number; end_char: number; start_byte: number } | undefined
+    // Same rule the row-per-line query encoded: the last line whose start is at
+    // or before the offset — the line the offset falls inside.
+    ? lineEntry(offsets, lineAtByte(offsets, request.startByte))
     : request.startLine !== undefined
-      ? store.db.prepare("SELECT line_number,start_char,end_char,start_byte FROM source_blob_lines WHERE source_blob_id=? AND line_number=?").get(row.blobId, request.startLine) as { line_number: number; start_char: number; end_char: number; start_byte: number } | undefined
-      : store.db.prepare("SELECT line_number,start_char,end_char,start_byte FROM source_blob_lines WHERE source_blob_id=? ORDER BY line_number LIMIT 1").get(row.blobId) as { line_number: number; start_char: number; end_char: number; start_byte: number } | undefined;
+      ? lineEntry(offsets, request.startLine)
+      : lineEntry(offsets, 1);
   if (!start) return null;
-  const end = request.endLine !== undefined ? store.db.prepare("SELECT end_char FROM source_blob_lines WHERE source_blob_id=? AND line_number=?").get(row.blobId, request.endLine) as { end_char: number } | undefined : { end_char: start.end_char };
+  const end = request.endLine !== undefined
+    ? lineEntry(offsets, request.endLine)
+    : { endChar: start.endChar };
   let untrusted = false;
   try { untrusted = String(JSON.parse(row.coverage ?? "{}").reasonCode ?? "").startsWith("external_"); } catch { untrusted = false; }
   const repoName = (store.db.prepare("SELECT name FROM repos WHERE id=?").get(row.repoId) as { name: string } | undefined)?.name ?? row.repoId;
-  const locator = { repoId: row.repoId, repoName, revisionId: request.snapshotId, revisionKind: "commit", filePath: request.filePath, startLine: start.line_number, endLine: request.endLine ?? start.line_number, startByte: start.start_byte, offsetEncoding: "utf8_normalized" };
-  const safe = sanitizeUntrustedText(sourceSnippet(row.content, start.start_char, end?.end_char ?? start.end_char, request.contextLines ?? 2));
-  return { hitId: `source_${row.sourceFactId}_${start.start_byte}`, kind: "source_occurrence", lane: "source", title: request.filePath, locator, snippet: safe.text, untrustedContent: true, evidence: [{ source: "source", locator, excerpt: safe.text, status: untrusted ? "observed" : "verified" }], ...(safe.redacted ? { warnings: ["secret content redacted"] } : {}) };
+  const locator = { repoId: row.repoId, repoName, revisionId: request.snapshotId, revisionKind: "commit", filePath: request.filePath, startLine: start.line, endLine: request.endLine ?? start.line, startByte: start.startByte, offsetEncoding: "utf8_normalized" };
+  const safe = sanitizeUntrustedText(sourceSnippet(row.content, start.startChar, end?.endChar ?? start.endChar, request.contextLines ?? 2));
+  return { hitId: `source_${row.sourceFactId}_${start.startByte}`, kind: "source_occurrence", lane: "source", title: request.filePath, locator, snippet: safe.text, untrustedContent: true, evidence: [{ source: "source", locator, excerpt: safe.text, status: untrusted ? "observed" : "verified" }], ...(safe.redacted ? { warnings: ["secret content redacted"] } : {}) };
 }

@@ -115,7 +115,7 @@ export function exportKnowledgeArtifact(store: KnowledgeStore, options: Artifact
       artifactDb.prepare(`UPDATE branches SET current_snapshot_id=NULL WHERE current_snapshot_id IS NOT NULL AND current_snapshot_id NOT IN (${placeholders})`).run(...options.snapshotIds);
     }
     if (options.includeSource !== true) {
-      for (const table of ["source_path_fts", "source_blob_trigrams", "source_blob_lines", "source_snapshot_overlays", "effective_snapshot_sources", "file_fact_sources", "markdown_sections", "source_facts", "source_blobs", "source_backfill_checkpoints"]) artifactDb.prepare(`DELETE FROM ${table}`).run();
+      for (const table of ["source_path_fts", "source_blob_trigrams", "source_blob_line_offsets", "source_snapshot_overlays", "effective_snapshot_sources", "file_fact_sources", "markdown_sections", "source_facts", "source_blobs", "source_backfill_checkpoints"]) artifactDb.prepare(`DELETE FROM ${table}`).run();
     }
     if (options.includeNotes !== true) {
       for (const table of ["fts_notes", "note_links", "note_properties", "notes_index"]) artifactDb.prepare(`DELETE FROM ${table}`).run();

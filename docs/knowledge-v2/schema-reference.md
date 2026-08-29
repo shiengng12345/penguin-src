@@ -55,7 +55,7 @@
 - `snapshot_resolution_refs`
 - `global_resolved_edges`
 - `source_blobs`
-- `source_blob_lines`
+- `source_blob_line_offsets`
 - `source_blob_trigrams`
 - `source_facts`
 - `file_fact_sources`

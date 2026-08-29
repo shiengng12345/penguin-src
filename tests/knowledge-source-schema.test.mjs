@@ -16,7 +16,7 @@ test("fresh database creates schema v10 source corpus tables and indexes", () =>
   assert.equal(store.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value, "14");
   for (const name of [
     "source_blobs",
-    "source_blob_lines",
+    "source_blob_line_offsets",
     "source_facts",
     "file_fact_sources",
     "effective_snapshot_sources",

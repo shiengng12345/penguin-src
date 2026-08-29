@@ -555,16 +555,20 @@ CREATE TABLE IF NOT EXISTS source_blobs (
   decoded_content TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS source_blob_lines (
-  source_blob_id INTEGER NOT NULL,
-  line_number INTEGER NOT NULL,
-  start_byte INTEGER NOT NULL,
-  end_byte INTEGER NOT NULL,
-  start_char INTEGER NOT NULL,
-  end_char INTEGER NOT NULL,
-  PRIMARY KEY (source_blob_id, line_number)
+-- One row per BLOB, not per line. The row-per-line form cost six integers, a
+-- two-column primary key and a secondary index for every line of every indexed
+-- file — 5.3 GB of a 16 GB database — to answer "which line is this offset in".
+-- Both end offsets are derivable (the next line's start, minus its newline), so
+-- two packed uint32 arrays hold the same information at 8 bytes per line, and a
+-- binary search over them is no slower than descending the B-tree was.
+CREATE TABLE IF NOT EXISTS source_blob_line_offsets (
+  source_blob_id INTEGER PRIMARY KEY,
+  line_count INTEGER NOT NULL,
+  total_chars INTEGER NOT NULL,
+  total_bytes INTEGER NOT NULL,
+  start_chars BLOB NOT NULL,
+  start_bytes BLOB NOT NULL
 );
-CREATE INDEX IF NOT EXISTS idx_source_blob_lines_byte ON source_blob_lines(source_blob_id, start_byte, end_byte);
 CREATE TABLE IF NOT EXISTS source_blob_trigrams (
   source_blob_id INTEGER NOT NULL,
   trigram TEXT NOT NULL,
@@ -962,6 +966,49 @@ function migrate(db: Database.Database, _from: number): void {
   if (!branchCols.includes("parser_version")) {
     db.exec("ALTER TABLE branches ADD COLUMN parser_version TEXT");
   }
+  // Fold the row-per-line index into one packed row per blob. The old table is
+  // 5.3 GB of a 16 GB database; every value in it is reconstructible from two
+  // uint32 arrays, so this is a pure representation change with no answer
+  // changing. Done in one pass per blob so a large index does not need the old
+  // and new forms in memory at once.
+  const hasLegacyLines = db
+    .prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_blob_lines'")
+    .get() != null;
+  if (hasLegacyLines) {
+    db.exec(`CREATE TABLE IF NOT EXISTS source_blob_line_offsets (
+      source_blob_id INTEGER PRIMARY KEY,
+      line_count INTEGER NOT NULL,
+      total_chars INTEGER NOT NULL,
+      total_bytes INTEGER NOT NULL,
+      start_chars BLOB NOT NULL,
+      start_bytes BLOB NOT NULL
+    )`);
+    const blobs = db.prepare(`
+      SELECT source_blob_id AS id, COUNT(*) AS lines FROM source_blob_lines
+       WHERE source_blob_id NOT IN (SELECT source_blob_id FROM source_blob_line_offsets)
+       GROUP BY source_blob_id
+    `).all() as Array<{ id: number; lines: number }>;
+    const readLines = db.prepare(
+      "SELECT start_char AS startChar, start_byte AS startByte, end_char AS endChar, end_byte AS endByte FROM source_blob_lines WHERE source_blob_id=? ORDER BY line_number",
+    );
+    const insert = db.prepare(
+      "INSERT OR REPLACE INTO source_blob_line_offsets(source_blob_id,line_count,total_chars,total_bytes,start_chars,start_bytes) VALUES (?,?,?,?,?,?)",
+    );
+    for (const blob of blobs) {
+      const rows = readLines.all(blob.id) as Array<{ startChar: number; startByte: number; endChar: number; endByte: number }>;
+      if (rows.length === 0) continue;
+      const startChars = Buffer.allocUnsafe(rows.length * 4);
+      const startBytes = Buffer.allocUnsafe(rows.length * 4);
+      for (let i = 0; i < rows.length; i += 1) {
+        startChars.writeUInt32LE(rows[i].startChar, i * 4);
+        startBytes.writeUInt32LE(rows[i].startByte, i * 4);
+      }
+      const last = rows[rows.length - 1];
+      insert.run(blob.id, rows.length, last.endChar, last.endByte, startChars, startBytes);
+    }
+    db.exec("DROP TABLE source_blob_lines");
+  }
+
   // Reclaim the duplicate copy of every source file. raw_bytes was NOT NULL and
   // held the exact UTF-8 encoding of decoded_content, so an existing index
   // carries both — 3.49 GB of it here. Nulling the redundant ones is safe in
@@ -1160,6 +1207,8 @@ function isSchemaCurrent(
   // branches migration dead code.
   const blobColumns = db.prepare("PRAGMA table_info(source_blobs)").all() as { name: string; notnull: number }[];
   if (blobColumns.some((column) => column.name === "raw_bytes" && column.notnull === 1)) return false;
+  // The row-per-line table still being present is the old shape.
+  if (db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_blob_lines'").get()) return false;
   if (!have.has("idx_branches_one_default_per_repo")) return false;
   return db.prepare("SELECT 1 FROM ledger_state WHERE id='main'").get() != null;
 }

@@ -55,7 +55,7 @@ test("revision collection removes snapshot mappings and only collects unreferenc
   assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM source_blobs WHERE id=?").get(unused.blob).n, 0);
   assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM source_facts WHERE id=?").get(active.fact).n, 1);
   assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM source_blobs WHERE id=?").get(active.blob).n, 1);
-  assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM source_blob_lines WHERE source_blob_id=?").get(unused.blob).n, 0);
+  assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM source_blob_line_offsets WHERE source_blob_id=?").get(unused.blob).n, 0);
   store.close();
 });
 
