@@ -127,13 +127,16 @@ test("ContextPack groups external calls by package", async () => {
   store.close();
 });
 
-test("a symbol with no external calls stays complete and can still be high confidence", async () => {
+test("a symbol with no external calls is still only a lower bound", async () => {
   const { root, store } = indexed(WIDGET);
   await indexRepo({ store, rootPath: root });
   const pack = buildContextPack(store, "localHelper");
   assert.ok(pack.focus);
   assert.deepEqual(pack.externalCalls, []);
-  assert.equal(pack.completeness.status, "complete");
+  // No EXTERNAL calls is not the same as a complete calls list: the resolver
+  // does not model constructor invocation, interface dispatch, static calls or
+  // calls inside callback bodies, so the list stays a lower bound.
+  assert.equal(pack.completeness.status, "lower_bound");
   assert.equal(pack.completeness.externalCallCount, 0);
   store.close();
 });
@@ -161,11 +164,11 @@ test("ExplorePack shows the gap and stops claiming high confidence", async () =>
   store.close();
 });
 
-test("ExplorePack for a symbol with no external calls keeps high confidence", async () => {
+test("ExplorePack for a symbol with no external calls carries no external warning", async () => {
   const { root, store } = indexed(WIDGET);
   await indexRepo({ store, rootPath: root });
   const pack = buildExplorePack(store, "localHelper");
-  assert.equal(pack.completeness.status, "complete");
+  assert.equal(pack.completeness.status, "lower_bound");
   assert.deepEqual(pack.externalCalls, []);
   assert.ok(
     !pack.diagnostics.some((d) => /external packages/.test(d)),

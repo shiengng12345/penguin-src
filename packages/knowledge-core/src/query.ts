@@ -94,8 +94,8 @@ function nodeVisibleInRevision(store: KnowledgeStore, nodeId: string, revision?:
   );
 }
 
-function resolveNodeId(store: KnowledgeStore, idOrKey: string): string | null {
-  const r = resolveSymbolMatches(store, idOrKey);
+function resolveNodeId(store: KnowledgeStore, idOrKey: string, repoId?: string): string | null {
+  const r = resolveSymbolMatches(store, idOrKey, repoId ? { repoId } : undefined);
   return r.kind === "unique" ? r.nodeId : null;
 }
 
@@ -902,7 +902,7 @@ export function exploreGraph(
   store: KnowledgeStore,
   mode: GraphMode,
   nodeOrKey: string,
-  options?: { depth?: number; limit?: number; to?: string; branchId?: string; revision?: RevisionContext },
+  options?: { depth?: number; limit?: number; to?: string; branchId?: string; repoId?: string; revision?: RevisionContext },
 ): GraphResult {
   const limit = options?.limit ?? 100;
 
@@ -911,7 +911,7 @@ export function exploreGraph(
       const events = (store.db.prepare("SELECT event_type AS eventType, ts, origin, method, node_id AS nodeId FROM events WHERE repo_id IS NULL OR repo_id=? ORDER BY ts DESC LIMIT ?").all(options.revision.repoId, limit) as GraphResult["events"]);
       return { mode, nodes: [], events, revision: options.revision } as GraphResult;
     }
-    const nodeId = mode === "timeline" ? resolveNodeId(store, nodeOrKey) : null;
+    const nodeId = mode === "timeline" ? resolveNodeId(store, nodeOrKey, options?.repoId) : null;
     const rows = (
       nodeId
         ? store.db.prepare(
@@ -924,7 +924,7 @@ export function exploreGraph(
     return { mode, nodes: [], events: rows, revision: options?.revision } as GraphResult;
   }
 
-  const nodeId = resolveNodeId(store, nodeOrKey);
+  const nodeId = resolveNodeId(store, nodeOrKey, options?.repoId);
   if (!nodeId) {
     return {
       mode,
@@ -1555,7 +1555,19 @@ export interface ContextPack {
   // "Are the lists above complete?" — a different question from confidence,
   // which says how much to trust the edges that ARE here. Both are needed:
   // high confidence in an incomplete list is exactly what misled that caller.
-  completeness: { status: "complete" | "partial"; externalCallCount: number };
+  completeness: {
+    /** Never "complete". The calls list is a LOWER BOUND: the resolver models
+     * direct calls, and does not model constructor invocation, interface
+     * dispatch, static-method calls or calls inside callback bodies — so a
+     * short list can mean "few calls" or "few calls we can see", and nothing
+     * here can tell them apart. "unknown" means there is no answer at all
+     * (nothing resolved), which previously reported "complete" alongside
+     * confidence "high" for a symbol that is not in the index. */
+    status: "lower_bound" | "partial" | "unknown";
+    externalCallCount: number;
+    /** Plain-language statement of what the list does and does not cover. */
+    note: string;
+  };
   // Relations whose real size exceeded `limit`, named by their field above
   // (e.g. ["calls","callers"]). A list at exactly `limit` is otherwise
   // indistinguishable from a complete one, so a consumer cannot tell whether
@@ -1602,7 +1614,7 @@ export function buildContextPack(
     invokedDynamicallyBy: [], invokesDynamic: [], remoteCalls: [], invokedBy: [],
     referencedBy: [], usesTypes: [],
     routes: [], tests: [], errors: [], envs: [], notes: [], importers: [], signals: [],
-    externalCalls: [], completeness: { status: "complete", externalCallCount: 0 },
+    externalCalls: [], completeness: { status: "unknown", externalCallCount: 0, note: "Nothing resolved for this target, so there is no calls list to describe." },
     truncated: [],
     ambiguous: null, assemblyError: null,
   };
@@ -1805,8 +1817,15 @@ function buildContextPackBody(
     signals,
     externalCalls: externalCallGroups,
     completeness: {
-      status: externalCallCount > 0 ? "partial" : "complete",
+      // "complete" was never true and was actively harmful: a symbol that is
+      // not indexed at all came back as complete with confidence high, and a
+      // function whose five calls the resolver does not model came back the
+      // same way. An agent reading that concludes "this calls nothing".
+      status: externalCallCount > 0 ? "partial" : "lower_bound",
       externalCallCount,
+      note: externalCallCount > 0
+        ? `${externalCallCount} call(s) go to external packages and have no in-repo target — see externalCalls. Beyond those, the calls list is a lower bound: constructor calls, interface dispatch, static-method calls and calls inside callback bodies are not modelled.`
+        : "The calls list is a lower bound: constructor calls, interface dispatch, static-method calls and calls inside callback bodies are not modelled, so a short list may mean few calls or few visible calls.",
     },
     truncated: [...truncatedRelations].sort(),
     ambiguous: null,
@@ -2432,7 +2451,19 @@ export interface ExplorePack {
   truncated: string[];
   /** Calls that leave the repo, grouped by package — the calls list's gaps. */
   externalCalls: ExternalCallGroup[];
-  completeness: { status: "complete" | "partial"; externalCallCount: number };
+  completeness: {
+    /** Never "complete". The calls list is a LOWER BOUND: the resolver models
+     * direct calls, and does not model constructor invocation, interface
+     * dispatch, static-method calls or calls inside callback bodies — so a
+     * short list can mean "few calls" or "few calls we can see", and nothing
+     * here can tell them apart. "unknown" means there is no answer at all
+     * (nothing resolved), which previously reported "complete" alongside
+     * confidence "high" for a symbol that is not in the index. */
+    status: "lower_bound" | "partial" | "unknown";
+    externalCallCount: number;
+    /** Plain-language statement of what the list does and does not cover. */
+    note: string;
+  };
   // Structured counterpart to the "ambiguous target: N matches" diagnostics
   // string — callers need the actual candidates (nodeId/filePath/branch) to
   // disambiguate and retry directly, not just a count to guess against.
@@ -2521,9 +2552,15 @@ export function buildExplorePack(
   // missing its two most important calls got believed. The cap is the signal
   // that actually gets seen; `completeness` carries the precise story.
   const externalCallCount = effectiveContext.completeness?.externalCallCount ?? 0;
-  const level = externalCallCount > 0
-    ? (inferredEdges === 0 ? "mixed" : "low")
-    : inferredEdges === 0 ? "high" : minimum >= 0.5 ? "mixed" : "low";
+  // No focus means no answer, and an answer that does not exist cannot be
+  // high-confidence. `explore <name-that-is-not-indexed>` reported level "high"
+  // beside an empty pack.
+  const resolved = effectiveContext.focus != null;
+  const level = !resolved
+    ? "low"
+    : externalCallCount > 0
+      ? (inferredEdges === 0 ? "mixed" : "low")
+      : inferredEdges === 0 ? "high" : minimum >= 0.5 ? "mixed" : "low";
   const diagnostics = [
     ...context.signals,
     ...(externalCallCount > 0
@@ -2635,7 +2672,7 @@ export function buildExplorePack(
     // honesty contract has to survive the hop from ContextPack to here.
     truncated: effectiveContext.truncated ?? [],
     externalCalls: effectiveContext.externalCalls ?? [],
-    completeness: effectiveContext.completeness ?? { status: "complete", externalCallCount: 0 },
+    completeness: effectiveContext.completeness ?? { status: "unknown", externalCallCount: 0, note: "Nothing resolved for this target, so there is no calls list to describe." },
     ...(context.ambiguous ? { ambiguousCandidates: context.ambiguous } : {}),
     ...(!context.ambiguous && searchCandidates ? { ambiguousCandidates: searchCandidates } : {}),
     ...(scopeFallback ? { scopeFallback } : {}),

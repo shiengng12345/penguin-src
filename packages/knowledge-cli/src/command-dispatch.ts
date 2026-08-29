@@ -2040,8 +2040,31 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           return 0;
         }
         default: {
-          const res = exploreGraph(store, GRAPH_VERB_MODE[verb], pos[0] ?? "");
-          emit(deps, json, res.nodes.map((n) => `${n.nodeType}\t${n.title}`).join("\n") || "(none)", res);
+          const graphRepoId = scopedRepoId(store, optionValue("repo"));
+          if (graphRepoId === null) {
+            deps.err(`no indexed repo matches "${optionValue("repo")}" — see \`penguin status\` for the indexed names`);
+            return 2;
+          }
+          const res = exploreGraph(store, GRAPH_VERB_MODE[verb], pos[0] ?? "", { repoId: graphRepoId });
+          // An empty node list and a failed lookup are different answers.
+          // Rendering both as "(none)" told a caller "nothing calls this" when
+          // the truth was "the name matched several symbols and I gave up" —
+          // the most dangerous shape a wrong answer can take.
+          const status = res.diagnostics?.resolutionStatus;
+          if (status && status !== "resolved") {
+            deps.err(
+              `cannot answer ${verb} for "${pos[0] ?? ""}": ${status}`
+              + (optionValue("repo")
+                // Already scoped and still ambiguous means the name really does
+                // appear more than once inside that repo; telling them to pass
+                // --repo again would be advice they have followed.
+                ? `\n  the name matches more than one symbol inside ${optionValue("repo")} — pass a node id from \`penguin search\``
+                : `\n  (pass --repo to narrow, or a node id from \`penguin search\`)`),
+            );
+            if (json) emit(deps, json, "", res);
+            return 1;
+          }
+          emit(deps, json, res.nodes.map((n) => `${n.nodeType}\t${n.title}`).join("\n") || "(no results)", res);
           return 0;
         }
       }

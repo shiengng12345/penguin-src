@@ -106,3 +106,48 @@ test("an unscoped pack is unchanged", () => {
   assert.equal(pack.focus?.title, "alphaCaller");
   store.close();
 });
+
+// An external model evaluating the index reported three defects that all share
+// one shape: an answer that does not exist, presented as an answer that does.
+
+test("completeness never claims to be complete", async () => {
+  const { buildContextPack: build } = await import("../packages/knowledge-core/dist/index.js");
+  const { store } = seed();
+  // "complete" was never true. The resolver models direct calls and not
+  // constructor invocation, interface dispatch, static calls or calls inside
+  // callbacks, so the list is a lower bound and saying otherwise told agents
+  // "this function calls nothing" about functions with five visible calls.
+  const pack = build(store, "alphaCaller");
+  assert.notEqual(pack.completeness.status, "complete");
+  assert.equal(pack.completeness.status, "lower_bound");
+  assert.match(pack.completeness.note, /lower bound/i, "and it says so in words, not just a status");
+  store.close();
+});
+
+test("a target that does not resolve is not complete and not high confidence", async () => {
+  const { buildExplorePack: explore } = await import("../packages/knowledge-core/dist/index.js");
+  const { store } = seed();
+  // `explore <name-not-in-the-index>` returned completeness "complete" beside
+  // confidence "high" for an empty pack — the index at its most confident
+  // about nothing at all.
+  const pack = explore(store, "definitelyNotIndexedAnywhere");
+  assert.equal(pack.focus, null);
+  assert.equal(pack.completeness.status, "unknown");
+  assert.notEqual(pack.confidence.level, "high", "no answer cannot be a high-confidence answer");
+  store.close();
+});
+
+test("graph queries honour the repo scope", async () => {
+  const { exploreGraph } = await import("../packages/knowledge-core/dist/index.js");
+  const { store, repos, alphaShared } = seed();
+  const scoped = exploreGraph(store, "who_calls", "sharedName", { repoId: repos.alpha.repoId });
+  assert.equal(scoped.diagnostics.resolutionStatus, "resolved", "the scope settles the name");
+  assert.ok(
+    scoped.nodes.some((n) => n.title === "alphaCaller"),
+    `and returns that repo's callers, got ${JSON.stringify(scoped.nodes)}`,
+  );
+  const unscoped = exploreGraph(store, "who_calls", "sharedName");
+  assert.equal(unscoped.diagnostics.resolutionStatus, "ambiguous", "unscoped, the name is still ambiguous");
+  assert.deepEqual(unscoped.nodes, [], "and an ambiguous lookup returns nothing — which the CLI must not print as (none)");
+  store.close();
+});
