@@ -151,3 +151,34 @@ test("graph queries honour the repo scope", async () => {
   assert.deepEqual(unscoped.nodes, [], "and an ambiguous lookup returns nothing — which the CLI must not print as (none)");
   store.close();
 });
+
+test("architecture narrows to one repo when asked", async () => {
+  const { architecture } = await import("../packages/knowledge-core/dist/index.js");
+  const { store, repos } = seed();
+  // --repo was accepted and ignored, so "tell me about this service" answered
+  // with the whole 26-repo estate.
+  const scoped = architecture(store, { repoId: repos.alpha.repoId });
+  assert.deepEqual(scoped.repos.map((r) => r.name), ["alpha"]);
+  assert.ok(scoped.nodeCounts.symbol > 0, "and still reports that repo's own counts");
+
+  const all = architecture(store);
+  assert.deepEqual(all.repos.map((r) => r.name).sort(), ["alpha", "beta"], "unscoped is unchanged");
+  store.close();
+});
+
+test("repoGraph ranks on architectural edges and reports the degree it ranked on", async () => {
+  const { repoGraph } = await import("../packages/knowledge-core/dist/index.js");
+  const { store, repos } = seed();
+  const graph = repoGraph(store, repos.alpha.repoId, repos.alpha.branchId);
+  assert.ok(graph.nodes.length > 0);
+  // degree was in the result shape and always null, so a caller could not see
+  // why a node ranked where it did — and the ranking counted imports and
+  // defines, which put .spec.ts files at the top of "top hubs".
+  assert.ok(
+    graph.nodes.every((n) => typeof n.degree === "number"),
+    `every node carries the number it was ranked by, got ${JSON.stringify(graph.nodes.slice(0, 3))}`,
+  );
+  const degrees = graph.nodes.map((n) => n.degree);
+  assert.deepEqual(degrees, [...degrees].sort((a, b) => b - a), "and the list is ordered by it");
+  store.close();
+});

@@ -1245,7 +1245,12 @@ export function listFileSymbols(
 
 export interface GraphView {
   focus: string | null; // the centered node (null for repo-scoped view)
-  nodes: Array<{ nodeId: string; title: string; nodeType: string; revisionId?: string }>;
+  nodes: Array<{
+    nodeId: string; title: string; nodeType: string; revisionId?: string;
+    /** Ranked degree over calls/references/invokes/handles — the number the
+     * repo view sorts on. Present on repoGraph results; absent elsewhere. */
+    degree?: number;
+  }>;
   edges: Array<{ src: string; dst: string; edgeType: string; sourceType?: string | null }>;
 }
 
@@ -1330,22 +1335,45 @@ export function repoGraph(
   const limit = options?.limit ?? 150;
   const genericNames = [...GENERIC_UTILITY_HUB_NAMES];
   const genericPlaceholders = genericNames.map(() => "?").join(",");
+  // Rank on edges that say something about architecture. Counting every edge
+  // type made `imports` and `defines` dominate, so the "top hubs" of a NestJS
+  // monorepo came back as .spec.ts files — a test that imports thirty modules
+  // outranked the service everything actually calls.
   const top = store.db
     .prepare(
-      `SELECT d.id AS id FROM (
-         SELECT node AS id, COUNT(*) AS cnt FROM (
-           SELECT src AS node FROM edges WHERE branch_id=? AND status='active'
-           UNION ALL
-           SELECT dst AS node FROM edges WHERE branch_id=? AND status='active' AND dst IS NOT NULL
-         ) GROUP BY node
+      `SELECT d.id AS id, d.arch AS degree FROM (
+         SELECT node AS id,
+                SUM(CASE WHEN kind IN ('calls','references','invokes','handles') THEN 1 ELSE 0 END) AS arch,
+                COUNT(*) AS total
+           FROM (
+             SELECT src AS node, edge_type AS kind FROM edges
+              WHERE branch_id=? AND status='active'
+             UNION ALL
+             SELECT dst AS node, edge_type AS kind FROM edges
+              WHERE branch_id=? AND status='active' AND dst IS NOT NULL
+           ) GROUP BY node
        ) d JOIN nodes n ON n.id = d.id
        WHERE n.repo_id=? AND LOWER(n.title) NOT IN (${genericPlaceholders})
-       ORDER BY d.cnt DESC, d.id LIMIT ?`,
+       -- Rank on the edges that say something about architecture, but do not
+       -- DROP a node for having none: a file whose only relation is an import
+       -- still belongs in the view, just not at the top. Ranking on every edge
+       -- type put .spec.ts files above the services everything calls; ranking
+       -- only on architectural edges removed them from the graph altogether.
+       ORDER BY d.arch DESC, d.total DESC, d.id LIMIT ?`,
     )
-    .all(branchId, branchId, repoId, ...genericNames, limit) as { id: string }[];
+    .all(branchId, branchId, repoId, ...genericNames, limit) as { id: string; degree: number }[];
   const ids = top.map((r) => r.id);
   if (ids.length === 0) return { focus: null, nodes: [], edges: [] };
-  return { focus: null, ...collectGraph(store, ids, branchId, options?.edgeLimit) };
+  const graph = collectGraph(store, ids, branchId, options?.edgeLimit);
+  // Carry the number the ranking is based on. It was advertised in the result
+  // shape and always null, so a caller could neither see why a node ranked
+  // where it did nor re-sort on it.
+  const degreeOf = new Map(top.map((row) => [row.id, row.degree]));
+  return {
+    focus: null,
+    ...graph,
+    nodes: graph.nodes.map((node) => ({ ...node, degree: degreeOf.get(node.nodeId) ?? 0 })),
+  };
 }
 
 // Build {nodes, edges} for a fixed node-id set — edges only where BOTH ends are
@@ -2802,25 +2830,56 @@ const GENERIC_UTILITY_HUB_NAMES = new Set([
   "t", "$translate", "translate", "logerror", "emitter", "size", "populate",
 ]);
 
-export function architecture(store: KnowledgeStore): ArchitectureOverview {
+export function architecture(
+  store: KnowledgeStore,
+  options?: { repoId?: string },
+): ArchitectureOverview {
   const rows = <T,>(sql: string, ...p: unknown[]) => store.db.prepare(sql).all(...p) as T[];
+  // Every count below narrows to one repo when asked. Ignoring the scope meant
+  // "tell me about THIS service" answered with a 26-repo estate whose top hubs
+  // were parseInt and isNaN — an answer nobody can act on.
+  const repoId = options?.repoId;
+  const nodeScope = repoId ? "WHERE repo_id=?" : "";
+  const nodeArgs = repoId ? [repoId] : [];
+  const edgeJoin = repoId ? "JOIN nodes n ON n.id = e.src AND n.repo_id=?" : "";
+  const edgeArgs = repoId ? [repoId] : [];
   const repos = rows<{ name: string; n: number }>(
-    "SELECT r.name AS name, (SELECT COUNT(*) FROM branches b WHERE b.repo_id=r.id) AS n FROM repos r ORDER BY r.name",
+    `SELECT r.name AS name, (SELECT COUNT(*) FROM branches b WHERE b.repo_id=r.id) AS n
+       FROM repos r ${repoId ? "WHERE r.id=?" : ""} ORDER BY r.name`,
+    ...(repoId ? [repoId] : []),
   ).map((r) => ({ name: r.name, branches: r.n }));
-  const countMap = (sql: string) => Object.fromEntries(rows<{ k: string; n: number }>(sql).map((r) => [r.k, r.n]));
-  const nodeCounts = countMap("SELECT node_type AS k, COUNT(*) AS n FROM nodes GROUP BY node_type ORDER BY n DESC");
-  const edgeCounts = countMap("SELECT edge_type AS k, COUNT(*) AS n FROM edges WHERE status='active' GROUP BY edge_type ORDER BY n DESC");
+  const countMap = (sql: string, ...p: unknown[]) =>
+    Object.fromEntries(rows<{ k: string; n: number }>(sql, ...p).map((r) => [r.k, r.n]));
+  const nodeCounts = countMap(
+    `SELECT node_type AS k, COUNT(*) AS n FROM nodes ${nodeScope} GROUP BY node_type ORDER BY n DESC`,
+    ...nodeArgs,
+  );
+  const edgeCounts = countMap(
+    `SELECT e.edge_type AS k, COUNT(*) AS n FROM edges e ${edgeJoin}
+      WHERE e.status='active' GROUP BY e.edge_type ORDER BY n DESC`,
+    ...edgeArgs,
+  );
   const languages = rows<{ lang: string; symbols: number }>(
-    "SELECT lang, COUNT(*) AS symbols FROM symbol_versions WHERE status='fresh' GROUP BY lang ORDER BY symbols DESC LIMIT 12",
+    `SELECT sv.lang AS lang, COUNT(*) AS symbols FROM symbol_versions sv
+       ${repoId ? "JOIN branches b ON b.id = sv.branch_id AND b.repo_id=?" : ""}
+      WHERE sv.status='fresh' GROUP BY sv.lang ORDER BY symbols DESC LIMIT 12`,
+    ...(repoId ? [repoId] : []),
   );
   const hubs = rows<{ id: string; degree: number }>(
     `SELECT node AS id, COUNT(*) AS degree FROM (
-        SELECT src AS node FROM edges WHERE status='active' AND edge_type IN ('calls','references')
-        UNION ALL SELECT dst AS node FROM edges WHERE status='active' AND edge_type IN ('calls','references') AND dst IS NOT NULL
+        SELECT e.src AS node FROM edges e ${edgeJoin}
+         WHERE e.status='active' AND e.edge_type IN ('calls','references')
+        UNION ALL
+        SELECT e.dst AS node FROM edges e ${repoId ? "JOIN nodes n ON n.id = e.dst AND n.repo_id=?" : ""}
+         WHERE e.status='active' AND e.edge_type IN ('calls','references') AND e.dst IS NOT NULL
      ) GROUP BY node ORDER BY degree DESC LIMIT 40`,
+    ...edgeArgs, ...(repoId ? [repoId] : []),
   ).map((h) => { const b = nodeBrief(store, h.id); return { title: b.title, nodeType: b.nodeType, degree: h.degree }; })
    .filter((h) => h.nodeType === "symbol" && !GENERIC_UTILITY_HUB_NAMES.has(h.title.toLowerCase())).slice(0, 12);
-  const entryPoints = rows<{ title: string }>("SELECT title FROM nodes WHERE node_type='endpoint' ORDER BY title LIMIT 30").map((r) => r.title);
+  const entryPoints = rows<{ title: string }>(
+    `SELECT title FROM nodes WHERE node_type='endpoint' ${repoId ? "AND repo_id=?" : ""} ORDER BY title LIMIT 30`,
+    ...(repoId ? [repoId] : []),
+  ).map((r) => r.title);
   return { repos, nodeCounts, edgeCounts, languages, hubs, entryPoints };
 }
 

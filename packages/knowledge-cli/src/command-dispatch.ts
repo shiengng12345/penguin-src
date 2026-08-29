@@ -1806,7 +1806,14 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           return 0;
         }
         case "architecture": {
-          const o = architecture(store);
+          const archRepoId = scopedRepoId(store, optionValue("repo"));
+          if (archRepoId === null) {
+            deps.err(`no indexed repo matches "${optionValue("repo")}" — see \`penguin status\` for the indexed names`);
+            return 2;
+          }
+          // --repo was accepted and ignored: asking about one repo dumped the
+          // whole 26-repo estate, with hubs like parseInt and isNaN.
+          const o = architecture(store, archRepoId ? { repoId: archRepoId } : undefined);
           const txt = [
             `repos: ${o.repos.map((r) => `${r.name}(${r.branches}br)`).join(", ")}`,
             `nodes: ${Object.entries(o.nodeCounts).map(([k, v]) => `${k} ${v}`).join(" · ")}`,
