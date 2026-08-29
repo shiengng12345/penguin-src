@@ -122,7 +122,16 @@ export type SymbolResolution =
 // zero/unique/truly-few-candidates are the cases this feature is for.
 const MAX_AMBIGUOUS_CANDIDATES = 20;
 
-type SymbolCandidateScope = { branchId?: string; revision?: RevisionContext };
+type SymbolCandidateScope = {
+  branchId?: string;
+  revision?: RevisionContext;
+  /** Constrains WHICH symbol a bare name resolves to. Without it `--repo` only
+   * decorated the answer's scope envelope while resolution still searched every
+   * indexed repo: asking for one repo's `CMSGenBaseResponse` returned a ten-way
+   * ambiguity across ten repos, and a name unique in the target repo could
+   * silently resolve to a same-named symbol in another one. */
+  repoId?: string;
+};
 
 function symbolCandidateOf(
   store: KnowledgeStore,
@@ -178,9 +187,20 @@ export function resolveSymbolMatches(
   scope?: SymbolCandidateScope,
 ): SymbolResolution {
   const raw = idOrKey.startsWith("symbol:") ? idOrKey.slice("symbol:".length) : idOrKey;
-  if (store.getNode(raw)) return { kind: "unique", nodeId: raw };
+  // Honour an explicit repo on every path, not just the name fallback: a direct
+  // identity hit in a DIFFERENT repo is exactly the silent wrong-answer case —
+  // `explore accumulatePlayerDeposit --repo FPMS-NT` came back with another
+  // repo's symbol, empty callers and callees, and nothing but the trust block
+  // to say so.
+  const inScope = (nodeId: string): boolean =>
+    !scope?.repoId || store.getNode(nodeId)?.repo_id === scope.repoId;
+  const direct = store.getNode(raw);
+  if (direct) {
+    if (inScope(raw)) return { kind: "unique", nodeId: raw };
+    return { kind: "none" };
+  }
   const r = store.resolveIdentity(raw);
-  if (r) return { kind: "unique", nodeId: r.nodeId };
+  if (r && inScope(r.nodeId)) return { kind: "unique", nodeId: r.nodeId };
   // Human-friendly repo prefix: `auth::Class.method` or
   // `auth::src/file.ts::Class.method`. Repo ids are random on a fresh DB, so
   // prompts, benchmarks and notes must not need to preserve `repo_<uuid>`.
@@ -203,10 +223,13 @@ export function resolveSymbolMatches(
   }
   // friendly-name fallback: title match, or qualified-name suffix (so CLI/MCP
   // callers can pass "login" or "Svc.login", not just full identity keys).
+  // A caller-supplied repo narrows the search rather than annotating its result.
+  const repoClause = scope?.repoId ? "AND repo_id = ?" : "";
   const rows = store.db
     .prepare(
       `SELECT id FROM nodes
        WHERE (title = ? OR identity_key LIKE ? OR identity_key LIKE ?)
+         ${repoClause}
          AND (
            node_type <> 'symbol'
            OR NOT EXISTS (
@@ -220,7 +243,7 @@ export function resolveSymbolMatches(
          )
        LIMIT ${MAX_AMBIGUOUS_CANDIDATES + 1}`,
     )
-    .all(raw, `%::${raw}`, `%.${raw}`) as { id: string }[];
+    .all(...(scope?.repoId ? [raw, `%::${raw}`, `%.${raw}`, scope.repoId] : [raw, `%::${raw}`, `%.${raw}`])) as { id: string }[];
   if (rows.length === 0) return { kind: "none" };
   if (rows.length === 1) return { kind: "unique", nodeId: rows[0].id };
   const candidates = rows.slice(0, MAX_AMBIGUOUS_CANDIDATES).map((row) => symbolCandidateOf(store, row.id, scope));
@@ -1571,7 +1594,7 @@ export interface PackSourceOptions {
 export function buildContextPack(
   store: KnowledgeStore,
   target: string,
-  options?: { branchId?: string; revision?: RevisionContext; limit?: number } & PackSourceOptions,
+  options?: { branchId?: string; repoId?: string; revision?: RevisionContext; limit?: number } & PackSourceOptions,
 ): ContextPack {
   const limit = options?.limit ?? 25;
   const empty: ContextPack = {
@@ -2147,7 +2170,7 @@ export function resolveGrpcEndpoint(store: KnowledgeStore, input: string): GrpcR
 export function buildFlow(
   store: KnowledgeStore,
   target: string,
-  options?: { branchId?: string; revision?: RevisionContext; depth?: number; limit?: number },
+  options?: { branchId?: string; repoId?: string; revision?: RevisionContext; depth?: number; limit?: number },
 ): FlowResult {
   const grpc = resolveGrpcEndpoint(store, target);
   let focus: string | null = null;
@@ -2428,7 +2451,7 @@ export interface ExplorePack {
 export function buildExplorePack(
   store: KnowledgeStore,
   target: string,
-  options?: { branchId?: string; revision?: RevisionContext; depth?: number; limit?: number } & PackSourceOptions,
+  options?: { branchId?: string; repoId?: string; revision?: RevisionContext; depth?: number; limit?: number } & PackSourceOptions,
 ): ExplorePack {
   let context = buildContextPack(store, target, options);
   let flow = buildFlow(store, target, options);

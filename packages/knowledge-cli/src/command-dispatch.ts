@@ -505,6 +505,16 @@ Global: --json (machine-readable), --repo/--branch/--commit/--snapshot (scope se
 
 const CANONICAL_HELP = `${HELP}\nCanonical capability IDs (use \'penguin capabilities --json\' for schemas and status):\n${CAPABILITIES.map((capability) => `  ${capability.id}`).join("\n")}\n`;
 
+/** A caller-supplied --repo, resolved to an id. undefined when none was given;
+ * null when it matches nothing indexed — the caller reports that rather than
+ * quietly widening the search back to every repo, which is how `--repo X` came
+ * to return a ten-way ambiguity across ten repos. */
+function scopedRepoId(store: KnowledgeStore, repo: string | undefined): string | null | undefined {
+  if (!repo) return undefined;
+  const row = store.db.prepare("SELECT id FROM repos WHERE id=? OR name=? LIMIT 1").get(repo, repo) as { id: string } | undefined;
+  return row?.id ?? null;
+}
+
 // The CLI is a thin shell: parse → call knowledge-core query layer / indexer →
 // format (§8.3). No independent search/index logic. Returns an exit code.
 export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed = parseCliArguments(argv)): Promise<number> {
@@ -1721,7 +1731,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           let scope: ScopeEnvelope | undefined;
           try { ({ revision, scope } = resolveCliRevision(store, target, { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd)); }
           catch (error) { return reportScopeResolutionError(deps, error, json); }
-          const pack = buildContextPack(store, target, { revision });
+          const pack = buildContextPack(store, target, { revision, repoId: scopedRepoId(store, optionValue("repo")) ?? undefined });
           if (!pack.focus) {
             emit(deps, json, renderContextPackMarkdown(pack), pack, scope);
             return 1;
@@ -1751,8 +1761,14 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
               return 1;
             }
           }
+          const repoId = scopedRepoId(store, optionValue("repo"));
+          if (repoId === null) {
+            deps.err(`no indexed repo matches "${optionValue("repo")}" — see \`penguin status\` for the indexed names`);
+            return 2;
+          }
           const pack = buildExplorePack(store, target, {
             branchId,
+            repoId,
             revision,
             depth: numberOption("depth"),
             limit: numberOption("limit"),
@@ -1767,7 +1783,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           let scope: ScopeEnvelope | undefined;
           try { ({ revision, scope } = resolveCliRevision(store, target, { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd)); }
           catch (error) { return reportScopeResolutionError(deps, error, json); }
-          const flow = buildFlow(store, target, { revision });
+          const flow = buildFlow(store, target, { revision, repoId: scopedRepoId(store, optionValue("repo")) ?? undefined });
           if (!flow.root) {
             emit(deps, json, renderFlowMarkdown(flow), flow, scope);
             return 1;
@@ -1844,7 +1860,16 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           });
           const line = (c: typeof d.candidates[number]) =>
             `  ${c.title}${c.filePath ? ` — ${c.filePath}:${c.startLine ?? "?"}` : ""}`;
-          emit(deps, json, `${d.candidates.length} candidate(s) — ${d.note}\n` + d.candidates.slice(0, 40).map(line).join("\n"), d);
+          // Printing 40 of 77 under a "77 candidate(s)" headline is the silent
+          // truncation this codebase spent a day removing everywhere else.
+          const SHOWN = 40;
+          const shown = d.candidates.slice(0, SHOWN);
+          const cut = d.candidates.length - shown.length;
+          emit(deps, json,
+            `${d.candidates.length} candidate(s) — ${d.note}\n`
+            + shown.map(line).join("\n")
+            + (cut > 0 ? `\n  … ${cut} more not shown — pass --json for the full list` : ""),
+            d);
           return 0;
         }
         case "compare": {
@@ -1950,9 +1975,41 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           return 0;
         }
         case "filesymbols": {
-          // filesymbols <branchId> <filePath> — Wiki passes the branch id from `files`.
-          const syms = listFileSymbols(store, pos[0] ?? "", pos[1] ?? "");
-          emit(deps, json, syms.map((s) => `${s.kind}\t${s.title}${s.status === "stale" ? " (stale)" : ""}`).join("\n") || "(no symbols)", syms);
+          // The first argument is a branch id, which the Wiki has from `files`
+          // but a person does not. Passing a repo name — the obvious guess —
+          // silently returned "(no symbols)", indistinguishable from a file that
+          // genuinely defines none. Accept a repo name too, and when the scope
+          // cannot be resolved say so instead of answering empty.
+          const branchArg = optionValue("branch") ?? pos[0] ?? "";
+          const filePath = pos[1] ?? optionValue("path") ?? "";
+          const repoArg = optionValue("repo");
+          let branchId = branchArg;
+          const looksLikeBranchId = /^branch_/.test(branchArg);
+          if (!looksLikeBranchId || repoArg) {
+            const repoRow = store.db
+              .prepare("SELECT id, name FROM repos WHERE id=? OR name=? LIMIT 1")
+              .get(repoArg ?? branchArg, repoArg ?? branchArg) as { id: string; name: string } | undefined;
+            if (!repoRow) {
+              deps.err(`no indexed repo or branch matches "${repoArg ?? branchArg}" — see \`penguin status\` for the indexed names`);
+              return 2;
+            }
+            const branchName = repoArg ? branchArg : optionValue("branch");
+            const row = (branchName
+              ? store.getBranch(repoRow.id, branchName)
+              : store.db.prepare(
+                  "SELECT * FROM branches WHERE repo_id=? AND status='live' ORDER BY last_indexed_at DESC LIMIT 1",
+                ).get(repoRow.id)) as { id: string } | undefined;
+            if (!row) {
+              deps.err(`repo "${repoRow.name}" has no ${branchName ? `branch "${branchName}"` : "live branch"} indexed`);
+              return 2;
+            }
+            branchId = row.id;
+          }
+          if (!filePath) { deps.err("filesymbols needs a file path"); return 2; }
+          const syms = listFileSymbols(store, branchId, filePath);
+          const line = (s: typeof syms[number]) =>
+            `${s.kind}\t${s.title}${s.startLine != null ? `\t${filePath}:${s.startLine}` : ""}${s.status === "stale" ? " (stale)" : ""}`;
+          emit(deps, json, syms.map(line).join("\n") || `(no symbols indexed for ${filePath})`, syms);
           return 0;
         }
         case "graph": {

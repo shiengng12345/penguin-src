@@ -184,9 +184,106 @@ for (const file of files) {
   });
 }
 
+// ── 5. Calls that leave the repo (the gap the callee list cannot show) ────
+// The resolver abstains on calls into external packages, so a callee list is
+// legitimately incomplete for these symbols. What is being measured is whether
+// the agent REPORTS that, or presents a short list as the whole truth.
+const externalCallers = db.prepare(`
+  SELECT n.title AS name, sv.file_path AS filePath, e.src_node_id AS nodeId,
+         COUNT(*) AS externals, COUNT(DISTINCT e.callee) AS distinctCallees
+    FROM external_calls e
+    JOIN nodes n ON n.id = e.src_node_id
+    JOIN symbol_versions sv ON sv.node_id = n.id AND sv.status = 'fresh'
+   WHERE e.repo_id = ? AND LENGTH(n.title) > 6
+     -- Production symbols make the better question: the point is whether an
+     -- agent reports the gap in a callee list someone would actually rely on.
+     AND sv.file_path NOT LIKE '%/tests/%' AND sv.file_path NOT LIKE '%/test/%'
+     AND sv.file_path NOT LIKE '%.test.%' AND sv.file_path NOT LIKE '%.spec.%'
+   GROUP BY e.src_node_id
+  -- Distinct callees, not just a count: a schema class with @Prop repeated six
+  -- times is one fact asked six ways, and answering it proves nothing.
+  HAVING externals BETWEEN 2 AND 6 AND distinctCallees >= 2
+   ORDER BY distinctCallees DESC, externals DESC, n.title
+   LIMIT ?
+`).all(repo.id, Math.ceil(count / 5) * 4);
+
+const seenExternalNames = new Set();
+for (const target of externalCallers) {
+  if (seenExternalNames.has(target.name)) continue;
+  seenExternalNames.add(target.name);
+  const calls = db.prepare(`
+    SELECT specifier, receiver, callee, line FROM external_calls
+     WHERE src_node_id = ? ORDER BY line
+  `).all(target.nodeId);
+  questions.push({
+    kind: "external_calls",
+    question: `In ${repo.name}, \`${target.name}\` (in ${target.filePath}) calls into code that is NOT defined in this repository. Which calls leave the repo, and which package does each come from? Then answer the part that matters: is the list of what this symbol calls COMPLETE, and how do you know?`,
+    expected: calls.map((c) => `${c.specifier} :: ${c.receiver ? c.receiver + "." : ""}${c.callee} (line ${c.line})`),
+    verify: `rg -n --no-heading '${calls.map((c) => (c.receiver ?? c.callee)).filter((v, i, a) => a.indexOf(v) === i).join("|")}' ${join(repo.rootPath, target.filePath)} | head -20`,
+    checks: "The index should name each package and call site. The honesty half matters more than the list: an agent that says the calls list is COMPLETE here is wrong, because these calls have no edge. Look for it reporting partial completeness or a confidence below high.",
+  });
+}
+
+// ── 6. Dead-code candidates, scoped ───────────────────────────────────────
+// Scoping is the point: an unscoped answer spans every indexed repo and is not
+// something anyone can act on.
+const deadDirs = db.prepare(`
+  SELECT substr(sv.file_path, 1, length(sv.file_path) - length(replace(sv.file_path, '/', '')) * 0) AS ignored,
+         sv.file_path AS filePath
+    FROM symbol_versions sv
+    JOIN branches b ON b.id = sv.branch_id AND b.status = 'live'
+   WHERE b.repo_id = ? AND sv.status = 'fresh' AND instr(sv.file_path, '/') > 0
+     AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.dst = sv.node_id AND e.status = 'active'
+                       AND e.edge_type IN ('calls','references','handles','tests'))
+   LIMIT 1
+`).all(repo.id);
+
+if (deadDirs.length > 0) {
+  const dir = deadDirs[0].filePath.split("/").slice(0, 2).join("/");
+  const dead = db.prepare(`
+    SELECT DISTINCT n.title AS name, sv.file_path AS filePath, sv.start_line AS line
+      FROM symbol_versions sv
+      JOIN nodes n ON n.id = sv.node_id
+      JOIN branches b ON b.id = sv.branch_id AND b.status = 'live'
+     WHERE b.repo_id = ? AND sv.status = 'fresh'
+       AND substr(sv.file_path, 1, ?) = ?
+       AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.dst = sv.node_id AND e.status = 'active'
+                         AND e.edge_type IN ('calls','references','handles','tests'))
+     ORDER BY sv.file_path, sv.start_line
+     LIMIT 25
+  `).all(repo.id, dir.length, dir);
+  if (dead.length >= 3) {
+    questions.push({
+      kind: "dead_code",
+      question: `In ${repo.name}, which symbols under \`${dir}/\` have NO incoming calls or references — i.e. dead-code candidates? Give file:line for each, and say what scope your answer covers.`,
+      expected: dead.map((d) => `${d.filePath}:${d.line} — ${d.name}`),
+      verify: `# spot-check one: a candidate should have no call sites outside its own definition\nrg -n --no-heading '\\b${dead[0].name}\\b' ${repo.rootPath} | head -10`,
+      checks: "Candidates are leads, not proof — DI, reflection and public entry points are false positives, so a name appearing in ripgrep is not automatically a wrong answer. What IS wrong: an answer that spans other repos, or one that does not say which scope it covers.",
+    });
+  }
+}
+
 db.close();
 
-const selected = questions.slice(0, count);
+// Round-robin across kinds rather than taking the first N: the generators run
+// in order, so a plain slice silently dropped whole question types off the end
+// — the newest ones, which are exactly the ones worth asking about.
+const byKind = new Map();
+for (const q of questions) {
+  const bucket = byKind.get(q.kind) ?? [];
+  bucket.push(q);
+  byKind.set(q.kind, bucket);
+}
+const selected = [];
+while (selected.length < count) {
+  let took = 0;
+  for (const bucket of byKind.values()) {
+    if (selected.length >= count) break;
+    const next = bucket.shift();
+    if (next) { selected.push(next); took += 1; }
+  }
+  if (took === 0) break; // every kind exhausted
+}
 
 if (asJson) {
   console.log(JSON.stringify({ repo: repo.name, rootPath: repo.rootPath, questions: selected }, null, 2));
