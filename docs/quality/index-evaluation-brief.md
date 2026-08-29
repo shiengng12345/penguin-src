@@ -1,7 +1,7 @@
 # Evaluate a local code index — and tell me what you actually think
 
-> **Round 4 · 2026-08-29 · build `7b6086b9`**
-> Three earlier rounds found nine defects, all fixed. Their reports are in this
+> **Round 5 · 2026-08-29 · build `5dfb9a54`**
+> Four earlier rounds found eleven defects, all fixed. Their reports are in this
 > directory. See "What changed since the last round" below before you start, so
 > you spend the evaluation on new ground rather than re-finding what is done.
 
@@ -148,9 +148,11 @@ index-evaluation-gpt-5-round2.md     (round 2)
 index-evaluation-opus-5-round2.md    (round 2)
 index-evaluation-gpt-5-round3.md     (round 3)
 index-evaluation-opus-5-round3.md    (round 3)
+index-evaluation-gpt-5-round4.md     (round 4)
+index-evaluation-opus-5-round4.md    (round 4)
 ```
 
-So a fourth GPT-5 run writes `index-evaluation-gpt-5-round4.md`. If your name is
+So a fifth GPT-5 run writes `index-evaluation-gpt-5-round5.md`. If your name is
 already taken at the round you picked, go up a round — never replace a file that
 is there.
 
@@ -199,7 +201,7 @@ again — or not.
 
 ## What changed since the last round
 
-Nine defects reported by earlier reviewers have been fixed across three rounds.
+Eleven defects reported by earlier reviewers have been fixed across four rounds.
 If you hit any of these, it is a regression worth reporting loudly; if it works,
 one line is enough — do not spend the evaluation re-testing them.
 
@@ -218,6 +220,17 @@ From rounds one and two:
   calls/references/invokes/handles with the degree reported per node, instead of
   counting imports and putting `.spec.ts` files at the top.
 
+From round four:
+
+- `penguin affected <path>` without `--repo` used to resolve its scope from the
+  working directory, so asking about another repo's file printed
+  "changed 0 · impacted 0" — a confident wrong negative. It now says no indexed
+  file matches the path in the resolved scope and names the repos that contain
+  it.
+- Search hits carry `nodeId` and `symbol` for the innermost symbol containing
+  them, so a hit feeds straight into `explore` instead of being a dead end. A
+  hit with no symbol at that line carries no handle rather than a wrong one.
+
 From round three:
 
 - Graph results carry `truncated` when they sit at the limit, so a capped list
@@ -226,6 +239,12 @@ From round three:
   they live in. Zero is the strong case; a positive count is what DI and
   decorator wiring look like. The candidate is still listed either way —
   an import is not a call — but the two are now distinguishable.
+
+Three of those eleven were the same mistake in different clothes: **a lookup
+that failed, rendered as an answer that succeeded** — `callers` printing
+`(none)`, `explore` reporting `complete` with `confidence: high` beside an empty
+pack, `affected` printing `changed 0`. If you find a fourth instance of that
+shape anywhere, it is the most valuable thing you can report.
 
 Everything else is fair game, including anything an earlier round reported that
 you think was judged wrongly. One earlier claim was rejected on inspection:
