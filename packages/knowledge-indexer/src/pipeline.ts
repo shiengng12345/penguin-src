@@ -1340,18 +1340,35 @@ export async function indexRepo(input: {
 
     // delete detection: checkpoints present but file gone from disk (§6.3.1)
     stageStart("deletes");
-    for (const cp of store.listFileCheckpoints(repoId, branchId)) {
-      if (seen.has(cp.file_path) || cp.status === "deleted") continue;
-      store.markFileDeleted({ repoId, branchId, filePath: cp.file_path });
-      store.markFileSymbolsStale({ branchId, filePath: cp.file_path });
-      store.replaceFileEdges({ repoId, branchId, filePath: cp.file_path, edges: [] });
-      store.clearLogSitesForFile(repoId, cp.file_path);
+    const retire = (filePath: string): void => {
+      store.markFileDeleted({ repoId, branchId, filePath });
+      store.markFileSymbolsStale({ branchId, filePath });
+      store.replaceFileEdges({ repoId, branchId, filePath, edges: [] });
+      store.clearLogSitesForFile(repoId, filePath);
       const staleNodeIds = store.db
         .prepare("SELECT node_id FROM symbol_versions WHERE branch_id=? AND file_path=?")
-        .all(branchId, cp.file_path) as Array<{ node_id: string }>;
+        .all(branchId, filePath) as Array<{ node_id: string }>;
       for (const row of staleNodeIds) store.deleteSymbolText(row.node_id);
       report.deleted += 1;
+    };
+    for (const cp of store.listFileCheckpoints(repoId, branchId)) {
+      if (seen.has(cp.file_path) || cp.status === "deleted") continue;
+      retire(cp.file_path);
     }
+    // Checkpoints alone are not enough, and a rebuild is exactly the case they
+    // miss: it clears them first, so the loop above has nothing to compare and
+    // every file that left the candidate set since the last run keeps its
+    // symbols, still marked fresh. Adding one line to .gitignore left 152 live
+    // symbols behind for compiled .js the indexer no longer even reads — and a
+    // full rebuild did not clear them either. `seen` holds every path the
+    // walker produced this run, including ones skipped as unchanged, so a fresh
+    // symbol under any other path belongs to a file this index no longer covers.
+    const orphanPaths = (store.db
+      .prepare("SELECT DISTINCT file_path FROM symbol_versions WHERE branch_id=? AND status='fresh'")
+      .all(branchId) as Array<{ file_path: string }>)
+      .map((row) => row.file_path)
+      .filter((filePath) => !seen.has(filePath));
+    for (const filePath of orphanPaths) retire(filePath);
     for (const path of [...targetManifest.keys()]) {
       if (!seen.has(path)) targetManifest.delete(path);
     }
