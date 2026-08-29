@@ -1,5 +1,10 @@
 # Evaluate a local code index — and tell me what you actually think
 
+> **Round 4 · 2026-08-29 · build `7b6086b9`**
+> Three earlier rounds found nine defects, all fixed. Their reports are in this
+> directory. See "What changed since the last round" below before you start, so
+> you spend the evaluation on new ground rather than re-finding what is done.
+
 You are being asked to use a code knowledge index called **Penguin**, judge how
 good it is, and write up your findings. You are **not** changing any code.
 
