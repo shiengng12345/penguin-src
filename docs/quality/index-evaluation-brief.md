@@ -137,13 +137,15 @@ index-evaluation-<model>-<round>.md
 taken.** These already exist as of this brief:
 
 ```
-index-evaluation-gpt-5.md          (round 1)
-index-evaluation-opus-5.md         (round 1)
+index-evaluation-gpt-5.md            (round 1)
+index-evaluation-opus-5.md           (round 1)
+index-evaluation-gpt-5-round2.md     (round 2)
+index-evaluation-opus-5-round2.md    (round 2)
 ```
 
-So a second GPT-5 run writes `index-evaluation-gpt-5-round2.md`, not
-`index-evaluation-gpt-5.md`. If your name is already taken at the round you
-picked, go up a round — never replace a file that is there.
+So a third GPT-5 run writes `index-evaluation-gpt-5-round3.md`. If your name is
+already taken at the round you picked, go up a round — never replace a file that
+is there.
 
 If you genuinely cannot tell which model you are, use a short distinctive label
 instead of guessing at a version, and say in the report's first line what you
@@ -187,6 +189,26 @@ you, what did you expect that was not there, what would make you reach for it
 again — or not.
 
 ---
+
+## What changed since the last round
+
+Four defects reported by earlier reviewers were fixed. If you hit any of these,
+they are regressions worth reporting loudly; if they work, a one-line
+confirmation is enough — do not spend the evaluation re-testing them.
+
+- `completeness.status` never says "complete" any more. It reports
+  `lower_bound` (the calls list omits constructor calls, interface dispatch,
+  static calls and calls inside callbacks), `partial` (plus unresolvable
+  external calls, named in `externalCalls`), or `unknown` (nothing resolved).
+- A target that does not resolve returns `confidence: low`, not `high`.
+- `penguin callers X` reports a failed lookup instead of printing `(none)`,
+  which is what a genuinely empty result now says: `(no results)`.
+- `--repo` narrows resolution in `explore`, `context`, `flow`, `callers`,
+  `calls`, `impact`, `filesymbols`, `deadcode` and `architecture`. It is not
+  wired everywhere — finding a command that still ignores it is a useful result.
+
+Everything else is fair game, including anything an earlier round reported that
+you think was judged wrongly.
 
 ## What I am looking for
 
