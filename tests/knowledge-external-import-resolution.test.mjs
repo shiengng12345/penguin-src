@@ -55,6 +55,23 @@ test("specifier and test-path classification", () => {
   assert.equal(isTestFilePath("src/latest.ts"), false, "'latest' must not look like a test");
   assert.equal(isTestFilePath("src/contest/a.ts"), false, "'contest' must not look like a test");
   assert.equal(isTestFilePath(null), false);
+
+  // A `tests/` directory is the convention in Rust, Python, Go and this repo.
+  // Missing it let production Rust bind generic names like `text` to helpers in
+  // crates/*/tests/ — 23 of the fake edges that survived the first fix.
+  assert.equal(isTestFilePath("crates/o11y/tests/trace_id_pipeline.rs"), true);
+  assert.equal(isTestFilePath("tests/test_api.py"), true);
+  assert.equal(isTestFilePath("src/foo/tests.rs"), true, "Rust's in-crate tests module");
+  assert.equal(isTestFilePath("pkg/server_test.go"), true, "Go's suffix convention");
+  assert.equal(isTestFilePath("app/test_helpers.py"), true, "Python's prefix convention");
+  assert.equal(isTestFilePath("crates/ccms-api/src/handler/public_popup/mod.rs"), false);
+
+  // Whole-segment matching only: these are production paths that merely contain
+  // the letters, and treating them as tests would drop real edges.
+  assert.equal(isTestFilePath("src/contests/a.ts"), false);
+  assert.equal(isTestFilePath("src/protests/x.rs"), false);
+  assert.equal(isTestFilePath("src/testing/util.ts"), false, "'testing' is not 'tests'");
+  assert.equal(isTestFilePath("src/attestation/verify.rs"), false);
 });
 
 test("a hook imported from an external package does not bind to a same-named mock", async () => {

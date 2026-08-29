@@ -76,7 +76,17 @@ export function isTestFilePath(filePath: string | null | undefined): boolean {
   if (!filePath) return false;
   return /\.(test|spec)\.[^./]+$/i.test(filePath)
     || /(^|\/)(__tests__|__mocks__)(\/|$)/i.test(filePath)
-    || /(^|\/)e2e(\/|$)/i.test(filePath);
+    || /(^|\/)e2e(\/|$)/i.test(filePath)
+    // A `tests/` directory is the convention in Rust, Python, Go and this repo
+    // itself. Missing it let production Rust bind generic names like `text` to
+    // integration-test helpers in crates/*/tests/. Matched as a whole path
+    // segment so `src/latest/` and `contests/` stay untouched.
+    || /(^|\/)tests?(\/)/i.test(filePath)
+    // Rust's in-crate convention: a `tests.rs` module or `mod tests`, and the
+    // `*_test.go` / `test_*.py` file suffixes.
+    || /(^|\/)tests?\.[^./]+$/i.test(filePath)
+    || /_test\.[^./]+$/i.test(filePath)
+    || /(^|\/)test_[^/]+$/i.test(filePath);
 }
 
 const GENERIC_NAMES = new Set([

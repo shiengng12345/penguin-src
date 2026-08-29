@@ -223,7 +223,10 @@ test("more languages: ruby, php, c, cpp, csharp extract symbols", async () => {
 test("degrade: oversize file and no-tags-query language do not throw", async () => {
   const big = await extractSymbols({ lang: "ts", source: "x", maxBytes: 0 });
   assert.equal(big.symbols.length, 0);
-  assert.match(big.parseError, /max bytes/);
+  // Declining to parse an oversized file is a decision, not a failure: it comes
+  // back as parseSkipped so the caller never counts it among its errors.
+  assert.match(big.parseSkipped, /max bytes/);
+  assert.equal(big.parseError, null);
 
   // css has a grammar but no tags query yet → clean parse, no symbols, no error
   const css = await extractSymbols({ lang: "css", source: "a { color: red; }" });

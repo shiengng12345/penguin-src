@@ -48,6 +48,10 @@ export interface IndexReport {
   skipped: number;
   deleted: number;
   errors: number;
+  /** Files deliberately not parsed by policy (e.g. over the byte limit). Counted
+   * separately from errors so an intentional exclusion never reads as breakage,
+   * and separately from skipped so it stays visible rather than vanishing. */
+  excluded: number;
   renamed: number;
   commits: number; // git commit nodes captured
   tags: number; // git tag nodes captured
@@ -144,7 +148,7 @@ function addParseDuration(
 // reprocess on their next index run — without it, checkpoint-skipped files
 // silently lack the new edges forever.
 export const KNOWLEDGE_PARSER_VERSION = "tree-sitter-wasm-v8-wrapper-allowlist";
-export const KNOWLEDGE_RESOLVER_VERSION = "resolver-v6-external-call-facts";
+export const KNOWLEDGE_RESOLVER_VERSION = "resolver-v7-test-path-conventions";
 
 // In-process index task lock: one active task per repo+branch+checkout (§8.3).
 const activeLocks = new Set<string>();
@@ -337,6 +341,8 @@ async function indexFileWithSource(
   },
 ): Promise<{
   error: string | null;
+  /** Set when the file was deliberately not parsed. Never both with `error`. */
+  skipped?: string | null;
   renamed: number;
   // Endpoints this file defines (NestJS decorators) — surfaced so indexRepo
   // can emit discovery events without re-parsing.
@@ -366,7 +372,15 @@ async function indexFileWithSource(
       repoId: p.repoId, branchId: p.branchId, filePath: p.relPath,
       mtimeMs: p.mtimeMs, sizeBytes: p.sizeBytes, contentHash: p.contentHash, status: "skipped",
     });
-    return { error: null, renamed: 0, endpoints: [], retryNames: [] };
+    // Say which of the two it was. Reporting a deliberately-skipped bundle as
+    // "parsed" is the same dishonesty as reporting it as an error, in the other
+    // direction: the coverage table claimed symbols had been extracted from a
+    // file the indexer never opened.
+    return {
+      error: null,
+      ...(lang ? { skipped: "minified or generated bundle" } : {}),
+      renamed: 0, endpoints: [], retryNames: [],
+    };
   }
 
   let timingStartedAt = performance.now();
@@ -377,6 +391,16 @@ async function indexFileWithSource(
   // of these are symbol nodes, so this feeds fts_identifiers only (see
   // identifiers.ts). TS/JS-only for now: the grammar node types it looks for
   // (property_signature, public_field_definition, pair) are TS/JS-specific.
+  if (extracted.parseSkipped) {
+    // Same shape as the unsupported-language path above: recorded, visible, and
+    // not an error.
+    store.upsertFileCheckpoint({
+      repoId: p.repoId, branchId: p.branchId, filePath: p.relPath, lang,
+      mtimeMs: p.mtimeMs, sizeBytes: p.sizeBytes, contentHash: p.contentHash,
+      status: "skipped",
+    });
+    return { error: null, skipped: extracted.parseSkipped, renamed: 0, endpoints: [], retryNames: [] };
+  }
   if (extracted.parseError) {
     store.upsertFileCheckpoint({
       repoId: p.repoId, branchId: p.branchId, filePath: p.relPath, lang,
@@ -962,7 +986,7 @@ export async function indexRepo(input: {
     coverageGaps: git.worktreeState === "unknown" ? ["git_status_unavailable"] : [],
     coverage: { discovered: 0, admitted: 0, excluded: 0, failed: 0, stale: 0, byReason: {} },
     coverageWarnings: [],
-    scanned: 0, parsed: 0, skipped: 0, deleted: 0, errors: 0, renamed: 0,
+    scanned: 0, parsed: 0, skipped: 0, deleted: 0, errors: 0, excluded: 0, renamed: 0,
     commits: 0, tags: 0,
     timings: { totalMs: 0, stages: {}, parse: emptyParseTimings() },
     maintenance: {
@@ -1244,13 +1268,16 @@ export async function indexRepo(input: {
         ...(preExtracted ? { preExtracted } : {}),
       });
       store.db.prepare("UPDATE coverage_records SET parser_status=?,parser_language=?,parser_version=?,parser_error=?,updated_at=? WHERE repo_id=? AND file_path=?").run(
-        r.error ? "failed" : langOf(file.relPath) === "other" ? "unsupported" : "parsed",
+        r.error ? "failed" : r.skipped ? "excluded" : langOf(file.relPath) === "other" ? "unsupported" : "parsed",
         langForExtension(file.relPath),
         r.error || langOf(file.relPath) !== "other" ? KNOWLEDGE_PARSER_VERSION : null,
-        r.error ?? null,
+        // The reason is kept in the same column so `why was this file not
+        // indexed` has one place to look, whether it failed or was excluded.
+        r.error ?? r.skipped ?? null,
         new Date().toISOString(), repoId, file.relPath,
       );
       if (r.error) report.errors += 1;
+      else if (r.skipped) report.excluded += 1;
       else report.parsed += 1;
       report.renamed += r.renamed;
       if (r.retryNames.length > 0 && r.extracted) {

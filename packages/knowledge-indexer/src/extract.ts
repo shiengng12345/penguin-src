@@ -60,7 +60,12 @@ export interface ExtractedFile {
   identifiers: IdentifierEntry[]; // TS/JS fields and object keys, from this same AST
   logSites: ExtractedLogSite[]; // static logger message → enclosing symbol
   channels: ExtractedChannelBinding[];
+  /** The grammar was asked to parse and could not. A real failure. */
   parseError: string | null;
+  /** The file was deliberately not parsed (policy, e.g. over the byte limit).
+   * Distinct from parseError so an intentional exclusion is never counted as
+   * breakage. */
+  parseSkipped: string | null;
 }
 
 export interface ExtractedLogSite {
@@ -223,11 +228,15 @@ export async function extractSymbols(input: {
   const lang = input.lang;
   const base: ExtractedFile = {
     lang, symbols: [], refs: [], fileImports: [], importBindings: [], endpoints: [], grpcClientCalls: [],
-    identifiers: [], logSites: [], channels: [], parseError: null,
+    identifiers: [], logSites: [], channels: [], parseError: null, parseSkipped: null,
   };
   const max = input.maxBytes ?? DEFAULT_MAX_BYTES;
   if (Buffer.byteLength(input.source, "utf8") > max) {
-    return { ...base, parseError: "file exceeds max bytes" };
+    // Declining to parse a file the policy excludes is a decision, not a
+    // failure. Reporting it as parseError made a repo with 97 generated data
+    // blobs print "97 errors" on every single index — a permanent false alarm
+    // that teaches the reader to ignore the error count entirely.
+    return { ...base, parseSkipped: "file exceeds max bytes" };
   }
 
   // Languages without a tags query are intentionally file-level only. Do not
@@ -466,7 +475,7 @@ export async function extractSymbols(input: {
     // framework adapters are represented by the same binding extractor, while
     // unresolved/computed names remain candidates instead of becoming joins.
     const channels = extractChannelBindings(input.source, symbols);
-    return { lang, symbols, refs, fileImports, importBindings, endpoints, grpcClientCalls, identifiers, logSites, channels, parseError: null };
+    return { lang, symbols, refs, fileImports, importBindings, endpoints, grpcClientCalls, identifiers, logSites, channels, parseError: null, parseSkipped: null };
   } finally {
     query?.delete();
     tree?.delete();

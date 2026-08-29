@@ -31,7 +31,10 @@ function bigRepo() {
   // 40 data blobs of ~6MB each: 240MB total, far past a 256MB heap if the
   // window holds them all, trivial if it does not. Each is a single huge array
   // literal, which is what these generated files actually look like.
-  const blob = `module.exports = [${"0,".repeat(3_000_000)}0];\n`;
+  // Multi-line on purpose: a single enormous line trips the minified-bundle
+  // filter and never reaches the size check this test is about.
+  const row = `  { id: 0, name: "entry", tags: ["a", "b"], value: 12345 },\n`;
+  const blob = `module.exports = [\n${row.repeat(110_000)}];\n`;
   assert.ok(blob.length > EXTRACT_MAX_BYTES, "the fixture must exceed the extractor's limit to be representative");
   for (let i = 0; i < 40; i += 1) write(`data/blob${i}.js`, blob);
 
@@ -55,7 +58,7 @@ test("a repo of oversized generated files indexes within a small heap", () => {
     `const { indexRepo } = await import(${JSON.stringify(indexerUrl)});`,
     `const store = KnowledgeStore.open({ dbPath: ${JSON.stringify(dbPath)}, ledgerPath: ${JSON.stringify(ledgerPath)} });`,
     `const report = await indexRepo({ store, rootPath: ${JSON.stringify(root)}, mode: "rebuild" });`,
-    "console.log(JSON.stringify({ parsed: report.parsed, scanned: report.scanned }));",
+    "console.log(JSON.stringify({ parsed: report.parsed, scanned: report.scanned, errors: report.errors, excluded: report.excluded }));",
     "store.close();",
   ].join("\n"));
 
@@ -68,6 +71,12 @@ test("a repo of oversized generated files indexes within a small heap", () => {
 
   // And the real code is still indexed — the byte cap must skip the blobs, not
   // give up on the repo.
+  // A file the policy declines to parse is not a failure. Counting it as one
+  // made a real repo print "97 errors" on every index — a permanent false alarm
+  // that trains the reader to ignore the error count.
+  assert.equal(report.errors, 0, `policy exclusions must not be errors, got ${JSON.stringify(report)}`);
+  assert.equal(report.excluded, 40, "and they must still be counted, not silently dropped");
+
   const store = KnowledgeStore.open({ dbPath, ledgerPath });
   const symbols = store.db
     .prepare("SELECT n.title FROM nodes n JOIN symbol_versions sv ON sv.node_id=n.id WHERE sv.status='fresh'")
@@ -75,5 +84,21 @@ test("a repo of oversized generated files indexes within a small heap", () => {
     .map((row) => row.title);
   assert.ok(symbols.includes("realFunction"), `real code must survive, got ${JSON.stringify(symbols)}`);
   assert.ok(symbols.includes("helper"));
+
+  const coverage = store.db
+    .prepare("SELECT parser_status, parser_error, COUNT(*) AS n FROM coverage_records GROUP BY parser_status, parser_error")
+    .all();
+  const excluded = coverage.find((row) => row.parser_status === "excluded");
+  assert.ok(excluded, `oversized files must be recorded as excluded, got ${JSON.stringify(coverage)}`);
+  assert.equal(excluded.n, 40);
+  assert.match(
+    excluded.parser_error,
+    /exceeds max bytes/,
+    "the reason lives in the same column, so 'why is this file not indexed' has one place to look",
+  );
+  assert.ok(
+    !coverage.some((row) => row.parser_status === "failed"),
+    `nothing actually failed, got ${JSON.stringify(coverage)}`,
+  );
   store.close();
 });
