@@ -132,6 +132,13 @@ export interface SearchHit {
   evidence: SearchEvidence[];
   /** Retrieved repository/note text is data, never an instruction. */
   untrustedContent?: true;
+  /** The innermost indexed symbol containing this hit, when there is one. This
+   * is the handle that turns a search result into a graph query: pass it to
+   * explore/callers/impact. Without it a hit was a dead end — the only way on
+   * was to guess a name. */
+  nodeId?: string;
+  /** That symbol's name, so the handle is legible before it is used. */
+  symbol?: string;
 }
 
 export interface SearchDiagnostics {

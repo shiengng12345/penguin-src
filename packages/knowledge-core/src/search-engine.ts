@@ -124,7 +124,26 @@ function sourceHit(scope: ResolvedRevisionScope, store: KnowledgeStore, item: { 
   let untrusted = false;
   try { const parsed = coverage?.coverage ? JSON.parse(coverage.coverage) as { reasonCode?: string } : {}; untrusted = parsed.reasonCode?.startsWith("external_") === true; } catch { untrusted = false; }
   const safe = sanitizeUntrustedText(item.snippet);
-  return { hitId: hitId(scope, item.filePath, item.startByte, item.endByte, item.contentHash), kind: "source_occurrence", lane: "source", title: item.filePath, locator, snippet: safe.text, untrustedContent: true, score, rankReasons: [reason, ...(untrusted ? ["external content is untrusted"] : []), ...(safe.redacted ? ["secret content redacted"] : [])], evidence: [{ source: "source", locator, excerpt: safe.text, contentHash: item.contentHash, status: untrusted ? "observed" : "verified" }] };
+  // A search hit that lands inside a known symbol carries that symbol's node id,
+  // so search is a way INTO the graph rather than a dead end. Without it every
+  // hit came back as a bare source_occurrence and the only route to
+  // callers/callees was guessing a name for `explore`.
+  const symbol = store.db.prepare(`
+    SELECT sv.node_id AS nodeId, n.title AS title
+      FROM symbol_versions sv
+      JOIN nodes n ON n.id = sv.node_id
+     WHERE sv.file_path = ? AND sv.status = 'fresh'
+       AND sv.start_line <= ? AND sv.end_line >= ?
+       ${scope.repoId ? "AND n.repo_id = ?" : ""}
+     ORDER BY (sv.end_line - sv.start_line) ASC
+     LIMIT 1
+  `).get(...(scope.repoId
+    ? [item.filePath, item.startLine, item.startLine, scope.repoId]
+    : [item.filePath, item.startLine, item.startLine])) as { nodeId: string; title: string } | undefined;
+  return { hitId: hitId(scope, item.filePath, item.startByte, item.endByte, item.contentHash), kind: "source_occurrence", lane: "source", title: item.filePath, locator, snippet: safe.text, untrustedContent: true, score, rankReasons: [reason, ...(untrusted ? ["external content is untrusted"] : []), ...(safe.redacted ? ["secret content redacted"] : [])], evidence: [{ source: "source", locator, excerpt: safe.text, contentHash: item.contentHash, status: untrusted ? "observed" : "verified" }],
+    // The innermost symbol containing the hit — ordered by span so a method wins
+    // over the class that encloses it.
+    ...(symbol ? { nodeId: symbol.nodeId, symbol: symbol.title } : {}) };
 }
 
 export function searchKnowledge(input: SearchRequest | NormalizedSearchRequest, context: SearchContext): SearchResponse {

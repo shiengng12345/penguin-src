@@ -755,3 +755,38 @@ test("a strict tool's allowlist matches the schema it advertises", () => {
     );
   }
 });
+
+test("a source hit inside a symbol carries that symbol's node id", () => {
+  // Search returned bare source_occurrence hits with no handle, so the only way
+  // from a hit into the graph was to guess a name for `explore` — which for a
+  // name repeated across repos is the ambiguity search was supposed to settle.
+  const dir = mkdtempSync(join(tmpdir(), "pk-mcp-search-node-"));
+  const store = KnowledgeStore.open({ dbPath: join(dir, "k.db"), ledgerPath: join(dir, "l.jsonl") });
+  const seeded = seedSearchSnapshot(store, {
+    name: "handles",
+    rootPath: "/handles",
+    filePath: "src/svc.ts",
+    content: "export function findSomething() {\n  return 1;\n}\n",
+  });
+
+  // A symbol occupying those lines, as the indexer would have written.
+  const branchId = store.db.prepare("SELECT id FROM branches WHERE repo_id=?").get(seeded.repoId).id;
+  const nodeId = store.upsertNode({
+    nodeType: "symbol", identityKey: `${seeded.repoId}::src/svc.ts::findSomething`,
+    title: "findSomething", repoId: seeded.repoId,
+  });
+  store.upsertSymbolVersion({
+    nodeId, branchId, commitSha: "c0", filePath: "src/svc.ts", lang: "ts", kind: "function",
+    contentHash: "h_find", status: "fresh", startLine: 1, endLine: 3,
+  });
+
+  const hits = searchKnowledge(
+    { query: "findSomething", mode: "exact", page: { limit: 10 } },
+    { store, scopes: [{ repoId: seeded.repoId, snapshotId: seeded.snapshotId }] },
+  ).hits;
+  const located = hits.find((hit) => hit.locator?.filePath === "src/svc.ts");
+  assert.ok(located, `expected a hit in src/svc.ts, got ${JSON.stringify(hits.map((h) => h.locator?.filePath))}`);
+  assert.equal(located.nodeId, nodeId, "the handle points at the symbol containing the hit");
+  assert.equal(located.symbol, "findSomething", "and names it, so the handle is legible before use");
+  store.close();
+});

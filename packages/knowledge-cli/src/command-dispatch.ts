@@ -1799,6 +1799,30 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           try { ({ revision, scope } = resolveCliRevision(store, "", { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd)); }
           catch (error) { return reportScopeResolutionError(deps, error, json); }
           const a = affectedByFiles(store, pos, { revision });
+          // Without --repo the revision comes from the working directory, so
+          // asking about another repo's file matched nothing and reported
+          // "changed 0 · impacted 0" — which reads as "this file affects
+          // nothing", the most confident kind of wrong answer. If the paths
+          // match no file in the resolved scope, say so, and name the repos
+          // that DO contain them.
+          if (pos.length > 0 && a.changed.length === 0) {
+            const owners = [...new Set((store.db.prepare(`
+              SELECT DISTINCT r.name AS repo
+                FROM symbol_versions sv
+                JOIN branches b ON b.id = sv.branch_id
+                JOIN repos r ON r.id = b.repo_id
+               WHERE sv.file_path IN (${pos.map(() => "?").join(",")})
+            `).all(...pos) as Array<{ repo: string }>).map((row) => row.repo))];
+            deps.err(
+              `no indexed file matches ${pos.length === 1 ? `"${pos[0]}"` : `those ${pos.length} paths`}`
+              + ` in ${optionValue("repo") ? `repo ${optionValue("repo")}` : "the repo resolved from the working directory"}`
+              + (owners.length
+                ? `\n  those paths are indexed in: ${owners.join(", ")} — pass --repo ${owners[0]}`
+                : "\n  check the path is repo-relative and indexed (`penguin files <repo>`)"),
+            );
+            if (json) emit(deps, json, "", a, scope);
+            return 1;
+          }
           const txt = pos.length === 0 ? "usage: penguin affected <file>…"
             : `changed ${a.changed.length} · impacted ${a.impacted.length} · tests ${a.tests.length} · routes ${a.routes.length}\n`
               + a.routes.map((r) => `  route: ${r}`).join("\n");
