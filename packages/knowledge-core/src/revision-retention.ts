@@ -28,7 +28,7 @@ export interface RevisionCollectionApplyResult {
   skipped: Array<{ id: string; reason: "reference_changed" | "lock_unavailable" | "not_collectible" }>;
 }
 
-type Snapshot = { id: string; state: string; repo_id: string; created_at: string; last_accessed_at: string; pinned: number; base_snapshot_id: string | null };
+type Snapshot = { id: string; state: string; repo_id: string; created_at: string; last_accessed_at: string; pinned: number; base_snapshot_id: string | null; commit_sha: string | null; worktree_fingerprint: string | null };
 
 function assertSourceCorpusOrphanFree(store: KnowledgeStore): void {
   const checks = [
@@ -39,7 +39,7 @@ function assertSourceCorpusOrphanFree(store: KnowledgeStore): void {
 }
 
 export function planRevisionCollection(store: KnowledgeStore, repoId: string, policy: RevisionRetentionPolicy = DEFAULT_REVISION_RETENTION): RevisionCollectionPlan {
-  const snapshots = store.db.prepare("SELECT id,state,repo_id,created_at,last_accessed_at,pinned,base_snapshot_id FROM revision_snapshots WHERE repo_id=? AND state IN ('ready','cold') ORDER BY last_accessed_at DESC, id").all(repoId) as Snapshot[];
+  const snapshots = store.db.prepare("SELECT id,state,repo_id,created_at,last_accessed_at,pinned,base_snapshot_id,commit_sha,worktree_fingerprint FROM revision_snapshots WHERE repo_id=? AND state IN ('ready','cold') ORDER BY last_accessed_at DESC, id").all(repoId) as Snapshot[];
   const reasons = new Map<string, Set<string>>();
   const protect = (id: string, reason: string) => { if (!reasons.has(id)) reasons.set(id, new Set()); reasons.get(id)!.add(reason); };
   for (const row of store.db.prepare("SELECT current_snapshot_id, default_branch, pinned, status, deleted_at, recover_until FROM branches WHERE repo_id=?").all(repoId) as Array<{ current_snapshot_id: string | null; default_branch: number; pinned: number; status: string; deleted_at: string | null; recover_until: string | null }>) {
@@ -53,16 +53,75 @@ export function planRevisionCollection(store: KnowledgeStore, repoId: string, po
   for (const row of store.db.prepare("SELECT snapshot_id FROM revision_references WHERE repo_id=? AND snapshot_id IS NOT NULL").all(repoId) as Array<{ snapshot_id: string }>) protect(row.snapshot_id, "reference");
   for (const row of store.db.prepare("SELECT id FROM revision_snapshots WHERE repo_id=? AND pinned=1").all(repoId) as Array<{ id: string }>) protect(row.id, "snapshot_pin");
   for (const row of store.db.prepare("SELECT s.id FROM revision_snapshots s JOIN deployment_revisions d ON d.repo_id=s.repo_id AND d.commit_sha=s.commit_sha WHERE s.repo_id=?").all(repoId) as Array<{ id: string }>) protect(row.id, "deployed");
-  for (const row of snapshots) if (snapshots.some((candidate) => candidate.base_snapshot_id === row.id)) protect(row.id, "overlay_base");
+  // A snapshot names the branch's PREVIOUS snapshot as its base — lineage, from
+  // resolveBranchBase's "prior_branch_snapshot" path — even though it also
+  // materialises its own complete effective file set. Protecting every named
+  // base therefore made the whole chain immortal: each re-index added one more
+  // permanently-protected snapshot, with its own resolution sets and source
+  // facts. That is how five rebuilds took this database from 6GB to 25GB.
+  //
+  // A base is only genuinely needed by a dependent that does NOT materialise its
+  // own set and must read through to it. Snapshots still being built count too:
+  // they are absent from `snapshots` here and their base must survive until they
+  // finish.
+  const dependentBases = store.db.prepare(`
+    SELECT DISTINCT s.base_snapshot_id AS baseId
+      FROM revision_snapshots s
+     WHERE s.repo_id = ? AND s.base_snapshot_id IS NOT NULL
+       AND (s.state = 'building'
+            -- Conservative on purpose: a dependent reads through to its base for
+            -- whatever it did not materialise, so either half missing protects.
+            OR NOT EXISTS (SELECT 1 FROM effective_snapshot_files e WHERE e.snapshot_id = s.id)
+            OR NOT EXISTS (SELECT 1 FROM effective_snapshot_sources e WHERE e.snapshot_id = s.id))
+  `).all(repoId) as Array<{ baseId: string }>;
+  for (const row of dependentBases) protect(row.baseId, "overlay_base");
 
   const unprotected = snapshots.filter((row) => !reasons.has(row.id) && row.state === "ready");
-  for (const row of unprotected.slice(0, policy.maxHotFeatureViews)) protect(row.id, "hot_feature_limit");
+
+  // The hot limit exists to keep DISTINCT revisions available for comparison —
+  // several feature branches, several commits. It was counting snapshots, so
+  // re-indexing one branch N times produced N snapshots of the same revision,
+  // all under the limit and all protected. Five rebuilds of 25 repos in one
+  // evening took this database from 6GB to 25GB: each superseded snapshot keeps
+  // its own resolution sets and source facts.
+  //
+  // A snapshot of a revision that a NEWER snapshot already covers is not a view
+  // anyone can want — the newer one answers the same question with the current
+  // parser and resolver. So the limit now applies per revision, keeping the
+  // newest of each and letting the superseded ones fall through to the normal
+  // cool/collect path (where reference, pin and grace rules still apply).
+  const revisionKey = (row: Snapshot) => `${row.commit_sha ?? row.id}::${row.worktree_fingerprint ?? ""}`;
+  // Computed over ALL snapshots, not just the unprotected ones: when the true
+  // newest is already kept for another reason (it backs the live branch), the
+  // second-newest would otherwise be promoted to "newest of its revision" and
+  // inherit the hot protection — reintroducing exactly the immortality this
+  // removes, one snapshot at a time.
+  const newestPerRevision = new Map<string, Snapshot>();
+  for (const row of snapshots) {
+    const key = revisionKey(row);
+    const held = newestPerRevision.get(key);
+    // `snapshots` is ordered by last_accessed_at DESC, so the first wins; fall
+    // back to created_at when access times tie, which they do on a fresh index.
+    if (!held || Date.parse(row.created_at) > Date.parse(held.created_at)) newestPerRevision.set(key, row);
+  }
+  const distinctNewest = unprotected.filter((row) => newestPerRevision.get(revisionKey(row)) === row);
+  for (const row of distinctNewest.slice(0, policy.maxHotFeatureViews)) protect(row.id, "hot_feature_limit");
   const keep = [...reasons.entries()].map(([snapshotId, values]) => ({ snapshotId, reasons: [...values].sort() }));
   const cool: RevisionCollectionPlan["cool"] = [], collect: RevisionCollectionPlan["collect"] = [];
   const cutoff = Date.now() - policy.coldAfterDays * 86400000;
-  for (const row of unprotected.slice(policy.maxHotFeatureViews)) {
-    if (Date.parse(row.last_accessed_at) >= cutoff) cool.push({ snapshotId: row.id, reason: "exceeds_hot_feature_limit" });
-    else collect.push({ snapshotId: row.id, reason: "cold_and_unreferenced" });
+  for (const row of unprotected) {
+    if (reasons.has(row.id)) continue; // kept as a hot view of a distinct revision
+    const superseded = newestPerRevision.get(revisionKey(row)) !== row;
+    if (superseded) {
+      // Nothing reads a superseded snapshot of a revision that has a newer one,
+      // so there is no point cooling it first and collecting it a fortnight
+      // later. The grace rules on its facts and resolution sets still apply.
+      collect.push({ snapshotId: row.id, reason: "superseded_by_newer_snapshot_of_same_revision" });
+    } else if (Date.parse(row.last_accessed_at) >= cutoff) {
+      cool.push({ snapshotId: row.id, reason: "exceeds_hot_feature_limit" });
+    } else {
+      collect.push({ snapshotId: row.id, reason: "cold_and_unreferenced" });
+    }
   }
   const keptIds = new Set(keep.map((item) => item.snapshotId));
   const factsToCollect = (store.db.prepare("SELECT f.id FROM file_facts f WHERE f.repo_id=? AND f.created_at < ? AND NOT EXISTS (SELECT 1 FROM effective_snapshot_files e JOIN revision_snapshots s ON s.id=e.snapshot_id WHERE e.file_fact_id=f.id AND s.id IN (" + (keptIds.size ? [...keptIds].map(() => "?").join(",") : "NULL") + "))").all(repoId, new Date(Date.now() - policy.factGcGraceDays * 86400000).toISOString(), ...keptIds) as Array<{ id: string }>).map((row) => row.id);
