@@ -148,7 +148,7 @@ function addParseDuration(
 // reprocess on their next index run — without it, checkpoint-skipped files
 // silently lack the new edges forever.
 export const KNOWLEDGE_PARSER_VERSION = "tree-sitter-wasm-v8-wrapper-allowlist";
-export const KNOWLEDGE_RESOLVER_VERSION = "resolver-v7-test-path-conventions";
+export const KNOWLEDGE_RESOLVER_VERSION = "resolver-v8-test-path-conventions";
 
 // In-process index task lock: one active task per repo+branch+checkout (§8.3).
 const activeLocks = new Set<string>();

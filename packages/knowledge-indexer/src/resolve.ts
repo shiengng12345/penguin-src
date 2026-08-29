@@ -85,7 +85,9 @@ export function isTestFilePath(filePath: string | null | undefined): boolean {
     // Rust's in-crate convention: a `tests.rs` module or `mod tests`, and the
     // `*_test.go` / `test_*.py` file suffixes.
     || /(^|\/)tests?\.[^./]+$/i.test(filePath)
-    || /_test\.[^./]+$/i.test(filePath)
+    // Rust's sibling-module convention is `<impl>_tests.rs`; Go's is
+    // `<impl>_test.go`. Both suffixes, singular and plural.
+    || /_tests?\.[^./]+$/i.test(filePath)
     || /(^|\/)test_[^/]+$/i.test(filePath);
 }
 
