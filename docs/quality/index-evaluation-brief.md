@@ -120,13 +120,38 @@ evidence beats a list of maybes.
 
 ## Part C — write the report
 
-Write everything to:
+### Where to write it — read this before you write anything
+
+Write to a file in `docs/quality/` named:
 
 ```
-docs/quality/index-evaluation-<your-model-name>.md
+index-evaluation-<model>-<round>.md
 ```
 
-Use these sections, in this order:
+- `<model>` — your own model name, lowercased, spaces and dots as hyphens.
+  `gpt-5`, `opus-5`, `gemini-3-pro`, `sonnet-4-5`.
+- `<round>` — `round2`, `round3`, and so on. Earlier evaluations are kept for
+  comparison, so **do not overwrite an existing file.**
+
+**Before writing, list the directory and pick a name that is not already
+taken.** These already exist as of this brief:
+
+```
+index-evaluation-gpt-5.md          (round 1)
+index-evaluation-opus-5.md         (round 1)
+```
+
+So a second GPT-5 run writes `index-evaluation-gpt-5-round2.md`, not
+`index-evaluation-gpt-5.md`. If your name is already taken at the round you
+picked, go up a round — never replace a file that is there.
+
+If you genuinely cannot tell which model you are, use a short distinctive label
+instead of guessing at a version, and say in the report's first line what you
+actually are.
+
+State the full path you wrote to as the last line of your reply.
+
+### Sections — use these, in this order:
 
 ### 1. Summary
 Three or four sentences. Would you rely on this index to understand unfamiliar
