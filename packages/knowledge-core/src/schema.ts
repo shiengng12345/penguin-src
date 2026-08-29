@@ -548,7 +548,10 @@ CREATE TABLE IF NOT EXISTS source_blobs (
   content_hash TEXT NOT NULL UNIQUE,
   byte_size INTEGER NOT NULL,
   encoding TEXT NOT NULL,
-  raw_bytes BLOB NOT NULL,
+  -- Null whenever the decode round-trips (every UTF-8 file, which is all but two
+  -- blobs here): those bytes are exactly decoded_content re-encoded, and storing
+  -- both put every source file in the database twice.
+  raw_bytes BLOB,
   decoded_content TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
@@ -959,6 +962,35 @@ function migrate(db: Database.Database, _from: number): void {
   if (!branchCols.includes("parser_version")) {
     db.exec("ALTER TABLE branches ADD COLUMN parser_version TEXT");
   }
+  // Reclaim the duplicate copy of every source file. raw_bytes was NOT NULL and
+  // held the exact UTF-8 encoding of decoded_content, so an existing index
+  // carries both — 3.49 GB of it here. Nulling the redundant ones is safe in
+  // place: the round-trip is verified per row, so a blob whose bytes do not
+  // re-derive keeps them. The space returns on the next VACUUM.
+  const blobCols = (db.prepare("PRAGMA table_info(source_blobs)").all() as { name: string; notnull: number }[]);
+  if (blobCols.some((column) => column.name === "raw_bytes" && column.notnull === 1)) {
+    db.exec("ALTER TABLE source_blobs RENAME TO source_blobs_pre_nullable");
+    db.exec(`CREATE TABLE source_blobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      content_hash TEXT NOT NULL UNIQUE,
+      byte_size INTEGER NOT NULL,
+      encoding TEXT NOT NULL,
+      raw_bytes BLOB,
+      decoded_content TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )`);
+    db.exec(`INSERT INTO source_blobs (id, content_hash, byte_size, encoding, raw_bytes, decoded_content, created_at)
+      SELECT id, content_hash, byte_size, encoding,
+             CASE WHEN encoding = 'utf8' AND CAST(decoded_content AS BLOB) = raw_bytes THEN NULL ELSE raw_bytes END,
+             decoded_content, created_at
+        FROM source_blobs_pre_nullable`);
+    db.exec("DROP TABLE source_blobs_pre_nullable");
+  } else if (blobCols.length > 0) {
+    // Column already nullable: clear any rows a previous build wrote redundantly.
+    db.exec(`UPDATE source_blobs SET raw_bytes = NULL
+              WHERE raw_bytes IS NOT NULL AND encoding = 'utf8'
+                AND CAST(decoded_content AS BLOB) = raw_bytes`);
+  }
   if (!branchCols.includes("resolver_version")) {
     // Left null on existing branches on purpose: resolveIndexMode reads null
     // as "unknown resolver" and rebuilds once, which re-derives edges with the
@@ -1122,6 +1154,12 @@ function isSchemaCurrent(
   if (!["parser_status", "parser_language", "parser_version", "parser_error"].every((column) => coverageCols.includes(column))) return false;
   const savedQueryCols = (db.prepare("PRAGMA table_info(saved_queries)").all() as { name: string }[]).map((c) => c.name);
   if (!savedQueryCols.includes("contract_version")) return false;
+  // A NOT NULL raw_bytes is the old shape that stored every source file twice.
+  // Without this the migration block below is unreachable and the duplicate
+  // stays forever — the same way a missing column check once made the whole
+  // branches migration dead code.
+  const blobColumns = db.prepare("PRAGMA table_info(source_blobs)").all() as { name: string; notnull: number }[];
+  if (blobColumns.some((column) => column.name === "raw_bytes" && column.notnull === 1)) return false;
   if (!have.has("idx_branches_one_default_per_repo")) return false;
   return db.prepare("SELECT 1 FROM ledger_state WHERE id='main'").get() != null;
 }

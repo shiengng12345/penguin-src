@@ -45,13 +45,32 @@ function trigrams(content: string): string[] {
   return [...result];
 }
 
+/** True when re-encoding the decoded text reproduces the original bytes exactly,
+ * which makes storing those bytes redundant. Verified per blob rather than
+ * assumed from the encoding name: a file labelled utf8 that does not round-trip
+ * keeps its bytes. */
+function isLosslessUtf8(encoding: string, rawBytes: Uint8Array, decoded: string): boolean {
+  if (encoding !== "utf8") return false;
+  return Buffer.from(decoded, "utf8").equals(Buffer.from(rawBytes));
+}
+
+/** The blob's original bytes, re-derived when they were not stored. */
+export function storedBytes(row: { encoding: string; raw_bytes: Buffer | null; decodedContent: string }): Buffer {
+  return row.raw_bytes ? Buffer.from(row.raw_bytes) : Buffer.from(row.decodedContent, "utf8");
+}
+
 export class SourceStore {
   constructor(private readonly store: KnowledgeStore) {}
 
   putBlob(input: PutBlobInput): number {
-    const existing = this.store.db.prepare("SELECT id, byte_size, raw_bytes FROM source_blobs WHERE content_hash=?").get(input.contentHash) as { id: number; byte_size: number; raw_bytes: Buffer } | undefined;
+    const existing = this.store.db.prepare(
+      "SELECT id, byte_size, encoding, raw_bytes, decoded_content AS decodedContent FROM source_blobs WHERE content_hash=?",
+    ).get(input.contentHash) as
+      | { id: number; byte_size: number; encoding: string; raw_bytes: Buffer | null; decodedContent: string }
+      | undefined;
     if (existing) {
-      if (existing.byte_size !== input.rawBytes.byteLength || !Buffer.from(existing.raw_bytes).equals(Buffer.from(input.rawBytes))) {
+      if (existing.byte_size !== input.rawBytes.byteLength
+          || !storedBytes(existing).equals(Buffer.from(input.rawBytes))) {
         throw new Error("CONTENT_HASH_COLLISION");
       }
       return existing.id;
@@ -60,7 +79,14 @@ export class SourceStore {
     const tx = this.store.db.transaction(() => {
       const inserted = this.store.db.prepare(
         "INSERT INTO source_blobs(content_hash,byte_size,encoding,raw_bytes,decoded_content,created_at) VALUES (?,?,?,?,?,?)",
-      ).run(input.contentHash, input.rawBytes.byteLength, input.encoding, Buffer.from(input.rawBytes), input.decodedContent, new Date().toISOString());
+      ).run(
+        input.contentHash, input.rawBytes.byteLength, input.encoding,
+        // UTF-8 raw bytes ARE the encoding of decoded_content — storing both put
+        // every source file in the database twice, 3.49 GB of it in this repo's
+        // own index. Only a lossy decode needs the original preserved.
+        isLosslessUtf8(input.encoding, input.rawBytes, input.decodedContent) ? null : Buffer.from(input.rawBytes),
+        input.decodedContent, new Date().toISOString(),
+      );
       const id = Number(inserted.lastInsertRowid);
       const lineInsert = this.store.db.prepare(
         "INSERT INTO source_blob_lines(source_blob_id,line_number,start_byte,end_byte,start_char,end_char) VALUES (?,?,?,?,?,?)",
