@@ -182,3 +182,33 @@ test("repoGraph ranks on architectural edges and reports the degree it ranked on
   assert.deepEqual(degrees, [...degrees].sort((a, b) => b - a), "and the list is ordered by it");
   store.close();
 });
+
+test("a graph result at the limit says it was capped", async () => {
+  const { exploreGraph } = await import("../packages/knowledge-core/dist/index.js");
+  const { store, repos, alphaShared } = seed();
+  // `callers` on a symbol with 450 callers returned exactly 100 rows with
+  // nothing to say more existed — a capped list read as the whole answer.
+  const extra = [];
+  for (let i = 0; i < 5; i += 1) {
+    const id = store.upsertNode({
+      nodeType: "symbol", identityKey: `${repos.alpha.repoId}::caller${i}`, title: `caller${i}`, repoId: repos.alpha.repoId,
+    });
+    store.upsertSymbolVersion({
+      nodeId: id, branchId: repos.alpha.branchId, commitSha: "c0", filePath: `src/c${i}.ts`,
+      lang: "ts", kind: "function", contentHash: `h${i}`, status: "fresh", startLine: 1, endLine: 2,
+    });
+    extra.push({ src: id, dst: alphaShared, edgeType: "calls", origin: "parser", method: "EXTRACTED" });
+  }
+  extra.forEach((edge, i) => store.replaceFileEdges({
+    branchId: repos.alpha.branchId, filePath: `src/c${i}.ts`, edges: [edge],
+  }));
+
+  const capped = exploreGraph(store, "who_calls", alphaShared, { limit: 3 });
+  assert.equal(capped.nodes.length, 3);
+  assert.ok(capped.truncated, "a result at the cap must say so");
+  assert.equal(capped.truncated.limit, 3);
+
+  const whole = exploreGraph(store, "who_calls", alphaShared, { limit: 50 });
+  assert.equal(whole.truncated, undefined, "and a complete list must not claim truncation");
+  store.close();
+});

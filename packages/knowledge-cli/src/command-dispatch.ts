@@ -1866,7 +1866,10 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
             )?.id : undefined,
           });
           const line = (c: typeof d.candidates[number]) =>
-            `  ${c.title}${c.filePath ? ` — ${c.filePath}:${c.startLine ?? "?"}` : ""}`;
+            `  ${c.title}${c.filePath ? ` — ${c.filePath}:${c.startLine ?? "?"}` : ""}`
+            // The DI/decorator false positive, made visible per candidate
+            // instead of only warned about in the note.
+            + (c.fileImportedBy ? `  [file imported by ${c.fileImportedBy} — likely wired, not dead]` : "");
           // Printing 40 of 77 under a "77 candidate(s)" headline is the silent
           // truncation this codebase spent a day removing everywhere else.
           const SHOWN = 40;
@@ -2071,7 +2074,8 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
             if (json) emit(deps, json, "", res);
             return 1;
           }
-          emit(deps, json, res.nodes.map((n) => `${n.nodeType}\t${n.title}`).join("\n") || "(no results)", res);
+          const body = res.nodes.map((n) => `${n.nodeType}\t${n.title}`).join("\n") || "(no results)";
+          emit(deps, json, res.truncated ? `${body}\n  … ${res.truncated.hint}` : body, res);
           return 0;
         }
       }

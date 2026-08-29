@@ -164,3 +164,39 @@ test("an unknown repo is an empty answer that names the problem", () => {
   assert.equal(result.truncated, false);
   store.close();
 });
+
+// A reviewer found a live NestJS interceptor — imported by two controllers,
+// wired by a decorator so it has no call edge — presented as dead code with
+// nothing to distinguish it from a symbol nothing references at all. The
+// generic "DI and reflection are false positives" note in the prose is not
+// evidence a caller can act on per candidate.
+test("a candidate says how many files import the file it lives in", () => {
+  const { store, repos } = seed();
+  const repoId = repos.alpha.repoId;
+  // A file node carries its repo-relative path as its title, and something
+  // imports it — the shape of a DI-wired provider.
+  const fileNode = store.db.prepare(
+    "SELECT id FROM nodes WHERE node_type='file' AND title=? AND repo_id=?",
+  ).get("apps/promotion/src/orphan.ts", repoId)?.id
+    ?? store.upsertNode({
+      nodeType: "file", identityKey: `${repoId}::file::apps/promotion/src/orphan.ts`,
+      title: "apps/promotion/src/orphan.ts", repoId,
+    });
+  const importer = store.upsertNode({
+    nodeType: "file", identityKey: `${repoId}::file::apps/promotion/src/module.ts`,
+    title: "apps/promotion/src/module.ts", repoId,
+  });
+  store.replaceFileEdges({
+    branchId: repos.alpha.branchId, filePath: "apps/promotion/src/module.ts",
+    edges: [{ src: importer, dst: fileNode, edgeType: "imports", origin: "parser", method: "EXTRACTED" }],
+  });
+
+  const candidates = deadCode(store, { repo: "alpha" }).candidates;
+  const wired = candidates.find((c) => c.filePath === "apps/promotion/src/orphan.ts");
+  assert.ok(wired, "the symbol is still a candidate — an import is not a call");
+  assert.equal(wired.fileImportedBy, 1, "but the caller can now see something pulls its file in");
+
+  const untouched = candidates.find((c) => c.filePath === "libs/shared/src/orphan.ts");
+  assert.equal(untouched.fileImportedBy, 0, "while a file nobody imports reads zero — the strong case");
+  store.close();
+});

@@ -512,6 +512,10 @@ export type GraphMode =
 export interface GraphResult {
   mode: GraphMode;
   nodes: Array<{ nodeId: string; title: string; nodeType: string }>;
+  /** Set when the result hit the limit and more exist. Absent means the list is
+   * everything. Without it, `callers` on a 450-caller symbol returned exactly
+   * 100 rows that looked like the whole answer. */
+  truncated?: { limit: number; hint: string };
   events?: Array<{ eventType: string; ts: string; origin: string; method: string; nodeId: string | null }>;
   diagnostics?: QueryDiagnostics;
   revision?: RevisionContext;
@@ -958,6 +962,12 @@ export function exploreGraph(
     mode,
     nodes,
     ...(events ? { events } : {}),
+    // A result exactly at the limit is indistinguishable from a complete one
+    // unless it says so. Every caller of this shape was reading a capped list
+    // as the full answer.
+    ...(nodes.length >= limit
+      ? { truncated: { limit, hint: `showing ${limit} of possibly more — pass --limit to raise the cap` } }
+      : {}),
     diagnostics: buildQueryDiagnostics(store, nodeOrKey, nodeId, nodes.length, {
       branchId: options?.branchId,
     }),
@@ -3108,7 +3118,11 @@ export function endpointSamples(store: KnowledgeStore, endpoint: string): Respon
 // —— dead code: symbols nothing references (best-effort; DI/reflection/entry
 // points inflate false positives → callers must treat as candidates) ——
 export interface DeadCodeResult {
-  candidates: ContextBrief[];
+  /** Each candidate carries `fileImportedBy`: how many files import the file it
+   * lives in. Zero is the strong case. A positive count means something pulls
+   * the file in without calling this symbol — DI and decorator wiring look
+   * exactly like that, and are the usual false positives here. */
+  candidates: Array<ContextBrief & { fileImportedBy?: number }>;
   note: string;
   /** What the answer actually covers, so a filtered result is not mistaken for
    * a whole-graph one. */
@@ -3188,9 +3202,30 @@ export function deadCode(store: KnowledgeStore, options?: DeadCodeOptions): Dead
     ? ` Scope: ${[repoLabel && `repo ${repoLabel}`, options?.path && `under ${options.path}`].filter(Boolean).join(", ")}.`
     : " Scope: every indexed repo — pass repo/path to get a list you can act on.";
 
+  // Per-candidate evidence, not just a blanket disclaimer. A NestJS interceptor
+  // wired by a decorator has no call edge, so it lands here — but its FILE is
+  // imported by the two controllers that use it, and that is computable. A
+  // reviewer found exactly that case presented as dead code with nothing to
+  // distinguish it from a symbol nothing references at all.
+  // A file node carries its repo-relative path as its TITLE; it has no
+  // symbol_versions row, so joining through that table returned nothing and
+  // every candidate looked equally unreferenced.
+  const fileImportedBy = new Map(
+    (store.db.prepare(`
+      SELECT d.title AS filePath, COUNT(DISTINCT e.src) AS importers
+        FROM edges e
+        JOIN nodes d ON d.id = e.dst AND d.node_type = 'file'
+       WHERE e.edge_type = 'imports' AND e.status = 'active'
+         ${repoId ? "AND d.repo_id = ?" : ""}
+       GROUP BY d.title
+    `).all(...(repoId ? [repoId] : [])) as Array<{ filePath: string; importers: number }>)
+      .map((row) => [row.filePath, row.importers] as const),
+  );
+
   return {
     candidates: rows.slice(0, limit).map((r) => {
       const brief = nodeBrief(store, r.id);
+      const importers = r.filePath ? fileImportedBy.get(r.filePath) ?? 0 : 0;
       return {
         nodeId: brief.nodeId,
         title: brief.title,
@@ -3198,6 +3233,10 @@ export function deadCode(store: KnowledgeStore, options?: DeadCodeOptions): Dead
         filePath: r.filePath ?? undefined,
         startLine: r.startLine ?? undefined,
         endLine: r.endLine ?? undefined,
+        // Zero means nothing even imports the file — the strong case. A
+        // positive count means something pulls this file in without calling
+        // this symbol, which is what DI and decorator wiring look like.
+        fileImportedBy: importers,
       };
     }),
     note: "no inbound calls/references/handles/tests — verify: DI, reflection, framework magic, dynamic import, and public entry points are false positives."
