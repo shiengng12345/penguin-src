@@ -1970,6 +1970,13 @@ export interface FlowStep {
   title: string;
   nodeType: string;
   via: string; // edge type from its parent ("root" for the entry)
+  /** The node this step actually hangs off. Absent on the root.
+   *
+   * Without it a renderer can only indent by depth, which hangs every depth-N+1
+   * step off whichever depth-N line was printed last — and that printed a
+   * TypeScript interface as the caller of thirteen functions. The traversal knew
+   * the parent all along and dropped it. */
+  parentNodeId?: string;
   source?: { repoId: string; filePath: string; startLine: number; endLine?: number; revisionId: string };
 }
 export type FlowDiagnosticReason =
@@ -2152,7 +2159,7 @@ function appendFlowDownstream(
         if (!edge || seen.has(edge.id) || !store.getNode(edge.id)) continue;
         seen.add(edge.id);
         const depth = current.depth + 1;
-        steps.push({ depth, ...nodeBriefStep(store, edge.id, revisionId), via: edge.via });
+        steps.push({ depth, parentNodeId: current.id, ...nodeBriefStep(store, edge.id, revisionId), via: edge.via });
         if (depth < depthCap) next.push({ id: edge.id, depth });
       }
     }
@@ -2735,11 +2742,39 @@ export function renderFlowMarkdown(flow: FlowResult): string {
     return L.join("\n") + "\n";
   }
   const L: string[] = [`# Flow: ${flow.root.title}`, ""];
-  for (const s of flow.steps) {
-    const indent = "  ".repeat(s.depth);
-    const arrow = s.via === "root" ? "" : `${s.via} → `;
-    const tag = s.nodeType !== "symbol" ? ` _(${s.nodeType})_` : "";
-    L.push(`${indent}${s.depth === 0 ? "" : "↳ "}${arrow}\`${s.title}\`${tag}`);
+  // Walk the real parent links. Printing in traversal order and indenting by
+  // depth put each step under whichever line of the previous depth happened to
+  // be printed last, which showed an interface as the caller of thirteen
+  // functions — a statement that is false, not merely incomplete.
+  const childrenOf = new Map<string, FlowStep[]>();
+  const roots: FlowStep[] = [];
+  for (const step of flow.steps) {
+    if (!step.parentNodeId) { roots.push(step); continue; }
+    const bucket = childrenOf.get(step.parentNodeId);
+    if (bucket) bucket.push(step);
+    else childrenOf.set(step.parentNodeId, [step]);
+  }
+  const line = (step: FlowStep, indentDepth: number) => {
+    const indent = "  ".repeat(indentDepth);
+    const arrow = step.via === "root" ? "" : `${step.via} → `;
+    const tag = step.nodeType !== "symbol" ? ` _(${step.nodeType})_` : "";
+    L.push(`${indent}${indentDepth === 0 ? "" : "↳ "}${arrow}\`${step.title}\`${tag}`);
+  };
+  const walk = (step: FlowStep, indentDepth: number, visited: Set<string>) => {
+    line(step, indentDepth);
+    if (visited.has(step.nodeId)) return; // a cycle prints once, not forever
+    visited.add(step.nodeId);
+    for (const child of childrenOf.get(step.nodeId) ?? []) walk(child, indentDepth + 1, visited);
+  };
+  const seenInRender = new Set<string>();
+  for (const root of roots) walk(root, 0, seenInRender);
+  // A step whose parent never made it into `steps` still belongs in the output;
+  // dropping it silently would trade a wrong tree for a short one.
+  const rendered = new Set<string>();
+  const collect = (step: FlowStep) => { rendered.add(step.nodeId); (childrenOf.get(step.nodeId) ?? []).forEach(collect); };
+  roots.forEach(collect);
+  for (const step of flow.steps) {
+    if (!rendered.has(step.nodeId)) line(step, step.depth);
   }
   if (flow.relatedTests.length > 0) {
     L.push("", "## Related tests", "", ...flow.relatedTests.map((item) => `- \`${item.title}\``));

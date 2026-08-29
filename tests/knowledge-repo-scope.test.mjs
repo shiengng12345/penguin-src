@@ -212,3 +212,48 @@ test("a graph result at the limit says it was capped", async () => {
   assert.equal(whole.truncated, undefined, "and a complete list must not claim truncation");
   store.close();
 });
+
+test("flow renders the real tree, not whatever was printed last", async () => {
+  const { buildFlow, renderFlowMarkdown } = await import("../packages/knowledge-core/dist/index.js");
+  const { store, repos } = seed();
+  const { repoId, branchId } = repos.alpha;
+  const mk = (title, kind) => {
+    const id = store.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::flow::${title}`, title, repoId });
+    store.upsertSymbolVersion({
+      nodeId: id, branchId, commitSha: "c0", filePath: `src/${title}.ts`, lang: "ts",
+      kind, contentHash: `h_${title}`, status: "fresh", startLine: 1, endLine: 9,
+    });
+    return id;
+  };
+  // entry calls doWork and references ResultShape. Only doWork calls anything.
+  // Indenting by depth hangs deepLeaf off ResultShape — an interface presented
+  // as the caller of a function.
+  const entry = mk("entryPoint", "function");
+  const doWork = mk("doWork", "function");
+  const shape = mk("ResultShape", "interface");
+  const leaf = mk("deepLeaf", "function");
+  store.replaceFileEdges({ branchId, filePath: "src/entryPoint.ts", edges: [
+    { src: entry, dst: doWork, edgeType: "calls", origin: "parser", method: "EXTRACTED" },
+    { src: entry, dst: shape, edgeType: "references", origin: "parser", method: "EXTRACTED" },
+  ] });
+  store.replaceFileEdges({ branchId, filePath: "src/doWork.ts", edges: [
+    { src: doWork, dst: leaf, edgeType: "calls", origin: "parser", method: "EXTRACTED" },
+  ] });
+
+  const flow = buildFlow(store, "entryPoint", { repoId });
+  const deep = flow.steps.find((s) => s.title === "deepLeaf");
+  assert.ok(deep, "the leaf is in the flow");
+  assert.equal(deep.parentNodeId, doWork, "and knows which node it actually hangs off");
+
+  const md = renderFlowMarkdown(flow);
+  const lines = md.split("\n");
+  const at = (title) => lines.findIndex((l) => l.includes(`\`${title}\``));
+  const indent = (title) => lines[at(title)].search(/\S/);
+  assert.ok(indent("deepLeaf") > indent("doWork"), "deepLeaf nests under doWork");
+  assert.equal(
+    indent("ResultShape"), indent("doWork"),
+    "and the interface is doWork's SIBLING, not its parent — it calls nothing",
+  );
+  assert.ok(at("deepLeaf") > at("doWork"), "printed inside its parent's subtree");
+  store.close();
+});
