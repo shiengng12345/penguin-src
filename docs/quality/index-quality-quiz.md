@@ -37,70 +37,70 @@ confidence: high / medium / low — if low, say what the index was missing
 
 ## Q1 · callers
 
-In FPMS-NT, which functions call `CMSGenBaseResponse` (defined in apps/promotion/src/budget/budget-base-response.ts)? List every caller with its file.
+In FPMS-NT, which functions call `claimPeriod` (defined in apps/promotion/src/modules/realtime-task/services/realtime-task.service.ts)? List every caller with its file.
 
 
 ## Q2 · callees
 
-In FPMS-NT, what does `accumulatePlayerDeposit` (apps/riskControl/src/antiAddiction/deposit-limit.service.ts) call? Name each callee and where it lives.
+In FPMS-NT, what does `updatePlayerProfile` (libs/tools/src/processor/player/player-processor.ts) call? Name each callee and where it lives.
 
 
-## Q3 · endpoint
+## Q3 · file_symbols
 
-In FPMS-NT, trace the endpoint `GET /healthcheck`: which handler serves it, and what does that handler call next?
-
-
-## Q4 · file_symbols
-
-In FPMS-NT, list every function/class/method defined in apps/livechat/src/processor/liveChatBot/livechat-bot-processor.ts.
+In FPMS-NT, list every function/class/method defined in apps/promotion/src/reward-grant/reward-grant.types.ts.
 
 
-## Q5 · external_calls
-
-In FPMS-NT, `DynamicThresholdVipConfigDto` (in apps/promotion/src/modules/dynamic-threshold-configs/dto/dynamic-threshold-vip-config.dto.ts) calls into code that is NOT defined in this repository. Which calls leave the repo, and which package does each come from? Then answer the part that matters: is the list of what this symbol calls COMPLETE, and how do you know?
-
-
-## Q6 · dead_code
+## Q4 · dead_code
 
 In FPMS-NT, which symbols under `apps/admin/` have NO incoming calls or references — i.e. dead-code candidates? Give file:line for each, and say what scope your answer covers.
 
 
-## Q7 · callers
+## Q5 · callers
 
-In FPMS-NT, which functions call `addPlayerFreeSpin` (defined in apps/promotion/src/free-spin/processors/add-free-spin/add-free-spin-processor.ts)? List every caller with its file.
-
-
-## Q8 · callees
-
-In FPMS-NT, what does `applyOpenPromoCode` (apps/promotion/src/promo-code/promo-code.processor.ts) call? Name each callee and where it lives.
+In FPMS-NT, which functions call `coercePbIntEnum` (defined in apps/user-engagement/src/app-push/backend-app-push/app-push-pb-mappers.ts)? List every caller with its file.
 
 
-## Q9 · endpoint
+## Q6 · callees
 
-In FPMS-NT, trace the endpoint `POST /internal/vip-cohort/retention-risk`: which handler serves it, and what does that handler call next?
+In FPMS-NT, what does `validateForCreate` (apps/promotion/src/modules/growth-task/services/task-config-validator.ts) call? Name each callee and where it lives.
+
+
+## Q7 · file_symbols
+
+In FPMS-NT, list every function/class/method defined in apps/promotion/src/skin-fragment/controllers/skin-fragment-admin.controller.ts.
+
+
+## Q8 · callers
+
+In FPMS-NT, which functions call `deleteMany` (defined in libs/common/base-repository/base-repository.ts)? List every caller with its file.
+
+
+## Q9 · callees
+
+In FPMS-NT, what does `_findAvailableAgentAndJoinRoom` (apps/livechat/src/processor/liveChatAgent/livechat-agent-processor.ts) call? Name each callee and where it lives.
 
 
 ## Q10 · file_symbols
 
-In FPMS-NT, list every function/class/method defined in apps/livechat/src/processor/liveChatConversation/livechat-convo-processor.ts.
+In FPMS-NT, list every function/class/method defined in apps/promotion/src/special-event/controllers/special-event-admin.controller.ts.
 
 
-## Q11 · external_calls
+## Q11 · callers
 
-In FPMS-NT, `intercept` (in apps/promotion/src/accumulative-event-config/interceptors/grpc-base-response.interceptor.ts) calls into code that is NOT defined in this repository. Which calls leave the repo, and which package does each come from? Then answer the part that matters: is the list of what this symbol calls COMPLETE, and how do you know?
-
-
-## Q12 · callers
-
-In FPMS-NT, which functions call `addPlayerMudDisbursement` (defined in apps/promotion/src/mud/processors/add-mud/add-mud-processor.ts)? List every caller with its file.
+In FPMS-NT, which functions call `findOneByPlatformId` (defined in libs/tools/src/repositories/player/fpms/admin/platform/platform.repository.ts)? List every caller with its file.
 
 
-## Q13 · callees
+## Q12 · callees
 
-In FPMS-NT, what does `createLeaderBoardRewardProposal` (apps/promotion/src/leaderboard/leaderboard.processor.ts) call? Name each callee and where it lives.
+In FPMS-NT, what does `callBackToUser` (apps/user-engagement/src/callback/processors/callback.processor.ts) call? Name each callee and where it lives.
 
 
-## Q14 · endpoint
+## Q13 · file_symbols
 
-In FPMS-NT, trace the endpoint `POST /promotion/GetPlayerFreeSpinInfo`: which handler serves it, and what does that handler call next?
+In FPMS-NT, list every function/class/method defined in apps/promotion/src/winsday-billion/services/boost-claim.service.ts.
+
+
+## Q14 · callers
+
+In FPMS-NT, which functions call `findPlayerProgress` (defined in apps/promotion/src/modules/player-progress/services/player-mission.progress.service.ts)? List every caller with its file.
 

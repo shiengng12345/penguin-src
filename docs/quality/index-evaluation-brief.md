@@ -2,7 +2,9 @@
 
 > **Round 5 · 2026-08-29 · build `5dfb9a54`**
 > Four earlier rounds found eleven defects, all fixed. Their reports are in this
-> directory. See "What changed since the last round" below before you start, so
+> directory. **The Part A questions are new this round** — rounds two through
+> four unknowingly re-asked round one's set, because the generator was
+> deterministic; it now takes a seed. See "What changed since the last round" below before you start, so
 > you spend the evaluation on new ground rather than re-finding what is done.
 
 You are being asked to use a code knowledge index called **Penguin**, judge how

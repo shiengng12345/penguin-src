@@ -36,6 +36,12 @@ const asJson = args.includes("--json");
 const outDir = flag("out", null);
 const wanted = flag("repo", null);
 const count = Number(flag("count", 12));
+// Without this the generator is deterministic: same index, same ORDER BY, same
+// fourteen questions every time. Four evaluation rounds re-answered one static
+// set while the brief claimed each was freshly generated. The seed rotates
+// which slice of eligible targets is taken, so a later round asks about
+// different symbols.
+const seed = Number(flag("seed", 0)) || 0;
 
 const dbPath = process.env.PENGUIN_KNOWLEDGE_DB ?? join(homedir(), ".penguin", "knowledge", "knowledge.db");
 const db = new Database(dbPath, { readonly: true });
@@ -50,6 +56,10 @@ if (!repo) {
 }
 
 const questions = [];
+// Skip `seedOffset` eligible targets before taking any, so seed 1 asks about
+// the next batch down the ranking rather than the same top slice.
+const seedOffset = seed * Math.max(2, Math.ceil(count / 3));
+const rotate = (rows) => rows.slice(seedOffset);
 
 // ── 1. Callers of a well-connected function ───────────────────────────────
 // Picks symbols with a middling caller count: one caller is trivial, fifty is
@@ -65,9 +75,9 @@ const callerTargets = db.prepare(`
   HAVING callers BETWEEN 2 AND 8
    ORDER BY callers DESC, d.title
    LIMIT ?
-`).all(repo.id, Math.ceil(count / 3));
+`).all(repo.id, Math.ceil(count / 3) * 4 + seedOffset);
 
-for (const target of callerTargets) {
+for (const target of rotate(callerTargets)) {
   const callers = db.prepare(`
     SELECT DISTINCT s.title AS name, svs.file_path AS filePath
       FROM edges e
@@ -104,9 +114,9 @@ const calleeSources = db.prepare(`
   HAVING callees BETWEEN 3 AND 10
    ORDER BY callees DESC, s.title
    LIMIT ?
-`).all(repo.id, Math.ceil(count / 4));
+`).all(repo.id, Math.ceil(count / 4) * 4 + seedOffset);
 
-for (const source of calleeSources) {
+for (const source of rotate(calleeSources)) {
   const callees = db.prepare(`
     SELECT DISTINCT d.title AS name, svd.file_path AS filePath
       FROM edges e
@@ -134,9 +144,9 @@ const endpoints = db.prepare(`
    WHERE n.repo_id = ? AND n.node_type = 'endpoint'
    ORDER BY n.title
    LIMIT ?
-`).all(repo.id, Math.ceil(count / 4));
+`).all(repo.id, Math.ceil(count / 4) * 4 + seedOffset);
 
-for (const endpoint of endpoints) {
+for (const endpoint of rotate(endpoints)) {
   const handlers = db.prepare(`
     SELECT DISTINCT d.title AS name, sv.file_path AS filePath
       FROM edges e
@@ -165,9 +175,9 @@ const files = db.prepare(`
   HAVING symbols BETWEEN 4 AND 12
    ORDER BY symbols DESC
    LIMIT ?
-`).all(repo.id, Math.ceil(count / 4));
+`).all(repo.id, Math.ceil(count / 4) * 4 + seedOffset);
 
-for (const file of files) {
+for (const file of rotate(files)) {
   const symbols = db.prepare(`
     SELECT s.title AS name, s.kind
       FROM file_fact_symbols s
@@ -208,7 +218,7 @@ const externalCallers = db.prepare(`
 `).all(repo.id, Math.ceil(count / 5) * 4);
 
 const seenExternalNames = new Set();
-for (const target of externalCallers) {
+for (const target of rotate(externalCallers)) {
   if (seenExternalNames.has(target.name)) continue;
   seenExternalNames.add(target.name);
   const calls = db.prepare(`
@@ -235,11 +245,11 @@ const deadDirs = db.prepare(`
    WHERE b.repo_id = ? AND sv.status = 'fresh' AND instr(sv.file_path, '/') > 0
      AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.dst = sv.node_id AND e.status = 'active'
                        AND e.edge_type IN ('calls','references','handles','tests'))
-   LIMIT 1
+   LIMIT 20
 `).all(repo.id);
 
 if (deadDirs.length > 0) {
-  const dir = deadDirs[0].filePath.split("/").slice(0, 2).join("/");
+  const dir = deadDirs[Math.min(seed, deadDirs.length - 1)].filePath.split("/").slice(0, 2).join("/");
   const dead = db.prepare(`
     SELECT DISTINCT n.title AS name, sv.file_path AS filePath, sv.start_line AS line
       FROM symbol_versions sv
