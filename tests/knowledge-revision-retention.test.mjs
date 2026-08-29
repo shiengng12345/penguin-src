@@ -172,3 +172,55 @@ test("distinct revisions still fill the hot limit", () => {
   assert.equal(plan.keep.length, 6);
   store.close();
 });
+
+test("collecting a superseded snapshot actually deletes it, chain and all", () => {
+  // The planner saying "collect" is not enough: apply refused to delete any
+  // snapshot that another named as its base, which is every snapshot in a
+  // re-index chain. Nothing was deleted, so the resolution set refs survived,
+  // so 167,289 resolution sets were skipped as still-referenced — a collector
+  // that reported success while reclaiming nothing.
+  const store = openStore();
+  const repoId = store.registerRepo({ name: "chain-apply", rootPath: "/chain-apply" });
+  const made = chainedSnapshots(store, repoId, 5);
+  store.db.prepare("UPDATE revision_snapshots SET commit_sha='c0' WHERE repo_id=?").run(repoId);
+  const branchId = store.registerBranch({ repoId, name: "main", status: "live" });
+  store.db.prepare("UPDATE branches SET current_snapshot_id=? WHERE id=?").run(made.at(-1), branchId);
+
+  const result = applyRevisionCollection(store, planRevisionCollection(store, repoId));
+  assert.equal(
+    result.collectedSnapshotIds.length,
+    4,
+    `every superseded snapshot must actually be deleted, got ${JSON.stringify(result)}`,
+  );
+  const left = store.db.prepare("SELECT id FROM revision_snapshots WHERE repo_id=?").all(repoId);
+  assert.deepEqual(left.map((r) => r.id), [made.at(-1)], "only the live branch's snapshot remains");
+
+  // And the survivor's lineage is re-pointed rather than dangling.
+  const survivor = store.db.prepare("SELECT base_snapshot_id FROM revision_snapshots WHERE id=?").get(made.at(-1));
+  assert.equal(survivor.base_snapshot_id, null, "its base chain collapsed to nothing, not to a deleted id");
+  store.close();
+});
+
+test("a dependent that reads through its base blocks the base's collection", () => {
+  // The safety direction: re-pointing must not orphan a snapshot that cannot
+  // stand on its own.
+  const store = openStore();
+  const repoId = store.registerRepo({ name: "readthrough", rootPath: "/readthrough" });
+  const topology = new GitTopologyStore(store);
+  const base = topology.createBuildingSnapshot({ snapshotKey: "b", repoId, parserVersion: "p", resolverVersion: "r", schemaVersion: 14 });
+  const src = putSource(store, repoId, "src/a.ts", "base");
+  const cow = new SourceSnapshotStore(store);
+  cow.replaceOverlay(base.id, [{ op: "add", path: "src/a.ts", sourceFactId: src.fact }]);
+  cow.materializeManifest(base.id);
+  store.db.prepare("INSERT OR IGNORE INTO effective_snapshot_files (snapshot_id, file_path, file_fact_id) VALUES (?,?,?)").run(base.id, "src/a.ts", "f0");
+  topology.markSnapshotReady(base.id);
+  const dependent = topology.createBuildingSnapshot({ snapshotKey: "d", repoId, parserVersion: "p", resolverVersion: "r2", schemaVersion: 14, baseSnapshotId: base.id });
+  topology.markSnapshotReady(dependent.id); // no manifests of its own
+
+  applyRevisionCollection(store, planRevisionCollection(store, repoId));
+  const stillThere = store.db.prepare("SELECT 1 FROM revision_snapshots WHERE id=?").get(base.id);
+  assert.ok(stillThere, "a base something reads through must survive collection");
+  const link = store.db.prepare("SELECT base_snapshot_id FROM revision_snapshots WHERE id=?").get(dependent.id);
+  assert.equal(link.base_snapshot_id, base.id, "and the dependent's link is untouched");
+  store.close();
+});

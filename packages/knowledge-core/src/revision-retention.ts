@@ -202,6 +202,21 @@ function applyRevisionCollectionInner(store: KnowledgeStore, plan: RevisionColle
       if (result.changes) cooledSnapshotIds.push(item.snapshotId); else skipped.push({ id: item.snapshotId, reason: "reference_changed" });
     }
     for (const item of plan.collect) {
+      // Lineage is re-pointed, not treated as a veto. Every re-index names the
+      // branch's previous snapshot as its base, so requiring "nothing names this
+      // as a base" made the newest snapshot the only deletable one and left the
+      // whole chain — and its resolution sets, whose refs then blocked their own
+      // collection too. A dependent that materialises its own manifests only
+      // needs the ORDER, so it inherits the collected snapshot's base; one that
+      // reads through was never planned for collection (see planRevisionCollection).
+      store.db.prepare(`
+        UPDATE revision_snapshots
+           SET base_snapshot_id = (SELECT base_snapshot_id FROM revision_snapshots WHERE id = ?)
+         WHERE base_snapshot_id = ?
+           AND state != 'building'
+           AND EXISTS (SELECT 1 FROM effective_snapshot_files e WHERE e.snapshot_id = revision_snapshots.id)
+           AND EXISTS (SELECT 1 FROM effective_snapshot_sources e WHERE e.snapshot_id = revision_snapshots.id)
+      `).run(item.snapshotId, item.snapshotId);
       // The planner may collect an old unreferenced ready snapshot directly;
       // retention must not require a separate cold transition before the
       // destructive transaction is allowed to proceed.
