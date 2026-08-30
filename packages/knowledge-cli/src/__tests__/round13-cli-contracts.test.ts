@@ -183,7 +183,10 @@ test("an invalid node returns a structured resolution error", async () => {
     code: "TARGET_NOT_FOUND",
     message: `target was not found: ${missing}`,
     retryable: false,
-    details: { target: missing },
+    details: {
+      target: missing,
+      remediation: "run penguin search to find a current target ID",
+    },
   });
   store.close();
 });
