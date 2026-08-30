@@ -337,7 +337,36 @@ export function unsupportedArguments(
   };
 }
 
+/** 什么时候用：MCP tool result 离开 handler 前使用，确保字符串错误也满足统一 error envelope。 */
+function normalizeMcpToolResult(result: unknown): unknown {
+  const isRecord = result !== null && typeof result === "object" && !Array.isArray(result);
+  if (!isRecord || !("error" in result)) return result;
+
+  const record = result as Record<string, unknown>;
+  const rawError = record.error;
+  const rawMessage = typeof record.message === "string" && record.message ? record.message : undefined;
+  if (typeof rawError === "string") {
+    const codeMatch = /^([A-Z][A-Z0-9_]*)(?::|$)/u.exec(rawError);
+    const code = codeMatch?.[1] ?? "INTERNAL";
+    const message = rawMessage ?? rawError;
+    return { ...record, error: knowledgeErrorEnvelope(code, message) };
+  }
+
+  return { ...record, error: normalizeKnowledgeError(rawError) };
+}
+
+/** 什么时候用：MCP server 调用 knowledge tool 时使用，统一返回结果和未捕获异常。 */
 export async function runKnowledgeTool(name: string, a: Record<string, unknown>, options: KnowledgeToolOptions = {}): Promise<unknown> {
+  try {
+    const result = await runKnowledgeToolUnsafe(name, a, options);
+    return normalizeMcpToolResult(result);
+  } catch (error) {
+    return { error: normalizeKnowledgeError(error) };
+  }
+}
+
+/** 什么时候用：执行既有 knowledge tool 路由时使用，保留成功路径和资源清理逻辑。 */
+async function runKnowledgeToolUnsafe(name: string, a: Record<string, unknown>, options: KnowledgeToolOptions = {}): Promise<unknown> {
   const mutation = mutationGuard(name, a);
   if (mutation && "error" in mutation) return mutation;
   let store: KnowledgeStore | null;
@@ -626,7 +655,22 @@ function normalizeMcpSearchInput(input: Record<string, unknown>): Record<string,
 // Dispatch a knowledge tool call. `store` may be null when the knowledge DB
 // hasn't been created yet (no `penguin init`) — read tools then return a hint
 // instead of crashing (§9).
+/** 什么时候用：需要直接调用同步 MCP handler 测试或路由时使用，返回统一错误 envelope。 */
 export function handleKnowledgeTool(
+  name: string,
+  a: Record<string, unknown>,
+  store: KnowledgeStore | null,
+  options: KnowledgeToolOptions = {},
+): unknown {
+  try {
+    return normalizeMcpToolResult(handleKnowledgeToolUnsafe(name, a, store, options));
+  } catch (error) {
+    return { error: normalizeKnowledgeError(error) };
+  }
+}
+
+/** 什么时候用：执行同步 MCP tool 分支时使用，保留原有业务结果供外层归一化。 */
+function handleKnowledgeToolUnsafe(
   name: string,
   a: Record<string, unknown>,
   store: KnowledgeStore | null,

@@ -409,6 +409,16 @@ function jsonResult(value: unknown, isError = false) {
     : null;
   const text = searchSummary ?? JSON.stringify(enriched, null, 2);
   const structuredContent = Array.isArray(enriched) ? { items: enriched } : (enriched && typeof enriched === "object" ? enriched : { result: enriched });
+  const hasTypedToolError = enriched !== null
+    && typeof enriched === "object"
+    && !Array.isArray(enriched)
+    && "error" in enriched
+    && enriched.error !== null
+    && typeof enriched.error === "object"
+    && !Array.isArray(enriched.error)
+    && typeof (enriched.error as Record<string, unknown>).code === "string"
+    && typeof (enriched.error as Record<string, unknown>).message === "string"
+    && typeof (enriched.error as Record<string, unknown>).retryable === "boolean";
   // Update propagation (1.16.2): a long-lived stdio server keeps serving the
   // old build after an app update. `_meta` carries the machine-readable
   // signal on every call while outdated; the notice text is appended to
@@ -419,7 +429,7 @@ function jsonResult(value: unknown, isError = false) {
   const notice = !generationState.noticeDelivered ? generationNotice(generationState) : null;
   if (notice) generationState.noticeDelivered = true;
   return {
-    isError: isError || undefined,
+    isError: isError || hasTypedToolError || undefined,
     content: notice
       ? [{ type: "text", text }, { type: "text", text: `[penguin] ${notice}` }]
       : [{ type: "text", text }],

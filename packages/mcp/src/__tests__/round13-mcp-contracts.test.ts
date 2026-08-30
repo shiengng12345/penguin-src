@@ -106,6 +106,25 @@ function runBuiltMcpHealth() {
   return JSON.parse(frame.result.content[0].text) as Record<string, any>;
 }
 
+function runBuiltMcpError() {
+  const input = [
+    JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "round13", version: "1" } } }),
+    JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+    JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "knowledge_capabilities", arguments: { contract_version: "9" } } }),
+  ].join(String.fromCharCode(10)) + String.fromCharCode(10);
+  const result = spawnSync(process.execPath, [resolve(diagnosticRoot(), "packages/mcp/dist/index.js")], {
+    cwd: diagnosticRoot(),
+    input,
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  const frame = result.stdout
+    .split(String.fromCharCode(10))
+    .map((line) => { try { return JSON.parse(line) as Record<string, any>; } catch { return null; } })
+    .find((candidate) => candidate?.id === 2);
+  return { result, frame };
+}
+
 test("MCP definitions list every Round 13 continuation tool", () => {
   for (const capability of ["knowledge.callees", "knowledge.affected", "knowledge.context", "knowledge.flow"]) {
     const name = capability.replaceAll(".", "_");
@@ -146,6 +165,51 @@ test("MCP uses the shared envelope for unsupported contracts and scope errors", 
   assert.equal(scope.error?.details?.remediation, "specify branch, commit, or snapshot");
   assert.match(scope.error?.message, /specify branch, commit, or snapshot/i);
   store.close();
+});
+
+test("MCP raw-string error paths return a non-empty shared envelope", async () => {
+  const { store, repo } = fixture();
+  const watch = await runKnowledgeTool("knowledge_watch", {}, { store }) as Record<string, any>;
+  assert.equal(watch.error.code, "MUTATION_DISABLED");
+  assert.match(watch.error.code, /^[A-Z][A-Z0-9_]+$/);
+  assert.ok(watch.error.message);
+  assert.equal(typeof watch.error.retryable, "boolean");
+
+  const search = await runKnowledgeTool("knowledge_search", {}, { store }) as Record<string, any>;
+  assert.equal(search.error.code, "INTERNAL");
+  assert.match(search.error.code, /^[A-Z][A-Z0-9_]+$/);
+  assert.match(search.error.message, /non-empty query/i);
+  assert.equal(typeof search.error.retryable, "boolean");
+
+  const unsupported = await runKnowledgeTool("find_dead_code", { query: "ignored" }, { store }) as Record<string, any>;
+  assert.equal(unsupported.error.code, "UNSUPPORTED_FILTER");
+  assert.ok(unsupported.error.message);
+  assert.equal(typeof unsupported.error.retryable, "boolean");
+
+  const branch = handleKnowledgeTool("knowledge_branch_pin", { repo, branch: "missing" }, store) as Record<string, any>;
+  assert.equal(branch.error.code, "BRANCH_NOT_FOUND");
+  assert.ok(branch.error.message);
+  assert.equal(typeof branch.error.retryable, "boolean");
+
+  const internal = await runKnowledgeTool("not_a_knowledge_tool", {}, { store }) as Record<string, any>;
+  assert.equal(internal.error.code, "INTERNAL");
+  assert.match(internal.error.message, /not a knowledge tool/i);
+  assert.equal(typeof internal.error.retryable, "boolean");
+  store.close();
+});
+
+test("built MCP keeps the process alive and marks typed tool errors in the response", () => {
+  const { result, frame } = runBuiltMcpError();
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.ok(frame?.result, result.stdout);
+  assert.equal(frame.result.isError, true);
+  const error = frame.result.structuredContent?.error;
+  assert.equal(typeof error?.code, "string");
+  assert.ok(error.code.length > 0);
+  assert.match(error.code, /^[A-Z][A-Z0-9_]+$/);
+  assert.equal(typeof error?.message, "string");
+  assert.ok(error.message.length > 0);
+  assert.equal(typeof error?.retryable, "boolean");
 });
 
 test("parity source gates complete manifests, successful flows, identity forms, and safe evidence", () => {
