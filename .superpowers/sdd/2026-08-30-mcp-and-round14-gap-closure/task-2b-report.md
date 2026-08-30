@@ -72,3 +72,39 @@
 - 完整 Node MCP 合约仍有上述既有 resolver mismatch，因此该命令不是全绿。
 - Rust 测试保留当前工作树已有的 unused-import/dead-code warnings。
 - 未执行真实发布包安装和外部 Claude/Codex client 重启；本轮已执行真实 stable launcher 的 versioned-runtime stdio E2E，外部 client live session 仍由 MCP health 明确标记为不可观测。
+
+## Round 2 修复与验证（2026-08-30）
+
+### C1 修复
+
+- 将 generation-watch 的真实发布路径 E2E 改为临时 HOME 环境：创建
+  `$HOME/.penguin/bin/penguin-mcp` stable wrapper 及其
+  `penguin-mcp-launcher.mjs` target，创建 `$HOME/.penguin/runtimes/current`
+  和 versioned runtime manifest/generation。
+- 测试直接 spawn stable wrapper，不设置 `PENGUIN_RUNTIME_ROOT`；同时从测试子进程环境移除可能继承的同名变量，证明 wrapper 自己通过
+  `$HOME/.penguin/runtimes` 传递 runtime root。
+- 真实 MCP session 先观测 `build-old` 为 running/available 且未过期，再切换
+  `current` 和 root manifest 到 `build-new`，观测 `runningBuildId=build-old`、
+  `availableBuildId=build-new`、`outdated=true` 以及 `restart_mcp_session` action。
+
+### Round 2 命令结果
+
+1. `rtk node --test tests/mcp-generation-watch.test.mjs`
+   - **9 passed, 0 failed**；包含稳定 wrapper 临时 HOME 真实 E2E。
+2. `rtk node --test --test-name-pattern 'real stable wrapper' tests/mcp-generation-watch.test.mjs`
+   - **1 passed, 0 failed**；单独复核 C1 真实 E2E。
+3. `rtk node --test tests/settings-dialog.test.mjs tests/mcp-status.test.mjs`
+   - **12 passed, 0 failed**；I1/I2/M1 回归保持通过。
+4. `rtk cargo test --manifest-path src-tauri/Cargo.toml mcp`
+   - **28 passed, 96 filtered out**（2 suites）。
+5. `rtk pnpm run typecheck`
+   - **exit 0**；workspace builds、MCP bundle 与 root `tsc -b` 通过。
+6. `rtk node --test packages/mcp/dist/__tests__/round13-mcp-contracts.test.js`
+   - **10 passed, 1 failed**：既有 resolver mismatch，实际 `TARGET_NOT_FOUND`、断言期望 `TARGET_NOT_RESOLVED`；未触及该逻辑。
+
+### Round 2 结论与 concerns
+
+- C1 已通过 stable wrapper 默认路径的真实 temporary-HOME E2E 闭合；I1/I2/M1 及 Task 2A 相关 Rust mcp 行为保持通过。
+- 完整 MCP Node 合约仍有上述既有 resolver mismatch，因此该命令不是全绿，也未扩大 Task 2B 范围修复它。
+- 保留当前工作树已有的 Rust unused-import/dead-code warnings。
+- 未执行真实发布包安装及外部 Claude/Codex client 重启；本轮证明的是稳定 wrapper、versioned runtime、manifest 更新与 MCP session health 的真实 stdio 链路。
