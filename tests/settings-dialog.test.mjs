@@ -25,16 +25,22 @@ test("MCP primary action uses client-neutral wording", async () => {
     new URL("../src/components/settings/SettingsDialog.tsx", import.meta.url),
     "utf8",
   );
+  const viewSource = await readFile(
+    new URL("../src/components/settings/mcp-status.ts", import.meta.url),
+    "utf8",
+  );
 
   assert.match(source, /Configure MCP Clients/);
   assert.match(source, /Reconfigure MCP Clients/);
   assert.doesNotMatch(source, /MCP Ready/);
-  assert.match(source, /Configured — Restart Required/);
-  assert.match(source, /Runtime Outdated — Restart Required/);
-  assert.match(source, /Fully quit and restart/);
-  assert.match(source, /Server Check Failed/);
+  assert.match(viewSource, /Configuration present/);
+  assert.match(viewSource, /restart may be required/i);
+  assert.match(viewSource, /Runtime Outdated — Restart Required/);
+  assert.match(viewSource, /restart may be required/i);
+  assert.match(viewSource, /Server Check Failed/);
   assert.match(source, /Partial Setup/);
-  assert.match(source, /invoke<string>\("mcp_install_to_local_clients"\)/);
+  assert.match(source, /wroteConfig/);
+  assert.match(source, /setMcpPendingClientReload\(result\.wroteConfig\)/);
   assert.doesNotMatch(source, /Add to Claude Desktop/);
   assert.doesNotMatch(source, /Re-add to Claude Desktop/);
   assert.doesNotMatch(source, /Claude Desktop Configured/);
@@ -63,6 +69,7 @@ test("MCP status checks server runtime health, not only client config presence",
   );
   const backendSource = await readFile(new URL("../src-tauri/src/mcp.rs", import.meta.url), "utf8");
   const libSource = await readFile(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+  const viewSource = await readFile(new URL("../src/components/settings/mcp-status.ts", import.meta.url), "utf8");
   const statusStart = settingsSource.indexOf("  const mcpClaudeConfigured");
   const statusEnd = settingsSource.indexOf("  const copyMcpSetup", statusStart);
   const statusBlock = settingsSource.slice(statusStart, statusEnd);
@@ -78,18 +85,16 @@ test("MCP status checks server runtime health, not only client config presence",
   // mcp_status must NOT carry health fields — that would put the 1.5s probe
   // back on the fast path.
   assert.doesNotMatch(backendSource, /server_healthy:\s*bool/);
-  assert.match(
-    settingsSource,
-    /invoke<\{ healthy: boolean; initializeHealthy: boolean; error: string \| null \}>\("mcp_server_health"\)/,
-  );
+  assert.match(settingsSource, /invoke<\{[\s\S]*runtimeOutdated: boolean \| null;[\s\S]*\}>\("mcp_server_health"\)/);
   assert.match(settingsSource, /void refreshMcpHealth\(\)/);
   assert.match(statusBlock, /mcpServerHealthy/);
-  assert.match(statusBlock, /mcpConfigWritten/);
+  assert.match(statusBlock, /mcpView/);
+  assert.match(statusBlock, /mcpPendingClientReload/);
   assert.match(statusBlock, /mcpLauncherHealthy/);
   assert.match(statusBlock, /mcpClientRestartRequired/);
   assert.match(statusBlock, /mcpRuntimeOutdated/);
   assert.doesNotMatch(statusBlock, /MCP Ready/);
-  assert.match(statusBlock, /Server Check Failed/);
+  assert.match(viewSource, /Server Check Failed/);
   assert.match(statusBlock, /Checking Local Server/);
   assert.doesNotMatch(statusBlock, /mcpBothConfigured\s*\?\s*"Both Configured"/);
 });

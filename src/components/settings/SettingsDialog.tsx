@@ -37,6 +37,12 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { writeClipboard } from "@/lib/clipboard";
+import {
+  deriveMcpStatusView,
+  type McpConfigWriteResult,
+  type McpHealthSnapshot,
+  type McpStatusSnapshot,
+} from "./mcp-status";
 
 const PROTOCOL_TABS: { id: VisibleProtocolTab; label: string; icon: typeof Globe }[] = [
   { id: "grpc-web", label: "gRPC-Web", icon: Globe },
@@ -107,7 +113,7 @@ export function SettingsDialog({
 
   // MCP integration. `mcpStatus` is fetched lazily when the user opens
   // Settings; the one-click setup refreshes it after writing the local client config.
-  interface McpStatusShape {
+  interface McpStatusShape extends McpStatusSnapshot {
     server_name: string;
     bundled_server_path: string | null;
     node_path: string | null;
@@ -118,11 +124,6 @@ export function SettingsDialog({
     claude_code_configured: boolean;
     codex_config_path: string | null;
     codex_configured: boolean;
-    configured: boolean;
-    launcherHealthy: boolean;
-    initializeHealthy: boolean | null;
-    clientRestartRequired: boolean;
-    runtimeOutdated: boolean | null;
   }
   const [mcpStatus, setMcpStatus] = useState<McpStatusShape | null>(null);
   const [mcpInstallState, setMcpInstallState] = useState<
@@ -146,16 +147,27 @@ export function SettingsDialog({
   // without waiting so the dialog renders instantly; the badge updates to
   // ready/failed when the result lands.
   const [mcpHealth, setMcpHealth] = useState<"checking" | "ok" | "failed">("checking");
+  const [mcpHealthData, setMcpHealthData] = useState<McpHealthSnapshot | null>(null);
   const [mcpHealthError, setMcpHealthError] = useState<string | null>(null);
+  const [mcpConfigWriteResult, setMcpConfigWriteResult] = useState<McpConfigWriteResult>("not-run");
+  const [mcpPendingClientReload, setMcpPendingClientReload] = useState(false);
   const refreshMcpHealth = useCallback(async () => {
     setMcpHealth("checking");
     setMcpHealthError(null);
     try {
-      const h = await invoke<{ healthy: boolean; initializeHealthy: boolean; error: string | null }>("mcp_server_health");
+      const h = await invoke<{
+        healthy: boolean;
+        initializeHealthy: boolean;
+        error: string | null;
+        clientRestartRequired: boolean | null;
+        runtimeOutdated: boolean | null;
+      }>("mcp_server_health");
       setMcpHealth(h.initializeHealthy ? "ok" : "failed");
       setMcpHealthError(h.error);
+      setMcpHealthData(h);
     } catch (err) {
       setMcpHealth("failed");
+      setMcpHealthData(null);
       setMcpHealthError(String(err));
     }
   }, []);
@@ -164,8 +176,15 @@ export function SettingsDialog({
     setMcpInstallState("installing");
     setMcpInstallMsg("");
     try {
-      const msg = await invoke<string>("mcp_install_to_local_clients");
-      setMcpInstallMsg(msg);
+      const result = await invoke<{
+        message: string;
+        wroteConfig: boolean;
+        changedClients: string[];
+        unchangedClients: string[];
+      }>("mcp_install_to_local_clients");
+      setMcpInstallMsg(result.message);
+      setMcpConfigWriteResult(result.wroteConfig ? "written" : "unchanged");
+      setMcpPendingClientReload(result.wroteConfig);
       setMcpInstallState("success");
       await refreshMcpStatus();
     } catch (err) {
@@ -178,7 +197,13 @@ export function SettingsDialog({
   };
 
   const mcpLauncherPath = mcpStatus?.launcher_path ?? "~/.penguin/bin/penguin-mcp";
-  const canCopyMcpSetup = Boolean(mcpStatus?.launcher_path);
+  const mcpView = deriveMcpStatusView({
+    status: mcpStatus,
+    health: mcpHealthData,
+    writeResult: mcpConfigWriteResult,
+    pendingClientReload: mcpPendingClientReload,
+  });
+  const canCopyMcpSetup = mcpView.canCopySetup;
   const mcpJsonSnippet = JSON.stringify(
     {
       mcpServers: {
@@ -196,31 +221,22 @@ export function SettingsDialog({
   const mcpClaudeConfigured = Boolean(mcpStatus?.claude_desktop_configured);
   const mcpClaudeCodeConfigured = Boolean(mcpStatus?.claude_code_configured);
   const mcpCodexConfigured = Boolean(mcpStatus?.codex_configured);
-  const mcpConfigWritten = Boolean(mcpStatus?.configured);
   const mcpLauncherHealthy = mcpStatus?.launcherHealthy === true;
   const mcpServerHealthy = mcpHealth === "ok";
   const mcpAllConfigured = mcpClaudeConfigured && mcpClaudeCodeConfigured && mcpCodexConfigured;
   const mcpServerCheckFailed = mcpHealth === "failed";
-  const mcpClientRestartRequired = mcpStatus?.clientRestartRequired === true;
-  const mcpRuntimeOutdated = mcpStatus?.runtimeOutdated === true;
+  const mcpClientRestartRequired = mcpPendingClientReload;
+  const mcpRuntimeOutdated = mcpView.runtimeOutdated;
   const mcpLocalChecksHealthy = mcpLauncherHealthy && mcpServerHealthy;
   const mcpPartiallyConfigured =
     !mcpAllConfigured && (mcpClaudeConfigured || mcpClaudeCodeConfigured || mcpCodexConfigured);
-  const mcpStatusLabel = mcpRuntimeOutdated
-    ? "Runtime Outdated — Restart Required"
-    : mcpServerCheckFailed
-        ? "Server Check Failed"
-        : mcpClientRestartRequired
-          ? "Configured — Restart Required"
-          : mcpHealth === "checking"
-            ? "Checking Local Server…"
-            : mcpPartiallyConfigured
-              ? "Partial Setup"
-              : mcpConfigWritten
-                ? "Configured"
-                : mcpLocalChecksHealthy
-                  ? "Local Server Healthy"
-                  : "Manual Setup";
+  const mcpStatusLabel = mcpHealth === "checking" && !mcpRuntimeOutdated
+    ? "Checking Local Server…"
+    : mcpRuntimeOutdated
+      ? mcpView.statusLabel
+    : mcpPartiallyConfigured
+      ? "Partial Setup"
+      : mcpView.statusLabel;
 
   const copyMcpSetup = async (
     text: string,
@@ -630,26 +646,35 @@ export function SettingsDialog({
             </div>
 
             <div className="mt-2 space-y-0.5 text-[11px] text-muted-foreground">
-              <p>Configuration written: {mcpStatus === null ? "checking…" : mcpConfigWritten ? "yes" : "no"}.</p>
+              <p>Configuration: {mcpStatus === null ? "checking…" : mcpView.configurationLabel}.</p>
+              <p>{mcpView.writeLabel}.</p>
               <p>Stable launcher: {mcpStatus === null ? "checking…" : mcpLauncherHealthy ? "healthy" : "not ready"}.</p>
               <p>Local server initialize: {mcpHealth === "checking" ? "checking…" : mcpServerHealthy ? "passed" : "failed"}.</p>
-              {mcpClientRestartRequired && (
-                <p className="text-amber-500">Client session restart required: fully quit and restart the configured client; this local check does not prove an existing session has reloaded the config.</p>
+              {mcpView.clientReloadNotice && (
+                <p className="text-amber-500">
+                  {mcpView.clientReloadNotice}{" "}
+                  <button type="button" className="underline" onClick={() => setMcpPendingClientReload(false)}>
+                    Clear reminder
+                  </button>
+                </p>
               )}
-              {mcpRuntimeOutdated && (
-                <p className="text-red-500">Runtime is outdated: fully restart the MCP session, then reconfigure the client if the outdated status remains.</p>
+              {mcpView.runtimeNotice && (
+                <p className="text-red-500">{mcpView.runtimeNotice}</p>
               )}
             </div>
 
             {((!mcpStatus?.bundled_server_path && mcpStatus !== null) ||
               (!mcpStatus?.node_path && mcpStatus !== null) ||
-              (mcpServerCheckFailed && mcpHealthError)) && (
+              (mcpServerCheckFailed && mcpHealthError) ||
+              mcpView.copyDisabledNotice) && (
               <p className="mt-2 text-[11px] text-amber-500">
                 {mcpStatus !== null && !mcpStatus.node_path
                   ? "Node.js not detected — install from nodejs.org first."
                   : mcpStatus !== null && !mcpStatus.bundled_server_path
                     ? "Bundled MCP server missing — rebuild the app."
-                    : `MCP server check failed — ${mcpHealthError}`}
+                    : mcpServerCheckFailed && mcpHealthError
+                      ? `MCP server check failed — ${mcpHealthError}`
+                      : mcpView.copyDisabledNotice}
               </p>
             )}
 
@@ -679,11 +704,7 @@ export function SettingsDialog({
                 "mt-2 text-[11px]",
                 mcpServerCheckFailed ? "text-amber-500" : "text-emerald-500",
               )}>
-                {mcpServerHealthy
-                  ? `✓ ${mcpInstallMsg} Local server initialize passed. Fully quit and restart each configured client to load the new config; this local check does not prove an existing session has reloaded it.`
-                  : mcpServerCheckFailed
-                    ? `${mcpInstallMsg} Client restart is still required, but local server initialize failed: ${mcpHealthError ?? "unknown error"}`
-                    : `✓ ${mcpInstallMsg} Verifying local server initialize… / 正在检查本地服务…`}
+                {mcpInstallMsg}{mcpServerHealthy ? " Local server initialize passed." : mcpServerCheckFailed ? ` Local server initialize failed: ${mcpHealthError ?? "unknown error"}` : " Verifying local server initialize… / 正在检查本地服务…"}
               </p>
             )}
             {mcpInstallState === "error" && mcpInstallMsg && (

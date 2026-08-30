@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -8,7 +8,7 @@ import { dirname, join } from "node:path";
 // the client happens to restart it, and MCP has no protocol signal for
 // "server is outdated" (only tools/list_changed, which means something else).
 //
-// The app writes ~/.penguin/mcp/manifest.json LAST when it stages a new
+// The app writes the active runtime manifest LAST when it stages a new
 // generation, so the manifest's buildId is a READY marker: seeing a
 // different buildId than the one recorded at startup means a complete newer
 // generation exists on disk. We stat the manifest (cheap, one file, no
@@ -39,8 +39,19 @@ export interface GenerationState {
   noticeDelivered: boolean;
 }
 
-export function manifestPath(root = join(homedir(), ".penguin", "mcp")): string {
+export function generationRoot(): string {
+  return process.env.PENGUIN_RUNTIME_ROOT?.trim() || join(homedir(), ".penguin", "mcp");
+}
+
+export function manifestPath(root = generationRoot()): string {
   return join(root, "manifest.json");
+}
+
+function generationPath(path: string, buildId: string): string {
+  const root = dirname(path);
+  const versioned = join(root, buildId);
+  if (existsSync(versioned)) return versioned;
+  return join(root, "generations", buildId);
 }
 
 export function readGenerationManifest(path: string): GenerationManifest | null {
@@ -74,7 +85,7 @@ export function createGenerationState(path = manifestPath()): GenerationState {
  */
 export function acquireGenerationLease(path: string, buildId: string | null, pid = process.pid): string | null {
   if (!buildId) return null;
-  const lease = join(dirname(path), "generations", buildId, ".leases", `${pid}.lease`);
+  const lease = join(generationPath(path, buildId), ".leases", `${pid}.lease`);
   try {
     mkdirSync(dirname(lease), { recursive: true });
     writeFileSync(lease, `${new Date().toISOString()}\n`, { flag: "w" });

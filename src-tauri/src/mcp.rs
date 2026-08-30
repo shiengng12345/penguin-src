@@ -881,6 +881,16 @@ fn codex_mcp_configured_at(cfg_path: &Path) -> bool {
 struct McpRuntimeHealth {
     healthy: bool,
     error: Option<String>,
+    generation: Option<McpServerGeneration>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct McpServerGeneration {
+    running_build_id: Option<String>,
+    available_build_id: Option<String>,
+    outdated: bool,
+    action: Option<String>,
 }
 
 fn parse_mcp_initialize_response(stdout: &str) -> Result<(), String> {
@@ -904,11 +914,70 @@ fn parse_mcp_initialize_response(stdout: &str) -> Result<(), String> {
     Err("MCP server did not return a valid initialize response".to_string())
 }
 
+fn parse_mcp_health_response(stdout: &str) -> Result<McpServerGeneration, String> {
+    for line in stdout.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(content) = value
+            .get("result")
+            .and_then(|result| result.get("content"))
+            .and_then(serde_json::Value::as_array)
+        else {
+            continue;
+        };
+        for item in content {
+            let Some(text) = item.get("text").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            let Ok(health) = serde_json::from_str::<serde_json::Value>(text) else {
+                continue;
+            };
+            let Some(generation) = health.get("serverGeneration") else {
+                continue;
+            };
+            return Ok(McpServerGeneration {
+                running_build_id: generation
+                    .get("runningBuildId")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                available_build_id: generation
+                    .get("availableBuildId")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+                outdated: generation
+                    .get("outdated")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+                action: generation
+                    .get("action")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string),
+            });
+        }
+    }
+    Err("MCP server did not return a valid mcp_health response".to_string())
+}
+
+fn mcp_generation_root(server: &Path) -> Option<PathBuf> {
+    for ancestor in server.ancestors() {
+        if !ancestor.join("manifest.json").is_file() {
+            continue;
+        }
+        if ancestor.file_name().and_then(|name| name.to_str()) == Some("current") {
+            return ancestor.parent().map(Path::to_path_buf);
+        }
+        return Some(ancestor.to_path_buf());
+    }
+    None
+}
+
 fn check_mcp_server_runtime(node: &Path, server: &Path) -> McpRuntimeHealth {
     if !node.exists() {
         return McpRuntimeHealth {
             healthy: false,
             error: Some(format!("Node.js binary not found: {}", node.display())),
+            generation: None,
         };
     }
     if !server.exists() {
@@ -918,32 +987,41 @@ fn check_mcp_server_runtime(node: &Path, server: &Path) -> McpRuntimeHealth {
                 "Bundled MCP server not found: {}",
                 server.display()
             )),
+            generation: None,
         };
     }
 
-    let mut child = match Command::new(node)
+    let mut command = Command::new(node);
+    command
         .arg(server)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+        .stderr(Stdio::piped());
+    if let Some(root) = mcp_generation_root(server) {
+        command.env("PENGUIN_RUNTIME_ROOT", root);
+    }
+    let mut child = match command.spawn() {
         Ok(child) => child,
         Err(e) => {
             return McpRuntimeHealth {
                 healthy: false,
                 error: Some(format!("Failed to start MCP server: {e}")),
+                generation: None,
             }
         }
     };
 
     const MCP_INITIALIZE_REQUEST: &str = r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"penguin-settings-check","version":"0.0.0"}}}"#;
+    const MCP_HEALTH_REQUEST: &str = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mcp_health","arguments":{}}}"#;
     if let Some(mut stdin) = child.stdin.take() {
-        if let Err(e) = stdin.write_all(format!("{MCP_INITIALIZE_REQUEST}\n").as_bytes()) {
+        if let Err(e) = stdin.write_all(
+            format!("{MCP_INITIALIZE_REQUEST}\n{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}}\n{MCP_HEALTH_REQUEST}\n").as_bytes(),
+        ) {
             let _ = child.kill();
             return McpRuntimeHealth {
                 healthy: false,
                 error: Some(format!("Failed to send MCP initialize request: {e}")),
+                generation: None,
             };
         }
     }
@@ -967,6 +1045,7 @@ fn check_mcp_server_runtime(node: &Path, server: &Path) -> McpRuntimeHealth {
                     error: Some(stderr.unwrap_or_else(|| {
                         "MCP server did not answer initialize within 1500ms".to_string()
                     })),
+                    generation: None,
                 };
             }
             Err(e) => {
@@ -974,6 +1053,7 @@ fn check_mcp_server_runtime(node: &Path, server: &Path) -> McpRuntimeHealth {
                 return McpRuntimeHealth {
                     healthy: false,
                     error: Some(format!("Failed while waiting for MCP server: {e}")),
+                    generation: None,
                 };
             }
         }
@@ -985,6 +1065,7 @@ fn check_mcp_server_runtime(node: &Path, server: &Path) -> McpRuntimeHealth {
             return McpRuntimeHealth {
                 healthy: false,
                 error: Some(format!("Failed to read MCP server output: {e}")),
+                generation: None,
             }
         }
     };
@@ -1000,6 +1081,7 @@ fn check_mcp_server_runtime(node: &Path, server: &Path) -> McpRuntimeHealth {
             } else {
                 stderr
             }),
+            generation: None,
         };
     }
 
@@ -1007,6 +1089,7 @@ fn check_mcp_server_runtime(node: &Path, server: &Path) -> McpRuntimeHealth {
         Ok(()) => McpRuntimeHealth {
             healthy: true,
             error: None,
+            generation: parse_mcp_health_response(&stdout).ok(),
         },
         Err(e) => McpRuntimeHealth {
             healthy: false,
@@ -1015,6 +1098,7 @@ fn check_mcp_server_runtime(node: &Path, server: &Path) -> McpRuntimeHealth {
             } else {
                 format!("{e}. stderr: {stderr}")
             }),
+            generation: None,
         },
     }
 }
@@ -1134,7 +1218,7 @@ pub(crate) struct McpStatus {
     #[serde(rename = "initializeHealthy")]
     initialize_healthy: Option<bool>,
     #[serde(rename = "clientRestartRequired")]
-    client_restart_required: bool,
+    client_restart_required: Option<bool>,
     #[serde(rename = "runtimeOutdated")]
     runtime_outdated: Option<bool>,
 }
@@ -1163,10 +1247,19 @@ pub(crate) async fn mcp_status<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> M
             configured: false,
             launcher_healthy: false,
             initialize_healthy: None,
-            client_restart_required: false,
+            client_restart_required: None,
             runtime_outdated: None,
         },
     }
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct McpInstallResult {
+    message: String,
+    wrote_config: bool,
+    changed_clients: Vec<String>,
+    unchanged_clients: Vec<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -1175,6 +1268,12 @@ pub(crate) struct McpServerHealth {
     error: Option<String>,
     #[serde(rename = "initializeHealthy")]
     initialize_healthy: bool,
+    #[serde(rename = "clientRestartRequired")]
+    client_restart_required: Option<bool>,
+    #[serde(rename = "runtimeOutdated")]
+    runtime_outdated: Option<bool>,
+    #[serde(rename = "serverGeneration")]
+    server_generation: Option<McpServerGeneration>,
 }
 
 // Slow path: spawns the bundled server under node and waits for a real MCP
@@ -1195,17 +1294,26 @@ pub(crate) async fn mcp_server_health<R: tauri::Runtime>(app: tauri::AppHandle<R
                     healthy: health.healthy,
                     initialize_healthy: health.healthy,
                     error: health.error,
+                    client_restart_required: health.generation.as_ref().map(|generation| generation.outdated),
+                    runtime_outdated: health.generation.as_ref().map(|generation| generation.outdated),
+                    server_generation: health.generation,
                 }
             }
             (None, _) => McpServerHealth {
                 healthy: false,
                 error: Some("Node.js not detected".to_string()),
                 initialize_healthy: false,
+                client_restart_required: None,
+                runtime_outdated: None,
+                server_generation: None,
             },
             (_, None) => McpServerHealth {
                 healthy: false,
                 error: Some("Bundled MCP server missing".to_string()),
                 initialize_healthy: false,
+                client_restart_required: None,
+                runtime_outdated: None,
+                server_generation: None,
             },
         }
     });
@@ -1215,6 +1323,9 @@ pub(crate) async fn mcp_server_health<R: tauri::Runtime>(app: tauri::AppHandle<R
             healthy: false,
             error: Some(format!("health check task failed: {e}")),
             initialize_healthy: false,
+            client_restart_required: None,
+            runtime_outdated: None,
+            server_generation: None,
         },
     }
 }
@@ -1267,9 +1378,10 @@ fn mcp_status_blocking<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> McpStatu
         initialize_healthy: None,
         // Config writes cannot observe whether an external client has loaded
         // the new entry, so keep this conservative until that client restarts.
-        client_restart_required: configured,
-        // Only the long-lived MCP process can compare its startup generation
-        // with the available manifest; mcp_health reports that live signal.
+        // This fast status probe cannot observe whether an external client
+        // has loaded its config or which generation that client is running.
+        // `null` is deliberate; the local MCP probe reports its own signal.
+        client_restart_required: None,
         runtime_outdated: None,
     }
 }
@@ -1295,7 +1407,7 @@ fn detected_local_clients(home: &std::path::Path) -> Vec<(&'static str, PathBuf)
 #[tauri::command]
 pub(crate) async fn mcp_install_to_local_clients<R: tauri::Runtime>(
     app: tauri::AppHandle<R>,
-) -> Result<String, String> {
+) -> Result<McpInstallResult, String> {
     // Same blocking profile as mcp_status (stable-copy sync + node detection);
     // keep it off the main thread so the Settings UI stays responsive.
     tauri::async_runtime::spawn_blocking(move || mcp_install_to_local_clients_blocking(&app))
@@ -1305,7 +1417,7 @@ pub(crate) async fn mcp_install_to_local_clients<R: tauri::Runtime>(
 
 fn mcp_install_to_local_clients_blocking<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
-) -> Result<String, String> {
+) -> Result<McpInstallResult, String> {
     let _ = ensure_stable_mcp_server(app)?;
     let launcher = install_stable_mcp_launcher()?;
     let home = dirs::home_dir().ok_or("No home directory")?;
@@ -1317,18 +1429,25 @@ fn mcp_install_to_local_clients_blocking<R: tauri::Runtime>(
         );
     }
     let mut configured = Vec::new();
+    let mut changed_clients = Vec::new();
+    let mut unchanged_clients = Vec::new();
     for (name, cfg_path) in &clients {
-        match *name {
+        let result = match *name {
             // ~/.claude.json uses the same mcpServers shape as Claude Desktop,
             // and the merge preserves all of the client's other state.
             "Claude Desktop" | "Claude Code" => {
-                let _ = write_claude_desktop_mcp_config_at(cfg_path, &launcher, Path::new(""))?;
+                write_claude_desktop_mcp_config_at(cfg_path, &launcher, Path::new(""))?
             }
             _ => {
-                let _ = write_codex_mcp_config_at(cfg_path, &launcher, Path::new(""))?;
+                write_codex_mcp_config_at(cfg_path, &launcher, Path::new(""))?
             }
-        }
+        };
         configured.push(format!("{} ({})", name, cfg_path.display()));
+        if result.written {
+            changed_clients.push(name.to_string());
+        } else {
+            unchanged_clients.push(name.to_string());
+        }
     }
     let all = ["Claude Desktop", "Claude Code", "Codex CLI"];
     let skipped: Vec<&str> = all
@@ -1343,7 +1462,12 @@ fn mcp_install_to_local_clients_blocking<R: tauri::Runtime>(
     if !skipped.is_empty() {
         msg.push_str(&format!(" Skipped (not installed): {}.", skipped.join(", ")));
     }
-    Ok(msg)
+    Ok(McpInstallResult {
+        message: msg,
+        wrote_config: !changed_clients.is_empty(),
+        changed_clients,
+        unchanged_clients,
+    })
 }
 
 #[cfg(test)]
@@ -1436,6 +1560,7 @@ mod mcp_config_tests {
                     McpRuntimeHealth {
                         healthy: true,
                         error: None,
+                        generation: None,
                     }
                 }
             },
@@ -1533,6 +1658,7 @@ mod mcp_config_tests {
             |_, _| McpRuntimeHealth {
                 healthy: false,
                 error: Some("invalid initialize response".to_string()),
+                generation: None,
             },
             || Ok(PathBuf::from("launcher")),
         );
@@ -1581,6 +1707,16 @@ mod mcp_config_tests {
             .is_some_and(|error| error.contains("valid initialize response")));
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn mcp_health_response_exposes_generation_and_restart_action() {
+        let stdout = r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"{\"runtimeOutdated\":true,\"serverGeneration\":{\"runningBuildId\":\"old\",\"availableBuildId\":\"new\",\"outdated\":true,\"action\":\"Restart the MCP session\"}}"}]}}"#;
+        let health = parse_mcp_health_response(stdout).unwrap();
+        assert_eq!(health.running_build_id.as_deref(), Some("old"));
+        assert_eq!(health.available_build_id.as_deref(), Some("new"));
+        assert!(health.outdated);
+        assert_eq!(health.action.as_deref(), Some("Restart the MCP session"));
     }
 
     #[test]
