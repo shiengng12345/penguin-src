@@ -118,6 +118,7 @@ export function SettingsDialog({
     bundled_server_path: string | null;
     node_path: string | null;
     launcher_path: string | null;
+    launcherHealthy: boolean;
     claude_desktop_config_path: string | null;
     claude_desktop_configured: boolean;
     claude_code_config_path: string | null;
@@ -157,7 +158,7 @@ export function SettingsDialog({
     try {
       const h = await invoke<{
         healthy: boolean;
-        initializeHealthy: boolean;
+        initializeHealthy: boolean | null;
         error: string | null;
         clientRestartRequired: boolean | null;
         runtimeOutdated: boolean | null;
@@ -650,9 +651,10 @@ export function SettingsDialog({
               <p>{mcpView.writeLabel}.</p>
               <p>Stable launcher: {mcpStatus === null ? "checking…" : mcpLauncherHealthy ? "healthy" : "not ready"}.</p>
               <p>Local server initialize: {mcpHealth === "checking" ? "checking…" : mcpServerHealthy ? "passed" : "failed"}.</p>
+              <p>Local checks: this does not prove the external Claude/Codex session has reloaded.</p>
               {mcpView.clientReloadNotice && (
                 <p className="text-amber-500">
-                  {mcpView.clientReloadNotice}{" "}
+                  {mcpView.clientReloadNotice} Fully quit and restart Claude/Codex to load the updated MCP server.{" "}
                   <button type="button" className="underline" onClick={() => setMcpPendingClientReload(false)}>
                     Clear reminder
                   </button>
@@ -660,6 +662,9 @@ export function SettingsDialog({
               )}
               {mcpView.runtimeNotice && (
                 <p className="text-red-500">{mcpView.runtimeNotice}</p>
+              )}
+              {mcpRuntimeOutdated && (
+                <p className="text-red-500">Outdated MCP runtime — reconfigure MCP clients to use the current launcher.</p>
               )}
             </div>
 

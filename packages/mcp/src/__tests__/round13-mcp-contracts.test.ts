@@ -161,7 +161,7 @@ test("MCP uses the shared envelope for unsupported contracts and scope errors", 
   const scope = await runKnowledgeTool("knowledge_context", { target: "round13McpTarget", repo, branch: "missing" }, { store }) as Record<string, any>;
   assert.equal(scope.error?.code, "SCOPE_NOT_FOUND");
   assert.equal(scope.error?.retryable, false);
-  assert.deepEqual(scope.error?.details?.candidates, []);
+  assert.deepEqual(scope.error?.details?.candidates, [{ branchName: "main", commitSha: "round13-mcp-commit" }]);
   assert.equal(scope.error?.details?.remediation, "specify branch, commit, or snapshot");
   assert.match(scope.error?.message, /specify branch, commit, or snapshot/i);
   store.close();
