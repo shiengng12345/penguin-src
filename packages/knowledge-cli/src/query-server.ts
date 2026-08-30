@@ -391,7 +391,7 @@ export async function runQueryServer(deps: CliDeps, input = process.stdin, outpu
   let framingErrors = 0;
   let framingCorruption = false;
   const invoke = async (capabilityId: string, value: unknown, signal?: AbortSignal): Promise<unknown> => {
-    if (capabilityId === "knowledge.capabilities") return { schemaVersion: "1", capabilityHash: capabilityHash(CAPABILITIES), capabilities: caches.capabilityRegistry };
+    if (capabilityId === "knowledge.capabilities") return { schemaVersion: String(SCHEMA_VERSION), contractVersion: "2", buildId: process.env.PENGUIN_BUILD_ID ?? "local", capabilityHash: capabilityHash(CAPABILITIES), capabilities: caches.capabilityRegistry };
     if (capabilityId === "knowledge.index_status") return compactIndexStatus(store);
     if (capabilityId === "knowledge.status_panel") return buildStatusPanel(store);
     if (capabilityId === "knowledge.storage_report") return buildStorageReport(store);

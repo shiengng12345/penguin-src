@@ -360,25 +360,11 @@ for (const tool of KNOWLEDGE_TOOL_DEFS) {
 // ---------------------------------------------------------------------------
 // Listing surface
 //
-// KNOWLEDGE_TOOL_DEFS carries EVERY canonical capability so parity checks and
-// the dispatcher see the whole manifest. Publishing all 119 to tools/list was
-// harmful — an agent had to scan a wall of entries, which is why "call
-// knowledge_explore first" never stuck.
-//
-// But the first pass at this cut too deep. It kept only the hand-written
-// tools, on the assumption that the auto-generated entries were mostly
-// unimplemented placeholders. They are not: 98 capabilities have real MCP
-// handlers, and 44 read-only ones (callers, callees, flow, affected, path,
-// files, file_symbols, locate, impact, the graph views...) became
-// undiscoverable. An agent asked to enumerate a file's symbols tried five
-// tools and gave up, while knowledge_file_symbols sat there working.
-//
-// So the listing now carries every read-only capability an agent would
-// reasonably reach for, tiered by how often it is the right next call, with
-// knowledge_explore still first. Write and maintenance capabilities stay
-// unlisted (they remain callable by name, and knowledge_capabilities still
-// returns the full manifest) — the goal is a short path to the right tool,
-// not the shortest possible list.
+// KNOWLEDGE_TOOL_DEFS carries every canonical capability plus compatibility
+// aliases. Publish the complete canonical tool manifest so tools/list and
+// knowledge_capabilities cannot drift into two different registrations. Keep
+// the discovery tiers first; the remaining canonical definitions follow in a
+// deterministic name order.
 // ---------------------------------------------------------------------------
 
 // Ordered tiers. Tier 0 is the entry point; later tiers are specialised tools
@@ -408,6 +394,7 @@ const TOOL_TIERS: ReadonlyArray<readonly [prefix: string, names: readonly string
     "knowledge_context",
     "knowledge_explain",
     "knowledge_coverage",
+    "knowledge_endpoints",
   ]],
   ["[specialised — knowledge_explore usually answers this first] ", [
     "explore_graph",
@@ -455,14 +442,21 @@ for (const [tier, [prefix, names]] of TOOL_TIERS.entries()) {
   }
 }
 
-/** Tools advertised through tools/list — the hand-written set, tier-ordered. */
-export const MCP_LISTED_TOOL_DEFS = KNOWLEDGE_TOOL_DEFS
+const TIERED_TOOL_DEFS = KNOWLEDGE_TOOL_DEFS
   .filter((tool) => TIER_BY_NAME.has(tool.name))
   .sort((a, b) => TIER_BY_NAME.get(a.name)!.order - TIER_BY_NAME.get(b.name)!.order)
   .map((tool) => {
     const prefix = TIER_BY_NAME.get(tool.name)!.prefix;
     return prefix ? { ...tool, description: `${prefix}${tool.description}` } : tool;
   });
+
+/** Tools advertised through tools/list — complete canonical manifest. */
+export const MCP_LISTED_TOOL_DEFS = [
+  ...TIERED_TOOL_DEFS,
+  ...KNOWLEDGE_TOOL_DEFS
+    .filter((tool) => !TIER_BY_NAME.has(tool.name))
+    .sort((a, b) => a.name.localeCompare(b.name)),
+];
 
 // Kept as a separate pure module for release-bundle startup, but accepted by
 // the same lazy knowledge dispatcher.

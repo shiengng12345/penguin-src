@@ -1,9 +1,12 @@
 #!/usr/bin/env node
-import { CAPABILITIES, capabilityHash, listMcpRegistrations } from "../packages/knowledge-contracts/dist/index.js";
-import { KNOWLEDGE_TOOL_DEFS } from "../packages/mcp/dist/knowledge-tool-defs.js";
-import { defaultProcessPaths, extractCliJson, McpSession, mcpStructured, normalizeForParity, parseJson, processEnv, runCli } from "./knowledge-process-utils.mjs";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { CAPABILITIES, capabilityHash, listMcpRegistrations, listCliRegistrations } from "../packages/knowledge-contracts/dist/index.js";
+import { KNOWLEDGE_TOOL_DEFS, MCP_LISTED_TOOL_DEFS } from "../packages/mcp/dist/knowledge-tool-defs.js";
+import { defaultProcessPaths, extractCliJson as extractCliJsonOutput, McpSession, mcpStructured, normalizeForParity, parseJson, processEnv, runCli } from "./knowledge-process-utils.mjs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
 
 // `defaultProcessPaths` uses spawn/spawnSync internally; this marker keeps the
 // executable-process requirement visible to static audits as well.
@@ -13,22 +16,140 @@ const REAL_PROCESS_TRANSPORT = "spawn";
 const RAW_STREAMS = ["stdout", "stderr"];
 
 const root = resolve(import.meta.dirname, "..");
-const paths = defaultProcessPaths(root);
+const paths = { ...defaultProcessPaths(root), cliLauncher: resolve(root, "scripts/knowledge-cli-launcher.mjs"), mcpLauncher: resolve(root, "scripts/knowledge-mcp-launcher.mjs") };
 const repo = process.env.PENGUIN_REPO ?? "FPMS-NT";
 const report = process.env.PENGUIN_PARITY_REPORT ?? resolve(root, ".superpowers/sdd/2026-08-30-mcp-and-round14-gap-closure/task-3-report.md");
-const env = processEnv(root, { PENGUIN_MCP_WORKSPACE_ROOTS: process.env.PENGUIN_MCP_WORKSPACE_ROOTS ?? root });
+const baseEnv = processEnv(root, { PENGUIN_MCP_WORKSPACE_ROOTS: process.env.PENGUIN_MCP_WORKSPACE_ROOTS ?? root });
 const rows = [];
 const checks = [];
+
+function fileHash(path) {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+function sourceMetadata() {
+  const sourceCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
+  const dirtyFiles = execFileSync("git", ["status", "--porcelain=v1"], { cwd: root, encoding: "utf8" })
+    .split(/\r?\n/).filter(Boolean);
+  return {
+    sourceCommit,
+    worktreeState: dirtyFiles.length ? "dirty" : "clean",
+    dirtyFiles,
+    bundleContentHashes: {
+      cli: fileHash(paths.cliBundle),
+      mcp: fileHash(paths.mcpBundle),
+      cliLauncher: fileHash(paths.cliLauncher),
+      mcpLauncher: fileHash(paths.mcpLauncher),
+    },
+  };
+}
+
+function stableRuntime(pathsToStage) {
+  const home = mkdtempSync(join(tmpdir(), "penguin-task3-home-"));
+  const runtimeRoot = join(home, ".penguin", "runtimes");
+  const current = join(runtimeRoot, "current");
+  const bin = join(home, ".penguin", "bin");
+  mkdirSync(current, { recursive: true });
+  const buildId = createHash("sha256")
+    .update(fileHash(pathsToStage.cliBundle))
+    .update(fileHash(pathsToStage.mcpBundle))
+    .digest("hex");
+  const link = (target, destination) => { mkdirSync(dirname(destination), { recursive: true }); symlinkSync(target, destination); };
+  link(pathsToStage.node, join(current, "node"));
+  link(pathsToStage.cliBundle, join(current, "penguin.mjs"));
+  link(pathsToStage.mcpBundle, join(current, "mcp", "dist", "index.js"));
+  const wasm = resolve(root, "packages/knowledge-cli/bundle/wasm");
+  if (existsSync(wasm)) link(wasm, join(current, "wasm"));
+  const manifest = { schemaVersion: 1, ready: true, buildId, appVersion: "task3-round1", nodePath: "node", cliEntry: "penguin.mjs", mcpEntry: "mcp/dist/index.js", wasmPath: "wasm" };
+  mkdirSync(runtimeRoot, { recursive: true });
+  writeFileSync(join(runtimeRoot, "manifest.json"), JSON.stringify(manifest, null, 2));
+  writeFileSync(join(current, "manifest.json"), JSON.stringify(manifest, null, 2));
+  mkdirSync(bin, { recursive: true });
+  const cliLauncher = join(bin, "penguin-cli-launcher.mjs");
+  const mcpLauncher = join(bin, "penguin-mcp-launcher.mjs");
+  copyFileSync(pathsToStage.cliLauncher, cliLauncher);
+  copyFileSync(pathsToStage.mcpLauncher, mcpLauncher);
+  chmodSync(cliLauncher, 0o755);
+  chmodSync(mcpLauncher, 0o755);
+  const cliWrapper = join(bin, "penguin");
+  const mcpWrapper = join(bin, "penguin-mcp");
+  const wrapper = (launcher) => `#!/bin/sh\nexport PENGUIN_RUNTIME_ROOT="$HOME/.penguin/runtimes"\nexec "$HOME/.penguin/runtimes/current/node" "$HOME/.penguin/bin/${launcher}" "$@"\n`;
+  writeFileSync(cliWrapper, wrapper("penguin-cli-launcher.mjs"));
+  writeFileSync(mcpWrapper, wrapper("penguin-mcp-launcher.mjs"));
+  chmodSync(cliWrapper, 0o755);
+  chmodSync(mcpWrapper, 0o755);
+  const sourceDb = process.env.PENGUIN_KNOWLEDGE_DB ?? join(homedir(), ".penguin", "knowledge", "knowledge.db");
+  return {
+    home,
+    runtimeRoot,
+    buildId,
+    cliWrapper,
+    mcpWrapper,
+    env: {
+      ...baseEnv,
+      HOME: home,
+      PENGUIN_RUNTIME_ROOT: runtimeRoot,
+      PENGUIN_BUILD_ID: buildId,
+      // Keep the launcher HOME isolated while reading the already-indexed
+      // graph selected for this parity run. Ledger writes stay in the temp HOME.
+      PENGUIN_KNOWLEDGE_DB: sourceDb,
+      PENGUIN_KNOWLEDGE_LEDGER: join(home, ".penguin", "knowledge", "ledger.jsonl"),
+    },
+  };
+}
+
+const { buildId, env, cliWrapper, mcpWrapper } = stableRuntime(paths);
+const provenance = sourceMetadata();
 
 function record(name, evidence, passed, reason = "") {
   rows.push({ name, evidence });
   checks.push({ name, passed, reason });
 }
 
+function redactEvidence(value) {
+  if (typeof value === "string") return value.replaceAll(provenanceHome(), "<temporary-home>").replaceAll(root, "<workspace>");
+  if (Array.isArray(value)) return value.map(redactEvidence);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, redactEvidence(item)]));
+}
+
+function provenanceHome() {
+  return env.HOME;
+}
+
+function extractCliJson(row) {
+  // Successful CLI JSON is stdout; structured failures deliberately use
+  // stderr so a caller cannot mistake an error for a successful result.
+  return extractCliJsonOutput({ ...row, stdout: [row.stdout, row.stderr].filter(Boolean).join("\n") });
+}
+
+function resolvedTargetNodeId(value) {
+  const target = value?.target;
+  if (target && typeof target === "object" && typeof target.nodeId === "string") return target.nodeId;
+  if (typeof target === "string" && target.startsWith("node:")) return target.slice("node:".length);
+  return null;
+}
+
+function evidenceSummary(value) {
+  if (!value || typeof value !== "object") return { type: typeof value };
+  const object = value;
+  const summary = { fields: Object.keys(object).sort() };
+  if (typeof object.exitCode === "number") summary.exitCode = object.exitCode;
+  if (typeof object.spawnError === "string" || object.spawnError === null) summary.spawnError = object.spawnError;
+  for (const stream of RAW_STREAMS) {
+    if (typeof object[stream] === "string") summary[`${stream}Bytes`] = Buffer.byteLength(object[stream], "utf8");
+  }
+  return summary;
+}
+
 function errorEnvelope(value) {
   if (!value || typeof value !== "object") return null;
   if (value.error && typeof value.error === "object") return value.error;
   return null;
+}
+
+function capabilityProjection(value) {
+  return normalizeForParity(value);
 }
 
 function flowProjection(value) {
@@ -45,34 +166,57 @@ function flowProjection(value) {
 }
 
 function registrationProjection(value) {
-  if (!value || typeof value !== "object") return value;
-  return normalizeForParity({
-    capabilityId: value.capabilityId,
-    status: value.status,
-    inputSchemaId: value.inputSchemaId,
-    inputSchema: value.inputSchema,
-    outputSchemaId: value.outputSchemaId,
-  });
+  return normalizeForParity(value);
 }
 
 function toolProjection(value) {
   if (!value || typeof value !== "object") return value;
-  return normalizeForParity({ name: value.name, inputSchema: value.inputSchema, capabilityId: value["x-penguin-capability-id"] });
+  return normalizeForParity({ name: value.name, description: value.description, inputSchema: value.inputSchema, capabilityId: value["x-penguin-capability-id"] });
+}
+
+function endpointIdentityForms(endpoint) {
+  const identity = String(endpoint?.identityKey ?? "").replace(/^grpc::/u, "");
+  const split = identity.lastIndexOf(".");
+  const service = split > 0 ? identity.slice(0, split) : "";
+  const method = split > 0 ? identity.slice(split + 1) : "";
+  return [endpoint?.title, endpoint?.identityKey, service && method ? `/${service}/${method}` : null, endpoint?.nodeId, endpoint?.nodeId ? `node:${endpoint.nodeId}` : null].filter(Boolean);
+}
+
+function sameEndpointResult(value, nodeId) {
+  const result = extractCliJson(value);
+  return value.exitCode === 0 && result?.equal === true && result?.rootNodeId === nodeId;
+}
+
+function targetForError(nodeId) {
+  return nodeId ? `node:${nodeId}` : "node:task3-missing-target";
 }
 
 const canonical = new Map(CAPABILITIES.map((capability) => [capability.id, capability]));
 const registrations = new Map(listMcpRegistrations().map((registration) => [registration.capabilityId, registration]));
-const tools = new Map(KNOWLEDGE_TOOL_DEFS.map((tool) => [tool["x-penguin-capability-id"], tool]));
+const tools = new Map(KNOWLEDGE_TOOL_DEFS.map((tool) => [tool.name, tool]));
 const missingRegistrations = [...canonical.keys()].filter((id) => !registrations.has(id));
-const missingTools = [...canonical.keys()].filter((id) => !tools.has(id));
+const expectedToolNames = new Set(MCP_LISTED_TOOL_DEFS.map((tool) => tool.name));
+const expectedToolIds = new Set(CAPABILITIES.map((capability) => capability.id));
+const toolIds = new Set(KNOWLEDGE_TOOL_DEFS.map((tool) => tool["x-penguin-capability-id"]));
+const missingTools = [...expectedToolNames].filter((name) => !tools.has(name));
+const extraTools = [...tools.keys()].filter((name) => !expectedToolNames.has(name));
+const missingToolIds = [...expectedToolIds].filter((id) => !toolIds.has(id));
+const extraToolIds = [...toolIds].filter((id) => !expectedToolIds.has(id));
+const duplicateToolNames = [...new Set(KNOWLEDGE_TOOL_DEFS.map((tool) => tool.name))]
+  .filter((name) => KNOWLEDGE_TOOL_DEFS.filter((tool) => tool.name === name).length > 1);
+const duplicateToolIds = [...expectedToolIds]
+  .filter((id) => KNOWLEDGE_TOOL_DEFS.filter((tool) => tool["x-penguin-capability-id"] === id).length > 1);
 const schemaMismatches = [...canonical.keys()].filter((id) => {
   const registration = registrations.get(id);
-  const tool = tools.get(id);
-  return !registration || JSON.stringify(registration.inputSchema) !== JSON.stringify(tool.inputSchema);
+  const definitions = KNOWLEDGE_TOOL_DEFS.filter((tool) => tool["x-penguin-capability-id"] === id);
+  return !registration || definitions.length === 0 || definitions.some((tool) => JSON.stringify(tool.inputSchema) !== JSON.stringify(registration.inputSchema));
 });
-record("registration-surface", { capabilityCount: CAPABILITIES.length, capabilityHash: capabilityHash(CAPABILITIES), mcpRegistrationCount: registrations.size, toolDefinitionCount: tools.size, missingRegistrations, missingTools, schemaMismatches }, missingRegistrations.length === 0 && missingTools.length === 0 && schemaMismatches.length === 0, "registration parity is not sufficient; real process checks follow");
+const registrationIds = new Set(registrations.keys());
+const missingMcpRegistrations = [...expectedToolIds].filter((id) => !registrationIds.has(id));
+const extraRegistrations = [...registrationIds].filter((id) => !expectedToolIds.has(id));
+record("registration-surface", { capabilityCount: CAPABILITIES.length, capabilityHash: capabilityHash(CAPABILITIES), mcpRegistrationCount: registrations.size, toolDefinitionCount: tools.size, missingRegistrations, extraRegistrations, missingTools, extraTools, missingToolIds, extraToolIds, duplicateToolNames, duplicateToolIds, schemaMismatches }, missingRegistrations.length === 0 && extraRegistrations.length === 0 && missingTools.length === 0 && extraTools.length === 0 && missingToolIds.length === 0 && extraToolIds.length === 0 && duplicateToolNames.length === 0 && schemaMismatches.length === 0, "registration parity is not sufficient; real process checks follow");
 
-const cliCapabilities = runCli({ node: paths.node, bundle: paths.cliBundle, args: ["capabilities", "--json"], cwd: root, env });
+const cliCapabilities = runCli({ command: cliWrapper, args: ["capabilities", "--json"], cwd: root, env });
 const cliCapabilitiesJson = extractCliJson(cliCapabilities);
 record("cli-capabilities-process", { process: cliCapabilities, capabilities: cliCapabilitiesJson }, cliCapabilities.exitCode === 0
   && cliCapabilitiesJson?.capabilityHash === capabilityHash(CAPABILITIES)
@@ -80,46 +224,85 @@ record("cli-capabilities-process", { process: cliCapabilities, capabilities: cli
   && cliCapabilitiesJson?.schemaVersion === "14"
   && Array.isArray(cliCapabilitiesJson?.registrations));
 
-const cliEndpoint = runCli({ node: paths.node, bundle: paths.cliBundle, args: ["endpoints", repo, "--protocol", "grpc", "--limit", "1", "--json"], cwd: root, env });
+const cliEndpoint = runCli({ command: cliWrapper, args: ["endpoints", repo, "--protocol", "grpc", "--limit", "1", "--json"], cwd: root, env });
 const cliEndpointJson = extractCliJson(cliEndpoint);
 record("cli-endpoints-process", cliEndpoint, cliEndpoint.exitCode === 0 && Boolean(cliEndpointJson?.items?.[0]?.nodeId));
 const cliNodeId = cliEndpointJson?.items?.[0]?.nodeId ?? null;
-const session = new McpSession({ node: paths.node, server: paths.mcpBundle, cwd: root, env, label: "parity-mcp" });
+const session = new McpSession({ command: mcpWrapper, cwd: root, env, label: "parity-mcp" });
 try {
   const initialized = await session.initialize();
   const instructions = parseJson(initialized?.result?.instructions ?? "");
   record("mcp-initialize-process", { response: initialized, instructions, ...session.evidence() }, Boolean(initialized?.result?.serverInfo)
     && instructions?.contractVersion === "2"
     && instructions?.schemaVersion === 14
-    && instructions?.capabilityHash === cliCapabilitiesJson?.capabilityHash);
+    && instructions?.capabilityHash === cliCapabilitiesJson?.capabilityHash
+    && initialized?.result?.serverInfo?.version === cliCapabilitiesJson?.buildId);
 
   const listedResponse = await session.request("tools/list");
   const listedTools = listedResponse?.result?.tools;
-  const expectedListed = KNOWLEDGE_TOOL_DEFS.filter((tool) => listedTools?.some((candidate) => candidate.name === tool.name));
-  const toolMismatches = expectedListed.filter((tool) => {
-    const actual = listedTools.find((candidate) => candidate.name === tool.name);
-    return JSON.stringify(toolProjection(actual)) !== JSON.stringify(toolProjection(tool));
+  const actualKnowledgeTools = Array.isArray(listedTools) ? listedTools.filter((tool) => tool["x-penguin-capability-id"]) : [];
+  const listedByName = new Map(actualKnowledgeTools.map((tool) => [tool.name, tool]));
+  const actualToolNames = new Set(listedByName.keys());
+  const actualToolIds = new Set(actualKnowledgeTools.map((tool) => tool["x-penguin-capability-id"]));
+  const missingListedTools = [...expectedToolNames].filter((name) => !actualToolNames.has(name));
+  const extraListedTools = [...actualToolNames].filter((name) => !expectedToolNames.has(name));
+  const missingListedToolIds = [...expectedToolIds].filter((id) => !actualToolIds.has(id));
+  const extraListedToolIds = [...actualToolIds].filter((id) => !expectedToolIds.has(id));
+  const duplicateListedToolNames = [...actualToolNames]
+    .filter((name) => actualKnowledgeTools.filter((tool) => tool.name === name).length > 1);
+  const duplicateListedToolIds = [...actualToolIds]
+    .filter((id) => actualKnowledgeTools.filter((tool) => tool["x-penguin-capability-id"] === id).length > 1);
+  const toolMismatches = MCP_LISTED_TOOL_DEFS.filter((tool) => {
+    const actual = listedByName.get(tool.name);
+    return actual && JSON.stringify(toolProjection(actual)) !== JSON.stringify(toolProjection(tool));
   }).map((tool) => tool.name);
-  record("mcp-tools-process", { response: listedResponse, listedTools, expectedListed, toolMismatches, ...session.evidence() }, Array.isArray(listedTools)
-    && listedTools.length > 0
-    && expectedListed.length === listedTools.filter((tool) => tool["x-penguin-capability-id"]).length
+  record("mcp-tools-process", { response: listedResponse, listedTools, missingListedTools, extraListedTools, missingListedToolIds, extraListedToolIds, duplicateListedToolNames, duplicateListedToolIds, toolMismatches, ...session.evidence() }, Array.isArray(listedTools)
+    && missingListedTools.length === 0
+    && extraListedTools.length === 0
+    && missingListedToolIds.length === 0
+    && extraListedToolIds.length === 0
+    && duplicateListedToolNames.length === 0
     && toolMismatches.length === 0,
-  `listed canonical=${listedTools?.filter((tool) => tool["x-penguin-capability-id"]).length ?? 0}, expected=${expectedListed.length}, mismatches=${toolMismatches.join(",")}`);
+  `listed canonical=${actualKnowledgeTools.length}, expected=${MCP_LISTED_TOOL_DEFS.length}, missing=${missingListedTools.join(",")}, extra=${extraListedTools.join(",")}, mismatches=${toolMismatches.join(",")}`);
 
   const capabilitiesResponse = await session.callTool("knowledge_capabilities", {});
   const mcpCapabilities = mcpStructured(capabilitiesResponse);
-  const cliRegistrations = new Map((cliCapabilitiesJson?.registrations ?? []).map((registration) => [registration.capabilityId, registration]));
-  const mcpRegistrations = new Map((mcpCapabilities?.registrations ?? []).map((registration) => [registration.capabilityId, registration]));
-  const registrationMismatches = [...cliRegistrations.keys()]
-    .filter((id) => mcpRegistrations.has(id))
+  const cliRegistrationList = cliCapabilitiesJson?.registrations;
+  const mcpRegistrationList = mcpCapabilities?.registrations;
+  const cliRegistrations = new Map((Array.isArray(cliRegistrationList) ? cliRegistrationList : []).map((registration) => [registration.capabilityId, registration]));
+  const mcpRegistrations = new Map((Array.isArray(mcpRegistrationList) ? mcpRegistrationList : []).map((registration) => [registration.capabilityId, registration]));
+  const registrationMismatches = [...new Set([...cliRegistrations.keys(), ...mcpRegistrations.keys()])]
     .filter((id) => JSON.stringify(registrationProjection(cliRegistrations.get(id))) !== JSON.stringify(registrationProjection(mcpRegistrations.get(id))));
   const missingMcpRegistrations = [...cliRegistrations.keys()].filter((id) => !mcpRegistrations.has(id));
-  record("mcp-capabilities-schema-process", { response: capabilitiesResponse, structured: mcpCapabilities, registrationMismatches, missingMcpRegistrations, ...session.evidence() }, capabilitiesResponse?.result?.isError !== true
+  const extraMcpRegistrations = [...mcpRegistrations.keys()].filter((id) => !cliRegistrations.has(id));
+  const cliManifestList = cliCapabilitiesJson?.capabilities;
+  const mcpManifestList = mcpCapabilities?.capabilities;
+  const cliManifest = new Map((Array.isArray(cliManifestList) ? cliManifestList : []).map((capability) => [capability.id, capabilityProjection(capability)]));
+  const mcpManifest = new Map((Array.isArray(mcpManifestList) ? mcpManifestList : []).map((capability) => [capability.id, capabilityProjection(capability)]));
+  const canonicalManifest = new Map(CAPABILITIES.map((capability) => [capability.id, capabilityProjection(capability)]));
+  const manifestIds = [...new Set([...canonicalManifest.keys(), ...cliManifest.keys(), ...mcpManifest.keys()])];
+  const missingCliCapabilities = [...canonicalManifest.keys()].filter((id) => !cliManifest.has(id));
+  const extraCliCapabilities = [...cliManifest.keys()].filter((id) => !canonicalManifest.has(id));
+  const missingMcpCapabilities = [...canonicalManifest.keys()].filter((id) => !mcpManifest.has(id));
+  const extraMcpCapabilities = [...mcpManifest.keys()].filter((id) => !canonicalManifest.has(id));
+  const manifestMismatches = manifestIds.filter((id) => JSON.stringify(cliManifest.get(id)) !== JSON.stringify(mcpManifest.get(id)) || JSON.stringify(cliManifest.get(id)) !== JSON.stringify(canonicalManifest.get(id)));
+  const manifestEqual = Array.isArray(cliManifestList) && Array.isArray(mcpManifestList)
+    && missingCliCapabilities.length === 0
+    && extraCliCapabilities.length === 0
+    && missingMcpCapabilities.length === 0
+    && extraMcpCapabilities.length === 0
+    && manifestMismatches.length === 0;
+  record("mcp-capabilities-schema-process", { response: capabilitiesResponse, structured: mcpCapabilities, registrationMismatches, missingMcpRegistrations, extraMcpRegistrations, missingCliCapabilities, extraCliCapabilities, missingMcpCapabilities, extraMcpCapabilities, manifestMismatches, manifestEqual, ...session.evidence() }, capabilitiesResponse?.result?.isError !== true
     && mcpCapabilities?.capabilityHash === cliCapabilitiesJson?.capabilityHash
+    && mcpCapabilities?.buildId === cliCapabilitiesJson?.buildId
     && mcpCapabilities?.contractVersion === "2"
     && mcpCapabilities?.schemaVersion === "14"
+    && manifestEqual
+    && Array.isArray(cliRegistrationList)
+    && Array.isArray(mcpRegistrationList)
     && registrationMismatches.length === 0
-    && missingMcpRegistrations.length === 0);
+    && missingMcpRegistrations.length === 0
+    && extraMcpRegistrations.length === 0);
 
   const healthResponse = await session.callTool("mcp_health", {});
   const health = mcpStructured(healthResponse);
@@ -129,6 +312,8 @@ try {
     && typeof generation.availableBuildId === "string"
     && generation.availableBuildId.length > 0
     && generation.runningBuildId === generation.availableBuildId
+    && generation.runningBuildId === cliCapabilitiesJson?.buildId
+    && generation.runningBuildId === initialized?.result?.serverInfo?.version
     && generation.outdated === false);
 
   const mcpEndpointResponse = await session.callTool("knowledge_endpoints", { repo, protocol: "grpc", limit: 1 });
@@ -136,32 +321,61 @@ try {
   record("mcp-endpoints-process", { response: mcpEndpointResponse, structured: mcpEndpoint, ...session.evidence() }, Boolean(mcpEndpoint?.items?.[0]?.nodeId));
   const mcpNodeId = mcpEndpoint?.items?.[0]?.nodeId ?? null;
 
+  const cliEndpointItem = cliEndpointJson?.items?.[0];
+  const mcpEndpointItem = mcpEndpoint?.items?.[0];
+  const endpointForms = endpointIdentityForms(cliEndpointItem);
+  const identityTriples = endpointForms.length >= 5
+    ? [[endpointForms[0], endpointForms[1], endpointForms[3]], [endpointForms[2], endpointForms[3], endpointForms[4]]]
+    : [];
+  const cliIdentityChecks = identityTriples.map((forms) => {
+    const result = runCli({ command: cliWrapper, args: ["endpoint-identity", ...forms, "--repo", repo, "--json"], cwd: root, env });
+    return { forms, process: result, result: extractCliJson(result), passed: sameEndpointResult(result, cliEndpointItem?.nodeId) };
+  });
+  const mcpIdentityChecks = [];
+  for (const form of endpointForms) {
+    const response = await session.callTool("knowledge_flow", { target: form, repo });
+    const flow = mcpStructured(response);
+    mcpIdentityChecks.push({ form, response, flow, passed: response?.result?.isError !== true && flow?.target?.nodeId === cliEndpointItem?.nodeId && flow?.root?.nodeId === cliEndpointItem?.nodeId });
+  }
+  const endpointIdentityPassed = Boolean(cliEndpointItem?.nodeId)
+    && Boolean(mcpEndpointItem?.nodeId)
+    && JSON.stringify(normalizeForParity({ title: cliEndpointItem?.title, identityKey: cliEndpointItem?.identityKey, nodeId: cliEndpointItem?.nodeId })) === JSON.stringify(normalizeForParity({ title: mcpEndpointItem?.title, identityKey: mcpEndpointItem?.identityKey, nodeId: mcpEndpointItem?.nodeId }))
+    && cliIdentityChecks.length === 2
+    && cliIdentityChecks.every((check) => check.passed)
+    && mcpIdentityChecks.length === endpointForms.length
+    && mcpIdentityChecks.every((check) => check.passed);
+  record("endpoint-identity-process", { cliEndpoint: cliEndpointItem, mcpEndpoint: mcpEndpointItem, forms: endpointForms, cliIdentityChecks, mcpIdentityChecks, ...session.evidence() }, endpointIdentityPassed, "rendered title, canonical identity, slash route, bare id, and node:id must resolve to the same endpoint on both surfaces");
+
   if (cliNodeId) {
     const target = `node:${cliNodeId}`;
-    const cliFlow = runCli({ node: paths.node, bundle: paths.cliBundle, args: ["flow", target, "--repo", repo, "--json"], cwd: root, env });
+    const cliFlow = runCli({ command: cliWrapper, args: ["flow", target, "--repo", repo, "--json"], cwd: root, env });
     const cliFlowJson = extractCliJson(cliFlow);
     const mcpFlowResponse = await session.callTool("knowledge_flow", { target, repo });
     const mcpFlow = mcpStructured(mcpFlowResponse);
-    const equal = JSON.stringify(flowProjection(cliFlowJson)) === JSON.stringify(flowProjection(mcpFlow));
-    record("dynamic-cli-id-to-mcp-flow", { target, cli: cliFlow, mcp: mcpFlowResponse, normalizedCli: flowProjection(cliFlowJson), normalizedMcp: flowProjection(mcpFlow), ...session.evidence() }, equal, equal ? "normalized structured results match" : "normalized structured results differ");
+    const cliSuccess = cliFlow.exitCode === 0 && cliFlowJson?.root?.nodeId === cliNodeId && resolvedTargetNodeId(cliFlowJson) === cliNodeId;
+    const mcpSuccess = mcpFlowResponse?.result?.isError !== true && mcpFlow?.root?.nodeId === cliNodeId && resolvedTargetNodeId(mcpFlow) === cliNodeId;
+    const equal = cliSuccess && mcpSuccess && JSON.stringify(flowProjection(cliFlowJson)) === JSON.stringify(flowProjection(mcpFlow));
+    record("dynamic-cli-id-to-mcp-flow", { target, cli: cliFlow, mcp: mcpFlowResponse, normalizedCli: flowProjection(cliFlowJson), normalizedMcp: flowProjection(mcpFlow), cliSuccess, mcpSuccess, ...session.evidence() }, equal, equal ? "normalized structured results match" : "both flows must succeed with resolved root/target before projection comparison");
   } else {
     record("dynamic-cli-id-to-mcp-flow", { skipped: true, reason: "CLI endpoint process emitted no nodeId", ...session.evidence() }, false, "SKIPPED is a failure");
   }
 
   if (mcpNodeId) {
     const target = `node:${mcpNodeId}`;
-    const cliFlow = runCli({ node: paths.node, bundle: paths.cliBundle, args: ["flow", target, "--repo", repo, "--json"], cwd: root, env });
+    const cliFlow = runCli({ command: cliWrapper, args: ["flow", target, "--repo", repo, "--json"], cwd: root, env });
     const cliFlowJson = extractCliJson(cliFlow);
     const mcpFlowResponse = await session.callTool("knowledge_flow", { target, repo });
     const mcpFlow = mcpStructured(mcpFlowResponse);
-    const equal = JSON.stringify(flowProjection(cliFlowJson)) === JSON.stringify(flowProjection(mcpFlow));
-    record("dynamic-mcp-id-to-cli-flow", { target, cli: cliFlow, mcp: mcpFlowResponse, normalizedCli: flowProjection(cliFlowJson), normalizedMcp: flowProjection(mcpFlow), ...session.evidence() }, equal, equal ? "normalized structured results match" : "normalized structured results differ");
+    const cliSuccess = cliFlow.exitCode === 0 && cliFlowJson?.root?.nodeId === mcpNodeId && resolvedTargetNodeId(cliFlowJson) === mcpNodeId;
+    const mcpSuccess = mcpFlowResponse?.result?.isError !== true && mcpFlow?.root?.nodeId === mcpNodeId && resolvedTargetNodeId(mcpFlow) === mcpNodeId;
+    const equal = cliSuccess && mcpSuccess && JSON.stringify(flowProjection(cliFlowJson)) === JSON.stringify(flowProjection(mcpFlow));
+    record("dynamic-mcp-id-to-cli-flow", { target, cli: cliFlow, mcp: mcpFlowResponse, normalizedCli: flowProjection(cliFlowJson), normalizedMcp: flowProjection(mcpFlow), cliSuccess, mcpSuccess, ...session.evidence() }, equal, equal ? "normalized structured results match" : "both flows must succeed with resolved root/target before projection comparison");
   } else {
     record("dynamic-mcp-id-to-cli-flow", { skipped: true, reason: "MCP endpoint process emitted no nodeId", ...session.evidence() }, false, "SKIPPED is a failure");
   }
 
   const invalidTarget = "node:task10-definitely-missing";
-  const cliInvalid = runCli({ node: paths.node, bundle: paths.cliBundle, args: ["flow", invalidTarget, "--repo", repo, "--json"], cwd: root, env });
+  const cliInvalid = runCli({ command: cliWrapper, args: ["flow", invalidTarget, "--repo", repo, "--json"], cwd: root, env });
   const cliInvalidJson = extractCliJson(cliInvalid);
   const mcpInvalidResponse = await session.callTool("knowledge_flow", { target: invalidTarget, repo });
   const mcpInvalid = mcpStructured(mcpInvalidResponse);
@@ -174,6 +388,41 @@ try {
     && cliError.retryable === false
     && mcpError.retryable === false;
   record("normalized-error-envelope", { target: invalidTarget, cli: cliInvalid, mcp: mcpInvalidResponse, normalizedCliError: normalizeForParity(cliError), normalizedMcpError: normalizeForParity(mcpError), ...session.evidence() }, equalErrors, equalErrors ? "error envelopes match" : "one process did not expose the same typed error envelope");
+
+  const scopeBranch = `task3-missing-${buildId.slice(0, 12)}`;
+  const cliScope = runCli({ command: cliWrapper, args: ["flow", targetForError(cliNodeId), "--repo", repo, "--branch", scopeBranch, "--json"], cwd: root, env });
+  const cliScopeJson = extractCliJson(cliScope);
+  const mcpScopeResponse = await session.callTool("knowledge_flow", { target: targetForError(cliNodeId), repo, branch: scopeBranch });
+  const mcpScope = mcpStructured(mcpScopeResponse);
+  const cliScopeError = errorEnvelope(cliScopeJson);
+  const mcpScopeError = errorEnvelope(mcpScope);
+  const scopeEqual = cliScope.exitCode === 4
+    && mcpScopeResponse?.result?.isError !== true
+    && JSON.stringify(normalizeForParity(cliScopeError)) === JSON.stringify(normalizeForParity(mcpScopeError))
+    && cliScopeError?.retryable === false
+    && mcpScopeError?.retryable === false
+    && cliScopeError?.details?.remediation;
+  record("scope-error-envelope", { branch: scopeBranch, cli: cliScope, mcp: mcpScopeResponse, normalizedCliError: normalizeForParity(cliScopeError), normalizedMcpError: normalizeForParity(mcpScopeError), ...session.evidence() }, Boolean(scopeEqual), "scope mismatch envelopes must match with retryable, details, and remediation");
+
+  const cliUnsupported = runCli({ command: cliWrapper, args: ["capabilities", "--contract-version", "9", "--json"], cwd: root, env });
+  const cliUnsupportedJson = extractCliJson(cliUnsupported);
+  const mcpUnsupportedResponse = await session.callTool("knowledge_capabilities", { contract_version: "9" });
+  const mcpUnsupported = mcpStructured(mcpUnsupportedResponse);
+  const cliUnsupportedError = errorEnvelope(cliUnsupportedJson);
+  const mcpUnsupportedError = errorEnvelope(mcpUnsupported);
+  const unsupportedEqual = cliUnsupported.exitCode === 1
+    && JSON.stringify(normalizeForParity(cliUnsupportedError)) === JSON.stringify(normalizeForParity(mcpUnsupportedError));
+  record("unsupported-error-envelope", { cli: cliUnsupported, mcp: mcpUnsupportedResponse, normalizedCliError: normalizeForParity(cliUnsupportedError), normalizedMcpError: normalizeForParity(mcpUnsupportedError), ...session.evidence() }, unsupportedEqual, "unsupported contract envelopes match");
+
+  const unknownName = "knowledge-task3-unknown";
+  const cliInternal = runCli({ command: cliWrapper, args: [unknownName, "--json"], cwd: root, env });
+  const cliInternalJson = extractCliJson(cliInternal);
+  const mcpInternalResponse = await session.callTool(unknownName, {});
+  const mcpInternal = mcpStructured(mcpInternalResponse);
+  const cliInternalError = errorEnvelope(cliInternalJson);
+  const mcpInternalError = errorEnvelope(mcpInternal);
+  const internalEqual = JSON.stringify(normalizeForParity(cliInternalError)) === JSON.stringify(normalizeForParity(mcpInternalError));
+  record("generic-error-envelope", { cli: cliInternal, mcp: mcpInternalResponse, normalizedCliError: normalizeForParity(cliInternalError), normalizedMcpError: normalizeForParity(mcpInternalError), ...session.evidence() }, internalEqual, "generic errors must expose the same normalized envelope");
 } catch (error) {
   record("mcp-process-session", { error: String(error), ...session.evidence() }, false, "real MCP session failed");
 } finally {
@@ -181,9 +430,18 @@ try {
 }
 
 const failed = checks.filter((check) => !check.passed);
+const evidenceDir = resolve(dirname(report), "task-3-evidence");
+mkdirSync(evidenceDir, { recursive: true });
+const evidenceFiles = new Map();
+for (const row of rows) {
+  const file = join(evidenceDir, `${String(rows.indexOf(row) + 1).padStart(2, "0")}-${row.name}.json`);
+  const safe = redactEvidence(row.evidence);
+  writeFileSync(file, `${JSON.stringify(safe, null, 2)}\n`);
+  evidenceFiles.set(row.name, { file, bytes: Buffer.byteLength(JSON.stringify(safe), "utf8") + 1, sha256: fileHash(file) });
+}
 const markdown = [
-  "# Task 3 MCP/CLI parity evidence", "", `- CLI bundle: \`${paths.cliBundle}\``, `- MCP bundle: \`${paths.mcpBundle}\``, `- Node: \`${paths.node}\``, `- Repository: \`${repo}\``, `- Checks: ${checks.length}`, `- Failed: ${failed.length}`, "", "## Verdict", "", failed.length ? `FAIL: ${failed.map((check) => `${check.name} (${check.reason})`).join("; ")}` : "PASS: real CLI and MCP process parity checks passed.", "", "## Raw evidence", "",
-  ...rows.flatMap((row) => [`### ${row.name}`, "```json", JSON.stringify(row.evidence, null, 2).slice(0, 40_000), "```", ""]),
+  "# Task 3 MCP/CLI parity evidence", "", `- CLI bundle: \`${paths.cliBundle}\``, `- MCP bundle: \`${paths.mcpBundle}\``, `- Node: \`${paths.node}\``, `- CLI stable wrapper: \`${cliWrapper}\``, `- MCP stable wrapper: \`${mcpWrapper}\``, `- Repository: \`${repo}\``, `- Checks: ${checks.length}`, `- Failed: ${failed.length}`, `- Source commit: \`${provenance.sourceCommit}\``, `- Worktree state at start: \`${provenance.worktreeState}\``, `- Dirty files at start: ${provenance.dirtyFiles.length}`, `- Bundle hashes: ${JSON.stringify(provenance.bundleContentHashes)}`, "", "## Verdict", "", failed.length ? `FAIL: ${failed.map((check) => `${check.name} (${check.reason})`).join("; ")}` : "PASS: real CLI and MCP process parity checks passed.", "", "## Evidence sidecars", "", "Each sidecar is complete JSON; no evidence is truncated. Paths and temporary-home values are redacted.", "", 
+  ...rows.flatMap((row) => { const sidecar = evidenceFiles.get(row.name); return [`### ${row.name}`, `- Sidecar: \`${sidecar.file}\``, `- Bytes: ${sidecar.bytes}`, `- SHA-256: \`${sidecar.sha256}\``, "```json", JSON.stringify(evidenceSummary(row.evidence)), "```", ""]; }),
 ];
 mkdirSync(dirname(report), { recursive: true });
 writeFileSync(report, markdown.join("\n"));

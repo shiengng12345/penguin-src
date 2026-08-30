@@ -126,6 +126,41 @@ test("MCP capability negotiation records build, hash, and schema identity throug
   store.close();
 });
 
+test("MCP uses the shared envelope for unsupported contracts and scope errors", async () => {
+  const { store, repo } = fixture();
+  const contract = await runKnowledgeTool("knowledge_capabilities", { contract_version: "9" }, { store }) as Record<string, any>;
+  assert.deepEqual(contract.error, {
+    code: "CAPABILITY_MISMATCH",
+    message: "unsupported knowledge contract major 9; upgrade Penguin or request contract 2",
+    retryable: false,
+    details: {
+      requestedContract: "9",
+      remediation: "upgrade Penguin or request contract 2",
+    },
+  });
+
+  const scope = await runKnowledgeTool("knowledge_context", { target: "round13McpTarget", repo, branch: "missing" }, { store }) as Record<string, any>;
+  assert.equal(scope.error?.code, "SCOPE_NOT_FOUND");
+  assert.equal(scope.error?.retryable, false);
+  assert.deepEqual(scope.error?.details?.candidates, []);
+  assert.equal(scope.error?.details?.remediation, "specify branch, commit, or snapshot");
+  assert.match(scope.error?.message, /specify branch, commit, or snapshot/i);
+  store.close();
+});
+
+test("parity source gates complete manifests, successful flows, identity forms, and safe evidence", () => {
+  const source = readFileSync(resolve(diagnosticRoot(), "scripts/knowledge-mcp-parity-test.mjs"), "utf8");
+  assert.match(source, /missingListedTools/);
+  assert.match(source, /extraListedTools/);
+  assert.match(source, /cliFlow\.exitCode === 0/);
+  assert.match(source, /mcpFlowResponse\?\.result\?\.isError !== true/);
+  assert.match(source, /endpoint-identity/);
+  assert.match(source, /knowledge-cli-launcher/);
+  assert.match(source, /knowledge-mcp-launcher/);
+  assert.match(source, /evidenceFile/);
+  assert.doesNotMatch(source, /JSON\.stringify\(row\.evidence, null, 2\)\.slice\(0,\s*40_000\)/);
+});
+
 test("MCP accepts node:<id> for callees, affected, and flow continuation", async () => {
   const { store, repo, target } = fixture();
   const selector = `node:${target}`;

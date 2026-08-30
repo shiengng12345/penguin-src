@@ -12,7 +12,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 // this process because each bounded query opens its store inside a worker.
 import { KNOWLEDGE_TOOL_DEFS, MCP_LISTED_TOOL_DEFS, LOG_INVESTIGATION_TOOL_DEFS, isKnowledgeTool } from "./knowledge-tool-defs.js";
 export { KNOWLEDGE_TOOL_DEFS } from "./knowledge-tool-defs.js";
-import { CAPABILITIES, capabilityHash } from "@penguin/knowledge-contracts";
+import { CAPABILITIES, capabilityHash, normalizeKnowledgeError } from "@penguin/knowledge-contracts";
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
@@ -554,7 +554,7 @@ function searchAllMethods(
 }
 
 const server = new Server(
-  { name: "penguin-mcp", version: `0.0.1+knowledge-${capabilityHash(CAPABILITIES).slice(0, 12)}` },
+  { name: "penguin-mcp", version: process.env.PENGUIN_BUILD_ID ?? "local" },
   {
     capabilities: { tools: {} },
     // MCP initialize has no portable custom metadata field. Keep the
@@ -1178,16 +1178,9 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       });
     }
 
-    throw new Error(
-      `Unknown tool: ${name}. Valid tools: mcp_health, search_methods, list_packages, list_methods, describe_method, describe_service, install_package, uninstall_package, list_environments, resolve_environment, package_status, get_default_headers, list_saved_requests, search_request_history, compare_environments, call_method.`,
-    );
+    throw Object.assign(new Error(`capability not implemented: ${name}`), { code: "CAPABILITY_NOT_IMPLEMENTED" });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    const code = (err as { code?: string }).code;
-    return jsonResult(
-      code ? { code, message: msg, retryable: code === "QUERY_BUSY" } : `Error: ${msg}`,
-      true,
-    );
+    return jsonResult({ error: normalizeKnowledgeError(err) }, true);
   }
 });
 

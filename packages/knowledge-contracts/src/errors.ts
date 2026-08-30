@@ -51,3 +51,18 @@ export function knowledgeErrorEnvelope(
 ): KnowledgeErrorEnvelope {
   return normalizeKnowledgeError({ code, message, details, retryable });
 }
+
+export function scopeResolutionErrorEnvelope(error: {
+  code: string;
+  message: string;
+  candidates?: readonly Record<string, unknown>[];
+}): KnowledgeErrorEnvelope {
+  const remediation = error.code === "BRANCH_NOT_INDEXED"
+    ? "pass allow_fallback: true to query another indexed branch"
+    : "specify branch, commit, or snapshot";
+  return knowledgeErrorEnvelope(
+    error.code,
+    `${error.message} ${remediation}`,
+    { candidates: [...(error.candidates ?? [])], remediation },
+  );
+}

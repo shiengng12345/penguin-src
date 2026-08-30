@@ -67,7 +67,7 @@ import {
   HmacOperationCursorCodec,
   type ResolvedQueryScope,
 } from "@penguin/knowledge-core";
-import { CAPABILITIES, capabilityHash, listMcpRegistrations, CAPABILITY_ALIASES, canonicalInputSchema, normalizeKnowledgeError } from "@penguin/knowledge-contracts";
+import { CAPABILITIES, capabilityHash, listMcpRegistrations, CAPABILITY_ALIASES, canonicalInputSchema, knowledgeErrorEnvelope, normalizeKnowledgeError, scopeResolutionErrorEnvelope } from "@penguin/knowledge-contracts";
 import { analyzeRepository } from "./repository-analysis.js";
 import { preflightSearchTerms } from "./log-investigation-preflight.js";
 import { readConfig } from "./config.js";
@@ -324,12 +324,13 @@ export function unsupportedArguments(
   if (unsupported.length === 0) return null;
   return {
     error: {
-      code: "UNSUPPORTED_FILTER",
-      message:
+      ...knowledgeErrorEnvelope(
+        "UNSUPPORTED_FILTER",
         `${toolName} does not accept ${unsupported.map((key) => `\`${key}\``).join(", ")}`
         + ` — it would have been ignored, and the answer would have looked scoped when it was not.`
         + ` Accepted: ${accepted.join(", ")}.`,
-      retryable: false,
+        { unsupported, accepted, remediation: `remove unsupported arguments: ${unsupported.join(", ")}` },
+      ),
       unsupported,
       accepted,
     },
@@ -371,7 +372,11 @@ export async function runKnowledgeTool(name: string, a: Record<string, unknown>,
     if (routedName === "knowledge_capabilities") {
       const requestedContract = typeof a.contract_version === "string" ? a.contract_version : undefined;
       if (requestedContract && requestedContract.split(".")[0] !== "2") {
-        return { error: { code: "CAPABILITY_MISMATCH", message: `unsupported knowledge contract major ${requestedContract}; upgrade Penguin or request contract 2`, retryable: false } };
+        return { error: knowledgeErrorEnvelope(
+          "CAPABILITY_MISMATCH",
+          `unsupported knowledge contract major ${requestedContract}; upgrade Penguin or request contract 2`,
+          { requestedContract, remediation: "upgrade Penguin or request contract 2" },
+        ) };
       }
       return {
         schemaVersion: String(SCHEMA_VERSION),
@@ -496,10 +501,7 @@ function isSensitive(store: KnowledgeStore, nodeId: string): boolean {
 // since MCP clients read structured errors and retry rather than reading a
 // CLI --flag hint.
 function scopeResolutionErrorPayload(error: ScopeResolutionError): Record<string, unknown> {
-  const message = error.code === "BRANCH_NOT_INDEXED"
-    ? `${error.message} Pass allow_fallback: true to answer from another indexed branch instead.`
-    : error.message;
-  return { error: { code: error.code, message, candidates: error.candidates } };
+  return scopeResolutionErrorEnvelope(error);
 }
 
 // The shared scope chokepoint (§Phase 1a trust plumbing, Task 8). Delegates
@@ -521,8 +523,8 @@ function resolveMcpRevision(
   let repoId: string | undefined;
   if (repoSelector) {
     const repoIds = store.resolveRepoIds(String(repoSelector));
-    if (repoIds.length === 0) return { error: { error: "revision_repo_not_found", repo: repoSelector } };
-    if (repoIds.length > 1) return { error: { error: "revision_repo_ambiguous", repo: repoSelector, candidates: repoIds } };
+    if (repoIds.length === 0) return { error: knowledgeErrorEnvelope("SCOPE_NOT_FOUND", `repository not found: ${repoSelector}`, { repo: repoSelector, remediation: "specify a registered repository" }) };
+    if (repoIds.length > 1) return { error: knowledgeErrorEnvelope("REPO_AMBIGUOUS", `repository is ambiguous: ${repoSelector}`, { repo: repoSelector, candidates: repoIds, remediation: "specify a repository id" }) };
     repoId = repoIds[0];
   }
   try {
@@ -650,7 +652,11 @@ export function handleKnowledgeTool(
   if (name === "knowledge_capabilities") {
     const requestedContract = typeof a.contract_version === "string" ? a.contract_version : undefined;
     if (requestedContract && requestedContract.split(".")[0] !== "2") {
-      return { error: { code: "CAPABILITY_MISMATCH", message: `unsupported knowledge contract major ${requestedContract}; upgrade Penguin or request contract 2`, retryable: false } };
+      return { error: knowledgeErrorEnvelope(
+        "CAPABILITY_MISMATCH",
+        `unsupported knowledge contract major ${requestedContract}; upgrade Penguin or request contract 2`,
+        { requestedContract, remediation: "upgrade Penguin or request contract 2" },
+      ) };
     }
     return { schemaVersion: String(SCHEMA_VERSION), contractVersion: "2", buildId: process.env.PENGUIN_BUILD_ID ?? "local", capabilityHash: capabilityHash(CAPABILITIES), capabilities: CAPABILITIES, registrations: listMcpRegistrations() };
   }
@@ -828,7 +834,7 @@ export function handleKnowledgeTool(
       const revision = canonicalRevisionContexts.length > 0
         ? { context: canonicalRevisionContexts[0] }
         : resolveMcpRevision(store, resolvedRepoId ? { ...a, repo: resolvedRepoId } : a);
-      if (revision.error) return revision.error;
+      if (revision.error) return { error: revision.error };
       const queryText = String(a.query ?? "");
       const camelCaseIdentifier = /^[A-Za-z_$][\w$]*$/u.test(queryText) && /[a-z][A-Z]/u.test(queryText);
       const defaultIdentifier = camelCaseIdentifier && a.mode === undefined;
@@ -921,7 +927,7 @@ export function handleKnowledgeTool(
       const key = (a.id ?? a.identity_key) as string | undefined;
       // Selector-gated (see legacyGatedRepoId) — full unification deferred.
       const revision = resolveMcpRevision(store, a, legacyGatedRepoId(store, a, key ?? ""));
-      if (revision.error) return revision.error;
+      if (revision.error) return { error: revision.error };
       const detail = getNodeDetail(store, key ?? "", revision.context ? { revision: revision.context } : undefined);
       return detail ? { ...detail, ...(revision.context ? { revision: revision.context } : {}) } : { error: "node not found" };
     }
@@ -929,7 +935,7 @@ export function handleKnowledgeTool(
       const node = String(a.node ?? "");
       // Selector-gated (see legacyGatedRepoId) — full unification deferred.
       const revision = resolveMcpRevision(store, a, legacyGatedRepoId(store, a, node));
-      if (revision.error) return revision.error;
+      if (revision.error) return { error: revision.error };
       const result = exploreGraph(store, a.mode as GraphMode, node, {
         depth: a.depth as number | undefined,
         limit: a.limit as number | undefined,
@@ -941,7 +947,7 @@ export function handleKnowledgeTool(
     case "knowledge_explore": {
       const target = String(a.target ?? "");
       const revision = resolveMcpRevision(store, a, nodeRepoId(store, target));
-      if (revision.error) return revision.error;
+      if (revision.error) return { error: revision.error };
       const result = buildExplorePack(store, target, {
         revision: revision.context,
         depth: a.depth as number | undefined,
@@ -957,7 +963,7 @@ export function handleKnowledgeTool(
       const symbol = String(a.symbol ?? "");
       // Selector-gated (see legacyGatedRepoId) — full unification deferred.
       const revision = resolveMcpRevision(store, a, legacyGatedRepoId(store, a, symbol));
-      if (revision.error) return revision.error;
+      if (revision.error) return { error: revision.error };
       return (
         compareBranches(store, symbol, String(a.branch_a ?? ""), String(a.branch_b ?? ""), { revision: revision.context }) ??
         { error: "symbol not found on one or both branches" }
@@ -1032,7 +1038,7 @@ export function handleKnowledgeTool(
       const mode = name === "knowledge_callers" ? "who_calls" : name === "knowledge_callees" ? "calls_of" : "impact";
       const target = String(a.target ?? a.node ?? a.symbol ?? "");
       const revision = resolveMcpRevision(store, a, nodeRepoId(store, target));
-      if (revision.error) return revision.error;
+      if (revision.error) return { error: revision.error };
       let resolvedTarget;
       try { resolvedTarget = resolveTarget(store, target, { repoId: revision.context?.repoId, revision: revision.context }); }
       catch (error) { return targetResolutionError(error); }
@@ -1041,13 +1047,13 @@ export function handleKnowledgeTool(
     case "knowledge_locate": {
       const target = String(a.target ?? "");
       const revision = resolveMcpRevision(store, a, nodeRepoId(store, target));
-      if (revision.error) return revision.error;
+      if (revision.error) return { error: revision.error };
       return { ...buildExplorePack(store, target, { revision: revision.context, depth: a.depth as number | undefined, limit: a.limit as number | undefined }), ...(revision.context ? { revision: revision.context } : {}), ...scopeEnvelopeFields(revision.scope) };
     }
     case "knowledge_context": {
       const target = String(a.target ?? "");
       const revision = resolveMcpRevision(store, a, nodeRepoId(store, target));
-      if (revision.error) return revision.error;
+      if (revision.error) return { error: revision.error };
       let resolvedTarget;
       try { resolvedTarget = resolveTarget(store, target, { repoId: revision.context?.repoId, revision: revision.context }); }
       catch (error) { return targetResolutionError(error); }
@@ -1056,7 +1062,7 @@ export function handleKnowledgeTool(
     case "knowledge_flow": {
       const target = String(a.target ?? "");
       const revision = resolveMcpRevision(store, a, nodeRepoId(store, target));
-      if (revision.error) return revision.error;
+      if (revision.error) return { error: revision.error };
       let resolvedTarget;
       try { resolvedTarget = resolveTarget(store, target, { repoId: revision.context?.repoId, revision: revision.context }); }
       catch (error) { return targetResolutionError(error); }
@@ -1066,7 +1072,7 @@ export function handleKnowledgeTool(
       const paths = Array.isArray(a.files) ? a.files.map(String) : [String(a.file ?? a.path ?? "")].filter(Boolean);
       const target = String(a.target ?? a.node ?? a.symbol ?? "").trim();
       const revision = resolveMcpRevision(store, a, target ? nodeRepoId(store, target) : null);
-      if (revision.error) return revision.error;
+      if (revision.error) return { error: revision.error };
       let resolvedTarget;
       try { resolvedTarget = target ? resolveTarget(store, target, { repoId: revision.context?.repoId, revision: revision.context }) : null; }
       catch (error) { return targetResolutionError(error); }
@@ -1081,7 +1087,7 @@ export function handleKnowledgeTool(
       const from = String(a.from ?? a.source ?? "");
       const to = String(a.to ?? a.target ?? "");
       const revision = resolveMcpRevision(store, a, nodeRepoId(store, from));
-      if (revision.error) return revision.error;
+      if (revision.error) return { error: revision.error };
       return { ...exploreGraph(store, "path", from, { to, depth: a.depth as number | undefined, limit: a.limit as number | undefined, revision: revision.context }), ...(revision.context ? { revision: revision.context } : {}), ...scopeEnvelopeFields(revision.scope) };
     }
     case "knowledge_service_graph":

@@ -116,6 +116,25 @@ test("CLI exposes the runtime identity contract through capabilities", async () 
   store.close();
 });
 
+test("CLI rejects an unsupported capability contract with the shared envelope", async () => {
+  const { store, dir, dbPath, ledgerPath } = fixture();
+  const lines: string[] = [];
+  const code = await runCli(["capabilities", "--contract-version", "9", "--json"], deps(dbPath, ledgerPath, dir, lines));
+  const payload = lastJson(lines);
+
+  assert.equal(code, 1);
+  assert.deepEqual(payload?.error, {
+    code: "CAPABILITY_MISMATCH",
+    message: "unsupported knowledge contract major 9; upgrade Penguin or request contract 2",
+    retryable: false,
+    details: {
+      requestedContract: "9",
+      remediation: "upgrade Penguin or request contract 2",
+    },
+  });
+  store.close();
+});
+
 test("node:<id> survives context, flow, callers, callees, and affected", async () => {
   const { store, dir, dbPath, ledgerPath, repo, target } = fixture();
   for (const verb of ["context", "flow", "callers", "callees", "affected"]) {
@@ -166,6 +185,23 @@ test("an invalid node returns a structured resolution error", async () => {
     retryable: false,
     details: { target: missing },
   });
+  store.close();
+});
+
+test("CLI scope errors carry retryable, details, and remediation fields", async () => {
+  const { store, dir, dbPath, ledgerPath, repo } = fixture();
+  const lines: string[] = [];
+  const code = await runCli(["context", "Alpha", "--repo", repo, "--branch", "missing", "--json"], deps(dbPath, ledgerPath, dir, lines));
+  const payload = lastJson(lines);
+
+  assert.equal(code, 4);
+  assert.equal(payload?.error?.code, "SCOPE_NOT_FOUND");
+  assert.equal(payload?.error?.retryable, false);
+  assert.deepEqual(payload?.error?.details?.candidates, [
+    { branchName: "main", commitSha: "round13-cli-commit" },
+  ]);
+  assert.equal(payload?.error?.details?.remediation, "specify branch, commit, or snapshot");
+  assert.match(payload?.error?.message, /specify branch, commit, or snapshot/i);
   store.close();
 });
 
