@@ -25,13 +25,33 @@ export type TargetResolutionErrorCode =
   | "UNSUPPORTED_TARGET_KIND";
 
 export class TargetResolutionError extends Error {
+  readonly details: Record<string, unknown>;
+  readonly retryable = false;
+
   constructor(
     readonly code: TargetResolutionErrorCode,
     message: string,
-    readonly details: Record<string, unknown> = {},
+    details: Record<string, unknown> = {},
   ) {
     super(message);
     this.name = "TargetResolutionError";
+    this.details = {
+      ...details,
+      remediation: details.remediation ?? targetRemediation(code),
+    };
+  }
+}
+
+function targetRemediation(code: TargetResolutionErrorCode): string {
+  switch (code) {
+    case "TARGET_REQUIRED": return "provide a target from penguin search or specify --target";
+    case "TARGET_AMBIGUOUS": return "specify --repo and, when needed, --branch or an exact node ID";
+    case "TARGET_STALE": return "run penguin index for the repository, then retry the query";
+    case "REPO_SCOPE_MISMATCH": return "specify the repository that owns the target";
+    case "BRANCH_NOT_FOUND": return "specify an indexed branch or run penguin index";
+    case "REVISION_MISMATCH": return "specify the matching commit or snapshot, or re-index it";
+    case "UNSUPPORTED_TARGET_KIND": return "use a symbol, endpoint, service, file, or note target";
+    case "TARGET_NOT_FOUND": return "run penguin search to find a current target ID";
   }
 }
 
@@ -110,7 +130,13 @@ export function resolveTarget(store: KnowledgeStore, input: string, options: Res
     ? store.db.prepare("SELECT file_path AS filePath,start_line AS startLine,end_line AS endLine FROM symbol_versions WHERE node_id=? AND branch_id=? AND status='fresh' ORDER BY start_line LIMIT 1").get(nodeId, options.revision.branchId) as { filePath: string | null; startLine: number | null; endLine: number | null } | undefined
     : store.db.prepare("SELECT file_path AS filePath,start_line AS startLine,end_line AS endLine FROM symbol_versions WHERE node_id=? AND status='fresh' ORDER BY start_line LIMIT 1").get(nodeId) as { filePath: string | null; startLine: number | null; endLine: number | null } | undefined;
   if (nodeType === "symbol" && !version) {
-    throw new TargetResolutionError("TARGET_STALE", `target is indexed but has no fresh version: ${requested}`, { target: requested, nodeId });
+    throw new TargetResolutionError(
+      options.revision ? "REVISION_MISMATCH" : "TARGET_STALE",
+      options.revision
+        ? `target has no fresh version in the selected revision: ${requested}`
+        : `target is indexed but has no fresh version: ${requested}`,
+      { target: requested, nodeId, ...(options.revision ? { revision: options.revision } : {}) },
+    );
   }
   return {
     nodeId,

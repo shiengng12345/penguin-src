@@ -7,7 +7,7 @@ export interface McpStatusSnapshot {
 }
 
 export interface McpHealthSnapshot {
-  initializeHealthy: boolean;
+  initializeHealthy: boolean | null;
   clientRestartRequired: boolean | null;
   runtimeOutdated: boolean | null;
 }

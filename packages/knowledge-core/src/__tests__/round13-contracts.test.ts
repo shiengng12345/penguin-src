@@ -8,6 +8,8 @@ import {
   affectedByNode,
   deadCode,
   resolveGrpcEndpoint,
+  resolveTarget,
+  TargetResolutionError,
 } from "../index.js";
 
 function fixture() {
@@ -100,6 +102,28 @@ test("canonical gRPC identity resolves to the same endpoint node", () => {
   const result = resolveGrpcEndpoint(store, "grpc::Round13Service.getThing");
 
   assert.deepEqual(result, { kind: "unique", nodeId: endpoint });
+  store.close();
+});
+
+test("target identity forms share one endpoint and errors carry remediation", () => {
+  const { store, endpoint } = fixture();
+  for (const target of [
+    "gRPC Round13Service.getThing",
+    "/Round13Service/getThing",
+    "Round13Service.getThing",
+    endpoint,
+    `node:${endpoint}`,
+  ]) {
+    assert.equal(resolveTarget(store, target).nodeId, endpoint, target);
+  }
+
+  assert.throws(
+    () => resolveTarget(store, "missing-round13-target"),
+    (error: unknown) => error instanceof TargetResolutionError
+      && error.code === "TARGET_NOT_FOUND"
+      && typeof error.details.remediation === "string"
+      && error.retryable === false,
+  );
   store.close();
 });
 
