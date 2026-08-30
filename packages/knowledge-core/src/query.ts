@@ -5,6 +5,162 @@ import type { RevisionContext } from "./revision.js";
 import { legacyRevisionScope } from "./revision-scope.js";
 import { openRevisionView } from "./revision-view.js";
 
+export type EvidenceCompleteness = "complete" | "lower_bound" | "partial" | "unknown";
+export type EvidenceProofStatus = "proven" | "not_proven" | "candidate" | "unresolved";
+
+export interface EvidenceEnvelope {
+  scope: Record<string, unknown> | null;
+  revision: RevisionContext | null;
+  freshness: {
+    status: "fresh" | "dirty" | "stale" | "unknown";
+    indexedCommit: string | null;
+    headCommit: string | null;
+    dirtyFileCount: number | null;
+  };
+  coverage: {
+    discovered: number;
+    admitted: number;
+    excluded: number;
+    failed: number;
+    stale: number;
+    unresolvedReferences: number;
+  };
+  completeness: EvidenceCompleteness;
+  proofStatus: EvidenceProofStatus;
+  candidateCount: number;
+  returnedCount: number;
+  truncated: boolean;
+  cursor: string | null;
+}
+
+export interface UnresolvedReferenceCoverageRow {
+  repoId: string;
+  branchId: string;
+  filePath: string;
+  revisionId: string;
+  resolved: number;
+  total: number;
+  unresolved: number;
+  updatedAt: string;
+}
+
+/** Read the revision-scoped reference-resolution ledger without requiring a
+ * caller to know the SQLite table layout. Old databases return an empty list
+ * until their additive schema is opened once. */
+export function readUnresolvedReferenceCoverage(
+  store: KnowledgeStore,
+  filters: { repoId?: string; branchId?: string; filePath?: string; revisionId?: string } = {},
+): UnresolvedReferenceCoverageRow[] {
+  try {
+    const where: string[] = [];
+    const params: string[] = [];
+    for (const [column, value] of [
+      ["repo_id", filters.repoId],
+      ["branch_id", filters.branchId],
+      ["file_path", filters.filePath],
+      ["revision_id", filters.revisionId],
+    ] as const) {
+      if (value !== undefined) { where.push(`${column}=?`); params.push(value); }
+    }
+    const rows = store.db.prepare(`
+      SELECT repo_id AS repoId, branch_id AS branchId, file_path AS filePath,
+             revision_id AS revisionId, resolved, total, total-resolved AS unresolved,
+             updated_at AS updatedAt
+        FROM unresolved_reference_coverage
+       ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+       ORDER BY repo_id, branch_id, file_path, revision_id
+    `).all(...params) as UnresolvedReferenceCoverageRow[];
+    return rows;
+  } catch {
+    return [];
+  }
+}
+
+function coverageForEvidence(store: KnowledgeStore, repoId?: string, branchId?: string, revisionId?: string): EvidenceEnvelope["coverage"] {
+  const row = (repoId
+    ? store.db.prepare("SELECT COUNT(*) AS discovered, COALESCE(SUM(coverage_status='admitted'),0) AS admitted, COALESCE(SUM(coverage_status<>'admitted'),0) AS excluded, COALESCE(SUM(coverage_status='failed'),0) AS failed, COALESCE(SUM(coverage_status='stale'),0) AS stale FROM coverage_records WHERE repo_id=?").get(repoId)
+    : store.db.prepare("SELECT COUNT(*) AS discovered, COALESCE(SUM(coverage_status='admitted'),0) AS admitted, COALESCE(SUM(coverage_status<>'admitted'),0) AS excluded, COALESCE(SUM(coverage_status='failed'),0) AS failed, COALESCE(SUM(coverage_status='stale'),0) AS stale FROM coverage_records").get()) as { discovered: number; admitted: number; excluded: number; failed: number; stale: number };
+  const unresolved = readUnresolvedReferenceCoverage(store, { repoId, branchId, revisionId })
+    .reduce((sum, item) => sum + Math.max(0, Number(item.unresolved) || 0), 0);
+  return {
+    discovered: Number(row?.discovered ?? 0),
+    admitted: Number(row?.admitted ?? 0),
+    excluded: Number(row?.excluded ?? 0),
+    failed: Number(row?.failed ?? 0),
+    stale: Number(row?.stale ?? 0),
+    unresolvedReferences: unresolved,
+  };
+}
+
+export function buildEvidenceEnvelope(
+  store: KnowledgeStore,
+  options: {
+    repoId?: string;
+    branchId?: string;
+    revision?: RevisionContext;
+    scope?: Record<string, unknown> | null;
+    completeness: EvidenceCompleteness;
+    proofStatus: EvidenceProofStatus;
+    candidateCount: number;
+    returnedCount: number;
+    truncated?: boolean;
+    cursor?: string | null;
+    coverageGaps?: string[];
+  },
+): EvidenceEnvelope {
+  const branchId = options.branchId ?? options.revision?.branchId;
+  const trust = branchId ? trustEnvelopeForBranch(store, branchId) : null;
+  const coverage = coverageForEvidence(store, options.repoId ?? options.revision?.repoId, branchId, options.revision?.snapshotId);
+  return {
+    scope: options.scope ?? (options.repoId || branchId ? { ...(options.repoId ? { repoId: options.repoId } : {}), ...(branchId ? { branchId } : {}) } : null),
+    revision: options.revision ?? null,
+    freshness: trust ? {
+      status: trust.stale ? "stale" : trust.worktreeState === "dirty" ? "dirty" : trust.worktreeState === "unknown" ? "unknown" : "fresh",
+      indexedCommit: trust.indexedCommit,
+      headCommit: trust.headCommit,
+      dirtyFileCount: trust.dirtyFiles.length,
+    } : { status: "unknown", indexedCommit: null, headCommit: null, dirtyFileCount: null },
+    coverage,
+    completeness: options.completeness,
+    proofStatus: options.proofStatus,
+    candidateCount: Math.max(0, options.candidateCount),
+    returnedCount: Math.max(0, options.returnedCount),
+    truncated: options.truncated === true,
+    cursor: options.cursor ?? null,
+  };
+}
+
+export function withEvidenceEnvelope<T extends Record<string, unknown>>(
+  store: KnowledgeStore,
+  result: T,
+  options: Parameters<typeof buildEvidenceEnvelope>[1],
+): T & { evidence: EvidenceEnvelope } {
+  return { ...result, evidence: buildEvidenceEnvelope(store, options) };
+}
+
+/** Expose the common evidence contract at the response root as well as under
+ * `evidence`. The root fields keep older CLI/MCP consumers interoperable while
+ * the nested object remains the canonical grouped envelope. */
+function publicEvidenceFields(
+  store: KnowledgeStore,
+  result: object,
+  options: Parameters<typeof buildEvidenceEnvelope>[1],
+): Record<string, unknown> {
+  const evidence = buildEvidenceEnvelope(store, options);
+  return {
+    ...result,
+    evidence,
+    scope: evidence.scope,
+    revision: evidence.revision,
+    freshness: evidence.freshness,
+    coverage: evidence.coverage,
+    proofStatus: evidence.proofStatus,
+    candidateCount: evidence.candidateCount,
+    returnedCount: evidence.returnedCount,
+    cursor: evidence.cursor,
+  };
+}
+
 // The single query implementation shared by MCP tools, the CLI, and the UI
 // (§8). Results carry provenance/staleness where applicable (§3.3/§4.4).
 
@@ -186,14 +342,18 @@ export function resolveSymbolMatches(
   idOrKey: string,
   scope?: SymbolCandidateScope,
 ): SymbolResolution {
-  const raw = idOrKey.startsWith("symbol:") ? idOrKey.slice("symbol:".length) : idOrKey;
+  // Public continuation identifiers are emitted as `node:<id>` (symbols may
+  // also be suggested as `symbol:<id>`). Normalize both forms here so every
+  // graph/context command shares the same round-trip contract.
+  const raw = normalizeNodeSelector(idOrKey);
   // Honour an explicit repo on every path, not just the name fallback: a direct
   // identity hit in a DIFFERENT repo is exactly the silent wrong-answer case —
   // `explore accumulatePlayerDeposit --repo FPMS-NT` came back with another
   // repo's symbol, empty callers and callees, and nothing but the trust block
   // to say so.
   const inScope = (nodeId: string): boolean =>
-    !scope?.repoId || store.getNode(nodeId)?.repo_id === scope.repoId;
+    !scope?.repoId || store.getNode(nodeId)?.repo_id === scope.repoId
+      || ["endpoint", "service"].includes(store.getNode(nodeId)?.node_type ?? "");
   const direct = store.getNode(raw);
   if (direct) {
     if (inScope(raw)) return { kind: "unique", nodeId: raw };
@@ -201,6 +361,43 @@ export function resolveSymbolMatches(
   }
   const r = store.resolveIdentity(raw);
   if (r && inScope(r.nodeId)) return { kind: "unique", nodeId: r.nodeId };
+  // A path-qualified target is the safest form for common method names.  The
+  // path is repo-relative and the symbol is resolved only among versions in
+  // that file, so a same-named symbol in another app/repository cannot win by
+  // accident.  Keep the syntax deliberately small: `path#symbol` and
+  // `repo:path#symbol` (the latter is handled by the repo-prefix branch below).
+  const hash = raw.lastIndexOf("#");
+  if (hash > 0 && hash < raw.length - 1) {
+    let filePath = raw.slice(0, hash).replaceAll("\\", "/").replace(/^\.\//, "");
+    let pathRepoId = scope?.repoId;
+    const colon = filePath.indexOf(":");
+    if (colon > 0) {
+      const repoIds = store.resolveRepoIds(filePath.slice(0, colon));
+      if (repoIds.length === 1) {
+        pathRepoId = pathRepoId && pathRepoId !== repoIds[0] ? "__path_repo_mismatch__" : repoIds[0];
+        filePath = filePath.slice(colon + 1);
+      }
+    }
+    const symbolName = raw.slice(hash + 1);
+    const pathRows = store.db.prepare(
+      `SELECT DISTINCT sv.node_id AS id
+         FROM symbol_versions sv
+         JOIN nodes n ON n.id = sv.node_id
+        WHERE sv.file_path=? AND sv.status='fresh'
+          AND (n.title=? OR n.identity_key LIKE ? OR n.identity_key LIKE ?)
+          ${pathRepoId ? "AND n.repo_id=?" : ""}
+        ORDER BY sv.start_line`,
+    ).all(...(pathRepoId
+      ? [filePath, symbolName, `%::${symbolName}`, `%.${symbolName}`, pathRepoId]
+      : [filePath, symbolName, `%::${symbolName}`, `%.${symbolName}`])) as { id: string }[];
+    const uniqueIds = [...new Set(pathRows.map((row) => row.id))];
+    if (uniqueIds.length === 1) return { kind: "unique", nodeId: uniqueIds[0] };
+    if (uniqueIds.length > 1) {
+      const candidates = uniqueIds.slice(0, MAX_AMBIGUOUS_CANDIDATES).map((nodeId) => symbolCandidateOf(store, nodeId, scope));
+      return { kind: "ambiguous", candidates };
+    }
+    return { kind: "none" };
+  }
   // Human-friendly repo prefix: `auth::Class.method` or
   // `auth::src/file.ts::Class.method`. Repo ids are random on a fresh DB, so
   // prompts, benchmarks and notes must not need to preserve `repo_<uuid>`.
@@ -257,6 +454,16 @@ export function resolveSymbolMatches(
   const located = candidates.filter((candidate) => candidate.filePath);
   if (located.length === 1) return { kind: "unique", nodeId: located[0].nodeId };
   return { kind: "ambiguous", candidates };
+}
+
+/** Public graph selectors use node:<id>; keep the legacy symbol alias readable. */
+export function normalizeNodeSelector(value: string): string {
+  const trimmed = value.trim();
+  return trimmed.startsWith("node:")
+    ? trimmed.slice("node:".length)
+    : trimmed.startsWith("symbol:")
+      ? trimmed.slice("symbol:".length)
+      : trimmed;
 }
 
 // Shared renderer for an ambiguous SymbolResolution — used by `context`/`node`
@@ -516,6 +723,13 @@ export interface GraphResult {
    * everything. Without it, `callers` on a 450-caller symbol returned exactly
    * 100 rows that looked like the whole answer. */
   truncated?: { limit: number; hint: string };
+  /** The returned relationship count is exact only when traversal did not hit
+   * its safety limit. A capped list must never be read as a complete impact
+   * or caller answer. */
+  candidateCount?: number;
+  totalIsExact?: boolean;
+  completeness?: "complete" | "lower_bound" | "partial" | "unknown";
+  coverageGaps?: string[];
   events?: Array<{ eventType: string; ts: string; origin: string; method: string; nodeId: string | null }>;
   diagnostics?: QueryDiagnostics;
   revision?: RevisionContext;
@@ -524,6 +738,7 @@ export interface GraphResult {
   // FlowResult.scopeFallback). Matters most for the legacy graph verbs
   // (callers/calls/impact/backlinks/recent) that stay unscoped by design.
   scopeFallback?: { branchId: string };
+  evidence?: EvidenceEnvelope;
 }
 
 function nodeBrief(store: KnowledgeStore, id: string): ContextBrief {
@@ -790,6 +1005,9 @@ export interface QueryDiagnostics {
     outgoingByType: Record<string, number>;
     unresolvedReferenceCount: number;
   };
+  candidateCount: number;
+  totalIsExact: boolean;
+  completeness: "complete" | "lower_bound" | "partial" | "unknown";
   coverageGaps: string[];
 }
 
@@ -831,7 +1049,13 @@ function buildQueryDiagnostics(
   requested: string,
   resolvedNodeId: string | null,
   resultCount: number,
-  options?: { branchId?: string; assemblyError?: string | null },
+  options?: {
+    branchId?: string;
+    assemblyError?: string | null;
+    limit?: number;
+    completeness?: QueryDiagnostics["completeness"];
+    coverageGaps?: string[];
+  },
 ): QueryDiagnostics {
   const repoCount = (
     store.db.prepare("SELECT COUNT(*) AS count FROM repos").get() as { count: number }
@@ -873,7 +1097,16 @@ function buildQueryDiagnostics(
       }
     : null;
   const coverageGaps = new Set(trust?.coverageGaps ?? []);
-  coverageGaps.add("unresolved_reference_counts_not_persisted");
+  const coverageColumns = new Set((store.db.prepare("PRAGMA table_info(coverage_records)").all() as Array<{ name: string }>).map((column) => column.name));
+  const unresolvedReferenceCount = resolvedNodeId && branchId
+    ? coverageColumns.has("unresolved_references")
+      ? Number((store.db.prepare("SELECT COALESCE(SUM(unresolved_references), 0) AS n FROM coverage_records WHERE repo_id=?").get(node?.repo_id) as { n: number } | undefined)?.n ?? 0)
+      : Number((store.db.prepare("SELECT COALESCE(total - resolved, 0) AS n FROM coverage_layers WHERE repo_id=? AND branch_id=? AND layer='references'").get(node?.repo_id, branchId) as { n: number } | undefined)?.n ?? 0)
+    : 0;
+  if (!resolvedNodeId || !branchId) coverageGaps.add("unresolved_reference_scope_unavailable");
+  else if (unresolvedReferenceCount > 0) coverageGaps.add("unresolved_references_present");
+  for (const gap of options?.coverageGaps ?? []) coverageGaps.add(gap);
+  const totalIsExact = options?.limit === undefined ? false : resultCount < options.limit;
   return {
     resolutionStatus,
     resultStatus: resolutionStatus !== "resolved"
@@ -895,8 +1128,12 @@ function buildQueryDiagnostics(
       outgoingByType: resolvedNodeId
         ? edgeCountsByType(store, resolvedNodeId, "outgoing")
         : {},
-      unresolvedReferenceCount: 0,
+      unresolvedReferenceCount,
     },
+    candidateCount: resultCount,
+    totalIsExact,
+    completeness: options?.completeness
+      ?? (resolutionStatus !== "resolved" ? "unknown" : totalIsExact ? "complete" : "partial"),
     coverageGaps: [...coverageGaps],
   };
 }
@@ -958,22 +1195,43 @@ export function exploreGraph(
   const graphResult = (
     nodes: GraphResult["nodes"],
     events?: GraphResult["events"],
-  ): GraphResult => ({
-    mode,
-    nodes,
-    ...(events ? { events } : {}),
+  ): GraphResult => {
+    const result = {
+      mode,
+      nodes,
+      ...(events ? { events } : {}),
     // A result exactly at the limit is indistinguishable from a complete one
     // unless it says so. Every caller of this shape was reading a capped list
     // as the full answer.
     ...(nodes.length >= limit
       ? { truncated: { limit, hint: `showing ${limit} of possibly more — pass --limit to raise the cap` } }
       : {}),
+    candidateCount: nodes.length,
+    totalIsExact: nodes.length < limit,
+    completeness: nodes.length >= limit ? "partial" : "lower_bound",
+    coverageGaps: nodes.length >= limit ? ["result_limit_reached"] : ["unresolved_reference_counts_not_persisted"],
     diagnostics: buildQueryDiagnostics(store, nodeOrKey, nodeId, nodes.length, {
       branchId: options?.branchId,
+      limit,
+      completeness: nodes.length >= limit ? "partial" : "lower_bound",
+      coverageGaps: nodes.length >= limit ? ["result_limit_reached"] : [],
     }),
     revision: options?.revision,
-    ...(scopeFallback ? { scopeFallback } : {}),
-  });
+      ...(scopeFallback ? { scopeFallback } : {}),
+    } as GraphResult;
+    result.evidence = buildEvidenceEnvelope(store, {
+      repoId: options?.repoId ?? (nodeId ? store.getNode(nodeId)?.repo_id ?? undefined : undefined),
+      branchId: options?.branchId,
+      revision: options?.revision,
+      completeness: nodes.length >= limit ? "partial" : nodes.length > 0 ? "lower_bound" : nodeId ? "partial" : "unknown",
+      proofStatus: nodes.length > 0 ? "proven" : "not_proven",
+      candidateCount: nodes.length,
+      returnedCount: nodes.length,
+      truncated: nodes.length >= limit,
+      cursor: null,
+    });
+    return result;
+  };
 
   // Trust filter (§3.3/§11): default traversal only follows confirmed edges —
   // unconfirmed AI suggestions (status='suggested') and rejected edges are out.
@@ -1626,6 +1884,15 @@ export interface ContextPack {
   // query silently answered against the repo's live branch instead (see
   // FlowResult.scopeFallback).
   scopeFallback?: { branchId: string };
+  evidence?: EvidenceEnvelope;
+  scope?: Record<string, unknown> | null;
+  revision?: RevisionContext | null;
+  freshness?: EvidenceEnvelope["freshness"];
+  coverage?: EvidenceEnvelope["coverage"];
+  proofStatus?: EvidenceProofStatus;
+  candidateCount?: number;
+  returnedCount?: number;
+  cursor?: string | null;
 }
 
 function briefsFrom(store: KnowledgeStore, rows: Array<{ id: string }>): ContextBrief[] {
@@ -1647,6 +1914,17 @@ export function buildContextPack(
   options?: { branchId?: string; repoId?: string; revision?: RevisionContext; limit?: number } & PackSourceOptions,
 ): ContextPack {
   const limit = options?.limit ?? 25;
+  const attach = (result: ContextPack): ContextPack => publicEvidenceFields(store, result, {
+    repoId: options?.repoId,
+    branchId: options?.branchId,
+    revision: options?.revision,
+    completeness: result.completeness.status,
+    proofStatus: result.focus && (result.callers.length + result.calls.length > 0) ? "proven" : "not_proven",
+    candidateCount: result.callers.length + result.calls.length,
+    returnedCount: result.callers.length + result.calls.length,
+    truncated: result.truncated.length > 0,
+    cursor: null,
+  }) as unknown as ContextPack;
   const empty: ContextPack = {
     target, trust: null, focus: null, callers: [], calls: [], renderedBy: [], renders: [],
     invokedDynamicallyBy: [], invokesDynamic: [], remoteCalls: [], invokedBy: [],
@@ -1660,10 +1938,10 @@ export function buildContextPack(
   try {
     resolution = resolveSymbolMatches(store, target, options);
   } catch (e) {
-    return { ...empty, assemblyError: (e as Error).message };
+    return attach({ ...empty, assemblyError: (e as Error).message });
   }
-  if (resolution.kind === "none") return empty;
-  if (resolution.kind === "ambiguous") return { ...empty, ambiguous: resolution.candidates };
+  if (resolution.kind === "none") return attach(empty);
+  if (resolution.kind === "ambiguous") return attach({ ...empty, ambiguous: resolution.candidates });
   const focusId = resolution.nodeId;
 
   // The symbol DID resolve uniquely at this point — any throw from here on is
@@ -1671,9 +1949,9 @@ export function buildContextPack(
   // etc.), NOT "not found". Surfacing it as assemblyError keeps it from being
   // silently indistinguishable from a genuine zero-match.
   try {
-    return buildContextPackBody(store, target, focusId, limit, options);
+    return attach(buildContextPackBody(store, target, focusId, limit, options));
   } catch (e) {
-    return { ...empty, assemblyError: (e as Error).message };
+    return attach({ ...empty, assemblyError: (e as Error).message });
   }
 }
 
@@ -2005,6 +2283,17 @@ export interface FlowResult {
   // consumer should know it got an implicit "whatever's live" answer, not a
   // revision it asked for (§ Phase 1 trust plumbing).
   scopeFallback?: { branchId: string };
+  evidence?: EvidenceEnvelope;
+  scope?: Record<string, unknown> | null;
+  revision?: RevisionContext | null;
+  freshness?: EvidenceEnvelope["freshness"];
+  coverage?: EvidenceEnvelope["coverage"];
+  completeness?: EvidenceCompleteness;
+  proofStatus?: EvidenceProofStatus;
+  candidateCount?: number;
+  returnedCount?: number;
+  truncated?: boolean;
+  cursor?: string | null;
 }
 
 function emptyFlowEnrichment(): Pick<FlowResult, "relatedTests" | "linkedKnowledge"> {
@@ -2180,16 +2469,58 @@ export type GrpcResolution =
   | { kind: "not_found"; attemptedKey: string }; // looked like a route, but no such endpoint is indexed
 
 export function resolveGrpcEndpoint(store: KnowledgeStore, input: string): GrpcResolution {
-  const raw = input.trim();
+  // `endpoints` renders the human-facing title as `gRPC Service.Method`,
+  // while the resolver historically accepted only `Service.Method` or the
+  // canonical `grpc::Service.method` identity. Accept the rendered title so
+  // endpoint inventory can feed directly into flow without a normalization
+  // detour.
+  const rawInput = input.trim();
+  const selector = normalizeNodeSelector(rawInput);
+  if (selector !== rawInput) {
+    const node = store.getNode(selector);
+    return node?.node_type === "endpoint"
+      ? { kind: "unique", nodeId: selector }
+      : { kind: "not_grpc" };
+  }
+  const raw = rawInput.replace(/^gRPC\s+/i, "");
   const lookup = (service: string, method: string): GrpcResolution => {
     if (!service || !method) return { kind: "not_grpc" };
     const key = `grpc::${service}.${method.toLowerCase()}`;
-    const id = store.findNodeIdByIdentity(key);
-    return id ? { kind: "unique", nodeId: id } : { kind: "not_found", attemptedKey: key };
+    const exact = store.findNodeIdByIdentity(key);
+    if (exact) return { kind: "unique", nodeId: exact };
+    // Older indexes and generated-proto metadata occasionally preserve the
+    // method's original casing or a package-qualified service. Endpoint
+    // identity is case-insensitive at the route boundary; do the final match
+    // against endpoint rows instead of turning a valid route into a silent
+    // flow/context miss.
+    const rows = store.db.prepare(
+      `SELECT id, identity_key AS identityKey, title
+         FROM nodes
+        WHERE node_type='endpoint'
+          AND (LOWER(identity_key)=LOWER(?) OR LOWER(title)=LOWER(?)
+               OR LOWER(identity_key) LIKE LOWER(?))
+        ORDER BY id`,
+    ).all(key, `${service}.${method}`, `%${method.toLowerCase()}`) as Array<{ id: string; identityKey: string; title: string }>;
+    const matches = rows.filter((row) => {
+      const identity = row.identityKey.startsWith("grpc::") ? row.identityKey.slice("grpc::".length) : row.identityKey;
+      const split = identity.lastIndexOf(".");
+      if (split < 1) return false;
+      const indexedService = identity.slice(0, split);
+      const indexedMethod = identity.slice(split + 1);
+      return indexedMethod.toLowerCase() === method.toLowerCase()
+        && (indexedService.toLowerCase() === service.toLowerCase()
+          || indexedService.toLowerCase().endsWith(`.${service.toLowerCase()}`));
+    });
+    if (matches.length === 1) return { kind: "unique", nodeId: matches[0].id };
+    if (matches.length > 1) return { kind: "ambiguous", candidates: matches.map((row) => symbolCandidateOf(store, row.id)) };
+    return { kind: "not_found", attemptedKey: key };
   };
 
   // 1. literal identity key: grpc::Service.method
   if (raw.startsWith("grpc::")) {
+    const body = raw.slice("grpc::".length);
+    const split = body.lastIndexOf(".");
+    if (split > 0) return lookup(body.slice(0, split), body.slice(split + 1));
     const id = store.findNodeIdByIdentity(raw);
     return id ? { kind: "unique", nodeId: id } : { kind: "not_found", attemptedKey: raw };
   }
@@ -2236,38 +2567,49 @@ export function buildFlow(
   target: string,
   options?: { branchId?: string; repoId?: string; revision?: RevisionContext; depth?: number; limit?: number },
 ): FlowResult {
+  const attach = (result: FlowResult): FlowResult => publicEvidenceFields(store, result, {
+    repoId: options?.repoId,
+    branchId: options?.branchId,
+    revision: options?.revision,
+    completeness: result.root ? "partial" : "unknown",
+    proofStatus: result.steps.length > 1 ? "proven" : "not_proven",
+    candidateCount: result.steps.length,
+    returnedCount: result.steps.length,
+    truncated: false,
+    cursor: null,
+  }) as unknown as FlowResult;
   const grpc = resolveGrpcEndpoint(store, target);
   let focus: string | null = null;
   let attemptedKey: string | null = null;
   if (grpc.kind === "unique") {
     focus = grpc.nodeId;
   } else if (grpc.kind === "ambiguous") {
-    return {
+    return attach({
       target, trust: null, root: null, steps: [], ...emptyFlowEnrichment(), ambiguous: grpc.candidates,
       diagnostic: {
         reason: "ambiguous",
         message: `"${target}" matches ${grpc.candidates.length} gRPC endpoints across different services — specify one.`,
         suggestions: grpc.candidates.map((c) => `penguin flow symbol:${c.nodeId}`),
       },
-    };
+    });
   } else {
     if (grpc.kind === "not_found") attemptedKey = grpc.attemptedKey;
     const sym = resolveSymbolMatches(store, target, options);
     if (sym.kind === "unique") {
       focus = sym.nodeId;
     } else if (sym.kind === "ambiguous") {
-      return {
+      return attach({
         target, trust: null, root: null, steps: [], ...emptyFlowEnrichment(), ambiguous: sym.candidates,
         diagnostic: {
           reason: "ambiguous",
           message: `"${target}" matches ${sym.candidates.length} symbols — specify one.`,
           suggestions: sym.candidates.map((c) => `penguin flow symbol:${c.nodeId}`),
         },
-      };
+      });
     }
   }
   if (!focus) {
-    return {
+    return attach({
       target, trust: null, root: null, steps: [], ...emptyFlowEnrichment(),
       diagnostic: {
         reason: "not_indexed",
@@ -2275,7 +2617,7 @@ export function buildFlow(
           ? `No symbol found for "${target}", and no gRPC endpoint "${attemptedKey}" is indexed. Check the service/method spelling, or that the provider repo has been indexed.`
           : `"${target}" is not indexed — no symbol, note, or gRPC endpoint matches this name.`,
       },
-    };
+    });
   }
   const depthCap = options?.depth ?? 5;
   const limit = options?.limit ?? 60;
@@ -2301,7 +2643,7 @@ export function buildFlow(
       limit,
       snapshotRevision: options.revision,
     });
-    return { target, trust: options.revision.branchId ? trustEnvelopeForBranch(store, options.revision.branchId) : null, root, steps, ...enrichment, ...(steps.length === 1 ? { diagnostic: { reason: "no_outgoing_edges" as const, message: `"${root.title}" is indexed but has no outgoing edges in the selected revision.` } } : {}) };
+    return attach({ target, trust: options.revision.branchId ? trustEnvelopeForBranch(store, options.revision.branchId) : null, root, steps, ...enrichment, ...(steps.length === 1 ? { diagnostic: { reason: "no_outgoing_edges" as const, message: `"${root.title}" is indexed but has no outgoing edges in the selected revision.` } } : {}) });
   }
   const explicitBranchId = revisionBranchId(options);
   const branchId = explicitBranchId ?? liveBranchOf(store, focus);
@@ -2355,7 +2697,7 @@ export function buildFlow(
       : [];
     const defines = fileEdges.find((row) => row.type === "defines")?.n ?? 0;
     const imports = fileEdges.find((row) => row.type === "imports")?.n ?? 0;
-    return {
+    return attach({
       target, trust: trustEnvelopeForBranch(store, branchId), root, steps, ...enrichment,
       diagnostic: {
         reason: isEndpoint ? "endpoint_no_handler" : "no_outgoing_edges",
@@ -2366,9 +2708,9 @@ export function buildFlow(
             : `"${root.title}" is indexed but has no outgoing calls/references — it may be a terminal/leaf symbol, or its callees aren't indexed.`,
       },
       ...(scopeFallback ? { scopeFallback } : {}),
-    };
+    });
   }
-  return { target, trust: trustEnvelopeForBranch(store, branchId), root, steps, ...enrichment, ...(scopeFallback ? { scopeFallback } : {}) };
+  return attach({ target, trust: trustEnvelopeForBranch(store, branchId), root, steps, ...enrichment, ...(scopeFallback ? { scopeFallback } : {}) });
 }
 
 function nodeBriefStep(store: KnowledgeStore, id: string, revisionId = "live") {
@@ -2796,7 +3138,67 @@ export interface AffectedResult {
   impacted: ContextBrief[];
   tests: ContextBrief[];
   routes: string[];
+  target?: { requested: string; nodeId: string; nodeType: string };
+  candidateCount?: number;
+  totalIsExact?: boolean;
+  completeness?: "complete" | "lower_bound" | "partial" | "unknown";
+  coverageGaps?: string[];
+  evidence?: EvidenceEnvelope;
+  scope?: Record<string, unknown> | null;
+  revision?: RevisionContext | null;
+  freshness?: EvidenceEnvelope["freshness"];
+  coverage?: EvidenceEnvelope["coverage"];
+  proofStatus?: EvidenceProofStatus;
+  returnedCount?: number;
+  cursor?: string | null;
 }
+
+/**
+ * Node-targeted blast radius. `affected <file>...` and `affected node:<id>`
+ * are deliberately separate contracts: a node target must never be treated
+ * as a literal filename and reported as a successful empty result.
+ */
+export function affectedByNode(
+  store: KnowledgeStore,
+  requested: string,
+  options?: { depth?: number; limit?: number; revision?: RevisionContext; repoId?: string },
+): AffectedResult | null {
+  const resolution = resolveSymbolMatches(store, requested, options?.repoId ? { repoId: options.repoId } : undefined);
+  if (resolution.kind !== "unique") return null;
+  const target = store.getNode(resolution.nodeId);
+  if (!target) return null;
+  const location = store.db.prepare(
+    "SELECT file_path AS filePath FROM symbol_versions WHERE node_id=? AND status='fresh' ORDER BY start_line LIMIT 1",
+  ).get(resolution.nodeId) as { filePath: string | null } | undefined;
+  const graph = exploreGraph(store, "impact", resolution.nodeId, {
+    depth: options?.depth,
+    limit: options?.limit,
+    repoId: options?.repoId,
+    revision: options?.revision,
+  });
+  const ids = [resolution.nodeId, ...graph.nodes.map((node) => node.nodeId)];
+  const placeholders = ids.map(() => "?").join(",");
+  const related = ids.length > 0
+    ? store.db.prepare(
+        `SELECT DISTINCT src AS id, edge_type AS edgeType FROM edges
+           WHERE dst IN (${placeholders}) AND status='active' AND edge_type IN ('tests','handles')`,
+      ).all(...ids) as Array<{ id: string; edgeType: string }>
+    : [];
+  const brief = (id: string): ContextBrief => nodeBrief(store, id);
+  return {
+    files: location?.filePath ? [location.filePath] : [],
+    changed: [brief(resolution.nodeId)],
+    impacted: graph.nodes,
+    tests: related.filter((row) => row.edgeType === "tests").map((row) => brief(row.id)),
+    routes: related.filter((row) => row.edgeType === "handles").map((row) => brief(row.id).title),
+    target: { requested, nodeId: resolution.nodeId, nodeType: target.node_type },
+    candidateCount: graph.candidateCount ?? graph.nodes.length,
+    totalIsExact: graph.totalIsExact ?? false,
+    completeness: graph.completeness ?? "unknown",
+    coverageGaps: graph.coverageGaps ?? ["impact_edges_are_static_only"],
+  };
+}
+
 export function affectedByFiles(
   store: KnowledgeStore,
   files: string[],
@@ -2804,7 +3206,17 @@ export function affectedByFiles(
 ): AffectedResult {
   const depth = options?.depth ?? 3;
   const limit = options?.limit ?? 200;
-  if (files.length === 0) return { files, changed: [], impacted: [], tests: [], routes: [] };
+  const attach = (result: AffectedResult): AffectedResult => publicEvidenceFields(store, result, {
+    branchId: options?.branchId,
+    revision: options?.revision,
+    completeness: (result.changed.length + result.impacted.length) >= limit ? "partial" : "lower_bound",
+    proofStatus: result.changed.length + result.impacted.length > 0 ? "candidate" : "not_proven",
+    candidateCount: result.changed.length + result.impacted.length,
+    returnedCount: result.changed.length + result.impacted.length,
+    truncated: result.changed.length + result.impacted.length >= limit,
+    cursor: null,
+  }) as unknown as AffectedResult;
+  if (files.length === 0) return attach({ files, changed: [], impacted: [], tests: [], routes: [] });
   if (options?.revision && !options.revision.snapshotId.startsWith("legacy:")) {
     const view = openRevisionView(store, options.revision);
     const changedIds = view.symbolVersions().filter((row) => files.includes(row.filePath)).map((row) => row.nodeId);
@@ -2816,7 +3228,7 @@ export function affectedByFiles(
       frontier = next;
     }
     const brief = (ids: string[]) => ids.map((id) => { const b = nodeBrief(store, id); return { nodeId: b.nodeId, title: b.title, nodeType: b.nodeType }; });
-    return { files, changed: brief(changedIds), impacted: brief([...seen].filter((id) => !changedIds.includes(id))), tests: [], routes: [] };
+    return attach({ files, changed: brief(changedIds), impacted: brief([...seen].filter((id) => !changedIds.includes(id))), tests: [], routes: [] });
   }
   const ph = files.map(() => "?").join(",");
   const branchId = revisionBranchId(options);
@@ -2850,13 +3262,13 @@ export function affectedByFiles(
     : [];
 
   const brief = (ids: string[]): ContextBrief[] => ids.map((id) => { const b = nodeBrief(store, id); return { nodeId: b.nodeId, title: b.title, nodeType: b.nodeType }; });
-  return {
+  return attach({
     files,
     changed: brief(changedIds),
     impacted: brief(impactedIds),
     tests: brief(tests.map((t) => t.id)),
     routes: routes.map((r) => nodeBrief(store, r.id).title),
-  };
+  });
 }
 
 // —— architecture: one-call project overview (AI onboarding, § parity) ——
@@ -2946,22 +3358,23 @@ export interface CommunityResult {
 // iterated to convergence. Deterministic (smallest-label tie-break) so repeated
 // runs agree. Returns the largest communities, each with its highest-degree
 // "god node" first and the repos it spans.
-export function communities(store: KnowledgeStore, opts: { limit?: number; minSize?: number } = {}): CommunityResult {
+export function communities(store: KnowledgeStore, opts: { limit?: number; minSize?: number; repoId?: string } = {}): CommunityResult {
   const limit = opts.limit ?? 20;
   const minSize = opts.minSize ?? 3;
+  const edgeScope = opts.repoId ? " AND (src IN (SELECT id FROM nodes WHERE repo_id=?) OR dst IN (SELECT id FROM nodes WHERE repo_id=?))" : "";
   const rawEdges = store.db
     .prepare(
-      "SELECT src, dst FROM edges WHERE status='active' AND dst IS NOT NULL AND edge_type IN ('calls','references','imports','defines')",
+      `SELECT src, dst FROM edges WHERE status='active' AND dst IS NOT NULL AND edge_type IN ('calls','references','imports','defines')${edgeScope}`,
     )
-    .all() as { src: string; dst: string }[];
+    .all(...(opts.repoId ? [opts.repoId, opts.repoId] : [])) as { src: string; dst: string }[];
   const rawDegree = new Map<string, number>();
   for (const edge of rawEdges) {
     rawDegree.set(edge.src, (rawDegree.get(edge.src) ?? 0) + 1);
     rawDegree.set(edge.dst, (rawDegree.get(edge.dst) ?? 0) + 1);
   }
   const nodeRows = store.db
-    .prepare("SELECT id, title, repo_id AS repoId FROM nodes")
-    .all() as Array<{ id: string; title: string; repoId: string | null }>;
+    .prepare(`SELECT id, title, repo_id AS repoId FROM nodes${opts.repoId ? " WHERE repo_id=?" : ""}`)
+    .all(...(opts.repoId ? [opts.repoId] : [])) as Array<{ id: string; title: string; repoId: string | null }>;
   const suppressedIds = new Set(
     nodeRows
       .filter((node) => GENERIC_UTILITY_HUB_NAMES.has(node.title.toLowerCase()))
@@ -3129,14 +3542,18 @@ export interface ResponseSample {
   capturedAt: string;
 }
 
-// Resolve an endpoint node id from an id or its title (e.g. "gRPC Svc.method",
+// Resolve an endpoint node id from its public selector (node:<id>), id, title,
+// or canonical identity (e.g. "gRPC Svc.method", "grpc::Svc.method",
 // "GET /users"). Returns the raw string if no node matches (samples may be
 // keyed by a global gRPC id).
 export function resolveEndpointId(store: KnowledgeStore, endpoint: string): string {
+  const selector = normalizeNodeSelector(endpoint);
   const row = store.db
-    .prepare("SELECT id FROM nodes WHERE node_type='endpoint' AND (id=? OR title=?) LIMIT 1")
-    .get(endpoint, endpoint) as { id: string } | undefined;
-  return row?.id ?? endpoint;
+    .prepare("SELECT id FROM nodes WHERE node_type='endpoint' AND (id=? OR title=? OR identity_key=? OR id=? OR title=? OR identity_key=?) LIMIT 1")
+    .get(endpoint, endpoint, endpoint, selector, selector, selector) as { id: string } | undefined;
+  if (row?.id) return row.id;
+  const grpc = resolveGrpcEndpoint(store, endpoint);
+  return grpc.kind === "unique" ? grpc.nodeId : endpoint;
 }
 
 // Captured runtime responses for an endpoint, newest first (§P2 runtime channel).
@@ -3164,6 +3581,9 @@ export interface DeadCodeResult {
   scope: { repo: string | null; path: string | null; branch: string | null };
   /** True when the limit cut the list — the rest exists, it just was not returned. */
   truncated: boolean;
+  /** Total candidates in the selected scope, independent of page size. */
+  candidateCount: number;
+  totalIsExact: boolean;
 }
 
 export interface DeadCodeOptions {
@@ -3174,6 +3594,8 @@ export interface DeadCodeOptions {
   /** Repo-relative path prefix, e.g. "apps/promotion/src". */
   path?: string;
   branchId?: string;
+  /** Exclusive stable cursor over filePath/startLine/nodeId. */
+  after?: { filePath: string; startLine: number; nodeId: string };
 }
 
 export function deadCode(store: KnowledgeStore, options?: DeadCodeOptions): DeadCodeResult {
@@ -3193,6 +3615,8 @@ export function deadCode(store: KnowledgeStore, options?: DeadCodeOptions): Dead
         note: `no indexed repo matches "${options.repo}" — check \`penguin status\` for the indexed repo names.`,
         scope: { repo: options.repo, path: options.path ?? null, branch: options.branchId ?? null },
         truncated: false,
+        candidateCount: 0,
+        totalIsExact: true,
       };
     }
     repoId = row.id;
@@ -3220,6 +3644,19 @@ export function deadCode(store: KnowledgeStore, options?: DeadCodeOptions): Dead
     where.push("substr(sv.file_path, 1, ?) = ?");
     params.push(options.path.length, options.path);
   }
+  if (options?.after) {
+    where.push("(sv.file_path > ? OR (sv.file_path = ? AND (sv.start_line > ? OR (sv.start_line = ? AND n.id > ?))))");
+    params.push(options.after.filePath, options.after.filePath, options.after.startLine, options.after.startLine, options.after.nodeId);
+  }
+
+  const count = (store.db.prepare(
+    `SELECT COUNT(DISTINCT n.id) AS count
+       FROM nodes n
+       JOIN symbol_versions sv ON sv.node_id = n.id
+      WHERE ${where.join(" AND ")}
+        AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.dst=n.id AND e.status='active'
+                          AND e.edge_type IN ('calls','references','handles','tests'))`,
+  ).get(...params) as { count: number }).count;
 
   const rows = store.db.prepare(
     `SELECT DISTINCT n.id AS id, sv.file_path AS filePath, sv.start_line AS startLine, sv.end_line AS endLine
@@ -3279,6 +3716,8 @@ export function deadCode(store: KnowledgeStore, options?: DeadCodeOptions): Dead
       + (truncated ? ` More than ${limit} candidates exist; raise limit to see the rest.` : ""),
     scope: { repo: repoLabel, path: options?.path ?? null, branch: branchId },
     truncated,
+    candidateCount: count,
+    totalIsExact: true,
   };
 }
 

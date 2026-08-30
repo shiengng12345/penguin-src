@@ -37,6 +37,7 @@ import {
   buildContextPack,
   buildFlow,
   affectedByFiles,
+  affectedByNode,
   communities,
   deadCode,
   listTags,
@@ -62,9 +63,11 @@ import {
   SCHEMA_VERSION,
   resolveQueryScope,
   ScopeResolutionError,
+  resolveTarget,
+  HmacOperationCursorCodec,
   type ResolvedQueryScope,
 } from "@penguin/knowledge-core";
-import { CAPABILITIES, capabilityHash, listMcpRegistrations, CAPABILITY_ALIASES, canonicalInputSchema } from "@penguin/knowledge-contracts";
+import { CAPABILITIES, capabilityHash, listMcpRegistrations, CAPABILITY_ALIASES, canonicalInputSchema, normalizeKnowledgeError } from "@penguin/knowledge-contracts";
 import { analyzeRepository } from "./repository-analysis.js";
 import { preflightSearchTerms } from "./log-investigation-preflight.js";
 import { readConfig } from "./config.js";
@@ -78,6 +81,7 @@ import { ApiDocPreviewStore, buildApiDocumentation, collectDocumentationFacts, r
 import { createKnowledgeApiDocAdapter } from "../../knowledge-cli/src/api-doc-knowledge-adapter.js";
 
 const execFileAsync = promisify(execFile);
+const OPERATION_CURSOR_CODEC = new HmacOperationCursorCodec(process.env.PENGUIN_CURSOR_SECRET ?? "penguin-operation-cursor-v1");
 
 export interface KnowledgeToolOptions {
   /** Host-owned adapter; credentials are resolved outside the MCP process. */
@@ -174,6 +178,7 @@ const CANONICAL_HANDLER_ALIASES: Record<string, string> = {
   knowledge_communities: "find_communities",
   knowledge_dead_code: "find_dead_code",
   knowledge_coverage: "knowledge_coverage",
+  knowledge_endpoints: "knowledge_endpoints",
   knowledge_why_get: "knowledge_why_get",
   knowledge_domain_explain: "knowledge_domain_explain",
   knowledge_onboarding_generate: "knowledge_onboarding_generate",
@@ -369,7 +374,7 @@ export async function runKnowledgeTool(name: string, a: Record<string, unknown>,
         return { error: { code: "CAPABILITY_MISMATCH", message: `unsupported knowledge contract major ${requestedContract}; upgrade Penguin or request contract 2`, retryable: false } };
       }
       return {
-        schemaVersion: "13",
+        schemaVersion: String(SCHEMA_VERSION),
         contractVersion: "2",
         buildId: process.env.PENGUIN_BUILD_ID ?? "local",
         capabilityHash: capabilityHash(CAPABILITIES),
@@ -545,8 +550,12 @@ function scopeEnvelopeFields(scope?: ResolvedQueryScope): Record<string, unknown
 }
 
 function nodeRepoId(store: KnowledgeStore, target: string): string | null {
-  const resolution = resolveSymbolMatches(store, target);
-  return resolution.kind === "unique" ? store.getNode(resolution.nodeId)?.repo_id ?? null : null;
+  try { return resolveTarget(store, target).repoId; }
+  catch { return null; }
+}
+
+function targetResolutionError(error: unknown): Record<string, unknown> {
+  return { error: normalizeKnowledgeError(error, "TARGET_NOT_RESOLVED") };
 }
 
 // get_node / explore_graph / compare_branches are pre-canonical low-level
@@ -649,6 +658,33 @@ export function handleKnowledgeTool(
     return { error: "knowledge not initialized — run `penguin init` or open Penguin app" };
   }
   switch (name) {
+    case "knowledge_endpoints": {
+      const repoSelector = typeof a.repo === "string" ? a.repo : undefined;
+      const repoId = repoSelector ? store.resolveRepoIds(repoSelector)[0] : undefined;
+      if (repoSelector && !repoId) return { error: { code: "REPO_NOT_FOUND", message: `no indexed repo matches ${repoSelector}` } };
+      const protocol = typeof a.protocol === "string" ? a.protocol : undefined;
+      const limit = Math.max(1, Math.min(Number(a.limit ?? 100), 500));
+      const scopeKey = `${repoSelector ?? "*"}|${protocol ?? "*"}`;
+      let rows = store.db.prepare(`SELECT n.id AS nodeId, n.title, n.identity_key AS identityKey, json_extract(n.meta, '$.protocol') AS protocol FROM nodes n WHERE n.node_type='endpoint' ${repoId ? "AND (n.repo_id=? OR n.repo_id IS NULL)" : ""} ${protocol ? "AND json_extract(n.meta, '$.protocol')=?" : ""} ORDER BY n.title, n.id`).all(...(repoId ? (protocol ? [repoId, protocol] : [repoId]) : (protocol ? [protocol] : []))) as Array<{ nodeId: string; title: string; identityKey: string; protocol: string | null }>;
+      const cursor = typeof a.cursor === "string" ? a.cursor : undefined;
+      if (cursor) {
+        try {
+          const decoded = OPERATION_CURSOR_CODEC.decode(cursor, { operation: "endpoints", scope: scopeKey, revision: null });
+          const [title, nodeId] = decoded.lastKey.split("\u0000");
+          if (!title || !nodeId) throw new Error("CURSOR_INVALID");
+          rows = rows.filter((row) => row.title > title || (row.title === title && row.nodeId > nodeId));
+        } catch (error) {
+          const code = String((error as Error).message ?? error);
+          return { error: { code: code === "CURSOR_SCOPE_MISMATCH" || code === "CURSOR_STALE" ? code : "CURSOR_INVALID", message: "invalid or mismatched endpoint cursor", retryable: false } };
+        }
+      }
+      const page = rows.slice(0, limit);
+      const nextCursor = rows.length > page.length && page.length > 0
+        ? OPERATION_CURSOR_CODEC.encode({ schemaVersion: "1", contractVersion: "2", operation: "endpoints", scope: scopeKey, orderingKey: "title,nodeId", lastKey: `${page.at(-1)!.title}\u0000${page.at(-1)!.nodeId}`, revision: null, expiresAt: new Date(Date.now() + 15 * 60_000).toISOString() })
+        : null;
+      const items = page.map((row) => ({ ...row, handlers: store.db.prepare("SELECT n.id AS nodeId, n.title, n.repo_id AS repoId FROM edges e JOIN nodes n ON n.id=e.dst WHERE e.src=? AND e.edge_type='handles' AND e.status='active'").all(row.nodeId) }));
+      return { items, returnedCount: items.length, candidateCount: rows.length, totalIsExact: !nextCursor, truncated: Boolean(nextCursor), nextCursor };
+    }
     case "knowledge_coverage": {
       const repoId = typeof a.repo === "string" ? store.resolveRepoIds(a.repo)[0] : undefined;
       const row = (repoId ? store.db.prepare("SELECT COUNT(*) AS discovered,SUM(coverage_status='admitted') AS admitted,SUM(coverage_status<>'admitted') AS excluded,SUM(coverage_status='failed') AS failed FROM coverage_records WHERE repo_id=?").get(repoId) : store.db.prepare("SELECT COUNT(*) AS discovered,SUM(coverage_status='admitted') AS admitted,SUM(coverage_status<>'admitted') AS excluded,SUM(coverage_status='failed') AS failed FROM coverage_records").get()) as { discovered:number; admitted:number; excluded:number; failed:number };
@@ -997,7 +1033,10 @@ export function handleKnowledgeTool(
       const target = String(a.target ?? a.node ?? a.symbol ?? "");
       const revision = resolveMcpRevision(store, a, nodeRepoId(store, target));
       if (revision.error) return revision.error;
-      return { ...exploreGraph(store, mode, target, { depth: a.depth as number | undefined, limit: a.limit as number | undefined, revision: revision.context }), ...(revision.context ? { revision: revision.context } : {}), ...scopeEnvelopeFields(revision.scope) };
+      let resolvedTarget;
+      try { resolvedTarget = resolveTarget(store, target, { repoId: revision.context?.repoId, revision: revision.context }); }
+      catch (error) { return targetResolutionError(error); }
+      return { ...exploreGraph(store, mode, `node:${resolvedTarget.nodeId}`, { depth: a.depth as number | undefined, limit: a.limit as number | undefined, revision: revision.context }), target: resolvedTarget, ...(revision.context ? { revision: revision.context } : {}), ...scopeEnvelopeFields(revision.scope) };
     }
     case "knowledge_locate": {
       const target = String(a.target ?? "");
@@ -1009,19 +1048,34 @@ export function handleKnowledgeTool(
       const target = String(a.target ?? "");
       const revision = resolveMcpRevision(store, a, nodeRepoId(store, target));
       if (revision.error) return revision.error;
-      return { ...buildContextPack(store, target, { revision: revision.context }), ...(revision.context ? { revision: revision.context } : {}), ...scopeEnvelopeFields(revision.scope) };
+      let resolvedTarget;
+      try { resolvedTarget = resolveTarget(store, target, { repoId: revision.context?.repoId, revision: revision.context }); }
+      catch (error) { return targetResolutionError(error); }
+      return { ...buildContextPack(store, `node:${resolvedTarget.nodeId}`, { revision: revision.context }), target: resolvedTarget, ...(revision.context ? { revision: revision.context } : {}), ...scopeEnvelopeFields(revision.scope) };
     }
     case "knowledge_flow": {
       const target = String(a.target ?? "");
       const revision = resolveMcpRevision(store, a, nodeRepoId(store, target));
       if (revision.error) return revision.error;
-      return { ...buildFlow(store, target, { revision: revision.context }), ...(revision.context ? { revision: revision.context } : {}), ...scopeEnvelopeFields(revision.scope) };
+      let resolvedTarget;
+      try { resolvedTarget = resolveTarget(store, target, { repoId: revision.context?.repoId, revision: revision.context }); }
+      catch (error) { return targetResolutionError(error); }
+      return { ...buildFlow(store, `node:${resolvedTarget.nodeId}`, { revision: revision.context }), target: resolvedTarget, ...(revision.context ? { revision: revision.context } : {}), ...scopeEnvelopeFields(revision.scope) };
     }
     case "knowledge_affected": {
       const paths = Array.isArray(a.files) ? a.files.map(String) : [String(a.file ?? a.path ?? "")].filter(Boolean);
-      const revision = resolveMcpRevision(store, a);
+      const target = String(a.target ?? a.node ?? a.symbol ?? "").trim();
+      const revision = resolveMcpRevision(store, a, target ? nodeRepoId(store, target) : null);
       if (revision.error) return revision.error;
-      return { ...affectedByFiles(store, paths, { revision: revision.context }), ...(revision.context ? { revision: revision.context } : {}), ...scopeEnvelopeFields(revision.scope) };
+      let resolvedTarget;
+      try { resolvedTarget = target ? resolveTarget(store, target, { repoId: revision.context?.repoId, revision: revision.context }) : null; }
+      catch (error) { return targetResolutionError(error); }
+      const nodeResult = resolvedTarget
+        ? affectedByNode(store, resolvedTarget.nodeId, { revision: revision.context, repoId: revision.context?.repoId })
+        : null;
+      if (target && !nodeResult) return { error: { code: "TARGET_NOT_RESOLVED", message: `affected target could not be resolved: ${target}`, retryable: false } };
+      const result = nodeResult ?? affectedByFiles(store, paths, { revision: revision.context });
+      return { ...result, ...(resolvedTarget ? { target: resolvedTarget } : {}), ...(revision.context ? { revision: revision.context } : {}), ...scopeEnvelopeFields(revision.scope) };
     }
     case "knowledge_path": {
       const from = String(a.from ?? a.source ?? "");
@@ -1084,7 +1138,27 @@ export function handleKnowledgeTool(
             : `no live branch indexed for ${repoSelector} — run penguin index first`,
         };
       }
-      return listFileSymbols(store, branchId, filePath);
+      const allSymbols = listFileSymbols(store, branchId, filePath);
+      const limit = Math.max(1, Math.min(Number(a.limit ?? 100), 500));
+      const scopeKey = `${branchId}|${filePath}`;
+      let symbolRows = allSymbols;
+      if (typeof a.cursor === "string") {
+        try {
+          const decoded = OPERATION_CURSOR_CODEC.decode(a.cursor, { operation: "filesymbols", scope: scopeKey, revision: branchId });
+          const [lineValue, nodeId] = decoded.lastKey.split("\u0000");
+          const line = Number(lineValue);
+          if (!Number.isFinite(line) || !nodeId) throw new Error("CURSOR_INVALID");
+          symbolRows = allSymbols.filter((item) => (item.startLine ?? -1) > line || ((item.startLine ?? -1) === line && item.nodeId > nodeId));
+        } catch (error) {
+          const code = String((error as Error).message ?? error);
+          return { error: { code: code === "CURSOR_SCOPE_MISMATCH" || code === "CURSOR_STALE" ? code : "CURSOR_INVALID", message: "invalid or mismatched filesymbols cursor", retryable: false } };
+        }
+      }
+      const page = symbolRows.slice(0, limit);
+      const nextCursor = symbolRows.length > page.length && page.length > 0
+        ? OPERATION_CURSOR_CODEC.encode({ schemaVersion: "1", contractVersion: "2", operation: "filesymbols", scope: scopeKey, orderingKey: "startLine,nodeId", lastKey: `${page.at(-1)!.startLine ?? -1}\u0000${page.at(-1)!.nodeId}`, revision: branchId, expiresAt: new Date(Date.now() + 15 * 60_000).toISOString() })
+        : null;
+      return { items: page, returnedCount: page.length, candidateCount: symbolRows.length, totalIsExact: !nextCursor, truncated: Boolean(nextCursor), nextCursor };
     }
     case "knowledge_tag_list":
       return listTags(store);

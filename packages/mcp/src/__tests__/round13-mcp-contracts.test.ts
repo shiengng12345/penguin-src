@@ -145,7 +145,12 @@ test("MCP invalid node is not a success-shaped empty context", async () => {
   const { store, repo } = fixture();
   const result = await runKnowledgeTool("knowledge_context", { target: "node:round13-missing-node", repo }, { store }) as Record<string, any>;
 
-  assert.equal(result.error?.code, "TARGET_NOT_RESOLVED");
+  assert.deepEqual(result.error, {
+    code: "TARGET_NOT_FOUND",
+    message: "target was not found: node:round13-missing-node",
+    retryable: false,
+    details: { target: "node:round13-missing-node" },
+  });
   store.close();
 });
 

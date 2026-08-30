@@ -7,6 +7,7 @@ import {
   buildFlow,
   renderFlowMarkdown,
   affectedByFiles,
+  affectedByNode,
   architecture,
   communities,
   timeline,
@@ -61,6 +62,7 @@ import {
   syncRemoteSource,
   syncPostgresSchema,
   resolveSymbolMatches,
+  resolveGrpcEndpoint,
   renderAmbiguousSymbols,
   requireRevisionContext,
   parseWorkspaceRoots,
@@ -72,6 +74,10 @@ import {
   resolveQueryScope,
   resolveRepoForPath,
   ScopeResolutionError,
+  resolveTarget,
+  TargetResolutionError,
+  SCHEMA_VERSION,
+  HmacOperationCursorCodec,
   type GraphMode,
   type KnowledgeStore,
 } from "@penguin/knowledge-core";
@@ -84,7 +90,7 @@ import { runApiDocCommand } from "./api-doc-command.js";
 import { runCallCommand } from "./call-command.js";
 import { createKnowledgeApiDocAdapter } from "./api-doc-knowledge-adapter.js";
 import { createLarkProcessRunner, LarkCliDocumentClient, type LarkProcessRunner } from "./lark-document-client.js";
-import { CAPABILITIES, capabilityHash, listCliRegistrations, warning, type ScopeEnvelope } from "@penguin/knowledge-contracts";
+import { CAPABILITIES, capabilityHash, knowledgeErrorEnvelope, listCliRegistrations, warning, type ScopeEnvelope } from "@penguin/knowledge-contracts";
 import { runQueryServer } from "./query-server.js";
 import { parseCliArguments } from "./args.js";
 export { listCliRegistrations } from "@penguin/knowledge-contracts";
@@ -139,9 +145,9 @@ export interface CliDeps {
 }
 
 const READ_VERBS = new Set([
-  "capabilities", "search", "node", "callers", "calls", "impact", "backlinks",
+  "capabilities", "search", "node", "callers", "calls", "callees", "impact", "backlinks",
   "path", "recent", "compare", "status", "suggestions", "snapshots", "doctor",
-  "files", "filesymbols", "hit", "get-hit", "graph-query", "graph", "repograph", "services", "tags", "context", "explore", "locate", "flow", "affected", "architecture", "communities", "timeline", "samples", "deadcode", "coverage", "why", "domain", "onboarding", "recall",
+  "files", "filesymbols", "endpoints", "endpoint-identity", "hit", "get-hit", "graph-query", "graph", "repograph", "services", "tags", "context", "explore", "locate", "flow", "affected", "architecture", "communities", "timeline", "samples", "deadcode", "coverage", "why", "domain", "onboarding", "recall",
 ]);
 
 // repo/branch args accept an id OR a name (humans pass names; the Wiki passes
@@ -259,6 +265,9 @@ function resolveCliRevision(
   options?: { preferCwd?: boolean },
 ): { revision: import("@penguin/knowledge-core").RevisionContext | undefined; scope: ScopeEnvelope | undefined } {
   let repoId = selector.repo ? resolveRepoId(store, selector.repo) ?? undefined : undefined;
+  if (selector.repo && !repoId) {
+    throw new ScopeResolutionError("SCOPE_NOT_FOUND", `repository not found: ${selector.repo}`);
+  }
   let inferredFromQuery = false;
   if (!repoId && options?.preferCwd) {
     const cwdRepo = cwd ? resolveRepoForPath(store, cwd) : null;
@@ -331,11 +340,15 @@ function resolveCliRevision(
   }
 }
 const GRAPH_VERB_MODE: Record<string, GraphMode> = {
-  callers: "who_calls", calls: "calls_of", impact: "impact",
+  callers: "who_calls", calls: "calls_of", callees: "calls_of", impact: "impact",
   backlinks: "backlinks", recent: "recent_changes",
 };
 
 const EVENT_OUTPUT = new WeakMap<object, boolean>();
+const OPERATION_CURSOR_CODEC = new HmacOperationCursorCodec(process.env.PENGUIN_CURSOR_SECRET ?? "penguin-operation-cursor-v1");
+function operationCursorScope(operation: "endpoints" | "filesymbols" | "deadcode", scope: string, revision: string | null = null) {
+  return { operation, scope, revision } as const;
+}
 
 // Core query functions (buildFlow/buildContextPack/exploreGraph/buildExplorePack)
 // mark their own result with `scopeFallback: { branchId }` whenever no
@@ -399,6 +412,12 @@ function emit(deps: CliDeps, json: boolean, human: string, data: unknown, scope?
   deps.out(footer ? `${human}\n${footer}` : human);
 }
 
+function emitCliError(deps: CliDeps, json: boolean, code: string, message: string, exitCode: number, details?: Record<string, unknown>): number {
+  if (json) deps.out(JSON.stringify({ error: knowledgeErrorEnvelope(code, message, details), exitCode }));
+  else deps.err(message);
+  return exitCode;
+}
+
 function emitProgress(deps: CliDeps, payload: unknown): void {
   if (EVENT_OUTPUT.get(deps)) deps.out(JSON.stringify({ type: "progress", payload }));
   deps.progressEvent?.(payload);
@@ -451,6 +470,7 @@ const HELP = `penguin — Penguin Knowledge CLI
   penguin node <id|name>        node detail + versions + aliases
   penguin callers <symbol>      who calls it
   penguin calls <symbol>        what it calls
+  penguin callees <symbol>      what it calls (explicit alias of calls)
   penguin impact <symbol>       transitive blast radius
   penguin context <symbol|api>  AI context pack (branch+code+notes+tests+risks); --json for structured
   penguin explore <symbol|api>  source+flow+impact+tests+routes+trust in one result
@@ -477,6 +497,8 @@ const HELP = `penguin — Penguin Knowledge CLI
   penguin compare <sym> <a> <b> cross-branch diff
   penguin files <repo> [branch] indexed files for a repo/branch
   penguin filesymbols <br> <f>  symbols defined in a file (branch id + path)
+  penguin endpoints [repo]       indexed endpoints and handlers
+  penguin endpoint-identity ...  compare endpoint title, identity, and node id
   penguin graph <node> [depth]  local graph: focus node + neighbours
   penguin repograph <repo> [br] repo/branch graph (top hubs by degree)
   penguin tags                  distinct tags across all notes
@@ -504,6 +526,18 @@ const HELP = `penguin — Penguin Knowledge CLI
 Global: --json (machine-readable), --repo/--branch/--commit/--snapshot (scope selectors), --allow-fallback (answer from another indexed branch when the checked-out one isn't indexed)`;
 
 const CANONICAL_HELP = `${HELP}\nCanonical capability IDs (use \'penguin capabilities --json\' for schemas and status):\n${CAPABILITIES.map((capability) => `  ${capability.id}`).join("\n")}\n`;
+const CLI_QUERY_CONTRACTS = {
+  schemaVersion: "1",
+  commands: {
+    endpoints: { usage: "endpoints [repo] [--protocol <protocol>] [--limit <n>] [--cursor <token>] [--json]", success: 0, json: "{items,returnedCount,candidateCount,totalIsExact,nextCursor}" },
+    "endpoint-identity": { usage: "endpoint-identity <rendered-title> <canonical-identity> <node-id> [--json]", success: 0, mismatch: 1, invalid: 2, json: "{forms,equal,rootNodeId,parentNodeId,completeness}" },
+    filesymbols: { usage: "filesymbols <repo> <branch> <path> [--limit <n>] [--cursor <token>] [--json]", success: 0, invalidCursor: 2, json: "{items,returnedCount,candidateCount,totalIsExact,nextCursor}" },
+    deadcode: { usage: "deadcode --repo <repo> [--path <prefix>] [--limit <n>] [--cursor <token>] [--json]", success: 0, invalidCursor: 2, json: "{candidates,returnedCount,candidateCount,totalIsExact,nextCursor,truncated}" },
+    explain: { usage: "explain <symbol|endpoint> [--provider <name>] [--model <name>] [--key <key>] [--json]", success: 0 },
+    ...Object.fromEntries([...READ_VERBS].map((name) => [name, { usage: `penguin ${name} ...`, success: 0 }])),
+  },
+  cursor: { ordering: "filePath,startLine,nodeId", scopeChecked: true, exhausted: "nextCursor:null", invalidExitCode: 2 },
+};
 
 /** A caller-supplied --repo, resolved to an id. undefined when none was given;
  * null when it matches nothing indexed — the caller reports that rather than
@@ -560,7 +594,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
   }
 
   if (!verb || verb === "help") {
-    deps.out(CANONICAL_HELP);
+    deps.out(json ? JSON.stringify(CLI_QUERY_CONTRACTS) : CANONICAL_HELP);
     return 0;
   }
 
@@ -798,12 +832,14 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
 
   if (verb === "capabilities") {
     const data = {
-      schemaVersion: "1",
+      schemaVersion: String(SCHEMA_VERSION),
+      contractVersion: "2",
+      buildId: process.env.PENGUIN_BUILD_ID ?? "local",
       capabilityHash: capabilityHash(CAPABILITIES),
       capabilities: CAPABILITIES,
       registrations: listCliRegistrations(),
     };
-    emit(deps, json, `capabilities: ${CAPABILITIES.length} (hash ${data.capabilityHash})`, data);
+    emit(deps, json, `capabilities: ${CAPABILITIES.length} (build ${data.buildId}, hash ${data.capabilityHash})`, data);
     return 0;
   }
 
@@ -1659,8 +1695,11 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
               emit(deps, json, `${response.error.code}: ${response.error.message}`, envelope, scope);
               return 3;
             }
+            const statusLine = response.hits.length === 0 && response.diagnostics.queryStatus === "NO_MATCH_INCOMPLETE"
+              ? `NOT_PROVEN (not proven absence) · ${response.hits.length} hits · coverage ${response.diagnostics.coverage.admitted}/${response.diagnostics.coverage.discovered}`
+              : `${response.diagnostics.queryStatus} · ${response.hits.length} hits · coverage ${response.diagnostics.coverage.admitted}/${response.diagnostics.coverage.discovered}`;
             const human = [
-              `${response.diagnostics.queryStatus} · ${response.hits.length} hits · coverage ${response.diagnostics.coverage.admitted}/${response.diagnostics.coverage.discovered}`,
+              statusLine,
               ...response.hits.map((hit) => `${hit.locator.filePath}${hit.locator.startLine ? `:${hit.locator.startLine}` : ""}\t${hit.lane}\t${hit.snippet ?? hit.title}`),
               ...(response.diagnostics.warnings.length ? [`warnings: ${response.diagnostics.warnings.map((warning) => warning.code).join(", ")}`] : []),
               ...response.diagnostics.nextActions.map((action) => `next: ${action.command} — ${action.reason}`),
@@ -1711,9 +1750,13 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
         }
         case "node": {
           const target = pos[0] ?? "";
-          const detail = getNodeDetail(store, target);
+          const repoId = optionValue("repo") ? scopedRepoId(store, optionValue("repo")) ?? undefined : undefined;
+          const scopedResolution = resolveSymbolMatches(store, target, repoId ? { repoId } : undefined);
+          const detail = scopedResolution.kind === "unique"
+            ? getNodeDetail(store, scopedResolution.nodeId)
+            : getNodeDetail(store, target);
           if (!detail) {
-            const resolution = resolveSymbolMatches(store, target);
+            const resolution = scopedResolution;
             if (resolution.kind === "ambiguous") {
               deps.err(renderAmbiguousSymbols(target, resolution.candidates));
               return 1;
@@ -1731,11 +1774,15 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           let scope: ScopeEnvelope | undefined;
           try { ({ revision, scope } = resolveCliRevision(store, target, { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd)); }
           catch (error) { return reportScopeResolutionError(deps, error, json); }
-          const pack = buildContextPack(store, target, { revision, repoId: scopedRepoId(store, optionValue("repo")) ?? undefined });
-          if (!pack.focus) {
-            emit(deps, json, renderContextPackMarkdown(pack), pack, scope);
-            return 1;
+          let targetResolution: import("@penguin/knowledge-core").ResolvedTarget;
+          try {
+            targetResolution = resolveTarget(store, target, { repoId: scopedRepoId(store, optionValue("repo")) ?? undefined, revision });
+          } catch (error) {
+            if (error instanceof TargetResolutionError && error.code === "TARGET_AMBIGUOUS") deps.err(renderAmbiguousSymbols(target, (error.details.candidates ?? []) as import("@penguin/knowledge-core").SymbolCandidate[]));
+            if (error instanceof TargetResolutionError) return emitCliError(deps, json, error.code, error.message, 1, error.details);
+            throw error;
           }
+          const pack = buildContextPack(store, `node:${targetResolution.nodeId}`, { revision, repoId: scopedRepoId(store, optionValue("repo")) ?? undefined });
           emit(deps, json, renderContextPackMarkdown(pack), pack, scope);
           return 0;
         }
@@ -1783,11 +1830,15 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           let scope: ScopeEnvelope | undefined;
           try { ({ revision, scope } = resolveCliRevision(store, target, { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd)); }
           catch (error) { return reportScopeResolutionError(deps, error, json); }
-          const flow = buildFlow(store, target, { revision, repoId: scopedRepoId(store, optionValue("repo")) ?? undefined });
-          if (!flow.root) {
-            emit(deps, json, renderFlowMarkdown(flow), flow, scope);
-            return 1;
+          let targetResolution: import("@penguin/knowledge-core").ResolvedTarget;
+          try {
+            targetResolution = resolveTarget(store, target, { repoId: scopedRepoId(store, optionValue("repo")) ?? undefined, revision });
+          } catch (error) {
+            if (error instanceof TargetResolutionError && error.code === "TARGET_AMBIGUOUS") deps.err(renderAmbiguousSymbols(target, (error.details.candidates ?? []) as import("@penguin/knowledge-core").SymbolCandidate[], "flow"));
+            if (error instanceof TargetResolutionError) return emitCliError(deps, json, error.code, error.message, 1, error.details);
+            throw error;
           }
+          const flow = buildFlow(store, `node:${targetResolution.nodeId}`, { revision, repoId: scopedRepoId(store, optionValue("repo")) ?? undefined });
           emit(deps, json, renderFlowMarkdown(flow), flow, scope);
           if (flow.diagnostic) return 1; // resolved, but a dead end — signal via exit code, still print the (partial) flow
           return 0;
@@ -1796,16 +1847,36 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           // Blast radius of changed files (pass paths, or a git diff piped in).
           let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
           let scope: ScopeEnvelope | undefined;
-          try { ({ revision, scope } = resolveCliRevision(store, "", { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd)); }
+          try { ({ revision, scope } = resolveCliRevision(store, pos.length === 1 ? pos[0] : "", { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd)); }
           catch (error) { return reportScopeResolutionError(deps, error, json); }
-          const a = affectedByFiles(store, pos, { revision });
+          const target = pos.length === 1 ? pos[0] : undefined;
+          let targetResolution: import("@penguin/knowledge-core").ResolvedTarget | null = null;
+          if (target) {
+            try {
+              targetResolution = resolveTarget(store, target, { repoId: optionValue("repo") ? scopedRepoId(store, optionValue("repo")) ?? undefined : undefined, revision });
+            } catch (error) {
+              if (error instanceof TargetResolutionError) {
+                if (error.code === "TARGET_AMBIGUOUS") deps.err(renderAmbiguousSymbols(target, (error.details.candidates ?? []) as import("@penguin/knowledge-core").SymbolCandidate[]));
+                return emitCliError(deps, json, error.code, error.message, 1, error.details);
+              }
+              throw error;
+            }
+          }
+          const a = targetResolution
+            ? affectedByNode(store, targetResolution.nodeId, { revision, repoId: optionValue("repo") ? scopedRepoId(store, optionValue("repo")) ?? undefined : undefined })
+            : null;
+          if (target && targetResolution && !a) {
+            deps.err(`cannot resolve affected target "${target}" in the selected scope`);
+            return 1;
+          }
+          const fileResult = a ?? affectedByFiles(store, pos, { revision });
           // Without --repo the revision comes from the working directory, so
           // asking about another repo's file matched nothing and reported
           // "changed 0 · impacted 0" — which reads as "this file affects
           // nothing", the most confident kind of wrong answer. If the paths
           // match no file in the resolved scope, say so, and name the repos
           // that DO contain them.
-          if (pos.length > 0 && a.changed.length === 0) {
+          if (!a && pos.length > 0 && fileResult.changed.length === 0) {
             const owners = [...new Set((store.db.prepare(`
               SELECT DISTINCT r.name AS repo
                 FROM symbol_versions sv
@@ -1820,13 +1891,13 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
                 ? `\n  those paths are indexed in: ${owners.join(", ")} — pass --repo ${owners[0]}`
                 : "\n  check the path is repo-relative and indexed (`penguin files <repo>`)"),
             );
-            if (json) emit(deps, json, "", a, scope);
+            if (json) emit(deps, json, "", fileResult, scope);
             return 1;
           }
           const txt = pos.length === 0 ? "usage: penguin affected <file>…"
-            : `changed ${a.changed.length} · impacted ${a.impacted.length} · tests ${a.tests.length} · routes ${a.routes.length}\n`
-              + a.routes.map((r) => `  route: ${r}`).join("\n");
-          emit(deps, json, txt, a, scope);
+            : `changed ${fileResult.changed.length} · impacted ${fileResult.impacted.length} · tests ${fileResult.tests.length} · routes ${fileResult.routes.length}\n`
+              + fileResult.routes.map((r) => `  route: ${r}`).join("\n");
+          emit(deps, json, txt, fileResult, scope);
           return 0;
         }
         case "architecture": {
@@ -1855,7 +1926,8 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           return 0;
         }
         case "communities": {
-          const c = communities(store, { limit: pos[0] ? Number(pos[0]) || 20 : 20 });
+          const communityRepo = optionValue("repo") ? scopedRepoId(store, optionValue("repo")) ?? undefined : undefined;
+          const c = communities(store, { limit: pos[0] ? Number(pos[0]) || 20 : 20, repoId: communityRepo });
           const txt = `${c.totalCommunities} communities across ${c.totalNodes} connected nodes; top ${c.communities.length}:\n`
             + c.communities.map((m) => `  #${m.id} (${m.size}) ${m.repos.slice(0, 3).join("/")} — ${m.topMembers.map((t) => t.title).slice(0, 4).join(", ")}`).join("\n");
           emit(deps, json, txt, c);
@@ -1880,10 +1952,25 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
         case "deadcode": {
           // Same filters the MCP surface has: an unscoped list across every
           // indexed repo is not something anyone can act on.
+          const deadCursor = optionValue("cursor");
+          let deadAfter: { filePath: string; startLine: number; nodeId: string } | undefined;
+          if (deadCursor) {
+            try {
+              const scopeKey = `${String(optionValue("repo") ?? "*")}|${String(optionValue("path") ?? pos[0] ?? "*")}|${String(optionValue("branch") ?? "*")}`;
+              const decoded = OPERATION_CURSOR_CODEC.decode(deadCursor, operationCursorScope("deadcode", scopeKey));
+              const [filePath, startLine, nodeId] = decoded.lastKey.split("\u0000");
+              if (!filePath || !Number.isFinite(Number(startLine)) || !nodeId) throw new Error("CURSOR_INVALID");
+              deadAfter = { filePath, startLine: Number(startLine), nodeId };
+            } catch (error) {
+              const raw = String((error as Error).message ?? error);
+              return emitCliError(deps, json, raw === "CURSOR_SCOPE_MISMATCH" ? raw : raw === "CURSOR_STALE" ? raw : "CURSOR_INVALID", "invalid or mismatched deadcode cursor", 2);
+            }
+          }
           const d = deadCode(store, {
             limit: Number(optionValue("limit") ?? 100),
             repo: optionValue("repo"),
             path: optionValue("path") ?? pos[0],
+            after: deadAfter,
             branchId: optionValue("branch") ? store.getBranch(
               (store.db.prepare("SELECT id FROM repos WHERE id=? OR name=? LIMIT 1").get(optionValue("repo") ?? "", optionValue("repo") ?? "") as { id: string } | undefined)?.id ?? "",
               String(optionValue("branch")),
@@ -1896,14 +1983,18 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
             + (c.fileImportedBy ? `  [file imported by ${c.fileImportedBy} — likely wired, not dead]` : "");
           // Printing 40 of 77 under a "77 candidate(s)" headline is the silent
           // truncation this codebase spent a day removing everywhere else.
-          const SHOWN = 40;
-          const shown = d.candidates.slice(0, SHOWN);
-          const cut = d.candidates.length - shown.length;
+          const deadItems = d.candidates;
+          const cut = d.truncated ? 1 : 0;
+          const deadScopeKey = `${String(optionValue("repo") ?? "*")}|${String(optionValue("path") ?? pos[0] ?? "*")}|${String(optionValue("branch") ?? "*")}`;
+          const nextCursor = d.truncated && deadItems.length
+            ? OPERATION_CURSOR_CODEC.encode({ schemaVersion: "1", contractVersion: "2", operation: "deadcode", scope: deadScopeKey, orderingKey: "filePath,startLine,nodeId", lastKey: `${deadItems.at(-1)!.filePath ?? ""}\u0000${deadItems.at(-1)!.startLine ?? -1}\u0000${deadItems.at(-1)!.nodeId}`, revision: null, expiresAt: new Date(Date.now() + 15 * 60_000).toISOString() })
+            : null;
+          const result = { ...d, returnedCount: deadItems.length, nextCursor };
           emit(deps, json,
             `${d.candidates.length} candidate(s) — ${d.note}\n`
-            + shown.map(line).join("\n")
-            + (cut > 0 ? `\n  … ${cut} more not shown — pass --json for the full list` : ""),
-            d);
+            + deadItems.map(line).join("\n")
+            + (cut > 0 ? `\n  … more candidates not shown — raise --limit (truncated=true)` : ""),
+            result);
           return 0;
         }
         case "compare": {
@@ -2014,9 +2105,10 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           // silently returned "(no symbols)", indistinguishable from a file that
           // genuinely defines none. Accept a repo name too, and when the scope
           // cannot be resolved say so instead of answering empty.
-          const branchArg = optionValue("branch") ?? pos[0] ?? "";
-          const filePath = pos[1] ?? optionValue("path") ?? "";
-          const repoArg = optionValue("repo");
+          const positionalRepo = pos.length >= 3 ? pos[0] : undefined;
+          const branchArg = optionValue("branch") ?? (positionalRepo ? pos[1] : pos[0]) ?? "";
+          const filePath = (positionalRepo ? pos[2] : pos[1]) ?? optionValue("path") ?? "";
+          const repoArg = optionValue("repo") ?? positionalRepo;
           let branchId = branchArg;
           const looksLikeBranchId = /^branch_/.test(branchArg);
           if (!looksLikeBranchId || repoArg) {
@@ -2041,10 +2133,96 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           }
           if (!filePath) { deps.err("filesymbols needs a file path"); return 2; }
           const syms = listFileSymbols(store, branchId, filePath);
+          const requestedLimit = optionValue("limit") ? Math.max(1, Math.min(Number(optionValue("limit")), 500)) : syms.length;
+          let symbolPage = syms;
+          const symbolCursor = optionValue("cursor");
+          if (symbolCursor) {
+            try {
+              const decoded = OPERATION_CURSOR_CODEC.decode(symbolCursor, operationCursorScope("filesymbols", `${branchId}|${filePath}`, branchId));
+              const [decodedLine, decodedId] = decoded.lastKey.split("\u0000");
+              const startLine = Number(decodedLine);
+              if (!Number.isFinite(startLine) || !decodedId) throw new Error("CURSOR_INVALID");
+              symbolPage = syms.filter((s) => (s.startLine ?? -1) > startLine || ((s.startLine ?? -1) === startLine && s.nodeId > decodedId));
+            } catch (error) {
+              const raw = String((error as Error).message ?? error);
+              return emitCliError(deps, json, raw === "CURSOR_SCOPE_MISMATCH" ? raw : raw === "CURSOR_STALE" ? raw : "CURSOR_INVALID", "invalid or mismatched filesymbols cursor", 2);
+            }
+          }
+          const symbolItems = symbolPage.slice(0, requestedLimit);
+          const nextSymbolCursor = symbolPage.length > symbolItems.length && symbolItems.length > 0
+            ? OPERATION_CURSOR_CODEC.encode({ schemaVersion: "1", contractVersion: "2", operation: "filesymbols", scope: `${branchId}|${filePath}`, orderingKey: "startLine,nodeId", lastKey: `${symbolItems.at(-1)!.startLine ?? -1}\u0000${symbolItems.at(-1)!.nodeId}`, revision: branchId, expiresAt: new Date(Date.now() + 15 * 60_000).toISOString() })
+            : null;
           const line = (s: typeof syms[number]) =>
             `${s.kind}\t${s.title}${s.startLine != null ? `\t${filePath}:${s.startLine}` : ""}${s.status === "stale" ? " (stale)" : ""}`;
-          emit(deps, json, syms.map(line).join("\n") || `(no symbols indexed for ${filePath})`, syms);
+          emit(deps, json, symbolItems.map(line).join("\n") || `(no symbols indexed for ${filePath})`, optionValue("limit") || symbolCursor
+            ? { items: symbolItems, returnedCount: symbolItems.length, candidateCount: symbolPage.length, totalIsExact: !nextSymbolCursor, truncated: Boolean(nextSymbolCursor), nextCursor: nextSymbolCursor }
+            : syms);
           return 0;
+        }
+        case "endpoints": {
+          const repoArg = optionValue("repo") ?? pos[0];
+          const repoId = repoArg ? scopedRepoId(store, repoArg) : undefined;
+          if (repoArg && !repoId) { deps.err(`no indexed repo matches "${repoArg}"`); return 2; }
+          const protocol = optionValue("protocol");
+          const limit = Number(optionValue("limit") ?? "100");
+          const cursor = optionValue("cursor");
+          const params = [...(repoId ? [repoId] : []), ...(protocol ? [protocol] : [])];
+          const coverageTotals = repoId
+            ? store.db.prepare("SELECT SUM(coverage_status='excluded') AS excluded, SUM(coverage_status='failed') AS failed FROM coverage_records WHERE repo_id=?").get(repoId) as { excluded: number | null; failed: number | null }
+            : null;
+          const endpointCoverageComplete = Boolean(repoId && Number(coverageTotals?.excluded ?? 0) === 0 && Number(coverageTotals?.failed ?? 0) === 0);
+          let rows = store.db.prepare(`SELECT n.id AS nodeId, n.title, n.identity_key AS identityKey, json_extract(n.meta, '$.protocol') AS protocol FROM nodes n WHERE n.node_type='endpoint' ${repoId ? "AND (n.repo_id=? OR n.repo_id IS NULL)" : ""} ${protocol ? "AND json_extract(n.meta, '$.protocol')=?" : ""} ORDER BY n.title, n.id`).all(...params) as Array<{nodeId:string;title:string;identityKey:string;protocol:string|null}>;
+          const scopeKey = `${repoArg ?? "*"}|${protocol ?? "*"}`;
+          if (cursor) {
+            try {
+              const decoded = OPERATION_CURSOR_CODEC.decode(cursor, operationCursorScope("endpoints", scopeKey));
+              const [title, nodeId] = decoded.lastKey.split("\u0000");
+              if (!title || !nodeId) throw new Error("CURSOR_INVALID");
+              rows = rows.filter((row) => row.title > title || (row.title === title && row.nodeId > nodeId));
+            } catch (error) {
+              const raw = String((error as Error).message ?? error);
+              return emitCliError(deps, json, raw === "CURSOR_SCOPE_MISMATCH" ? raw : raw === "CURSOR_STALE" ? raw : "CURSOR_INVALID", "invalid or mismatched endpoint cursor", 2);
+            }
+          }
+          const page = rows.slice(0, Math.max(1, Math.min(limit, 500)));
+          const nextCursor = rows.length > page.length && page.length > 0
+            ? OPERATION_CURSOR_CODEC.encode({ schemaVersion: "1", contractVersion: "2", operation: "endpoints", scope: scopeKey, orderingKey: "title,nodeId", lastKey: `${page.at(-1)!.title}\u0000${page.at(-1)!.nodeId}`, revision: null, expiresAt: new Date(Date.now() + 15 * 60_000).toISOString() })
+            : null;
+          const result = page.map((row) => {
+            const handlers = store.db.prepare("SELECT n.title, n.repo_id AS repoId FROM edges e JOIN nodes n ON n.id=e.dst WHERE e.src=? AND e.edge_type='handles' AND e.status='active'").all(row.nodeId) as Array<{ title: string; repoId: string | null }>;
+            // An endpoint with no handler is not automatically dead: endpoint
+            // coverage can be incomplete (generated proto, another repo, or a
+            // parser gap). Keep that distinction machine-readable.
+            const handlerStatus = handlers.length ? "handled" : endpointCoverageComplete ? "missing" : repoId ? "incomplete" : "unknown";
+            return {
+              ...row,
+              handlers,
+              handlerStatus,
+              missingHandlerReason: handlers.length ? null : endpointCoverageComplete
+                ? "no_active_handles_edge"
+                : "handler_not_proven_absent: endpoint coverage or generated wiring may be incomplete",
+            };
+          });
+          const payload = { items: result, returnedCount: result.length, candidateCount: rows.length, totalIsExact: !nextCursor, truncated: Boolean(nextCursor), nextCursor };
+          emit(deps, json, result.map((row) => `${row.title} [${row.protocol ?? "unknown"}]${row.handlers.length ? ` → ${row.handlers.map((h) => (h as {title:string}).title).join(", ")}` : " → (no indexed handler)"}`).join("\n") || "(no endpoints)", json ? payload : result);
+          return 0;
+        }
+        case "endpoint-identity": {
+          const forms = pos.filter(Boolean).slice(0, 3);
+          if (forms.length !== 3) { deps.err("endpoint-identity needs rendered title, canonical identity, and node id"); return 2; }
+          const resolve = (value: string) => {
+            const endpointId = resolveEndpointId(store, value);
+            const direct = store.db.prepare("SELECT id FROM nodes WHERE node_type='endpoint' AND id=? LIMIT 1").get(endpointId) as { id: string } | undefined;
+            if (direct?.id) return direct.id;
+            const grpc = resolveGrpcEndpoint(store, value);
+            return grpc.kind === "unique" ? grpc.nodeId : null;
+          };
+          const resolved = forms.map((value) => ({ value, nodeId: resolve(value), status: resolve(value) ? "resolved" : "no_match" }));
+          const ids = resolved.map((item) => item.nodeId).filter((id): id is string => Boolean(id));
+          const equal = ids.length === 3 && new Set(ids).size === 1;
+          const result = { forms: resolved, equal, rootNodeId: equal ? ids[0] : null, parentNodeId: null, completeness: equal ? "complete" : "unknown" };
+          emit(deps, json, equal ? `same endpoint: ${ids[0]}` : "endpoint identity mismatch or unresolved", result);
+          return equal ? 0 : 1;
         }
         case "graph": {
           const depth = pos[1] ? Number(pos[1]) || 1 : 1;
@@ -2079,7 +2257,17 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
             deps.err(`no indexed repo matches "${optionValue("repo")}" — see \`penguin status\` for the indexed names`);
             return 2;
           }
-          const res = exploreGraph(store, GRAPH_VERB_MODE[verb], pos[0] ?? "", { repoId: graphRepoId });
+          let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
+          let scope: ScopeEnvelope | undefined;
+          try {
+            ({ revision, scope } = resolveCliRevision(
+              store,
+              pos[0] ?? "",
+              { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") },
+              deps.cwd,
+            ));
+          } catch (error) { return reportScopeResolutionError(deps, error, json); }
+          const res = exploreGraph(store, GRAPH_VERB_MODE[verb], pos[0] ?? "", { repoId: graphRepoId ?? revision?.repoId, revision });
           // An empty node list and a failed lookup are different answers.
           // Rendering both as "(none)" told a caller "nothing calls this" when
           // the truth was "the name matched several symbols and I gave up" —
@@ -2095,11 +2283,22 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
                 ? `\n  the name matches more than one symbol inside ${optionValue("repo")} — pass a node id from \`penguin search\``
                 : `\n  (pass --repo to narrow, or a node id from \`penguin search\`)`),
             );
-            if (json) emit(deps, json, "", res);
+            if (json) emit(deps, json, "", res, scope);
             return 1;
           }
           const body = res.nodes.map((n) => `${n.nodeType}\t${n.title}`).join("\n") || "(no results)";
-          emit(deps, json, res.truncated ? `${body}\n  … ${res.truncated.hint}` : body, res);
+          // Every graph continuation must return the resolved target handle,
+          // even when the relationship set is empty. Otherwise an agent is
+          // forced to reuse an older ID and the next step no longer proves it
+          // consumed the immediately preceding response.
+          const graphPayload = {
+            ...res,
+            target: {
+              requested: pos[0] ?? "",
+              nodeId: res.diagnostics?.target.resolvedNodeId ?? null,
+            },
+          };
+          emit(deps, json, res.truncated ? `${body}\n  … ${res.truncated.hint}` : body, graphPayload, scope);
           return 0;
         }
       }
