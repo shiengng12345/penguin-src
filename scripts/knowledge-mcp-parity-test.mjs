@@ -191,6 +191,13 @@ function errorEnvelope(value) {
   return null;
 }
 
+function isValidErrorEnvelope(value) {
+  return Boolean(value)
+    && typeof value.code === "string" && value.code.length > 0
+    && typeof value.message === "string" && value.message.length > 0
+    && typeof value.retryable === "boolean";
+}
+
 function capabilityProjection(value) {
   return normalizeForParity(value);
 }
@@ -460,6 +467,8 @@ try {
   const cliUnsupportedError = errorEnvelope(cliUnsupportedJson);
   const mcpUnsupportedError = errorEnvelope(mcpUnsupported);
   const unsupportedEqual = cliUnsupported.exitCode === 1
+    && isValidErrorEnvelope(cliUnsupportedError)
+    && isValidErrorEnvelope(mcpUnsupportedError)
     && JSON.stringify(normalizeForParity(cliUnsupportedError)) === JSON.stringify(normalizeForParity(mcpUnsupportedError));
   record("unsupported-error-envelope", { cli: cliUnsupported, mcp: mcpUnsupportedResponse, normalizedCliError: normalizeForParity(cliUnsupportedError), normalizedMcpError: normalizeForParity(mcpUnsupportedError), ...session.evidence() }, unsupportedEqual, "unsupported contract envelopes match");
 
@@ -470,7 +479,11 @@ try {
   const mcpInternal = mcpStructured(mcpInternalResponse);
   const cliInternalError = errorEnvelope(cliInternalJson);
   const mcpInternalError = errorEnvelope(mcpInternal);
-  const internalEqual = JSON.stringify(normalizeForParity(cliInternalError)) === JSON.stringify(normalizeForParity(mcpInternalError));
+  const internalEqual = cliInternal.exitCode !== 0
+    && mcpInternalResponse?.result?.isError === true
+    && isValidErrorEnvelope(cliInternalError)
+    && isValidErrorEnvelope(mcpInternalError)
+    && JSON.stringify(normalizeForParity(cliInternalError)) === JSON.stringify(normalizeForParity(mcpInternalError));
   record("generic-error-envelope", { cli: cliInternal, mcp: mcpInternalResponse, normalizedCliError: normalizeForParity(cliInternalError), normalizedMcpError: normalizeForParity(mcpInternalError), ...session.evidence() }, internalEqual, "generic errors must expose the same normalized envelope");
 } catch (error) {
   record("mcp-process-session", { error: String(error), ...session.evidence() }, false, "real MCP session failed");

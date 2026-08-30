@@ -2,15 +2,15 @@
 
 ## Provenance
 
-- Target commit: `0505f85b7f2d52d1165ffe7740f30afcb5e13ce8`
-- Bundle capture commit: `0505f85b7f2d52d1165ffe7740f30afcb5e13ce8`
-- Target/bundle commit correspondence: **verified**; both values were resolved by `git rev-parse` during the same parity run.
+- Target commit: `2e711324b458fdf7de0080f753b4089b41a7afcd`
+- Bundle capture commit: `2e711324b458fdf7de0080f753b4089b41a7afcd`
+- Target/bundle commit correspondence: **source commit matched the target commit** during the parity run; because the shared worktree contained 65 pre-existing dirty entries, this is not claimed as a clean-tree proof.
 - CLI bundle SHA-256: `d6bb9836d2257f042960dbf2f7235d2c83ac38df6179eab590f01af2cd989e84`
 - MCP bundle SHA-256: `62cc0c8b6db37286f076b7fd29ab95b004c7a708282d07b3a648e6fb710d11a2`
 - Bundle ID: `8338fdf10a896374e74bb37c5d9921bb3702b3e088a9fcf99c59ca253a205b41` (SHA-256 of the exact CLI and MCP bundle hashes)
 - Runtime build ID: `8338fdf10a896374e74bb37c5d9921bb3702b3e088a9fcf99c59ca253a205b41`; CLI capabilities and MCP initialize both reported this value.
 - CLI launcher tracking: **verified** by `git ls-files --error-unmatch scripts/knowledge-cli-launcher.mjs`; the launcher is included in this change and is not read from an untracked workspace-only path.
-- Worktree at capture: dirty with 65 pre-existing entries. This run is therefore not claimed as a clean-tree parity pass; the commit/bundle correspondence above is independently recorded instead of being inferred from “old commit + dirty”.
+- Worktree at capture: dirty with 65 pre-existing entries. A clean-tree parity pass remains a separate Task 6 release gate; this report records the exact target commit and bundle hashes rather than claiming that dirty-worktree execution is clean.
 
 ## Targeted run
 
