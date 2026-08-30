@@ -314,25 +314,91 @@ fn sync_stable_mcp_runtime(runtime_dir: &Path, stable_dir: &Path) -> Result<Path
 // happened when Settings was opened (mcp_status) or the one-click setup was
 // clicked, so a user who updates the app but never opens Settings keeps
 // serving the OLD MCP bundle to Claude/Codex indefinitely.
-pub(crate) fn sync_stable_mcp_server_on_startup<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
-    std::thread::spawn(move || {
-        if let Err(error) = crate::knowledge::sync_bundled_knowledge_runtime(&app) {
-            eprintln!("knowledge runtime sync failed before MCP install: {error}");
-        }
-        match ensure_stable_mcp_server(&app) {
-            Ok((server, node)) => {
-                if let Some(node) = node.or_else(detect_node_path) {
-                    let health = check_mcp_server_runtime(&node, &server);
-                    if !health.healthy {
-                        eprintln!("MCP runtime health gate failed: {}", health.error.unwrap_or_else(|| "unknown error".to_string()));
-                    }
-                } else {
-                    eprintln!("MCP runtime health gate failed: Node.js not detected");
+#[derive(Debug, Default)]
+struct McpStartupPreflightResult {
+    runtime_sync_error: Option<String>,
+    migration_error: Option<String>,
+    node_missing: bool,
+    health_checked: bool,
+    health_error: Option<String>,
+    launcher_error: Option<String>,
+}
+
+// Keep startup ordering and best-effort error handling in one small seam. The
+// concrete Tauri/file-system operations are supplied by the caller so the
+// startup boundary can be tested without constructing a full Tauri app.
+fn run_mcp_startup_preflight<Sync, Ensure, Detect, Health, Install>(
+    sync_runtime: Sync,
+    ensure_server: Ensure,
+    detect_node: Detect,
+    check_health: Health,
+    install_launcher: Install,
+) -> McpStartupPreflightResult
+where
+    Sync: FnOnce() -> Result<(), String>,
+    Ensure: FnOnce() -> Result<(PathBuf, Option<PathBuf>), String>,
+    Detect: FnOnce() -> Option<PathBuf>,
+    Health: FnOnce(&Path, &Path) -> McpRuntimeHealth,
+    Install: FnOnce() -> Result<PathBuf, String>,
+{
+    let runtime_sync_error = sync_runtime().err();
+    let mut node_missing = false;
+    let (health_checked, health_error, migration_error) = match ensure_server() {
+        Ok((server, node)) => {
+            let node = node.or_else(detect_node);
+            match node {
+                Some(node) => {
+                    let health = check_health(&node, &server);
+                    let health_error = if health.healthy {
+                        None
+                    } else {
+                        Some(health.error.unwrap_or_else(|| "unknown error".to_string()))
+                    };
+                    (true, health_error, None)
+                }
+                None => {
+                    node_missing = true;
+                    (false, None, None)
                 }
             }
-            Err(error) => eprintln!("MCP runtime migration failed: {error}"),
         }
-        if let Err(error) = install_stable_mcp_launcher() {
+        Err(error) => (false, None, Some(error)),
+    };
+    let launcher_error = install_launcher().err();
+
+    McpStartupPreflightResult {
+        runtime_sync_error,
+        migration_error,
+        node_missing,
+        health_checked,
+        health_error,
+        launcher_error,
+    }
+}
+
+pub(crate) fn sync_stable_mcp_server_on_startup<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    std::thread::spawn(move || {
+        let result = run_mcp_startup_preflight(
+            || crate::knowledge::sync_bundled_knowledge_runtime(&app).map(|_| ()),
+            || ensure_stable_mcp_server(&app),
+            detect_node_path,
+            |node, server| check_mcp_server_runtime(node, server),
+            install_stable_mcp_launcher,
+        );
+        if let Some(error) = result.runtime_sync_error {
+            eprintln!("knowledge runtime sync failed before MCP install: {error}");
+        }
+        if let Some(error) = result.migration_error {
+            eprintln!("MCP runtime migration failed: {error}");
+        }
+        if result.node_missing {
+            eprintln!("MCP runtime health gate failed: Node.js not detected");
+        } else if result.health_checked {
+            if let Some(error) = result.health_error {
+                eprintln!("MCP runtime health gate failed: {error}");
+            }
+        }
+        if let Some(error) = result.launcher_error {
             eprintln!("MCP launcher migration failed: {error}");
         }
     });
@@ -345,7 +411,12 @@ fn stable_mcp_launcher_path() -> Option<PathBuf> {
 }
 
 fn install_stable_mcp_launcher() -> Result<PathBuf, String> {
-    let launcher = stable_mcp_launcher_path().ok_or("No home directory")?;
+    let home = dirs::home_dir().ok_or("No home directory")?;
+    install_stable_mcp_launcher_at(&home)
+}
+
+fn install_stable_mcp_launcher_at(home: &Path) -> Result<PathBuf, String> {
+    let launcher = home.join(".penguin/bin/penguin-mcp");
     let dir = launcher.parent().ok_or("MCP launcher has no parent")?;
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let script_path = dir.join("penguin-mcp-launcher.mjs");
@@ -1194,6 +1265,222 @@ mod mcp_config_tests {
         fs::write(dir.join("dist").join("index.js"), server_body).unwrap();
         fs::write(dir.join("dist").join("knowledge-worker.js"), "worker").unwrap();
         fs::write(dir.join("package.json"), "{\"type\":\"module\"}").unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stable_launcher_install_makes_wrapper_and_target_executable() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = scratch_dir("launcher-permissions");
+        let launcher = install_stable_mcp_launcher_at(&home).unwrap();
+        let target = launcher
+            .parent()
+            .unwrap()
+            .join("penguin-mcp-launcher.mjs");
+
+        assert_eq!(launcher, home.join(".penguin/bin/penguin-mcp"));
+        assert_eq!(
+            fs::metadata(&launcher).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "stable shell wrapper must be installed with mode 0755",
+        );
+        assert_eq!(
+            fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o755,
+            "launcher target must be installed with mode 0755",
+        );
+
+        assert!(!stable_mcp_launcher_path()
+            .map(|path| path == launcher)
+            .unwrap_or(false));
+        fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn startup_preflight_runs_sync_health_gate_and_launcher_install_in_order() {
+        use std::sync::{Arc, Mutex};
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let record = |event: &'static str, events: &Arc<Mutex<Vec<&'static str>>>| {
+            events.lock().unwrap().push(event);
+        };
+        let result = run_mcp_startup_preflight(
+            {
+                let events = Arc::clone(&events);
+                move || {
+                    record("runtime-sync", &events);
+                    Ok(())
+                }
+            },
+            {
+                let events = Arc::clone(&events);
+                move || {
+                    record("ensure-server", &events);
+                    Ok((PathBuf::from("server"), Some(PathBuf::from("node"))))
+                }
+            },
+            {
+                let events = Arc::clone(&events);
+                move || {
+                    record("detect-node", &events);
+                    Some(PathBuf::from("detected-node"))
+                }
+            },
+            {
+                let events = Arc::clone(&events);
+                move |node: &Path, server: &Path| {
+                    assert_eq!(node, Path::new("node"));
+                    assert_eq!(server, Path::new("server"));
+                    record("initialize-health", &events);
+                    McpRuntimeHealth {
+                        healthy: true,
+                        error: None,
+                    }
+                }
+            },
+            {
+                let events = Arc::clone(&events);
+                move || {
+                    record("launcher-install", &events);
+                    Ok(PathBuf::from("launcher"))
+                }
+            },
+        );
+
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec![
+                "runtime-sync",
+                "ensure-server",
+                "initialize-health",
+                "launcher-install"
+            ]
+        );
+        assert!(result.runtime_sync_error.is_none());
+        assert!(result.migration_error.is_none());
+        assert!(result.health_checked);
+        assert!(result.health_error.is_none());
+        assert!(!result.node_missing);
+        assert!(result.launcher_error.is_none());
+    }
+
+    #[test]
+    fn startup_preflight_continues_launcher_install_when_sync_or_migration_fails() {
+        use std::sync::{Arc, Mutex};
+
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let result = run_mcp_startup_preflight(
+            {
+                let events = Arc::clone(&events);
+                move || {
+                    events.lock().unwrap().push("runtime-sync");
+                    Err("sync failed".to_string())
+                }
+            },
+            {
+                let events = Arc::clone(&events);
+                move || {
+                    events.lock().unwrap().push("ensure-server");
+                    Err("migration failed".to_string())
+                }
+            },
+            || Some(PathBuf::from("node")),
+            |_, _| panic!("initialize health must not run without a server"),
+            {
+                let events = Arc::clone(&events);
+                move || {
+                    events.lock().unwrap().push("launcher-install");
+                    Ok(PathBuf::from("launcher"))
+                }
+            },
+        );
+
+        assert_eq!(
+            *events.lock().unwrap(),
+            vec!["runtime-sync", "ensure-server", "launcher-install"]
+        );
+        assert_eq!(result.runtime_sync_error.as_deref(), Some("sync failed"));
+        assert_eq!(result.migration_error.as_deref(), Some("migration failed"));
+        assert!(!result.health_checked);
+        assert!(!result.node_missing);
+        assert!(result.launcher_error.is_none());
+    }
+
+    #[test]
+    fn startup_preflight_reports_missing_node_but_still_installs_launcher() {
+        let result = run_mcp_startup_preflight(
+            || Ok(()),
+            || Ok((PathBuf::from("server"), None)),
+            || None,
+            |_, _| panic!("initialize health must not run without Node.js"),
+            || Ok(PathBuf::from("launcher")),
+        );
+
+        assert!(result.migration_error.is_none());
+        assert!(!result.health_checked);
+        assert!(result.node_missing);
+        assert!(result.health_error.is_none());
+        assert!(result.launcher_error.is_none());
+    }
+
+    #[test]
+    fn startup_preflight_keeps_launcher_install_after_initialize_health_failure() {
+        let result = run_mcp_startup_preflight(
+            || Ok(()),
+            || Ok((PathBuf::from("server"), Some(PathBuf::from("node")))),
+            || panic!("fallback node detection must not run when Node.js is bundled"),
+            |_, _| McpRuntimeHealth {
+                healthy: false,
+                error: Some("invalid initialize response".to_string()),
+            },
+            || Ok(PathBuf::from("launcher")),
+        );
+
+        assert!(result.migration_error.is_none());
+        assert!(result.health_checked);
+        assert_eq!(
+            result.health_error.as_deref(),
+            Some("invalid initialize response")
+        );
+        assert!(result.launcher_error.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mcp_initialize_health_gate_requires_penguin_server_info() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = scratch_dir("mcp-health");
+        let node = root.join("fake-node");
+        let server = root.join("server.js");
+        fs::write(&server, "unused").unwrap();
+        fs::write(
+            &node,
+            "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"result\":{\"serverInfo\":{\"name\":\"penguin-mcp\"}}}'\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&node).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&node, permissions).unwrap();
+
+        let healthy = check_mcp_server_runtime(&node, &server);
+        assert!(healthy.healthy, "{healthy:?}");
+        assert!(healthy.error.is_none());
+
+        fs::write(
+            &node,
+            "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"result\":{\"serverInfo\":{\"name\":\"other-server\"}}}'\n",
+        )
+        .unwrap();
+        let unhealthy = check_mcp_server_runtime(&node, &server);
+        assert!(!unhealthy.healthy);
+        assert!(unhealthy
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("valid initialize response")));
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

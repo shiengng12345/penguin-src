@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { McpSession, mcpStructured, processEnv } from "./knowledge-process-utils.mjs";
@@ -65,6 +65,21 @@ function launcherTarget(command) {
   } catch {
     return command;
   }
+}
+
+function launcherReadback(command, target) {
+  const mode = (path) => {
+    if (!path) return null;
+    try {
+      return statSync(path).mode & 0o777;
+    } catch {
+      return null;
+    }
+  };
+  return {
+    wrapperMode: mode(command),
+    launcherTargetMode: mode(target),
+  };
 }
 
 function streamEvidence(session) {
@@ -150,6 +165,8 @@ function markdown(record) {
     `- ` + "failureClass: `" + record.failureClass + "`",
     `- configuredCommand: \`${record.configuredCommand}\``,
     `- launcherTarget: \`${record.launcherTarget ?? "未解析"}\``,
+    `- wrapperMode: \`${record.launcherReadback?.wrapperMode ?? "未读取"}\``,
+    `- launcherTargetMode: \`${record.launcherReadback?.launcherTargetMode ?? "未读取"}\``,
     `- capabilityHash: \`${record.capabilityHash ?? "未取得"}\``,
     `- runningBuildId: \`${record.runningBuildId ?? "未取得"}\``,
     `- availableBuildId: \`${record.availableBuildId ?? "未取得"}\``,
@@ -167,7 +184,7 @@ function discoveryFailure() {
   const target = launcherTarget(configuredCommand);
   const isConfiguredCommandMissing = !existsSync(configuredCommand);
   const failureClass = isConfiguredCommandMissing ? "CONFIG_DISCOVERY_FAILED" : null;
-  return { target, failureClass };
+  return { target, failureClass, launcherReadback: launcherReadback(configuredCommand, target) };
 }
 
 async function diagnose() {
@@ -176,6 +193,7 @@ async function diagnose() {
     generatedAt: new Date().toISOString(),
     configuredCommand: redact(configuredCommand),
     launcherTarget: redact(discovery.target),
+    launcherReadback: discovery.launcherReadback,
     initialize: null,
     "tools/list": null,
     mcp_health: null,
@@ -286,6 +304,7 @@ try {
   record = {
     configuredCommand: redact(configuredCommand),
     launcherTarget: redact(launcherTarget(configuredCommand)),
+    launcherReadback: launcherReadback(configuredCommand, launcherTarget(configuredCommand)),
     initialize: null,
     "tools/list": null,
     mcp_health: null,
