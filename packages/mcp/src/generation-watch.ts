@@ -1,6 +1,6 @@
-import { readFileSync, statSync } from "node:fs";
+import { mkdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 // A stdio MCP server is launched once by the client and lives for the whole
 // session. When the desktop app updates, the code on disk changes underneath
@@ -66,6 +66,30 @@ export function createGenerationState(path = manifestPath()): GenerationState {
 }
 
 /**
+ * Keep the generation used by this long-lived process alive. The desktop app
+ * may publish several newer generations while an AI client keeps this stdio
+ * process open; a lease prevents cleanup from deleting the files this process
+ * still executes. Missing/legacy layouts remain best-effort and never block
+ * startup.
+ */
+export function acquireGenerationLease(path: string, buildId: string | null, pid = process.pid): string | null {
+  if (!buildId) return null;
+  const lease = join(dirname(path), "generations", buildId, ".leases", `${pid}.lease`);
+  try {
+    mkdirSync(dirname(lease), { recursive: true });
+    writeFileSync(lease, `${new Date().toISOString()}\n`, { flag: "w" });
+    return lease;
+  } catch {
+    return null;
+  }
+}
+
+export function releaseGenerationLease(lease: string | null): void {
+  if (!lease) return;
+  try { unlinkSync(lease); } catch { /* already removed or legacy layout */ }
+}
+
+/**
  * Cheap per-tool-call check. Stats the manifest first and only re-reads it
  * when the mtime moved, so the steady-state cost is one stat().
  */
@@ -110,5 +134,17 @@ export function generationMeta(state: GenerationState): Record<string, unknown> 
     "penguin/runningBuildId": state.startupBuildId,
     "penguin/availableBuildId": state.currentBuildId,
     ...(state.newAppVersion ? { "penguin/availableAppVersion": state.newAppVersion } : {}),
+  };
+}
+
+/** Stable top-level fields for clients that ignore MCP `_meta`. */
+export function generationAction(state: GenerationState): Record<string, unknown> | null {
+  if (!state.outdated) return null;
+  return {
+    code: "OUTDATED_RUNTIME",
+    message: generationNotice(state),
+    action: "restart_mcp_session",
+    runningBuildId: state.startupBuildId,
+    availableBuildId: state.currentBuildId,
   };
 }

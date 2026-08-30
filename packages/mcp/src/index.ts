@@ -23,6 +23,9 @@ import { join } from "node:path";
 import {
   checkGeneration,
   createGenerationState,
+  acquireGenerationLease,
+  releaseGenerationLease,
+  generationAction,
   generationMeta,
   generationNotice,
   manifestPath,
@@ -412,6 +415,7 @@ function jsonResult(value: unknown, isError = false) {
   // `content` ONCE per session because a search result's text is replaced by
   // a summary line, which would otherwise swallow the warning entirely.
   const meta = generationMeta(generationState);
+  const runtimeError = generationAction(generationState);
   const notice = !generationState.noticeDelivered ? generationNotice(generationState) : null;
   if (notice) generationState.noticeDelivered = true;
   return {
@@ -421,6 +425,7 @@ function jsonResult(value: unknown, isError = false) {
       : [{ type: "text", text }],
     structuredContent,
     ...(meta ? { _meta: meta } : {}),
+    ...(runtimeError ? { error: runtimeError, action: "restart_mcp_session" } : {}),
   };
 }
 
@@ -431,6 +436,15 @@ const LISTED_TOOL_ORDER = new Map(MCP_LISTED_TOOL_DEFS.map((tool, index) => [too
 const generationState = createGenerationState();
 const generationManifestFile = manifestPath();
 const generationMtime = { value: -1 };
+const generationLease = acquireGenerationLease(generationManifestFile, generationState.startupBuildId);
+const releaseGeneration = () => releaseGenerationLease(generationLease);
+process.once("exit", releaseGeneration);
+for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+  process.once(signal, () => {
+    releaseGeneration();
+    process.exit(0);
+  });
+}
 
 // Cap the response body MCP returns to AI tools. Backend list endpoints can
 // emit megabytes of JSON, which blows through context windows and triggers
@@ -849,6 +863,14 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
         platform: process.platform,
         cwd: process.cwd(),
         status: generationState.outdated ? "outdated" : "ok",
+        // This handler is reachable only after the MCP client completed
+        // initialize, so this is a local protocol gate — not proof that a
+        // different client has loaded a newly-written config.
+        configured: null,
+        launcherHealthy: null,
+        initializeHealthy: true,
+        clientRestartRequired: generationState.outdated,
+        runtimeOutdated: generationState.outdated,
         // Always present so a user (or agent) checking health sees whether
         // this process is still serving a superseded build.
         serverGeneration: {

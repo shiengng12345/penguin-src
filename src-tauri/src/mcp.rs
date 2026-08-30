@@ -540,29 +540,35 @@ fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
 // landed. Legacy dist/ stays synced so configs written by older builds keep
 // working until they are rewritten to current/.
 fn stage_mcp_generation(dir: &Path, build_id: &str, app_version: &str) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir.join("generations"))
+        .map_err(|e| format!("create MCP generations directory: {e}"))?;
     let gen_dir = dir.join("generations").join(build_id);
     let ready = gen_dir.join(".ready");
     if !ready.exists() {
-        copy_dir_recursive(&dir.join("dist"), &gen_dir.join("dist"))?;
+        let staging = dir.join(format!(".staging-{}-{}", std::process::id(), rand_suffix()));
+        if staging.exists() { let _ = std::fs::remove_dir_all(&staging); }
+        copy_dir_recursive(&dir.join("dist"), &staging.join("dist"))?;
         if dir.join("package.json").exists() {
-            copy_if_different(&dir.join("package.json"), &gen_dir.join("package.json"))?;
+            copy_if_different(&dir.join("package.json"), &staging.join("package.json"))?;
         }
         if dir.join("node_modules").is_dir() {
-            copy_dir_recursive(&dir.join("node_modules"), &gen_dir.join("node_modules"))?;
+            copy_dir_recursive(&dir.join("node_modules"), &staging.join("node_modules"))?;
         }
         if dir.join("node").exists() {
-            copy_if_different(&dir.join("node"), &gen_dir.join("node"))?;
+            copy_if_different(&dir.join("node"), &staging.join("node"))?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                if let Ok(meta) = std::fs::metadata(gen_dir.join("node")) {
+                if let Ok(meta) = std::fs::metadata(staging.join("node")) {
                     let mut perms = meta.permissions();
                     perms.set_mode(0o755);
-                    let _ = std::fs::set_permissions(gen_dir.join("node"), perms);
+                    let _ = std::fs::set_permissions(staging.join("node"), perms);
                 }
             }
         }
-        std::fs::write(&ready, build_id).map_err(|e| e.to_string())?;
+        std::fs::write(staging.join(".ready"), build_id).map_err(|e| e.to_string())?;
+        if gen_dir.exists() { let _ = std::fs::remove_dir_all(&gen_dir); }
+        std::fs::rename(&staging, &gen_dir).map_err(|e| format!("publish MCP generation: {e}"))?;
     }
     // Unix publishes through an atomic symlink swap; elsewhere the generation
     // directory itself is the pointer. Either way the manifest is written —
@@ -587,6 +593,13 @@ fn stage_mcp_generation(dir: &Path, build_id: &str, app_version: &str) -> Result
             serde_json::json!({
                 "buildId": build_id,
                 "appVersion": app_version,
+                "schemaVersion": 1,
+                "ready": true,
+                "capabilityHash": "40ae9528330e4e97d68072d3c40c1be3db9e40f8f52478b44c8de026be4487d0",
+                "cliEntry": "penguin.mjs",
+                "mcpEntry": "dist/index.js",
+                "nodePath": "node",
+                "wasmPath": "wasm",
                 "syncedAt": chrono_free_timestamp(),
             })
         ),
@@ -630,6 +643,12 @@ fn prune_old_generations(generations_dir: &Path, keep_build_id: &str) {
         if index < GENERATION_MIN_KEPT {
             continue;
         }
+        // A long-lived MCP stdio process owns a lease in its generation. Do
+        // not delete code that an existing client may still execute, even if
+        // it is older than the normal grace period.
+        if generation_has_active_lease(&path) {
+            continue;
+        }
         let stale = now
             .duration_since(modified)
             .map(|age| age.as_secs() > GENERATION_GRACE_SECS)
@@ -638,6 +657,12 @@ fn prune_old_generations(generations_dir: &Path, keep_build_id: &str) {
             let _ = std::fs::remove_dir_all(path);
         }
     }
+}
+
+fn generation_has_active_lease(path: &Path) -> bool {
+    std::fs::read_dir(path.join(".leases"))
+        .map(|entries| entries.flatten().any(|entry| entry.path().is_file()))
+        .unwrap_or(false)
 }
 
 // Single-flight: startup sync, mcp_status, install, and health check can all
@@ -652,6 +677,15 @@ fn ensure_stable_mcp_server<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
 ) -> Result<(PathBuf, Option<PathBuf>), String> {
     let _guard = STABLE_SYNC_LOCK.lock().map_err(|_| "stable sync lock poisoned".to_string())?;
+    if let Ok((server, node)) = crate::knowledge::active_knowledge_runtime_paths() {
+        return Ok((server, Some(node)));
+    }
+    // A release install must never silently serve a legacy MCP tree after the
+    // verified generation is missing or corrupt. Dev builds retain the old
+    // workspace path because they intentionally do not ship bundled assets.
+    if !cfg!(debug_assertions) {
+        return Err("RUNTIME_NOT_INSTALLED: active versioned MCP runtime is unavailable".to_string());
+    }
     let bundled = bundled_mcp_server_path(app)?;
     let dir = stable_mcp_dir().ok_or("No home directory")?;
     let server = sync_stable_mcp_files(&bundled, &dir)?;
@@ -683,7 +717,20 @@ fn claude_desktop_configured_at(cfg_path: &Path) -> bool {
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .and_then(|v| v.get("mcpServers")?.get("penguin").cloned())
-        .is_some()
+        .map(|penguin| {
+            let command = penguin
+                .get("command")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let server = penguin
+                .get("args")
+                .and_then(serde_json::Value::as_array)
+                .and_then(|args| args.first())
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            is_stable_mcp_client_target(command, server)
+        })
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
@@ -773,11 +820,16 @@ fn write_claude_desktop_mcp_config_at(
         }
     }
 
+    let args = if server.as_os_str().is_empty() {
+        serde_json::json!([])
+    } else {
+        serde_json::json!([server.to_string_lossy()])
+    };
     servers.insert(
         "penguin".to_string(),
         serde_json::json!({
             "command": node.to_string_lossy(),
-            "args": [server.to_string_lossy()],
+            "args": args,
         }),
     );
     let preserved_servers = servers.len().saturating_sub(1);
@@ -804,13 +856,25 @@ fn codex_mcp_configured_at(cfg_path: &Path) -> bool {
         return false;
     };
 
-    doc.get("mcp_servers")
+    let command = doc
+        .get("mcp_servers")
         .and_then(|servers| servers.as_table_like())
         .and_then(|servers| servers.get("penguin"))
         .and_then(|penguin| penguin.as_table_like())
         .and_then(|penguin| penguin.get("command"))
         .and_then(|command| command.as_str())
-        .is_some()
+        .unwrap_or_default();
+    let server = doc
+        .get("mcp_servers")
+        .and_then(|servers| servers.as_table_like())
+        .and_then(|servers| servers.get("penguin"))
+        .and_then(|penguin| penguin.as_table_like())
+        .and_then(|penguin| penguin.get("args"))
+        .and_then(Item::as_array)
+        .and_then(|args| args.get(0))
+        .and_then(toml_edit::Value::as_str)
+        .unwrap_or_default();
+    is_stable_mcp_client_target(command, server)
 }
 
 #[derive(Debug)]
@@ -1028,7 +1092,9 @@ fn write_codex_mcp_config_at(
     }
 
     let mut args = Array::new();
-    args.push(server.to_string_lossy().to_string());
+    if !server.as_os_str().is_empty() {
+        args.push(server.to_string_lossy().to_string());
+    }
 
     let mut penguin = Table::new();
     penguin["command"] = value(node.to_string_lossy().to_string());
@@ -1055,12 +1121,22 @@ pub(crate) struct McpStatus {
     server_name: String,
     bundled_server_path: Option<String>,
     node_path: Option<String>,
+    launcher_path: Option<String>,
     claude_desktop_config_path: Option<String>,
     claude_desktop_configured: bool,
     claude_code_config_path: Option<String>,
     claude_code_configured: bool,
     codex_config_path: Option<String>,
     codex_configured: bool,
+    configured: bool,
+    #[serde(rename = "launcherHealthy")]
+    launcher_healthy: bool,
+    #[serde(rename = "initializeHealthy")]
+    initialize_healthy: Option<bool>,
+    #[serde(rename = "clientRestartRequired")]
+    client_restart_required: bool,
+    #[serde(rename = "runtimeOutdated")]
+    runtime_outdated: Option<bool>,
 }
 
 #[tauri::command]
@@ -1077,12 +1153,18 @@ pub(crate) async fn mcp_status<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> M
             server_name: "penguin".to_string(),
             bundled_server_path: None,
             node_path: None,
+            launcher_path: None,
             claude_desktop_config_path: None,
             claude_desktop_configured: false,
             claude_code_config_path: None,
             claude_code_configured: false,
             codex_config_path: None,
             codex_configured: false,
+            configured: false,
+            launcher_healthy: false,
+            initialize_healthy: None,
+            client_restart_required: false,
+            runtime_outdated: None,
         },
     }
 }
@@ -1091,6 +1173,8 @@ pub(crate) async fn mcp_status<R: tauri::Runtime>(app: tauri::AppHandle<R>) -> M
 pub(crate) struct McpServerHealth {
     healthy: bool,
     error: Option<String>,
+    #[serde(rename = "initializeHealthy")]
+    initialize_healthy: bool,
 }
 
 // Slow path: spawns the bundled server under node and waits for a real MCP
@@ -1107,15 +1191,21 @@ pub(crate) async fn mcp_server_health<R: tauri::Runtime>(app: tauri::AppHandle<R
         match (node, bundled) {
             (Some(node), Some(server)) => {
                 let health = check_mcp_server_runtime(&node, &server);
-                McpServerHealth { healthy: health.healthy, error: health.error }
+                McpServerHealth {
+                    healthy: health.healthy,
+                    initialize_healthy: health.healthy,
+                    error: health.error,
+                }
             }
             (None, _) => McpServerHealth {
                 healthy: false,
                 error: Some("Node.js not detected".to_string()),
+                initialize_healthy: false,
             },
             (_, None) => McpServerHealth {
                 healthy: false,
                 error: Some("Bundled MCP server missing".to_string()),
+                initialize_healthy: false,
             },
         }
     });
@@ -1124,6 +1214,7 @@ pub(crate) async fn mcp_server_health<R: tauri::Runtime>(app: tauri::AppHandle<R
         Err(e) => McpServerHealth {
             healthy: false,
             error: Some(format!("health check task failed: {e}")),
+            initialize_healthy: false,
         },
     }
 }
@@ -1155,17 +1246,31 @@ fn mcp_status_blocking<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> McpStatu
         .as_ref()
         .map(|p| codex_mcp_configured_at(p))
         .unwrap_or(false);
+    let configured = claude_configured || claude_code_configured || codex_configured;
 
     McpStatus {
         server_name: "penguin".to_string(),
         bundled_server_path: bundled.map(|p| p.to_string_lossy().to_string()),
         node_path: node.map(|p| p.to_string_lossy().to_string()),
+        launcher_path: stable_mcp_launcher_path().map(|p| p.to_string_lossy().to_string()),
         claude_desktop_config_path: cfg_path.map(|p| p.to_string_lossy().to_string()),
         claude_desktop_configured: claude_configured,
         claude_code_config_path: claude_code_cfg_path.map(|p| p.to_string_lossy().to_string()),
         claude_code_configured,
         codex_config_path: codex_cfg_path.map(|p| p.to_string_lossy().to_string()),
         codex_configured,
+        configured,
+        launcher_healthy: stable_mcp_launcher_healthy(),
+        // mcp_status is intentionally a fast config probe. The separate
+        // mcp_server_health command fills this local initialize gate; null is
+        // deliberate and must not be rendered as a failed initialize.
+        initialize_healthy: None,
+        // Config writes cannot observe whether an external client has loaded
+        // the new entry, so keep this conservative until that client restarts.
+        client_restart_required: configured,
+        // Only the long-lived MCP process can compare its startup generation
+        // with the available manifest; mcp_health reports that live signal.
+        runtime_outdated: None,
     }
 }
 
@@ -1201,13 +1306,8 @@ pub(crate) async fn mcp_install_to_local_clients<R: tauri::Runtime>(
 fn mcp_install_to_local_clients_blocking<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
 ) -> Result<String, String> {
-    let (server, vendored_node) = ensure_stable_mcp_server(app)?;
-    // Vendored node (known-matching ABI for the shipped better-sqlite3
-    // prebuild) wins; only guess at a system node when the app shipped none
-    // (dev builds — the workspace's own node_modules resolve it directly).
-    let node = vendored_node
-        .or_else(detect_node_path)
-        .ok_or("Could not locate a node binary in common paths")?;
+    let _ = ensure_stable_mcp_server(app)?;
+    let launcher = install_stable_mcp_launcher()?;
     let home = dirs::home_dir().ok_or("No home directory")?;
 
     let clients = detected_local_clients(&home);
@@ -1222,10 +1322,10 @@ fn mcp_install_to_local_clients_blocking<R: tauri::Runtime>(
             // ~/.claude.json uses the same mcpServers shape as Claude Desktop,
             // and the merge preserves all of the client's other state.
             "Claude Desktop" | "Claude Code" => {
-                let _ = write_claude_desktop_mcp_config_at(cfg_path, &node, &server)?;
+                let _ = write_claude_desktop_mcp_config_at(cfg_path, &launcher, Path::new(""))?;
             }
             _ => {
-                let _ = write_codex_mcp_config_at(cfg_path, &node, &server)?;
+                let _ = write_codex_mcp_config_at(cfg_path, &launcher, Path::new(""))?;
             }
         }
         configured.push(format!("{} ({})", name, cfg_path.display()));
@@ -1622,6 +1722,33 @@ mod mcp_config_tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn leased_old_generation_is_never_pruned() {
+        let dir = scratch_dir("stage-prune-lease");
+        let generations = dir.join("generations");
+        for build in ["old1", "old2", "old3"] {
+            let gen = generations.join(build);
+            fs::create_dir_all(gen.join(".leases")).unwrap();
+            fs::write(gen.join(".ready"), build).unwrap();
+            let aged = std::time::SystemTime::now()
+                - std::time::Duration::from_secs(GENERATION_GRACE_SECS + 3600);
+            let times = fs::FileTimes::new().set_modified(aged);
+            fs::File::options()
+                .write(true)
+                .open(gen.join(".ready"))
+                .unwrap()
+                .set_times(times)
+                .unwrap();
+            fs::write(gen.join(".leases").join("4242.lease"), "active\n").unwrap();
+            let dir_handle = fs::File::open(&gen).unwrap();
+            let _ = dir_handle.set_times(times);
+        }
+        prune_old_generations(&generations, "active");
+        assert!(generations.join("old1").exists(), "leased generation must survive cleanup");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn detected_local_clients_matches_what_is_installed() {
         let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
@@ -1931,6 +2058,51 @@ mod mcp_config_tests {
     }
 
     #[test]
+    fn client_configs_use_the_stable_launcher_without_versioned_runtime_paths() {
+        let root = scratch_dir("stable-client-config");
+        let launcher = dirs::home_dir().unwrap().join(".penguin/bin/penguin-mcp");
+        let claude_path = root.join("claude.json");
+        fs::write(
+            &claude_path,
+            r#"{"mcpServers":{"other":{"command":"other-mcp"},"pengvi":{"command":"/usr/bin/node","args":["/Users/u/.penguin/runtimes/v1/dist/index.js"]}}}"#,
+        )
+        .unwrap();
+
+        let first = write_claude_desktop_mcp_config_at(&claude_path, &launcher, Path::new(""))
+            .unwrap();
+        let after_first = fs::read(&claude_path).unwrap();
+        let second = write_claude_desktop_mcp_config_at(&claude_path, &launcher, Path::new(""))
+            .unwrap();
+        let after_second = fs::read(&claude_path).unwrap();
+        let claude: serde_json::Value =
+            serde_json::from_slice(&after_second).unwrap();
+        assert_eq!(claude["mcpServers"]["penguin"]["command"], launcher.to_string_lossy().as_ref());
+        assert_eq!(claude["mcpServers"]["penguin"]["args"].as_array().unwrap().len(), 0);
+        assert_eq!(claude["mcpServers"]["other"]["command"], "other-mcp");
+        assert!(claude["mcpServers"].get("pengvi").is_none());
+        assert!(!String::from_utf8_lossy(&after_second).contains("runtimes/"));
+        assert!(first.written);
+        assert!(!second.written);
+        assert_eq!(after_first, after_second);
+
+        let codex_path = root.join("config.toml");
+        fs::write(
+            &codex_path,
+            "[mcp_servers.other]\ncommand = \"other-mcp\"\n\n[mcp_servers.pengvi]\ncommand = \"/usr/bin/node\"\nargs = [\"/Users/u/.penguin/runtimes/v1/dist/index.js\"]\n",
+        )
+        .unwrap();
+        write_codex_mcp_config_at(&codex_path, &launcher, Path::new("")).unwrap();
+        let codex = fs::read_to_string(&codex_path).unwrap();
+        assert!(codex.contains(&format!("command = \"{}\"", launcher.display())));
+        assert!(codex.contains("args = []"));
+        assert!(codex.contains("[mcp_servers.other]"));
+        assert!(!codex.contains("[mcp_servers.pengvi]"));
+        assert!(!codex.contains("runtimes/"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn codex_migration_removes_owned_pengvi_and_preserves_existing_servers() {
         let cfg_path = temp_config_path("codex-legacy");
         fs::write(
@@ -1966,18 +2138,19 @@ mod mcp_config_tests {
 
         write_codex_mcp_config_at(
             &cfg_path,
-            &PathBuf::from("/usr/local/bin/node"),
-            &PathBuf::from(
-                "/Applications/Penguin.app/Contents/Resources/_up_/packages/mcp/dist/index.js",
-            ),
+            &dirs::home_dir().unwrap().join(".penguin/bin/penguin-mcp"),
+            Path::new(""),
         )
         .unwrap();
 
         let saved = fs::read_to_string(&cfg_path).unwrap();
         assert!(saved.contains("[mcp_servers.github]"));
         assert!(saved.contains("[mcp_servers.penguin]"));
-        assert!(saved.contains("command = \"/usr/local/bin/node\""));
-        assert!(saved.contains("args = [\"/Applications/Penguin.app/Contents/Resources/_up_/packages/mcp/dist/index.js\"]"));
+        assert!(saved.contains(&format!(
+            "command = \"{}\"",
+            dirs::home_dir().unwrap().join(".penguin/bin/penguin-mcp").display()
+        )));
+        assert!(saved.contains("args = []"));
         assert!(codex_mcp_configured_at(&cfg_path));
 
         let _ = fs::remove_dir_all(cfg_path.parent().unwrap());

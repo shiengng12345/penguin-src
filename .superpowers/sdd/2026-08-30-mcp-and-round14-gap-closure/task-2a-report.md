@@ -73,7 +73,7 @@ Rust 回归测试 `stable_launcher_install_makes_wrapper_and_target_executable`
    rtk cargo test --manifest-path src-tauri/Cargo.toml startup_preflight
    ```
 
-   结果：分别 `1 passed`、`2 passed`。
+   结果：分别 `1 passed`、`4 passed`。
 
 3. 完整 Rust MCP tests：
 

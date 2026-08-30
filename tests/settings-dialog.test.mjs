@@ -28,7 +28,10 @@ test("MCP primary action uses client-neutral wording", async () => {
 
   assert.match(source, /Configure MCP Clients/);
   assert.match(source, /Reconfigure MCP Clients/);
-  assert.match(source, /MCP Ready/);
+  assert.doesNotMatch(source, /MCP Ready/);
+  assert.match(source, /Configured — Restart Required/);
+  assert.match(source, /Runtime Outdated — Restart Required/);
+  assert.match(source, /Fully quit and restart/);
   assert.match(source, /Server Check Failed/);
   assert.match(source, /Partial Setup/);
   assert.match(source, /invoke<string>\("mcp_install_to_local_clients"\)/);
@@ -47,7 +50,7 @@ test("MCP install refreshes status after partial failure", async () => {
     "utf8",
   );
   const start = source.indexOf("  const handleMcpInstall");
-  const end = source.indexOf("  const mcpNodePath", start);
+  const end = source.indexOf("  const mcpLauncherPath", start);
   const handler = source.slice(start, end);
 
   assert.match(handler, /catch \(err\) \{\n\s+await refreshMcpStatus\(\);\n\s+setMcpInstallMsg/);
@@ -77,14 +80,17 @@ test("MCP status checks server runtime health, not only client config presence",
   assert.doesNotMatch(backendSource, /server_healthy:\s*bool/);
   assert.match(
     settingsSource,
-    /invoke<\{ healthy: boolean; error: string \| null \}>\("mcp_server_health"\)/,
+    /invoke<\{ healthy: boolean; initializeHealthy: boolean; error: string \| null \}>\("mcp_server_health"\)/,
   );
   assert.match(settingsSource, /void refreshMcpHealth\(\)/);
   assert.match(statusBlock, /mcpServerHealthy/);
-  assert.match(statusBlock, /mcpReady/);
-  assert.match(statusBlock, /MCP Ready/);
+  assert.match(statusBlock, /mcpConfigWritten/);
+  assert.match(statusBlock, /mcpLauncherHealthy/);
+  assert.match(statusBlock, /mcpClientRestartRequired/);
+  assert.match(statusBlock, /mcpRuntimeOutdated/);
+  assert.doesNotMatch(statusBlock, /MCP Ready/);
   assert.match(statusBlock, /Server Check Failed/);
-  assert.match(statusBlock, /Checking Server/);
+  assert.match(statusBlock, /Checking Local Server/);
   assert.doesNotMatch(statusBlock, /mcpBothConfigured\s*\?\s*"Both Configured"/);
 });
 

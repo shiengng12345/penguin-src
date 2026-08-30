@@ -111,12 +111,18 @@ export function SettingsDialog({
     server_name: string;
     bundled_server_path: string | null;
     node_path: string | null;
+    launcher_path: string | null;
     claude_desktop_config_path: string | null;
     claude_desktop_configured: boolean;
     claude_code_config_path: string | null;
     claude_code_configured: boolean;
     codex_config_path: string | null;
     codex_configured: boolean;
+    configured: boolean;
+    launcherHealthy: boolean;
+    initializeHealthy: boolean | null;
+    clientRestartRequired: boolean;
+    runtimeOutdated: boolean | null;
   }
   const [mcpStatus, setMcpStatus] = useState<McpStatusShape | null>(null);
   const [mcpInstallState, setMcpInstallState] = useState<
@@ -145,8 +151,8 @@ export function SettingsDialog({
     setMcpHealth("checking");
     setMcpHealthError(null);
     try {
-      const h = await invoke<{ healthy: boolean; error: string | null }>("mcp_server_health");
-      setMcpHealth(h.healthy ? "ok" : "failed");
+      const h = await invoke<{ healthy: boolean; initializeHealthy: boolean; error: string | null }>("mcp_server_health");
+      setMcpHealth(h.initializeHealthy ? "ok" : "failed");
       setMcpHealthError(h.error);
     } catch (err) {
       setMcpHealth("failed");
@@ -171,41 +177,50 @@ export function SettingsDialog({
     void refreshMcpHealth();
   };
 
-  const mcpNodePath = mcpStatus?.node_path ?? "<node>";
-  const mcpServerPath = mcpStatus?.bundled_server_path ?? "<path>";
-  const canCopyMcpSetup = Boolean(mcpStatus?.bundled_server_path && mcpStatus?.node_path);
+  const mcpLauncherPath = mcpStatus?.launcher_path ?? "~/.penguin/bin/penguin-mcp";
+  const canCopyMcpSetup = Boolean(mcpStatus?.launcher_path);
   const mcpJsonSnippet = JSON.stringify(
     {
       mcpServers: {
         penguin: {
-          command: mcpNodePath,
-          args: [mcpServerPath],
+          command: mcpLauncherPath,
+          args: [],
         },
       },
     },
     null,
     2,
   );
-  const mcpClaudeCliCommand = `claude mcp add --scope user penguin ${mcpNodePath} ${mcpServerPath}`;
-  const mcpCodexCliCommand = `codex mcp add penguin -- ${mcpNodePath} ${mcpServerPath}`;
+  const mcpClaudeCliCommand = `claude mcp add --scope user penguin ${mcpLauncherPath}`;
+  const mcpCodexCliCommand = `codex mcp add penguin -- ${mcpLauncherPath}`;
   const mcpClaudeConfigured = Boolean(mcpStatus?.claude_desktop_configured);
   const mcpClaudeCodeConfigured = Boolean(mcpStatus?.claude_code_configured);
   const mcpCodexConfigured = Boolean(mcpStatus?.codex_configured);
+  const mcpConfigWritten = Boolean(mcpStatus?.configured);
+  const mcpLauncherHealthy = mcpStatus?.launcherHealthy === true;
   const mcpServerHealthy = mcpHealth === "ok";
   const mcpAllConfigured = mcpClaudeConfigured && mcpClaudeCodeConfigured && mcpCodexConfigured;
-  const mcpReady = mcpAllConfigured && mcpServerHealthy;
   const mcpServerCheckFailed = mcpHealth === "failed";
+  const mcpClientRestartRequired = mcpStatus?.clientRestartRequired === true;
+  const mcpRuntimeOutdated = mcpStatus?.runtimeOutdated === true;
+  const mcpLocalChecksHealthy = mcpLauncherHealthy && mcpServerHealthy;
   const mcpPartiallyConfigured =
     !mcpAllConfigured && (mcpClaudeConfigured || mcpClaudeCodeConfigured || mcpCodexConfigured);
-  const mcpStatusLabel = mcpReady
-    ? "MCP Ready"
+  const mcpStatusLabel = mcpRuntimeOutdated
+    ? "Runtime Outdated — Restart Required"
     : mcpServerCheckFailed
-      ? "Server Check Failed"
-      : mcpAllConfigured && mcpHealth === "checking"
-      ? "Checking Server…"
-      : mcpPartiallyConfigured
-      ? "Partial Setup"
-      : "Manual Setup";
+        ? "Server Check Failed"
+        : mcpClientRestartRequired
+          ? "Configured — Restart Required"
+          : mcpHealth === "checking"
+            ? "Checking Local Server…"
+            : mcpPartiallyConfigured
+              ? "Partial Setup"
+              : mcpConfigWritten
+                ? "Configured"
+                : mcpLocalChecksHealthy
+                  ? "Local Server Healthy"
+                  : "Manual Setup";
 
   const copyMcpSetup = async (
     text: string,
@@ -589,29 +604,41 @@ export function SettingsDialog({
               <span
                 className={cn(
                   "shrink-0 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px] font-medium",
-                  mcpReady
+                  mcpLocalChecksHealthy && !mcpClientRestartRequired && !mcpRuntimeOutdated
                     ? "bg-emerald-500/15 text-emerald-500"
-                    : mcpServerCheckFailed
+                    : mcpServerCheckFailed || mcpRuntimeOutdated
                       ? "bg-red-500/15 text-red-500"
-                    : mcpPartiallyConfigured
-                      ? "bg-amber-500/15 text-amber-500"
-                    : "bg-muted text-muted-foreground",
+                      : mcpClientRestartRequired || mcpPartiallyConfigured
+                        ? "bg-amber-500/15 text-amber-500"
+                        : "bg-muted text-muted-foreground",
                 )}
               >
                 <span
                   className={cn(
                     "h-1.5 w-1.5 rounded-full",
-                    mcpReady
+                    mcpLocalChecksHealthy && !mcpClientRestartRequired && !mcpRuntimeOutdated
                       ? "bg-emerald-500"
-                      : mcpServerCheckFailed
+                      : mcpServerCheckFailed || mcpRuntimeOutdated
                         ? "bg-red-500"
-                      : mcpPartiallyConfigured
-                        ? "bg-amber-500"
-                        : "bg-muted-foreground/40",
+                        : mcpClientRestartRequired || mcpPartiallyConfigured
+                          ? "bg-amber-500"
+                          : "bg-muted-foreground/40",
                   )}
                 />
                 {mcpStatusLabel}
               </span>
+            </div>
+
+            <div className="mt-2 space-y-0.5 text-[11px] text-muted-foreground">
+              <p>Configuration written: {mcpStatus === null ? "checking…" : mcpConfigWritten ? "yes" : "no"}.</p>
+              <p>Stable launcher: {mcpStatus === null ? "checking…" : mcpLauncherHealthy ? "healthy" : "not ready"}.</p>
+              <p>Local server initialize: {mcpHealth === "checking" ? "checking…" : mcpServerHealthy ? "passed" : "failed"}.</p>
+              {mcpClientRestartRequired && (
+                <p className="text-amber-500">Client session restart required: fully quit and restart the configured client; this local check does not prove an existing session has reloaded the config.</p>
+              )}
+              {mcpRuntimeOutdated && (
+                <p className="text-red-500">Runtime is outdated: fully restart the MCP session, then reconfigure the client if the outdated status remains.</p>
+              )}
             </div>
 
             {((!mcpStatus?.bundled_server_path && mcpStatus !== null) ||
@@ -653,10 +680,10 @@ export function SettingsDialog({
                 mcpServerCheckFailed ? "text-amber-500" : "text-emerald-500",
               )}>
                 {mcpServerHealthy
-                  ? "✓ Configured Claude Desktop, Claude Code and Codex CLI. Penguin MCP server checked. Restart the clients to load it."
+                  ? `✓ ${mcpInstallMsg} Local server initialize passed. Fully quit and restart each configured client to load the new config; this local check does not prove an existing session has reloaded it.`
                   : mcpServerCheckFailed
-                    ? `Configured clients, but MCP server check failed: ${mcpHealthError ?? "unknown error"}`
-                    : "✓ Configured Claude Desktop, Claude Code and Codex CLI. Verifying MCP server… / 正在检查服务…"}
+                    ? `${mcpInstallMsg} Client restart is still required, but local server initialize failed: ${mcpHealthError ?? "unknown error"}`
+                    : `✓ ${mcpInstallMsg} Verifying local server initialize… / 正在检查本地服务…`}
               </p>
             )}
             {mcpInstallState === "error" && mcpInstallMsg && (
@@ -746,7 +773,7 @@ export function SettingsDialog({
                     </button>
                   </div>
                   <pre className="font-mono text-[10px] text-muted-foreground rounded bg-muted/40 p-2 max-w-full overflow-x-auto whitespace-pre leading-relaxed">
-                    {mcpClaudeCliCommand.replace(` ${mcpNodePath} `, ` \\\n  ${mcpNodePath} \\\n  `)}
+                    {mcpClaudeCliCommand}
                   </pre>
                 </div>
 
@@ -780,7 +807,7 @@ export function SettingsDialog({
                     </button>
                   </div>
                   <pre className="font-mono text-[10px] text-muted-foreground rounded bg-muted/40 p-2 max-w-full overflow-x-auto whitespace-pre leading-relaxed">
-                    {mcpCodexCliCommand.replace(` -- ${mcpNodePath} `, ` -- \\\n  ${mcpNodePath} \\\n  `)}
+                    {mcpCodexCliCommand}
                   </pre>
                 </div>
               </div>

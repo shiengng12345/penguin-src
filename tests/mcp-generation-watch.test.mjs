@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, utimesSync } from "node:fs";
+import { existsSync, mkdtempSync, writeFileSync, utimesSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,7 +19,10 @@ const {
   checkGeneration,
   createGenerationState,
   generationMeta,
+  generationAction,
   generationNotice,
+  acquireGenerationLease,
+  releaseGenerationLease,
   readGenerationManifest,
 } = await import(`data:text/javascript;base64,${Buffer.from(outputText).toString("base64")}`);
 
@@ -126,4 +129,33 @@ test("notice is emitted for delivery-once bookkeeping by the caller", () => {
   state.noticeDelivered = true;
   // The helper stays pure — suppression is the caller's decision.
   assert.ok(generationNotice(state));
+});
+
+test("outdated state has a stable restart action for clients that ignore _meta", () => {
+  const path = scratchManifest({ buildId: "aaa" });
+  const state = createGenerationState(path);
+  const mtime = { value: -1 };
+  bump(path, { buildId: "bbb", appVersion: "1.16.2" });
+  checkGeneration(state, path, mtime);
+  assert.deepEqual(generationAction(state), {
+    code: "OUTDATED_RUNTIME",
+    message: generationNotice(state),
+    action: "restart_mcp_session",
+    runningBuildId: "aaa",
+    availableBuildId: "bbb",
+  });
+});
+
+test("generation lease is acquired and released without blocking legacy layouts", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pgv-lease-"));
+  const manifest = join(dir, "manifest.json");
+  const generation = join(dir, "generations", "aaa");
+  writeFileSync(manifest, JSON.stringify({ buildId: "aaa" }));
+  const lease = acquireGenerationLease(manifest, "aaa", 4242);
+  assert.ok(lease);
+  assert.equal(existsSync(lease), true);
+  releaseGenerationLease(lease);
+  assert.equal(existsSync(lease), false);
+  assert.equal(acquireGenerationLease(manifest, null, 4242), null);
+  assert.equal(existsSync(generation), true, "lease acquisition creates the generation path only as needed");
 });

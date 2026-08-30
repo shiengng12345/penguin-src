@@ -85,6 +85,27 @@ function runDiagnostic(launcher: string, mode = "success") {
   return { result, record: JSON.parse(result.stdout), report: readFileSync(report, "utf8"), reportPath: report };
 }
 
+function runBuiltMcpHealth() {
+  const input = [
+    JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "round13", version: "1" } } }),
+    JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+    JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "mcp_health", arguments: {} } }),
+  ].join(String.fromCharCode(10)) + String.fromCharCode(10);
+  const result = spawnSync(process.execPath, [resolve(diagnosticRoot(), "packages/mcp/dist/index.js")], {
+    cwd: diagnosticRoot(),
+    input,
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  const frame = result.stdout
+    .split(String.fromCharCode(10))
+    .map((line) => { try { return JSON.parse(line) as Record<string, any>; } catch { return null; } })
+    .find((candidate) => candidate?.id === 2);
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.ok(frame?.result, result.stdout);
+  return JSON.parse(frame.result.content[0].text) as Record<string, any>;
+}
+
 test("MCP definitions list every Round 13 continuation tool", () => {
   for (const capability of ["knowledge.callees", "knowledge.affected", "knowledge.context", "knowledge.flow"]) {
     const name = capability.replaceAll(".", "_");
@@ -141,6 +162,51 @@ test("real MCP session diagnostic records initialize, tools, health, and capabil
   assert.equal(record.runningBuildId, "running-test");
   assert.equal(record.availableBuildId, "available-test");
   assert.match(report, /failureClass: `NONE`/);
+});
+
+test("MCP health keeps local initialize and client restart status separate", () => {
+  // index.ts starts the stdio server as a module side effect, so keep this
+  // contract assertion focused on the production health response shape.
+  const source = readFileSync(resolve(diagnosticRoot(), "packages/mcp/src/index.ts"), "utf8");
+  assert.match(source, /initializeHealthy:\s*true/);
+  assert.match(source, /clientRestartRequired:\s*generationState\.outdated/);
+  assert.match(source, /runtimeOutdated:\s*generationState\.outdated/);
+  assert.match(source, /serverGeneration:\s*\{/);
+  assert.match(source, /action:\s*generationNotice\(generationState\)/);
+});
+
+test("built MCP health reports local initialize and runtime generation separately", () => {
+  const health = runBuiltMcpHealth();
+  assert.equal(health.configured, null);
+  assert.equal(health.launcherHealthy, null);
+  assert.equal(health.initializeHealthy, true);
+  assert.equal(health.clientRestartRequired, false);
+  assert.equal(health.runtimeOutdated, false);
+  assert.equal(health.serverGeneration.outdated, false);
+  assert.equal(health.serverGeneration.runningBuildId, health.serverGeneration.availableBuildId);
+});
+
+test("Settings keeps config, local checks, restart, and outdated state distinct", () => {
+  const source = readFileSync(resolve(diagnosticRoot(), "src/components/settings/SettingsDialog.tsx"), "utf8");
+  assert.match(source, /configured:\s*boolean/);
+  assert.match(source, /launcherHealthy:\s*boolean/);
+  assert.match(source, /initializeHealthy:\s*boolean\s*\|\s*null/);
+  assert.match(source, /clientRestartRequired:\s*boolean/);
+  assert.match(source, /runtimeOutdated:\s*boolean\s*\|\s*null/);
+  assert.match(source, /Fully quit and restart/);
+  assert.match(source, /does not prove.*reloaded/i);
+  assert.match(source, /Outdated.*reconfigure|reconfigure.*Outdated/i);
+  assert.doesNotMatch(source, /MCP Ready/);
+});
+
+test("Settings snippets use the stable launcher as the only canonical command", () => {
+  const source = readFileSync(resolve(diagnosticRoot(), "src/components/settings/SettingsDialog.tsx"), "utf8");
+  assert.match(source, /launcher_path/);
+  assert.match(source, /command:\s*mcpLauncherPath/);
+  assert.match(source, /args:\s*\[\]/);
+  assert.doesNotMatch(source, /command:\s*mcpNodePath/);
+  assert.doesNotMatch(source, /mcpClaudeCliCommand\s*=.*mcpNodePath/);
+  assert.doesNotMatch(source, /mcpCodexCliCommand\s*=.*mcpNodePath/);
 });
 
 test("real MCP session diagnostic covers launcher execute permissions", () => {
