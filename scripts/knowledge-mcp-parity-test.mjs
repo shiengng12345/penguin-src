@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { CAPABILITIES, capabilityHash, listMcpRegistrations, listCliRegistrations } from "../packages/knowledge-contracts/dist/index.js";
 import { KNOWLEDGE_TOOL_DEFS, MCP_LISTED_TOOL_DEFS } from "../packages/mcp/dist/knowledge-tool-defs.js";
 import { defaultProcessPaths, extractCliJson as extractCliJsonOutput, McpSession, mcpStructured, normalizeForParity, parseJson, processEnv, runCli } from "./knowledge-process-utils.mjs";
@@ -17,6 +17,7 @@ const RAW_STREAMS = ["stdout", "stderr"];
 
 const root = resolve(import.meta.dirname, "..");
 const paths = { ...defaultProcessPaths(root), cliLauncher: resolve(root, "scripts/knowledge-cli-launcher.mjs"), mcpLauncher: resolve(root, "scripts/knowledge-mcp-launcher.mjs") };
+const trackedLauncherPaths = ["scripts/knowledge-cli-launcher.mjs", "scripts/knowledge-mcp-launcher.mjs"];
 const repo = process.env.PENGUIN_REPO ?? "FPMS-NT";
 const report = process.env.PENGUIN_PARITY_REPORT ?? resolve(root, ".superpowers/sdd/2026-08-30-mcp-and-round14-gap-closure/task-3-report.md");
 const baseEnv = processEnv(root, { PENGUIN_MCP_WORKSPACE_ROOTS: process.env.PENGUIN_MCP_WORKSPACE_ROOTS ?? root });
@@ -27,33 +28,74 @@ function fileHash(path) {
   return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
+/**
+ * 什么时候用：为目标 commit/tree 读取到的 CLI、MCP 和两个 launcher 输入生成 parity runtime 的 buildId，方便报告核对 commit 与 bundle 是否绑定。
+ */
+function bundleId({ sourceCommit, sourceTree, bundleContentHashes }) {
+  return createHash("sha256")
+    .update(sourceCommit)
+    .update(sourceTree)
+    .update(bundleContentHashes.cli)
+    .update(bundleContentHashes.mcp)
+    .update(bundleContentHashes.cliLauncher)
+    .update(bundleContentHashes.mcpLauncher)
+    .digest("hex");
+}
+
+function gitValue(args) {
+  try {
+    return execFileSync("git", args, { cwd: root, encoding: "utf8" }).trim();
+  } catch (error) {
+    fail("PARITY_PROVENANCE_INVALID", `git ${args.join(" ")} failed: ${error.message}`);
+  }
+}
+
+/**
+ * 什么时候用：在 parity 复制 launcher 前确认输入确实来自 Git tree，避免 clean-tree 证明依赖未跟踪工作区文件。
+ */
+function trackedFile(relativePath) {
+  const result = spawnSync("git", ["ls-files", "--error-unmatch", "--", relativePath], { cwd: root, encoding: "utf8" });
+  const isTracked = result.status === 0 && result.stdout.trim() === relativePath;
+  if (isTracked) return result.stdout.trim();
+  fail("PARITY_INPUT_UNTRACKED", `${relativePath} must be tracked before parity can run`);
+}
+
 function sourceMetadata() {
-  const sourceCommit = execFileSync("git", ["rev-parse", "HEAD"], { cwd: root, encoding: "utf8" }).trim();
-  const dirtyFiles = execFileSync("git", ["status", "--porcelain=v1"], { cwd: root, encoding: "utf8" })
+  const sourceCommit = gitValue(["rev-parse", "HEAD"]);
+  const sourceTree = gitValue(["rev-parse", "HEAD^{tree}"]);
+  const targetCommit = process.env.PENGUIN_PARITY_TARGET_COMMIT ?? sourceCommit;
+  const targetCommitResolved = gitValue(["rev-parse", "--verify", `${targetCommit}^{commit}`]);
+  const trackedLauncherInputs = trackedLauncherPaths.map((relativePath) => trackedFile(relativePath));
+  const dirtyFiles = gitValue(["status", "--porcelain=v1", "--untracked-files=all"])
     .split(/\r?\n/).filter(Boolean);
+  const bundleContentHashes = {
+    cli: fileHash(paths.cliBundle),
+    mcp: fileHash(paths.mcpBundle),
+    cliLauncher: fileHash(paths.cliLauncher),
+    mcpLauncher: fileHash(paths.mcpLauncher),
+  };
   return {
     sourceCommit,
+    sourceTree,
+    targetCommit: targetCommitResolved,
+    bundleSourceCommit: sourceCommit,
+    bundleSourceTree: sourceTree,
+    bundleCommitMatchesTarget: sourceCommit === targetCommitResolved && dirtyFiles.length === 0,
+    trackedLauncherInputs,
     worktreeState: dirtyFiles.length ? "dirty" : "clean",
     dirtyFiles,
-    bundleContentHashes: {
-      cli: fileHash(paths.cliBundle),
-      mcp: fileHash(paths.mcpBundle),
-      cliLauncher: fileHash(paths.cliLauncher),
-      mcpLauncher: fileHash(paths.mcpLauncher),
-    },
+    bundleContentHashes,
+    bundleId: bundleId({ sourceCommit, sourceTree, bundleContentHashes }),
   };
 }
 
-function stableRuntime(pathsToStage) {
+function stableRuntime(pathsToStage, provenance) {
   const home = mkdtempSync(join(tmpdir(), "penguin-task3-home-"));
   const runtimeRoot = join(home, ".penguin", "runtimes");
   const current = join(runtimeRoot, "current");
   const bin = join(home, ".penguin", "bin");
   mkdirSync(current, { recursive: true });
-  const buildId = createHash("sha256")
-    .update(fileHash(pathsToStage.cliBundle))
-    .update(fileHash(pathsToStage.mcpBundle))
-    .digest("hex");
+  const buildId = provenance.bundleId;
   const link = (target, destination) => { mkdirSync(dirname(destination), { recursive: true }); symlinkSync(target, destination); };
   link(pathsToStage.node, join(current, "node"));
   link(pathsToStage.cliBundle, join(current, "penguin.mjs"));
@@ -83,6 +125,7 @@ function stableRuntime(pathsToStage) {
     home,
     runtimeRoot,
     buildId,
+    manifest,
     cliWrapper,
     mcpWrapper,
     env: {
@@ -98,8 +141,8 @@ function stableRuntime(pathsToStage) {
   };
 }
 
-const { buildId, env, cliWrapper, mcpWrapper } = stableRuntime(paths);
 const provenance = sourceMetadata();
+const { buildId, env, cliWrapper, mcpWrapper, manifest } = stableRuntime(paths, provenance);
 
 function record(name, evidence, passed, reason = "") {
   rows.push({ name, evidence });
@@ -214,7 +257,12 @@ const schemaMismatches = [...canonical.keys()].filter((id) => {
 const registrationIds = new Set(registrations.keys());
 const missingMcpRegistrations = [...expectedToolIds].filter((id) => !registrationIds.has(id));
 const extraRegistrations = [...registrationIds].filter((id) => !expectedToolIds.has(id));
-record("registration-surface", { capabilityCount: CAPABILITIES.length, capabilityHash: capabilityHash(CAPABILITIES), mcpRegistrationCount: registrations.size, toolDefinitionCount: tools.size, missingRegistrations, extraRegistrations, missingTools, extraTools, missingToolIds, extraToolIds, duplicateToolNames, duplicateToolIds, schemaMismatches }, missingRegistrations.length === 0 && extraRegistrations.length === 0 && missingTools.length === 0 && extraTools.length === 0 && missingToolIds.length === 0 && extraToolIds.length === 0 && duplicateToolNames.length === 0 && schemaMismatches.length === 0, "registration parity is not sufficient; real process checks follow");
+record("registration-surface", { capabilityCount: CAPABILITIES.length, capabilityHash: capabilityHash(CAPABILITIES), mcpRegistrationCount: registrations.size, toolDefinitionCount: tools.size, missingRegistrations, extraRegistrations, missingTools, extraTools, missingToolIds, extraToolIds, duplicateToolNames, duplicateToolIds, schemaMismatches }, missingRegistrations.length === 0 && extraRegistrations.length === 0 && missingTools.length === 0 && extraTools.length === 0 && missingToolIds.length === 0 && extraToolIds.length === 0 && duplicateToolNames.length === 0 && duplicateToolIds.length === 0 && schemaMismatches.length === 0, "registration parity is not sufficient; real process checks follow");
+const sourceBundleProvenancePassed = provenance.bundleCommitMatchesTarget
+  && provenance.bundleId === buildId
+  && manifest.buildId === buildId
+  && provenance.trackedLauncherInputs.length === trackedLauncherPaths.length;
+record("source-bundle-provenance", { ...provenance, runtimeBuildId: buildId, runtimeManifestBuildId: manifest.buildId, verification: "bundleId hashes the target commit/tree and exact CLI/MCP/launcher bytes; the runtime manifest carries the same value" }, sourceBundleProvenancePassed, "target commit/tree, exact bundle bytes, tracked launchers, and runtime manifest buildId must agree");
 
 const cliCapabilities = runCli({ command: cliWrapper, args: ["capabilities", "--json"], cwd: root, env });
 const cliCapabilitiesJson = extractCliJson(cliCapabilities);
@@ -262,6 +310,7 @@ try {
     && missingListedToolIds.length === 0
     && extraListedToolIds.length === 0
     && duplicateListedToolNames.length === 0
+    && duplicateListedToolIds.length === 0
     && toolMismatches.length === 0,
   `listed canonical=${actualKnowledgeTools.length}, expected=${MCP_LISTED_TOOL_DEFS.length}, missing=${missingListedTools.join(",")}, extra=${extraListedTools.join(",")}, mismatches=${toolMismatches.join(",")}`);
 
@@ -440,7 +489,7 @@ for (const row of rows) {
   evidenceFiles.set(row.name, { file, bytes: Buffer.byteLength(JSON.stringify(safe), "utf8") + 1, sha256: fileHash(file) });
 }
 const markdown = [
-  "# Task 3 MCP/CLI parity evidence", "", `- CLI bundle: \`${paths.cliBundle}\``, `- MCP bundle: \`${paths.mcpBundle}\``, `- Node: \`${paths.node}\``, `- CLI stable wrapper: \`${cliWrapper}\``, `- MCP stable wrapper: \`${mcpWrapper}\``, `- Repository: \`${repo}\``, `- Checks: ${checks.length}`, `- Failed: ${failed.length}`, `- Source commit: \`${provenance.sourceCommit}\``, `- Worktree state at start: \`${provenance.worktreeState}\``, `- Dirty files at start: ${provenance.dirtyFiles.length}`, `- Bundle hashes: ${JSON.stringify(provenance.bundleContentHashes)}`, "", "## Verdict", "", failed.length ? `FAIL: ${failed.map((check) => `${check.name} (${check.reason})`).join("; ")}` : "PASS: real CLI and MCP process parity checks passed.", "", "## Evidence sidecars", "", "Each sidecar is complete JSON; no evidence is truncated. Paths and temporary-home values are redacted.", "", 
+  "# Task 3 MCP/CLI parity evidence", "", `- CLI bundle: \`${paths.cliBundle}\``, `- MCP bundle: \`${paths.mcpBundle}\``, `- Node: \`${paths.node}\``, `- CLI stable wrapper: \`${cliWrapper}\``, `- MCP stable wrapper: \`${mcpWrapper}\``, `- Repository: \`${repo}\``, `- Checks: ${checks.length}`, `- Failed: ${failed.length}`, `- Target commit: \`${provenance.targetCommit}\``, `- Bundle commit: \`${provenance.bundleCommit}\``, `- Target/bundle commit match: \`${provenance.bundleCommitMatchesTarget}\``, `- Tracked CLI launcher: \`${provenance.trackedCliLauncher}\``, `- Worktree state at start: \`${provenance.worktreeState}\``, `- Dirty files at start: ${provenance.dirtyFiles.length}`, `- Bundle ID (SHA-256 of exact CLI+MCP bundle bytes): \`${provenance.bundleId}\``, `- Bundle hashes: ${JSON.stringify(provenance.bundleContentHashes)}`, "", "## Verdict", "", failed.length ? `FAIL: ${failed.map((check) => `${check.name} (${check.reason})`).join("; ")}` : "PASS: real CLI and MCP process parity checks passed.", "", "## Evidence sidecars", "", "Each sidecar is complete JSON; no evidence is truncated. Paths and temporary-home values are redacted.", "",
   ...rows.flatMap((row) => { const sidecar = evidenceFiles.get(row.name); return [`### ${row.name}`, `- Sidecar: \`${sidecar.file}\``, `- Bytes: ${sidecar.bytes}`, `- SHA-256: \`${sidecar.sha256}\``, "```json", JSON.stringify(evidenceSummary(row.evidence)), "```", ""]; }),
 ];
 mkdirSync(dirname(report), { recursive: true });
