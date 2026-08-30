@@ -19,25 +19,40 @@ const configuredArgs = (() => {
 })();
 const reportPath = process.env.PENGUIN_MCP_DIAGNOSTIC_REPORT ?? resolve(root, ".superpowers/sdd/2026-08-30-mcp-and-round14-gap-closure/task-1-report.md");
 const timeoutMs = Number(process.env.PENGUIN_MCP_DIAGNOSTIC_TIMEOUT_MS ?? 15_000);
+const MAX_INLINE_REPORT_BYTES = 256 * 1024; // 主报告保持可读，完整安全流写入 sidecar。
+const SENSITIVE_KEY_PATTERN = /authorization|proxy-authorization|cookie|password|secret|token|api[_-]?key/iu;
+const SENSITIVE_HEADER_NAME_PATTERN = /^(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key)$/iu;
 
+/**
+ * 什么时候用：诊断记录准备写入磁盘或输出给调用方时使用；先遮盖 home、workspace 和敏感 header，避免保存真实凭据。
+ */
 function redact(value) {
   if (Array.isArray(value)) return value.map(redact);
   if (value === null || typeof value !== "object") {
     if (typeof value !== "string") return value;
-    return value
+    const normalizedText = value
       .replaceAll(home, "~")
-      .replaceAll(root, "<workspace>")
-      .replace(/(authorization|cookie|password|secret|token|api[_-]?key)([=:]\s*)([^\s,;]+)/giu, "$1$2<redacted>");
+      .replaceAll(root, "<workspace>");
+    try {
+      const parsedJson = JSON.parse(normalizedText);
+      return JSON.stringify(redact(parsedJson));
+    } catch {
+      // 普通 stderr 不是 JSON，继续使用文本 header 规则脱敏。
+    }
+    const redactedText = normalizedText
+      .replace(/\bBearer\s+[^\s"',;}\]]+/giu, "Bearer <redacted>")
+      .replace(/(["']?(?:authorization|proxy-authorization|cookie|set-cookie|password|secret|token|api[_-]?key)["']?\s*[:=]\s*["']?)(?!Bearer\s+|<redacted>)[^\s"',;}\]]+/giu, "$1<redacted>")
+      .replace(/(\\?["']?name\\?["']?\s*[:=]\s*\\?["']?(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key)\\?["']?\s*,\s*\\?["']?value\\?["']?\s*[:=]\s*\\?["']?)(?!Bearer\s+|<redacted>)[^\s"',;}\]]+/giu, "$1<redacted>");
+    return redactedText;
   }
-  return Object.fromEntries(Object.entries(value).map(([key, item]) => {
-    const isSensitiveKey = /authorization|cookie|password|secret|token|api[_-]?key/iu.test(key);
-    return [key, isSensitiveKey ? "<redacted>" : redact(item)];
+  const entries = Object.entries(value);
+  const headerName = entries.find(([key]) => key.toLowerCase() === "name")?.[1];
+  const isSensitiveHeader = typeof headerName === "string" && SENSITIVE_HEADER_NAME_PATTERN.test(headerName.trim());
+  return Object.fromEntries(entries.map(([key, item]) => {
+    const isSensitiveKey = SENSITIVE_KEY_PATTERN.test(key);
+    const isHeaderValue = isSensitiveHeader && key.toLowerCase() === "value";
+    return [key, isSensitiveKey || isHeaderValue ? "<redacted>" : redact(item)];
   }));
-}
-
-function bounded(value, limit = 30_000) {
-  const text = String(value ?? "");
-  return text.length <= limit ? text : `${text.slice(0, limit)}\n...[truncated]`;
 }
 
 function launcherTarget(command) {
@@ -58,14 +73,44 @@ function streamEvidence(session) {
     command: evidence.command,
     args: evidence.args,
     pid: evidence.pid,
-    stdout: bounded(evidence.stdout),
-    stderr: bounded(evidence.stderr),
+    stdout: evidence.stdout,
+    stderr: evidence.stderr,
     protocolLines: evidence.protocolLines,
     messages: evidence.messages,
     spawnError: evidence.spawnError,
     exitCode: evidence.exitCode,
     exitSignal: evidence.exitSignal,
   });
+}
+
+/**
+ * 什么时候用：诊断结束后写主报告时使用；报告过大时把已脱敏的完整 session 流放入可读回的 sidecar。
+ */
+function writeDiagnosticReport(record) {
+  const safeRecord = redact(record);
+  const inlineReport = markdown(safeRecord);
+  const isReportTooLarge = Buffer.byteLength(inlineReport, "utf8") > MAX_INLINE_REPORT_BYTES;
+  if (!isReportTooLarge || !safeRecord.session) {
+    writeFileSync(reportPath, inlineReport);
+    return safeRecord;
+  }
+
+  const streamEvidencePath = `${reportPath}.streams.json`;
+  writeFileSync(streamEvidencePath, `${JSON.stringify(redact(safeRecord.session), null, 2)}\n`);
+  const safeStreamReference = redact(streamEvidencePath);
+  const compactRecord = {
+    ...safeRecord,
+    streamEvidenceFile: safeStreamReference,
+    session: {
+      ...safeRecord.session,
+      stdout: `[完整安全流证据见 ${safeStreamReference}]`,
+      stderr: `[完整安全流证据见 ${safeStreamReference}]`,
+      protocolLines: `[完整安全流证据见 ${safeStreamReference}]`,
+      messages: `[完整安全流证据见 ${safeStreamReference}]`,
+    },
+  };
+  writeFileSync(reportPath, markdown(compactRecord));
+  return compactRecord;
 }
 
 function errorText(error) {
@@ -253,6 +298,6 @@ try {
     session: null,
   };
 }
-writeFileSync(reportPath, markdown(redact(record)));
-process.stdout.write(`${JSON.stringify(redact(record), null, 2)}\n`);
+const outputRecord = writeDiagnosticReport(record);
+process.stdout.write(`${JSON.stringify(outputRecord, null, 2)}\n`);
 process.exitCode = record.failureClass === "NONE" ? 0 : 1;

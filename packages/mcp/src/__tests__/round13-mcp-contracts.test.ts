@@ -41,11 +41,14 @@ function diagnosticRoot() {
 function diagnosticFixture() {
   const dir = mkdtempSync(join(tmpdir(), "penguin-round13-mcp-diagnostic-"));
   const launcher = join(dir, "penguin-mcp");
-  writeFileSync(launcher, `#!/usr/bin/env node
+  const launcherTarget = join(dir, "penguin-mcp-launcher.mjs");
+  writeFileSync(launcherTarget, `#!/usr/bin/env node
 import { createInterface } from "node:readline";
 const mode = process.env.PENGUIN_DIAGNOSTIC_CASE ?? "success";
 if (mode === "missing-stdout") process.exit(0);
 if (mode === "non-json") { process.stdout.write("launcher log\\n"); process.exit(0); }
+if (mode === "sensitive") process.stderr.write("Authorization: Bearer abc123\\n");
+if (mode === "large-stream") process.stderr.write("x".repeat(300_000));
 const lines = createInterface({ input: process.stdin });
 for await (const line of lines) {
   const request = JSON.parse(line);
@@ -56,25 +59,30 @@ for await (const line of lines) {
   } else if (request.method === "tools/list") {
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { tools: [{ name: "mcp_health" }] } }) + "\\n");
   } else if (request.method === "tools/call" && request.params.name === "mcp_health") {
-    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { content: [{ type: "text", text: JSON.stringify({ status: "ok", serverGeneration: { runningBuildId: "running-test", availableBuildId: "available-test" } }) }] } }) + "\\n");
+    const health = { status: "ok", serverGeneration: { runningBuildId: "running-test", availableBuildId: "available-test" }, ...(mode === "sensitive" ? { headers: [{ name: "Authorization", value: "Bearer abc123" }, { name: "x-api-key", value: "json-secret-456" }] } : {}) };
+    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { content: [{ type: "text", text: JSON.stringify(health) }] } }) + "\\n");
   } else if (request.method === "tools/call" && request.params.name === "knowledge_capabilities") {
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: { structuredContent: { capabilityHash: "test-capability-hash" } } }) + "\\n");
   }
 }
 `);
+  writeFileSync(launcher, `#!/bin/sh
+exec "${process.execPath}" "${launcherTarget}"
+`);
+  chmodSync(launcherTarget, 0o755);
   chmodSync(launcher, 0o755);
-  return { dir, launcher };
+  return { dir, launcher, launcherTarget };
 }
 
 function runDiagnostic(launcher: string, mode = "success") {
   const report = join(tmpdir(), `penguin-round13-diagnostic-${process.pid}-${Date.now()}-${mode}.md`);
   const result = spawnSync(process.execPath, [join(diagnosticRoot(), "scripts/knowledge-mcp-session-diagnostic.mjs")], {
     cwd: diagnosticRoot(),
-    env: { ...process.env, PENGUIN_MCP_COMMAND: process.execPath, PENGUIN_MCP_COMMAND_ARGS: JSON.stringify([launcher]), PENGUIN_DIAGNOSTIC_CASE: mode, PENGUIN_MCP_DIAGNOSTIC_REPORT: report, PENGUIN_MCP_DIAGNOSTIC_TIMEOUT_MS: "100" },
+    env: { ...process.env, PENGUIN_MCP_COMMAND: launcher, PENGUIN_DIAGNOSTIC_CASE: mode, PENGUIN_MCP_DIAGNOSTIC_REPORT: report, PENGUIN_MCP_DIAGNOSTIC_TIMEOUT_MS: "1000" },
     encoding: "utf8",
-    timeout: 3_000,
+    timeout: 10_000,
   });
-  return { result, record: JSON.parse(result.stdout), report: readFileSync(report, "utf8") };
+  return { result, record: JSON.parse(result.stdout), report: readFileSync(report, "utf8"), reportPath: report };
 }
 
 test("MCP definitions list every Round 13 continuation tool", () => {
@@ -133,6 +141,41 @@ test("real MCP session diagnostic records initialize, tools, health, and capabil
   assert.equal(record.runningBuildId, "running-test");
   assert.equal(record.availableBuildId, "available-test");
   assert.match(report, /failureClass: `NONE`/);
+});
+
+test("real MCP session diagnostic covers launcher execute permissions", () => {
+  const { launcher } = diagnosticFixture();
+  const success = runDiagnostic(launcher);
+  assert.equal(success.result.status, 0, success.result.stderr || success.result.stdout);
+  assert.equal(success.record.failureClass, "NONE");
+
+  chmodSync(launcher, 0o644);
+  const failure = runDiagnostic(launcher);
+  assert.equal(failure.record.failureClass, "LAUNCHER_EXECUTION_FAILED");
+});
+
+test("diagnostic report redacts bearer and nested JSON header secrets", () => {
+  const { launcher } = diagnosticFixture();
+  const { record, report } = runDiagnostic(launcher, "sensitive");
+
+  assert.equal(record.failureClass, "NONE");
+  assert.doesNotMatch(report, /abc123|json-secret-456/);
+  assert.match(report, /Bearer <redacted>/);
+  assert.match(report, /"name": "x-api-key"/);
+  assert.match(report, /"value": "<redacted>"/);
+});
+
+test("diagnostic report preserves complete large streams in a safe readable sidecar", () => {
+  const { launcher } = diagnosticFixture();
+  const { record, report, reportPath } = runDiagnostic(launcher, "large-stream");
+  const streamEvidencePath = `${reportPath}.streams.json`;
+  const streamEvidence = readFileSync(streamEvidencePath, "utf8");
+
+  assert.equal(record.failureClass, "NONE");
+  assert.match(report, /streamEvidenceFile/);
+  assert.match(report, /完整安全流证据见/);
+  const parsedStreamEvidence = JSON.parse(streamEvidence) as { stderr: string };
+  assert.equal(parsedStreamEvidence.stderr, "x".repeat(300_000));
 });
 
 test("real MCP session diagnostic separates stdout, JSON, timeout, and server-info failures", () => {
