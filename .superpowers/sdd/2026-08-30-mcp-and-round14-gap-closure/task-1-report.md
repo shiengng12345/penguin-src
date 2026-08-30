@@ -84,3 +84,44 @@
    Exit code: `1`
 
    Result: expected current-environment failure classification `LAUNCHER_EXECUTION_FAILED`; launcher exited `126`, stdout was empty, and stderr retained both permission-denied lines in redacted form. No MCP parity failure was reported.
+
+## Round 2 fix evidence
+
+- I1: `round13-mcp-contracts.test.ts` now creates an executable `launcherTarget` with its own Node shebang, and the shell wrapper runs `exec "${launcherTarget}"`. The success case keeps `launcherTarget` at `755`; the failure case changes `launcherTarget` itself to `644` and asserts session exit code `126` plus `LAUNCHER_EXECUTION_FAILED`. The wrapper remains executable.
+- C1/I2/I3 coverage remains in the same focused diagnostic suite; no production diagnostic or process-session code was changed in Round 2.
+
+1. Focused diagnostic tests
+
+   Command:
+
+   ```bash
+   rtk pnpm exec esbuild packages/mcp/src/__tests__/round13-mcp-contracts.test.ts --bundle --platform=node --target=node24 --format=esm --external:better-sqlite3 --outfile=/tmp/penguin-round13-mcp-contracts.test.mjs && rtk env NODE_PATH=/Users/shieng/Desktop/Pengvi/packages/mcp/node_modules node --test --test-name-pattern='diagnostic' /tmp/penguin-round13-mcp-contracts.test.mjs
+   ```
+
+   Exit code: `0`
+
+   Result: `5` diagnostic tests passed, `0` failed, including real shell-wrapper-to-shebang execution, target permission failure with session exit `126`, C1 redaction, I2 complete stream sidecar readback, and initialize failure classification.
+
+2. Typecheck
+
+   Command:
+
+   ```bash
+   rtk pnpm run typecheck
+   ```
+
+   Exit code: `0`
+
+   Result: all workspace package builds and root `tsc -b` completed successfully.
+
+3. Second diagnostic against the installed launcher
+
+   Command:
+
+   ```bash
+   rtk env PENGUIN_MCP_DIAGNOSTIC_REPORT=/tmp/penguin-task1-round2-installed-diagnostic.md node scripts/knowledge-mcp-session-diagnostic.mjs
+   ```
+
+   Exit code: `1` (expected diagnostic failure)
+
+   Result: `failureClass=LAUNCHER_EXECUTION_FAILED`; the stable launcher session recorded `exitCode=126`, empty stdout, and the two permission-denied stderr lines. No MCP parity failure was reported.

@@ -42,7 +42,7 @@ function diagnosticFixture() {
   const dir = mkdtempSync(join(tmpdir(), "penguin-round13-mcp-diagnostic-"));
   const launcher = join(dir, "penguin-mcp");
   const launcherTarget = join(dir, "penguin-mcp-launcher.mjs");
-  writeFileSync(launcherTarget, `#!/usr/bin/env node
+  writeFileSync(launcherTarget, `#!${process.execPath}
 import { createInterface } from "node:readline";
 const mode = process.env.PENGUIN_DIAGNOSTIC_CASE ?? "success";
 if (mode === "missing-stdout") process.exit(0);
@@ -67,7 +67,7 @@ for await (const line of lines) {
 }
 `);
   writeFileSync(launcher, `#!/bin/sh
-exec "${process.execPath}" "${launcherTarget}"
+exec "${launcherTarget}"
 `);
   chmodSync(launcherTarget, 0o755);
   chmodSync(launcher, 0o755);
@@ -78,7 +78,7 @@ function runDiagnostic(launcher: string, mode = "success") {
   const report = join(tmpdir(), `penguin-round13-diagnostic-${process.pid}-${Date.now()}-${mode}.md`);
   const result = spawnSync(process.execPath, [join(diagnosticRoot(), "scripts/knowledge-mcp-session-diagnostic.mjs")], {
     cwd: diagnosticRoot(),
-    env: { ...process.env, PENGUIN_MCP_COMMAND: launcher, PENGUIN_DIAGNOSTIC_CASE: mode, PENGUIN_MCP_DIAGNOSTIC_REPORT: report, PENGUIN_MCP_DIAGNOSTIC_TIMEOUT_MS: "1000" },
+    env: { ...process.env, PENGUIN_MCP_COMMAND: launcher, PENGUIN_DIAGNOSTIC_CASE: mode, PENGUIN_MCP_DIAGNOSTIC_REPORT: report, PENGUIN_MCP_DIAGNOSTIC_TIMEOUT_MS: "3000" },
     encoding: "utf8",
     timeout: 10_000,
   });
@@ -144,13 +144,14 @@ test("real MCP session diagnostic records initialize, tools, health, and capabil
 });
 
 test("real MCP session diagnostic covers launcher execute permissions", () => {
-  const { launcher } = diagnosticFixture();
+  const { launcher, launcherTarget } = diagnosticFixture();
   const success = runDiagnostic(launcher);
   assert.equal(success.result.status, 0, success.result.stderr || success.result.stdout);
   assert.equal(success.record.failureClass, "NONE");
 
-  chmodSync(launcher, 0o644);
+  chmodSync(launcherTarget, 0o644);
   const failure = runDiagnostic(launcher);
+  assert.equal(failure.record.session.exitCode, 126, JSON.stringify(failure.record));
   assert.equal(failure.record.failureClass, "LAUNCHER_EXECUTION_FAILED");
 });
 
