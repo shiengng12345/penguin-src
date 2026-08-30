@@ -265,7 +265,16 @@ export function searchKnowledge(input: SearchRequest | NormalizedSearchRequest, 
   const nextCursor = ranked.length > pageHits.length && last ? codec.encode({ schemaVersion: "1", queryHash: hash(request.query), normalizedRequestHash: normalizedHash, scopeHash: hash(scopes), mode: request.mode, lanes: plan.stages.map((stage) => stage.lane), lastRank: last.score, lastHitId: last.hitId, capabilityHash: capabilityHash(CAPABILITIES), expiresAt: new Date((context.now?.() ?? new Date()).getTime() + 15 * 60_000).toISOString() }) : undefined;
   const coverage = scopes.reduce((sum, scope) => { const row = context.store.db.prepare("SELECT COUNT(*) AS discovered, SUM(coverage_status='admitted') AS admitted, SUM(coverage_status<>'admitted') AS excluded, SUM(coverage_status='failed') AS failed, SUM(coverage_status='stale') AS stale FROM coverage_records WHERE repo_id=?").get(scope.repoId) as { discovered: number; admitted: number; excluded: number; failed: number; stale: number }; return { discovered: sum.discovered + (row?.discovered ?? 0), admitted: sum.admitted + (row?.admitted ?? 0), excluded: sum.excluded + (row?.excluded ?? 0), failed: sum.failed + (row?.failed ?? 0), stale: sum.stale + (row?.stale ?? 0) }; }, { discovered: 0, admitted: 0, excluded: 0, failed: 0, stale: 0 });
   const sourceFacts = Number((context.store.db.prepare("SELECT COUNT(*) AS n FROM source_facts").get() as { n: number }).n ?? 0);
-  if (sourceFacts === 0 && plan.stages.some((stage) => stage.lane === "source")) warnings.push({ code: "SOURCE_NOT_INCLUDED", message: "the selected artifact/index contains no source corpus; graph and metadata may still be available, but exact source search cannot prove absence" });
+  const scopedSourceFacts = scopes.length === 0
+    ? sourceFacts
+    : scopes.reduce((total, scope) => {
+      if (scope.snapshotId.startsWith("legacy:")) {
+        return total + Number((context.store.db.prepare("SELECT COUNT(*) AS n FROM source_facts WHERE repo_id=?").get(scope.repoId ?? "") as { n: number } | undefined)?.n ?? 0);
+      }
+      return total + Number((context.store.db.prepare("SELECT COUNT(*) AS n FROM effective_snapshot_sources e JOIN source_facts sf ON sf.id=e.source_fact_id WHERE e.snapshot_id=? AND (? IS NULL OR sf.repo_id=? )").get(scope.snapshotId, scope.repoId ?? null, scope.repoId ?? null) as { n: number } | undefined)?.n ?? 0);
+    }, 0);
+  const sourceMissing = scopedSourceFacts === 0 && plan.stages.some((stage) => stage.lane === "source");
+  if (sourceMissing) warnings.push({ code: "SOURCE_NOT_INCLUDED", message: "the selected artifact/index contains no source corpus; graph and metadata may still be available, but exact source search cannot prove absence" });
   if (coverage.excluded > 0 || coverage.failed > 0) warnings.push({ code: "COVERAGE_INCOMPLETE", message: "coverage includes excluded or failed files; an empty result is not proof of absence" });
   if (coverage.stale > 0) warnings.push({ code: "INDEX_STALE", message: "one or more coverage records are stale; the result total is not exact" });
   if (semanticDeferred) warnings.push({ code: "SEMANTIC_LANE_UNAVAILABLE", message: "semantic search requires the async provider runtime; deterministic lanes are partial results" });
@@ -284,8 +293,8 @@ export function searchKnowledge(input: SearchRequest | NormalizedSearchRequest, 
   const error = scopes.length === 0 && request.scope.revisions?.length
     ? { code: "REPOSITORY_NOT_FOUND" as const, message: "requested repository or revision was not found in the indexed knowledge store", details: { revisions: request.scope.revisions }, retryable: false }
     : undefined;
-  const totalIsExact = coverage.stale === 0 && coverage.failed === 0 && coverage.excluded === 0 && request.mode === "exact" && ranked.length <= request.page.limit;
-  const incomplete = coverage.failed > 0 || coverage.excluded > 0 || coverage.stale > 0 || semanticDeferred;
+  const incomplete = sourceMissing || coverage.discovered === 0 || coverage.failed > 0 || coverage.excluded > 0 || coverage.stale > 0 || semanticDeferred;
+  const totalIsExact = !incomplete && coverage.stale === 0 && coverage.failed === 0 && coverage.excluded === 0 && request.mode === "exact" && ranked.length <= request.page.limit;
   const queryStatus = error
     ? "SCOPE_ERROR"
     : pageHits.length > 0
@@ -299,7 +308,19 @@ export function searchKnowledge(input: SearchRequest | NormalizedSearchRequest, 
       ? [{ command: "penguin index <repo-path>", reason: "refresh stale or failed coverage before relying on a negative result" }]
       : [];
   const deterministicLanes = plan.stages.map((stage) => stage.lane).filter((lane) => lane !== "semantic");
-  return validateSearchResponse({ schemaVersion: "2", hits: pageHits, ...(error ? { error } : {}), diagnostics: { queryStatus, requestId: `search_${hash([normalizedHash, Date.now()]).slice(0, 16)}`, contractVersion: "2", capabilityHash: capabilityHash(CAPABILITIES), requestedScope: request.scope, resolvedScope: scopes.map((scope) => ({ repoId: scope.repoId ?? "", snapshotId: scope.snapshotId })), scopeApplied: allRequestedScopesResolved && (!requestedRevisions?.length || scopes.length > 0), resolvedScopes: scopes.map((scope) => ({ repoId: scope.repoId ?? "", branch: (storeBranch(context.store, scope.snapshotId) ?? ""), snapshotId: scope.snapshotId, revisionKind: "commit" as const })), searchedLanes: deterministicLanes, skippedLanes: semanticDeferred ? [{ lane: "semantic", reason: "async_semantic_lane_required" }] : [], coverage, exclusions, warnings, nextActions, suggestions, timingsMs: { total: Math.round((performance.now() - startedAt) * 1000) / 1000 }, candidateCount, truncated: budgeted.truncated }, page: { limit: request.page.limit, ...(nextCursor ? { nextCursor } : {}), totalIsExact, ...(totalIsExact ? { total: ranked.length } : {}) } });
+  const envelope = {
+    scope: request.scope as unknown as Record<string, unknown>,
+    revision: scopes.length === 1 ? revisionContext(context.store, scopes[0]) ?? null : null,
+    freshness: { status: incomplete ? "stale" : "fresh" },
+    coverage,
+    completeness: totalIsExact ? "complete" as const : incomplete ? "partial" as const : "lower_bound" as const,
+    proofStatus: pageHits.length > 0 ? "proven" as const : "not_proven" as const,
+    candidateCount,
+    returnedCount: pageHits.length,
+    truncated: Boolean(nextCursor),
+    cursor: nextCursor ?? null,
+  };
+  return validateSearchResponse({ schemaVersion: "2", hits: pageHits, ...envelope, ...(error ? { error } : {}), diagnostics: { queryStatus, requestId: `search_${hash([normalizedHash, Date.now()]).slice(0, 16)}`, contractVersion: "2", capabilityHash: capabilityHash(CAPABILITIES), requestedScope: request.scope, resolvedScope: scopes.map((scope) => ({ repoId: scope.repoId ?? "", snapshotId: scope.snapshotId })), scopeApplied: allRequestedScopesResolved && (!requestedRevisions?.length || scopes.length > 0), resolvedScopes: scopes.map((scope) => { const revision = revisionContext(context.store, scope); return { repoId: scope.repoId ?? "", branch: revision?.branch ?? storeBranch(context.store, scope.snapshotId) ?? "", snapshotId: scope.snapshotId, ...(revision?.commitSha ? { commitSha: revision.commitSha } : {}), revisionKind: "commit" as const }; }), searchedLanes: deterministicLanes, skippedLanes: semanticDeferred ? [{ lane: "semantic", reason: "async_semantic_lane_required" }] : [], coverage, exclusions, warnings, nextActions, suggestions, timingsMs: { total: Math.round((performance.now() - startedAt) * 1000) / 1000 }, candidateCount, truncated: budgeted.truncated }, page: { limit: request.page.limit, ...(nextCursor ? { nextCursor } : {}), totalIsExact, ...(totalIsExact ? { total: ranked.length } : {}) } });
 }
 
 /** Async companion for the optional semantic lane. Deterministic search remains

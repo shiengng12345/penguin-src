@@ -125,11 +125,27 @@ export function resolveRevisionContext(
         };
       }
     }
+    // An explicitly supplied snapshot is a hard selector. Falling through to
+    // the sole-live-branch resolution below would answer from a different
+    // revision while presenting an apparently valid context pack.
+    return {
+      status: "not_found",
+      candidates: rows.map((row) => contextOf(row, selector)),
+      reason: `snapshot not found: ${selector.snapshotId}`,
+    };
   }
 
   if (selector.commitSha) {
+    // A commit selector is an exact knowledge selector. A branch head can be
+    // newer than the indexed commit, so accepting head_commit here would
+    // silently return last_indexed_commit evidence for a different revision.
     const commitRows = rows.filter(
-      (row) => row.last_indexed_commit === selector.commitSha || row.head_commit === selector.commitSha,
+      (row) =>
+        row.last_indexed_commit === selector.commitSha ||
+        // A newly registered branch has no indexed commit yet. Allow its
+        // declared head only during that bootstrap window; once an indexed
+        // commit exists, the head must never masquerade as indexed evidence.
+        (row.last_indexed_commit === null && row.head_commit === selector.commitSha),
     );
     if (commitRows.length === 1) {
       return { status: "resolved", context: contextOf(commitRows[0], selector) };
@@ -141,6 +157,13 @@ export function resolveRevisionContext(
         reason: `commit ${selector.commitSha} resolves to multiple branches; pass --branch or --snapshot`,
       };
     }
+    // A caller that names a commit is asking for that exact indexed commit;
+    // never fall back to the current live branch when it is absent.
+    return {
+      status: "not_found",
+      candidates: rows.map((row) => contextOf(row, selector)),
+      reason: `commit not found: ${selector.commitSha}`,
+    };
   }
 
   if (selector.branch) {

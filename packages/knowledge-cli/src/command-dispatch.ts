@@ -90,7 +90,7 @@ import { runApiDocCommand } from "./api-doc-command.js";
 import { runCallCommand } from "./call-command.js";
 import { createKnowledgeApiDocAdapter } from "./api-doc-knowledge-adapter.js";
 import { createLarkProcessRunner, LarkCliDocumentClient, type LarkProcessRunner } from "./lark-document-client.js";
-import { CAPABILITIES, capabilityHash, knowledgeErrorEnvelope, listCliRegistrations, warning, type ScopeEnvelope } from "@penguin/knowledge-contracts";
+import { CAPABILITIES, capabilityHash, knowledgeErrorEnvelope, listCliRegistrations, scopeResolutionErrorEnvelope, warning, type ScopeEnvelope } from "@penguin/knowledge-contracts";
 import { runQueryServer } from "./query-server.js";
 import { parseCliArguments } from "./args.js";
 export { listCliRegistrations } from "@penguin/knowledge-contracts";
@@ -206,8 +206,11 @@ function reportRevisionResolutionError(deps: CliDeps, error: unknown): void {
 // last-stdout-line Error it used to build (Phase 1B Task 8).
 function reportScopeResolutionError(deps: CliDeps, error: unknown, json: boolean): number {
   if (!(error instanceof ScopeResolutionError)) throw error;
+  const envelope = scopeResolutionErrorEnvelope(error);
   if (json) {
-    deps.err(JSON.stringify({ scopeError: { code: error.code, message: error.message, candidates: error.candidates } }));
+    // Keep scopeError as a compatibility alias for the resident query bridge;
+    // error is the canonical envelope shared with MCP.
+    deps.err(JSON.stringify({ error: envelope, scopeError: envelope, exitCode: 4 }));
     return 4;
   }
   deps.err([
@@ -831,6 +834,17 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
   }
 
   if (verb === "capabilities") {
+    const requestedContract = optionValue("contract-version");
+    if (requestedContract && requestedContract.split(".")[0] !== "2") {
+      return emitCliError(
+        deps,
+        json,
+        "CAPABILITY_MISMATCH",
+        `unsupported knowledge contract major ${requestedContract}; upgrade Penguin or request contract 2`,
+        1,
+        { requestedContract, remediation: "upgrade Penguin or request contract 2" },
+      );
+    }
     const data = {
       schemaVersion: String(SCHEMA_VERSION),
       contractVersion: "2",
@@ -2307,6 +2321,9 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
     }
   }
 
+  if (json) {
+    return emitCliError(deps, true, "CAPABILITY_NOT_IMPLEMENTED", `capability not implemented: ${verb}`, 2);
+  }
   deps.err(`unknown command: ${verb} (try \`penguin help\`)`);
   return 2;
 }

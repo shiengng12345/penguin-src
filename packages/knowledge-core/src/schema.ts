@@ -634,9 +634,26 @@ CREATE TABLE IF NOT EXISTS coverage_records (
   parser_version TEXT,
   parser_error TEXT,
   updated_at TEXT NOT NULL,
+  unresolved_references INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (repo_id, file_path)
 );
 CREATE INDEX IF NOT EXISTS idx_coverage_records_path ON coverage_records(repo_id, file_path);
+-- Reference resolution is revision-scoped.  coverage_records is deliberately
+-- kept repo/file keyed for file-discovery compatibility; this table preserves
+-- the per-branch/per-snapshot readback needed for trustworthy negative graph
+-- answers.
+CREATE TABLE IF NOT EXISTS unresolved_reference_coverage (
+  repo_id TEXT NOT NULL REFERENCES repos(id),
+  branch_id TEXT NOT NULL REFERENCES branches(id),
+  file_path TEXT NOT NULL,
+  revision_id TEXT NOT NULL,
+  resolved INTEGER NOT NULL DEFAULT 0,
+  total INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (repo_id, branch_id, file_path, revision_id)
+);
+CREATE INDEX IF NOT EXISTS idx_unresolved_reference_coverage_scope
+  ON unresolved_reference_coverage(repo_id, branch_id, revision_id);
 CREATE TABLE IF NOT EXISTS markdown_sections (
   source_fact_id TEXT NOT NULL,
   heading_path TEXT NOT NULL,
@@ -927,6 +944,7 @@ function migrate(db: Database.Database, _from: number): void {
     ["parser_language", "TEXT"],
     ["parser_version", "TEXT"],
     ["parser_error", "TEXT"],
+    ["unresolved_references", "INTEGER NOT NULL DEFAULT 0"],
   ] as const) {
     if (!coverageCols.includes(column)) db.exec(`ALTER TABLE coverage_records ADD COLUMN ${column} ${definition}`);
   }
@@ -1138,6 +1156,11 @@ const OPTIONAL_MAINTENANCE_OBJECT_NAMES = new Set([
   "external_calls",
   "idx_external_calls_src",
   "idx_external_calls_file",
+  // Revision-scoped unresolved-reference ledger. Reads can remain honest with
+  // an empty ledger on an older current DB; the next write/index pass creates
+  // it through the canonical DDL before persisting new rows.
+  "unresolved_reference_coverage",
+  "idx_unresolved_reference_coverage_scope",
 ]);
 
 /** Tables are derived from the same DDL used by openDatabase. */
@@ -1329,6 +1352,10 @@ export function openDatabase(
   // a current DB while those indexes are still missing; the next write command
   // performs the one-time optimization instead of breaking status/search.
   if (currentSchema) {
+    const currentCoverageColumns = new Set((db.prepare("PRAGMA table_info(coverage_records)").all() as { name: string }[]).map((column) => column.name));
+    if (!currentCoverageColumns.has("unresolved_references") && options?.allowSchemaMutation !== false) {
+      db.exec("ALTER TABLE coverage_records ADD COLUMN unresolved_references INTEGER NOT NULL DEFAULT 0");
+    }
     const missingIndexes = missingEdgeReplacementIndexes(db);
     if (missingIndexes.length > 0 && options?.allowSchemaMutation !== false) {
       installEdgeReplacementIndexes(db, missingIndexes, options?.onSchemaMaintenance);

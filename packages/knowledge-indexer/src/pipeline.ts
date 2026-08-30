@@ -546,6 +546,35 @@ async function indexFileWithSource(
           .map((binding) => [binding.localName, binding.specifier]),
       ),
     });
+    // Persist reference-resolution coverage alongside the file transaction so
+    // negative graph answers can distinguish "no edge" from "unresolved refs".
+    store.db.prepare(`
+      INSERT INTO coverage_layers(repo_id, branch_id, layer, resolved, total, updated_at)
+      VALUES (?, ?, 'references', ?, ?, ?)
+      ON CONFLICT(repo_id, branch_id, layer) DO UPDATE SET
+        resolved=excluded.resolved, total=excluded.total, updated_at=excluded.updated_at
+    `).run(p.repoId, p.branchId, resolved.edges.length, extracted.refs.length, new Date().toISOString());
+    const revisionId = p.snapshotId ?? p.commit ?? `branch:${p.branchId}`;
+    store.db.prepare(`
+      INSERT INTO unresolved_reference_coverage
+        (repo_id, branch_id, file_path, revision_id, resolved, total, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(repo_id, branch_id, file_path, revision_id) DO UPDATE SET
+        resolved=excluded.resolved, total=excluded.total, updated_at=excluded.updated_at
+    `).run(
+      p.repoId,
+      p.branchId,
+      p.relPath,
+      revisionId,
+      resolved.edges.length,
+      extracted.refs.length,
+      new Date().toISOString(),
+    );
+    const coverageColumns = new Set((store.db.prepare("PRAGMA table_info(coverage_records)").all() as Array<{ name: string }>).map((column) => column.name));
+    if (coverageColumns.has("unresolved_references")) {
+      store.db.prepare("UPDATE coverage_records SET unresolved_references=?, updated_at=? WHERE repo_id=? AND file_path=?")
+        .run(Math.max(0, extracted.refs.length - resolved.edges.length), new Date().toISOString(), p.repoId, p.relPath);
+    }
     // Cap: a file with hundreds of external (node_modules/stdlib) misses would
     // otherwise carry a huge retry list for names that never resolve.
     retryNames = [...new Set(resolved.unresolvedNames)].slice(0, 100);
