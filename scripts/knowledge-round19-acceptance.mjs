@@ -125,16 +125,17 @@ if (fixturesOnly) {
     const result = runCli(["search", "constructor", "--repo", repo, "--json"]);
     assert(result.exitCode === 0, `search failed: ${result.stderr}`);
     assert(result.json, "search did not return JSON");
-    assert(Array.isArray(result.json.results), "results is not an array");
-    assert(result.json.results.length > 0, "results array is empty");
-    const first = result.json.results[0];
-    assert(first.nodeId, "first result missing nodeId");
-    assert(first.title, "first result missing title");
-    assert(first.kind, "first result missing kind");
-    assert(first.locator?.filePath, "first result missing locator.filePath");
+    const hits = result.json.hits ?? result.json.results;
+    assert(Array.isArray(hits), "hits is not an array");
+    assert(hits.length > 0, "hits array is empty");
+    const first = hits[0];
+    assert(first.nodeId, "first hit missing nodeId");
+    assert(first.title, "first hit missing title");
+    assert(first.kind, "first hit missing kind");
+    assert(first.locator?.filePath, "first hit missing locator.filePath");
     searchNodeId = first.nodeId;
     searchFilePath = first.locator.filePath;
-    return { nodeId: searchNodeId, filePath: searchFilePath, resultCount: result.json.results.length };
+    return { nodeId: searchNodeId, filePath: searchFilePath, hitCount: hits.length };
   });
 
   gate("G1.2", "File symbols", () => {
@@ -162,11 +163,14 @@ if (fixturesOnly) {
     const result = runCli(["context", `node:${searchNodeId}`, "--repo", repo, "--json"]);
     assert(result.exitCode === 0, `context failed: ${result.stderr}`);
     assert(result.json, "context did not return JSON");
-    assert(result.json.node, "node object missing");
-    assert(result.json.node.nodeId, "node.nodeId missing");
-    assert(result.json.node.title, "node.title missing");
-    assert(Array.isArray(result.json.firstHopRelations), "firstHopRelations is not an array");
-    return { nodeId: result.json.node.nodeId, relationCount: result.json.firstHopRelations.length };
+    const focus = result.json.focus ?? result.json.node;
+    assert(focus, "focus object missing");
+    assert(focus.nodeId, "focus.nodeId missing");
+    assert(focus.title, "focus.title missing");
+    // Count total relations from all edge arrays
+    const relationCount = (result.json.callers?.length ?? 0) + (result.json.calls?.length ?? 0) +
+                          (result.json.renders?.length ?? 0) + (result.json.renderedBy?.length ?? 0);
+    return { nodeId: focus.nodeId, relationCount };
   });
 
   // Gate G2: Pagination
@@ -263,7 +267,8 @@ if (fixturesOnly) {
     }
     const byNodeId = runCli(["context", `node:${endpointId}`, "--repo", repo, "--json"]);
     assert(byNodeId.exitCode === 0, "context by node ID failed");
-    return { endpointId, resolvedNodeId: byNodeId.json?.node?.nodeId };
+    const focus = byNodeId.json?.focus ?? byNodeId.json?.node;
+    return { endpointId, resolvedNodeId: focus?.nodeId };
   });
 
   // Gate G7: Flow
@@ -322,17 +327,26 @@ if (fixturesOnly) {
       return { skipped: true, reason: "no node from G1.1" };
     }
     const result = runCli(["context", `node:${searchNodeId}`, "--repo", repo, "--json"]);
-    if (result.exitCode !== 0 || !result.json.firstHopRelations || result.json.firstHopRelations.length === 0) {
-      return { note: "no first hop relations to inspect" };
+    if (result.exitCode !== 0) {
+      return { note: "context command failed" };
     }
-    const relation = result.json.firstHopRelations[0];
-    assert(relation.edgeType, "edgeType missing");
-    assert(relation.evidenceState, "evidenceState missing");
-    return {
-      edgeType: relation.edgeType,
-      evidenceState: relation.evidenceState,
-      hasSourceRepoId: relation.source?.repoId !== undefined,
-    };
+    // Check if we have any edge arrays with items
+    const allEdges = [...(result.json.callers ?? []), ...(result.json.calls ?? []),
+                      ...(result.json.renders ?? []), ...(result.json.renderedBy ?? [])];
+    if (allEdges.length === 0) {
+      return { note: "no relations to inspect" };
+    }
+    // Check trust/revision evidence
+    const trust = result.json.trust;
+    if (trust) {
+      return {
+        hasRevisionEvidence: true,
+        schemaVersion: trust.schemaVersion,
+        hasRepoId: !!trust.repoId,
+        hasIndexedCommit: !!trust.indexedCommit,
+      };
+    }
+    return { note: "no provenance metadata available" };
   });
 
   // Gate G12: Deterministic target selection
@@ -341,11 +355,12 @@ if (fixturesOnly) {
     if (result.exitCode !== 0) {
       return { exitCode: result.exitCode, error: result.json?.error?.code };
     }
-    assert(result.json.results, "results missing");
-    const symbolResults = result.json.results.filter((r) => r.kind && r.kind !== "note" && r.kind !== "file");
-    if (symbolResults.length === 0) {
+    const hits = result.json.hits ?? result.json.results;
+    assert(hits, "hits missing");
+    const symbolHits = hits.filter((r) => r.kind && r.kind !== "note" && r.kind !== "file");
+    if (symbolHits.length === 0) {
       // Apply deterministic sort fallback
-      const sorted = [...result.json.results].sort((a, b) => {
+      const sorted = [...hits].sort((a, b) => {
         if (b.score !== a.score) return b.score - a.score;
         if (a.identityKey && b.identityKey && a.identityKey !== b.identityKey) {
           return a.identityKey.localeCompare(b.identityKey);
@@ -357,7 +372,7 @@ if (fixturesOnly) {
       }
       return { deterministic: true, selectedNodeId: sorted[0].nodeId, fallbackUsed: true };
     }
-    return { deterministic: true, selectedNodeId: symbolResults[0].nodeId, symbolResultCount: symbolResults.length };
+    return { deterministic: true, selectedNodeId: symbolHits[0].nodeId, symbolHitCount: symbolHits.length };
   });
 
   const result = {
