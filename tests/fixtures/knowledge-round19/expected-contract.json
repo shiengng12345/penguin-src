@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 15,
+  "contractVersion": "2",
+  "requiredCapabilities": [
+    "search",
+    "filesymbols",
+    "context",
+    "flow",
+    "callers",
+    "callees",
+    "affected",
+    "endpoints",
+    "deadcode",
+    "status",
+    "coverage",
+    "capabilities"
+  ],
+  "requiredErrorCodes": [
+    "REPOSITORY_NOT_FOUND",
+    "INVALID_TARGET",
+    "CURSOR_INVALID",
+    "BRANCH_NOT_FOUND",
+    "FILE_NOT_FOUND",
+    "INVALID_QUERY"
+  ],
+  "gateDefinitions": {
+    "G0": "Contract identity verification",
+    "G1": "Basic operations (search, filesymbols, context)",
+    "G2": "Pagination cursors (endpoints)",
+    "G3": "Scope errors (missing repo, invalid ID, malformed cursor)",
+    "G4": "Freshness and coverage reporting",
+    "G5": "Affected analysis",
+    "G6": "Endpoint identity forms",
+    "G7": "Flow tracing",
+    "G8": "Callers and callees",
+    "G9": "Deadcode listing",
+    "G10": "MCP/CLI parity",
+    "G11": "Evidence provenance",
+    "G12": "Deterministic target selection"
+  }
+}
