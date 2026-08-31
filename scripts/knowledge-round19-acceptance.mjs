@@ -53,7 +53,13 @@ function gate(id, description, fn) {
   try {
     const evidence = fn();
     gateResult.evidence = evidence ?? {};
-    gateResult.passed = true;
+    // FIXED: Explicitly check evidence.passed === false and propagate as gate failure
+    if (evidence && evidence.passed === false) {
+      gateResult.passed = false;
+      passed = false;
+    } else {
+      gateResult.passed = true;
+    }
   } catch (error) {
     gateResult.passed = false;
     gateResult.evidence = { error: error.message, stack: error.stack };
@@ -163,14 +169,32 @@ if (fixturesOnly) {
     const result = runCli(["context", `node:${searchNodeId}`, "--repo", repo, "--json"]);
     assert(result.exitCode === 0, `context failed: ${result.stderr}`);
     assert(result.json, "context did not return JSON");
+
+    // Check both focus and node field names as per contract
     const focus = result.json.focus ?? result.json.node;
-    assert(focus, "focus object missing");
+    assert(focus, "focus/node object missing from response");
     assert(focus.nodeId, "focus.nodeId missing");
     assert(focus.title, "focus.title missing");
-    // Count total relations from all edge arrays
+    assert(focus.kind, "focus.kind missing");
+
+    // Check first-hop relations: either firstHopRelations array OR separate edge arrays
+    const hasFirstHopRelations = Array.isArray(result.json.firstHopRelations);
+    const hasEdgeArrays = Array.isArray(result.json.callers) || Array.isArray(result.json.calls) ||
+                          Array.isArray(result.json.renders) || Array.isArray(result.json.renderedBy);
+    assert(hasFirstHopRelations || hasEdgeArrays, "No first-hop relation arrays found (neither firstHopRelations nor edge arrays)");
+
+    // Require at least one relation field to be non-empty for connectivity
     const relationCount = (result.json.callers?.length ?? 0) + (result.json.calls?.length ?? 0) +
-                          (result.json.renders?.length ?? 0) + (result.json.renderedBy?.length ?? 0);
-    return { nodeId: focus.nodeId, relationCount };
+                          (result.json.renders?.length ?? 0) + (result.json.renderedBy?.length ?? 0) +
+                          (result.json.firstHopRelations?.length ?? 0);
+    assert(relationCount > 0, "At least one relation field must be non-empty to demonstrate connectivity");
+
+    const usedFields = {
+      focusField: result.json.focus ? "focus" : "node",
+      relationField: hasFirstHopRelations ? "firstHopRelations" : "edge arrays",
+    };
+
+    return { nodeId: focus.nodeId, relationCount, usedFields };
   });
 
   // Gate G2: Pagination
@@ -182,28 +206,92 @@ if (fixturesOnly) {
     assert(result.exitCode === 0, `endpoints failed: ${result.stderr}`);
     assert(result.json, "endpoints did not return JSON");
     assert(Array.isArray(result.json.items), "items is not an array");
-    if (result.json.items.length > 0) {
-      assert(result.json.items.length === 1, "items length != 1");
-      endpointId = result.json.items[0].nodeId;
-      endpointCursor = result.json.nextCursor;
-      assert(typeof endpointCursor === "string" || endpointCursor === null, "nextCursor is not string or null");
-      return { endpointId, hasCursor: !!endpointCursor, candidateCount: result.json.candidateCount };
-    }
-    return { endpointId: null, hasCursor: false, candidateCount: 0, note: "no endpoints found" };
+    assert(result.json.items.length === 1, "items length must be exactly 1");
+    assert(result.json.candidateCount >= 1, "candidateCount must be >= 1");
+    endpointId = result.json.items[0].nodeId;
+    endpointCursor = result.json.nextCursor;
+    // G2.2 requires cursor from G2.1, so nextCursor must be non-empty string
+    assert(typeof endpointCursor === "string" && endpointCursor.length > 0, "Required upstream data for G2.2: nextCursor must be non-empty string");
+    return { endpointId, hasCursor: true, candidateCount: result.json.candidateCount };
   });
 
   gate("G2.2", "Endpoints page 2", () => {
-    if (!endpointCursor) {
-      return { skipped: true, reason: "no cursor from G2.1" };
-    }
+    assert(endpointCursor, "Required upstream data missing: no cursor from G2.1");
     const result = runCli(["endpoints", repo, "--protocol", "grpc", "--limit", "1", "--cursor", endpointCursor, "--json"]);
     assert(result.exitCode === 0, `endpoints page 2 failed: ${result.stderr}`);
     assert(result.json, "endpoints did not return JSON");
-    if (result.json.items && result.json.items.length > 0) {
-      assert(result.json.items[0].nodeId !== endpointId, "page 2 returned same nodeId as page 1");
-      return { differentNode: true, candidateCount: result.json.candidateCount };
+    assert(result.json.items && result.json.items.length > 0, "page 2 must have items");
+    assert(result.json.items[0].nodeId !== endpointId, "page 2 returned same nodeId as page 1");
+    return { differentNode: true, candidateCount: result.json.candidateCount };
+  });
+
+  // G2.3: Actual cursor exhaustion
+  gate("G2.3", "Cursor exhaustion", () => {
+    let cursor = null;
+    let page = 0;
+    const pages = [];
+    const allIds = new Set();
+    let lastResult = null;
+
+    // Start from page 1
+    const firstPage = runCli(["endpoints", repo, "--protocol", "grpc", "--limit", "2", "--json"]);
+    assert(firstPage.exitCode === 0, `endpoints command failed: ${firstPage.stderr}`);
+    assert(firstPage.json, "endpoints did not return JSON");
+    assert(Array.isArray(firstPage.json.items) && firstPage.json.items.length > 0, "Required upstream data missing: G2.3 requires at least one item in first page");
+
+    cursor = firstPage.json.nextCursor;
+    page = 1;
+    const firstPageIds = (firstPage.json.items ?? []).map(item => item.nodeId);
+    firstPageIds.forEach(id => allIds.add(id));
+    pages.push({
+      page: 1,
+      itemCount: firstPageIds.length,
+      cursor: cursor,
+      ids: firstPageIds,
+    });
+    lastResult = firstPage.json;
+
+    // Continue until cursor is null
+    const safetyPageCap = 50;
+    while (cursor !== null && cursor !== undefined && page < safetyPageCap) {
+      const result = runCli(["endpoints", repo, "--protocol", "grpc", "--limit", "2", "--cursor", cursor, "--json"]);
+      assert(result.exitCode === 0, `cursor continuation failed at page ${page + 1}`);
+      assert(result.json, `no JSON at page ${page + 1}`);
+
+      page++;
+      const pageIds = (result.json.items ?? []).map(item => item.nodeId);
+      pageIds.forEach(id => allIds.add(id));
+      pages.push({
+        page,
+        itemCount: pageIds.length,
+        cursor: result.json.nextCursor,
+        ids: pageIds,
+      });
+
+      cursor = result.json.nextCursor;
+      lastResult = result.json;
     }
-    return { differentNode: false, note: "page 2 empty" };
+
+    // FIXED: Fail if safety page cap is reached
+    assert(page < safetyPageCap, `safety page cap ${safetyPageCap} reached without cursor exhaustion`);
+
+    // Assert actual cursor exhaustion: final page has no cursor and truncated is false
+    assert(cursor === null || cursor === undefined, "Required evidence missing: final page still has cursor, pagination not exhausted");
+    const truncated = lastResult.truncated ?? false;
+    assert(truncated === false, `Required evidence missing: final page has truncated=${truncated}, expected false for complete exhaustion`);
+
+    // Check for duplicates
+    const totalItems = pages.reduce((sum, p) => sum + p.itemCount, 0);
+    const duplicateCount = totalItems - allIds.size;
+
+    return {
+      totalPages: pages.length,
+      totalItems,
+      uniqueItems: allIds.size,
+      duplicateCount,
+      finalTruncated: truncated,
+      pagesDetail: pages.map(p => ({page: p.page, itemCount: p.itemCount, hasCursor: !!p.cursor})),
+    };
   });
 
   // Gate G3: Scope errors
@@ -232,121 +320,207 @@ if (fixturesOnly) {
   gate("G4", "Freshness and coverage", () => {
     const status = runCli(["status", "--compact", "--json", "--repo", repo]);
     const coverage = runCli(["coverage", "--repo", repo, "--json"]);
-    // Allow some failures here, just record what we can
-    const statusJson = status.exitCode === 0 ? status.json : null;
-    const coverageJson = coverage.exitCode === 0 ? coverage.json : null;
+
+    // Both commands must succeed
+    assert(status.exitCode === 0, `status command failed with exit ${status.exitCode}: ${status.stderr}`);
+    assert(coverage.exitCode === 0, `coverage command failed with exit ${coverage.exitCode}: ${coverage.stderr}`);
+
+    const statusJson = status.json;
+    const coverageJson = coverage.json;
+
+    assert(statusJson || coverageJson, "neither status nor coverage returned JSON");
+
+    // Extract freshness from either command
+    const freshness = statusJson?.freshness ?? coverageJson?.freshness;
+    assert(freshness, "freshness field missing from both status and coverage");
+    assert(freshness.status, "freshness.status missing");
+    assert(["fresh", "stale", "partial"].includes(freshness.status), `invalid freshness.status: ${freshness.status}`);
+
+    // Extract coverage
+    assert(coverageJson, "coverage command did not return JSON");
+    assert(typeof coverageJson.indexed === "number", `coverage.indexed is not numeric: ${typeof coverageJson.indexed}`);
+    assert(coverageJson.indexed >= 0, `coverage.indexed is negative: ${coverageJson.indexed}`);
+
     return {
       statusExitCode: status.exitCode,
       coverageExitCode: coverage.exitCode,
-      freshness: statusJson?.freshness ?? coverageJson?.freshness ?? null,
-      indexed: coverageJson?.indexed ?? null,
+      freshness: freshness.status,
+      indexed: coverageJson.indexed,
     };
   });
 
   // Gate G5: Affected
   gate("G5", "Affected analysis", () => {
-    if (!searchFilePath) {
-      return { skipped: true, reason: "no file from G1.2" };
-    }
+    assert(searchFilePath, "Required upstream data missing: no file from G1.2");
     const result = runCli(["affected", searchFilePath, "--repo", repo, "--json"]);
-    // Gracefully handle if file not in repo
-    if (result.exitCode !== 0) {
-      return { exitCode: result.exitCode, error: result.json?.error?.code };
-    }
+    assert(result.exitCode === 0, `affected failed: ${result.stderr}, error code: ${result.json?.error?.code}`);
     assert(result.json, "affected did not return JSON");
-    assert(Array.isArray(result.json.changed) || result.json.changed === undefined, "changed is not array");
-    assert(Array.isArray(result.json.impacted) || result.json.impacted === undefined, "impacted is not array");
-    assert(result.json.revision, "revision missing");
-    return { hasRevision: true, changed: result.json.changed?.length ?? 0, impacted: result.json.impacted?.length ?? 0 };
+    assert(Array.isArray(result.json.changed), "changed must be an array");
+    assert(Array.isArray(result.json.impacted), "impacted must be an array");
+    assert(result.json.revision && result.json.revision.revisionId, "revision.revisionId missing");
+    return { hasRevision: true, changed: result.json.changed.length, impacted: result.json.impacted.length };
   });
 
   // Gate G6: Endpoint identity
   gate("G6", "Endpoint identity forms", () => {
-    if (!endpointId) {
-      return { skipped: true, reason: "no endpoint from G2.1" };
-    }
+    assert(endpointId, "Required upstream data missing: no endpoint from G2.1");
     const byNodeId = runCli(["context", `node:${endpointId}`, "--repo", repo, "--json"]);
-    assert(byNodeId.exitCode === 0, "context by node ID failed");
-    const focus = byNodeId.json?.focus ?? byNodeId.json?.node;
-    return { endpointId, resolvedNodeId: focus?.nodeId };
+    assert(byNodeId.exitCode === 0, `context by node ID failed: ${byNodeId.stderr}`);
+    assert(byNodeId.json, "context did not return JSON");
+    const focus = byNodeId.json.focus ?? byNodeId.json.node;
+    assert(focus && focus.nodeId, "focus/node with nodeId missing");
+    return { endpointId, resolvedNodeId: focus.nodeId };
   });
 
   // Gate G7: Flow
   gate("G7", "Flow tracing", () => {
-    if (!endpointId) {
-      return { skipped: true, reason: "no endpoint from G2.1" };
-    }
+    assert(endpointId, "Required upstream data missing: no endpoint from G2.1");
     const result = runCli(["flow", `node:${endpointId}`, "--repo", repo, "--json"]);
-    if (result.exitCode !== 0) {
-      return { exitCode: result.exitCode, error: result.json?.error?.code };
-    }
-    assert(Array.isArray(result.json.steps), "steps is not array");
-    if (result.json.steps.length > 0) {
-      const root = result.json.steps.find((s) => s.depth === 0);
-      assert(root, "no root step with depth 0");
-      return { stepCount: result.json.steps.length, hasRoot: true };
-    }
-    return { stepCount: 0, hasRoot: false };
+    assert(result.exitCode === 0, `flow failed: ${result.stderr}, error code: ${result.json?.error?.code}`);
+    assert(result.json, "flow did not return JSON");
+    assert(Array.isArray(result.json.steps), "Required upstream data missing: steps array not present");
+    // FIXED: Fail when steps is empty
+    assert(result.json.steps.length > 0, "steps array must not be empty");
+    // FIXED: Require a depth-0 root and its via field
+    const root = result.json.steps.find((s) => s.depth === 0);
+    assert(root, "Required upstream data missing: non-empty steps array must have at least one step with depth 0");
+    assert(typeof root.via === "string" || root.via === null, "root.via must be string or null");
+    return { stepCount: result.json.steps.length, hasRoot: true };
   });
 
   // Gate G8: Callers and callees
   gate("G8", "Callers and callees", () => {
-    if (!searchNodeId) {
-      return { skipped: true, reason: "no node from G1.1" };
-    }
+    assert(searchNodeId, "Required upstream data missing: no node from G1.1");
     const callers = runCli(["callers", `node:${searchNodeId}`, "--repo", repo, "--json"]);
     const callees = runCli(["callees", `node:${searchNodeId}`, "--repo", repo, "--json"]);
+    assert(callers.exitCode === 0, `callers failed: ${callers.stderr}`);
+    assert(callees.exitCode === 0, `callees failed: ${callees.stderr}`);
+    assert(callers.json, "callers did not return JSON");
+    assert(callees.json, "callees did not return JSON");
+    assert(callers.json.revision, "callers missing revision");
+    assert(callees.json.revision, "callees missing revision");
     return {
       callersExitCode: callers.exitCode,
       calleesExitCode: callees.exitCode,
-      callersHasRevision: !!callers.json?.revision,
-      calleesHasRevision: !!callees.json?.revision,
+      callersHasRevision: true,
+      calleesHasRevision: true,
     };
   });
 
   // Gate G9: Deadcode
   gate("G9", "Deadcode listing", () => {
     const result = runCli(["deadcode", "--repo", repo, "--limit", "5", "--json"]);
+
+    // Allow either success OR structured error indicating deadcode unavailable
     if (result.exitCode !== 0) {
-      return { exitCode: result.exitCode, error: result.json?.error?.code };
+      if (result.json?.error?.code) {
+        // Structured error is acceptable (feature unavailable, etc.)
+        return {
+          exitCode: result.exitCode,
+          errorCode: result.json.error.code,
+          note: "deadcode command returned structured error (acceptable per brief)",
+        };
+      }
+      // Unstructured error fails the gate
+      assert(false, `deadcode failed without structured error: ${result.stderr}`);
     }
-    assert(Array.isArray(result.json.items), "items is not array");
+
+    assert(result.json, "Required upstream data missing: deadcode did not return JSON");
+    assert(Array.isArray(result.json.items), "Required upstream data missing: items is not array");
+    assert(result.json.proofStatus, "Required upstream data missing: proofStatus field missing");
     const proofStatus = result.json.proofStatus;
-    assert(proofStatus === "candidate" || proofStatus === "not_proven", `proofStatus is ${proofStatus}, should not be "proven"`);
+    assert(proofStatus === "candidate" || proofStatus === "not_proven", `Required upstream data invalid: proofStatus is ${proofStatus}, must be "candidate" or "not_proven" (never "proven")`);
     return { itemCount: result.json.items.length, proofStatus };
   });
 
-  // Gate G10: MCP/CLI parity (placeholder, requires MCP integration)
+  // Gate G10: MCP/CLI parity
   gate("G10", "MCP/CLI parity", () => {
-    return { note: "N/A: MCP integration requires separate session", skipped: true };
+    // FIXED: Real MCP availability probe required before reporting N/A
+    const mcpLauncher = resolve(root, "scripts/knowledge-mcp-launcher.mjs");
+    const mcpProbe = spawnSync(process.execPath, [mcpLauncher, "--help"], {
+      encoding: "utf8",
+      timeout: 5000,
+    });
+
+    // FIXED: Explicit N/A/not_proven only after launcher probe
+    if (mcpProbe.error || mcpProbe.status !== 0) {
+      // MCP unavailable after probe - return explicit N/A evidence as non-passing
+      return {
+        status: "not_proven",
+        reason: `MCP server connection failed after probe: ${mcpProbe.error?.message ?? mcpProbe.stderr ?? "launcher not found"}`,
+        probe: {
+          launcherPath: mcpLauncher,
+          exitCode: mcpProbe.status,
+          error: mcpProbe.error?.message,
+        },
+        passed: false,
+      };
+    }
+
+    // MCP launcher available but full parity test requires separate MCP client session
+    // FIXED: Must remain non-passing until actual MCP parity runs
+    return {
+      status: "not_proven",
+      reason: "MCP launcher available but full parity test requires separate MCP client session (beyond CLI runner scope)",
+      probe: {
+        launcherPath: mcpLauncher,
+        exitCode: mcpProbe.status,
+        available: true,
+      },
+      note: "Actual MCP parity verification required: compare knowledge_capabilities/knowledge_search/knowledge_context with CLI equivalents in live MCP session",
+      passed: false,
+    };
   });
 
   // Gate G11: Evidence provenance
   gate("G11", "Evidence provenance", () => {
-    if (!searchNodeId) {
-      return { skipped: true, reason: "no node from G1.1" };
-    }
+    assert(searchNodeId, "Required upstream data missing: no node from G1.1");
     const result = runCli(["context", `node:${searchNodeId}`, "--repo", repo, "--json"]);
-    if (result.exitCode !== 0) {
-      return { note: "context command failed" };
-    }
-    // Check if we have any edge arrays with items
+    assert(result.exitCode === 0, `context failed: ${result.stderr}`);
+    assert(result.json, "context did not return JSON");
+
+    // Response-level provenance required (revision/trust checks)
+    const trust = result.json.trust ?? result.json.revision;
+    assert(trust, "Required upstream data missing: trust/revision object missing from response");
+    assert(trust.schemaVersion !== undefined, "Required upstream data missing: trust.schemaVersion missing");
+    assert(trust.repoId, "Required upstream data missing: trust.repoId missing");
+    assert(trust.indexedCommit, "Required upstream data missing: trust.indexedCommit missing");
+
+    // Collect all edge arrays
     const allEdges = [...(result.json.callers ?? []), ...(result.json.calls ?? []),
-                      ...(result.json.renders ?? []), ...(result.json.renderedBy ?? [])];
-    if (allEdges.length === 0) {
-      return { note: "no relations to inspect" };
-    }
-    // Check trust/revision evidence
-    const trust = result.json.trust;
-    if (trust) {
-      return {
-        hasRevisionEvidence: true,
-        schemaVersion: trust.schemaVersion,
-        hasRepoId: !!trust.repoId,
-        hasIndexedCommit: !!trust.indexedCommit,
-      };
-    }
-    return { note: "no provenance metadata available" };
+                      ...(result.json.renders ?? []), ...(result.json.renderedBy ?? []),
+                      ...(result.json.firstHopRelations ?? [])];
+
+    // Require at least one relation for edge-level provenance check
+    assert(allEdges.length > 0, "Required upstream data missing: at least one relation required for edge-level provenance verification");
+
+    // For at least one relation, verify complete provenance metadata
+    const firstEdge = allEdges[0];
+
+    // Edge type/kind (string indicating relation type)
+    const hasEdgeType = !!(firstEdge.type || firstEdge.kind || firstEdge.edgeType);
+    assert(hasEdgeType, "Required upstream data missing: edge type/kind missing (relation type)");
+
+    // Evidence state/confidence (proven, candidate, inferred, not_proven)
+    const hasConfidence = !!(firstEdge.confidence || firstEdge.state || firstEdge.evidence || firstEdge.proofStatus);
+    assert(hasConfidence, "Required upstream data missing: evidence state/confidence missing (proven/candidate/inferred/not_proven)");
+
+    // Source attribution (repository ID, file path, or location evidence)
+    const hasSource = !!(firstEdge.repoId || firstEdge.filePath || firstEdge.location || firstEdge.sourceFile);
+    assert(hasSource, "Required upstream data missing: source attribution missing (repository ID, file path, or location)");
+
+    return {
+      hasRevisionEvidence: true,
+      schemaVersion: trust.schemaVersion,
+      hasRepoId: !!trust.repoId,
+      hasIndexedCommit: !!trust.indexedCommit,
+      edgeCount: allEdges.length,
+      edgeProvenance: {
+        hasType: hasEdgeType,
+        hasConfidence: hasConfidence,
+        hasSource: hasSource,
+      },
+    };
   });
 
   // Gate G12: Deterministic target selection

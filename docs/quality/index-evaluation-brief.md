@@ -15,7 +15,7 @@ docs/quality/index-evaluation-brief-round19.md
 ## Brief SHA-256
 
 ```text
-32759f9709dc562afe4523cf79ad10e12b912e78c3ab2cd43d7b4a8241c81f71
+e9cc80008d0a20ad853cf7d002d2f3a31f8ab1a7545314abc0489212034a004a
 ```
 
 ## Required Report Filename Pattern
@@ -38,7 +38,7 @@ sha256sum docs/quality/index-evaluation-brief-round19.md
 
 Expected output:
 ```text
-32759f9709dc562afe4523cf79ad10e12b912e78c3ab2cd43d7b4a8241c81f71  docs/quality/index-evaluation-brief-round19.md
+e9cc80008d0a20ad853cf7d002d2f3a31f8ab1a7545314abc0489212034a004a  docs/quality/index-evaluation-brief-round19.md
 ```
 
 ## Purpose
