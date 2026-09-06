@@ -322,17 +322,19 @@ struct McpStartupPreflightResult {
     health_checked: bool,
     health_error: Option<String>,
     launcher_error: Option<String>,
+    client_config_error: Option<String>,
 }
 
 // Keep startup ordering and best-effort error handling in one small seam. The
 // concrete Tauri/file-system operations are supplied by the caller so the
 // startup boundary can be tested without constructing a full Tauri app.
-fn run_mcp_startup_preflight<Sync, Ensure, Detect, Health, Install>(
+fn run_mcp_startup_preflight<Sync, Ensure, Detect, Health, Install, Configure>(
     sync_runtime: Sync,
     ensure_server: Ensure,
     detect_node: Detect,
     check_health: Health,
     install_launcher: Install,
+    configure_clients: Configure,
 ) -> McpStartupPreflightResult
 where
     Sync: FnOnce() -> Result<(), String>,
@@ -340,6 +342,7 @@ where
     Detect: FnOnce() -> Option<PathBuf>,
     Health: FnOnce(&Path, &Path) -> McpRuntimeHealth,
     Install: FnOnce() -> Result<PathBuf, String>,
+    Configure: FnOnce(&Path) -> Result<(), String>,
 {
     let runtime_sync_error = sync_runtime().err();
     let mut node_missing = false;
@@ -364,7 +367,10 @@ where
         }
         Err(error) => (false, None, Some(error)),
     };
-    let launcher_error = install_launcher().err();
+    let (launcher_error, client_config_error) = match install_launcher() {
+        Ok(launcher) => (None, configure_clients(&launcher).err()),
+        Err(error) => (Some(error), None),
+    };
 
     McpStartupPreflightResult {
         runtime_sync_error,
@@ -373,17 +379,20 @@ where
         health_checked,
         health_error,
         launcher_error,
+        client_config_error,
     }
 }
 
 pub(crate) fn sync_stable_mcp_server_on_startup<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
     std::thread::spawn(move || {
+        let client_config_app = app.clone();
         let result = run_mcp_startup_preflight(
             || crate::knowledge::sync_bundled_knowledge_runtime(&app).map(|_| ()),
             || ensure_stable_mcp_server(&app),
             detect_node_path,
             |node, server| check_mcp_server_runtime(node, server),
             install_stable_mcp_launcher,
+            move |_| mcp_install_to_local_clients_blocking(&client_config_app).map(|_| ()),
         );
         if let Some(error) = result.runtime_sync_error {
             eprintln!("knowledge runtime sync failed before MCP install: {error}");
@@ -400,6 +409,9 @@ pub(crate) fn sync_stable_mcp_server_on_startup<R: tauri::Runtime>(app: tauri::A
         }
         if let Some(error) = result.launcher_error {
             eprintln!("MCP launcher migration failed: {error}");
+        }
+        if let Some(error) = result.client_config_error {
+            eprintln!("MCP client configuration refresh failed: {error}");
         }
     });
 }
@@ -595,7 +607,7 @@ fn stage_mcp_generation(dir: &Path, build_id: &str, app_version: &str) -> Result
                 "appVersion": app_version,
                 "schemaVersion": 1,
                 "ready": true,
-                "capabilityHash": "40ae9528330e4e97d68072d3c40c1be3db9e40f8f52478b44c8de026be4487d0",
+                "capabilityHash": "096b7a0e818e7296d76c6668c985305ffafa9c0c0cb31e2369b7ed8c3785ea7b",
                 "cliEntry": "penguin.mjs",
                 "mcpEntry": "dist/index.js",
                 "nodePath": "node",
@@ -668,6 +680,11 @@ fn generation_has_active_lease(path: &Path) -> bool {
 // Single-flight: startup sync, mcp_status, install, and health check can all
 // race here; concurrent stagers would fight over the symlink and tmp names.
 static STABLE_SYNC_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+// Startup, the release welcome dialog and the manual Settings action can all
+// request a refresh at the same time. Serialize config read/merge/write so an
+// external edit cannot be lost between two concurrent Penguin writers.
+static MCP_CLIENT_CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 // Resolves BOTH the stable server path and the node binary to launch it with.
 // Prefers the vendored runtime (known-good Node ABI, matches the shipped
@@ -837,7 +854,7 @@ fn write_claude_desktop_mcp_config_at(
     let pretty = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
     let written = existing_raw.as_deref() != Some(pretty.as_str());
     if written {
-        std::fs::write(cfg_path, pretty).map_err(|e| e.to_string())?;
+        write_atomic(cfg_path, &pretty)?;
     }
     Ok(CanonicalMigrationResult {
         canonical: "penguin",
@@ -874,7 +891,31 @@ fn codex_mcp_configured_at(cfg_path: &Path) -> bool {
         .and_then(|args| args.get(0))
         .and_then(toml_edit::Value::as_str)
         .unwrap_or_default();
+    let approval_mode = doc
+        .get("mcp_servers")
+        .and_then(|servers| servers.as_table_like())
+        .and_then(|servers| servers.get("penguin"))
+        .and_then(|penguin| penguin.as_table_like())
+        .and_then(|penguin| penguin.get("default_tools_approval_mode"))
+        .and_then(Item::as_str)
+        .unwrap_or_default();
+    let read_tool_approved = |name: &str| {
+        doc.get("mcp_servers")
+            .and_then(|servers| servers.as_table_like())
+            .and_then(|servers| servers.get("penguin"))
+            .and_then(|penguin| penguin.as_table_like())
+            .and_then(|penguin| penguin.get("tools"))
+            .and_then(|tools| tools.as_table_like())
+            .and_then(|tools| tools.get(name))
+            .and_then(|tool| tool.as_table_like())
+            .and_then(|tool| tool.get("approval_mode"))
+            .and_then(Item::as_str)
+            == Some("approve")
+    };
     is_stable_mcp_client_target(command, server)
+        && approval_mode == "writes"
+        && read_tool_approved("knowledge_capabilities")
+        && read_tool_approved("knowledge_context")
 }
 
 #[derive(Debug)]
@@ -882,6 +923,7 @@ struct McpRuntimeHealth {
     healthy: bool,
     error: Option<String>,
     generation: Option<McpServerGeneration>,
+    read_only_tools: Vec<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -959,6 +1001,41 @@ fn parse_mcp_health_response(stdout: &str) -> Result<McpServerGeneration, String
     Err("MCP server did not return a valid mcp_health response".to_string())
 }
 
+fn parse_mcp_read_only_tools(stdout: &str) -> Result<Vec<String>, String> {
+    for line in stdout.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(tools) = value
+            .get("result")
+            .and_then(|result| result.get("tools"))
+            .and_then(serde_json::Value::as_array)
+        else {
+            continue;
+        };
+        let mut names: Vec<String> = tools
+            .iter()
+            .filter(|tool| {
+                tool.get("annotations")
+                    .and_then(|annotations| annotations.get("readOnlyHint"))
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+            })
+            .filter_map(|tool| tool.get("name").and_then(serde_json::Value::as_str))
+            .map(str::to_string)
+            .collect();
+        names.sort();
+        names.dedup();
+        if names.iter().any(|name| name == "knowledge_capabilities")
+            && names.iter().any(|name| name == "knowledge_context")
+        {
+            return Ok(names);
+        }
+        return Err("MCP tools/list omitted required read-only Penguin tools".to_string());
+    }
+    Err("MCP server did not return a valid tools/list response".to_string())
+}
+
 fn mcp_generation_root(server: &Path) -> Option<PathBuf> {
     for ancestor in server.ancestors() {
         if !ancestor.join("manifest.json").is_file() {
@@ -978,6 +1055,7 @@ fn check_mcp_server_runtime(node: &Path, server: &Path) -> McpRuntimeHealth {
             healthy: false,
             error: Some(format!("Node.js binary not found: {}", node.display())),
             generation: None,
+            read_only_tools: Vec::new(),
         };
     }
     if !server.exists() {
@@ -988,6 +1066,7 @@ fn check_mcp_server_runtime(node: &Path, server: &Path) -> McpRuntimeHealth {
                 server.display()
             )),
             generation: None,
+            read_only_tools: Vec::new(),
         };
     }
 
@@ -1007,21 +1086,25 @@ fn check_mcp_server_runtime(node: &Path, server: &Path) -> McpRuntimeHealth {
                 healthy: false,
                 error: Some(format!("Failed to start MCP server: {e}")),
                 generation: None,
+                read_only_tools: Vec::new(),
             }
         }
     };
 
     const MCP_INITIALIZE_REQUEST: &str = r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"penguin-settings-check","version":"0.0.0"}}}"#;
     const MCP_HEALTH_REQUEST: &str = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"mcp_health","arguments":{}}}"#;
+    const MCP_LIST_TOOLS_REQUEST: &str =
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#;
     if let Some(mut stdin) = child.stdin.take() {
         if let Err(e) = stdin.write_all(
-            format!("{MCP_INITIALIZE_REQUEST}\n{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}}\n{MCP_HEALTH_REQUEST}\n").as_bytes(),
+            format!("{MCP_INITIALIZE_REQUEST}\n{{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}}\n{MCP_HEALTH_REQUEST}\n{MCP_LIST_TOOLS_REQUEST}\n").as_bytes(),
         ) {
             let _ = child.kill();
             return McpRuntimeHealth {
                 healthy: false,
                 error: Some(format!("Failed to send MCP initialize request: {e}")),
                 generation: None,
+                read_only_tools: Vec::new(),
             };
         }
     }
@@ -1046,6 +1129,7 @@ fn check_mcp_server_runtime(node: &Path, server: &Path) -> McpRuntimeHealth {
                         "MCP server did not answer initialize within 1500ms".to_string()
                     })),
                     generation: None,
+                    read_only_tools: Vec::new(),
                 };
             }
             Err(e) => {
@@ -1054,6 +1138,7 @@ fn check_mcp_server_runtime(node: &Path, server: &Path) -> McpRuntimeHealth {
                     healthy: false,
                     error: Some(format!("Failed while waiting for MCP server: {e}")),
                     generation: None,
+                    read_only_tools: Vec::new(),
                 };
             }
         }
@@ -1066,6 +1151,7 @@ fn check_mcp_server_runtime(node: &Path, server: &Path) -> McpRuntimeHealth {
                 healthy: false,
                 error: Some(format!("Failed to read MCP server output: {e}")),
                 generation: None,
+                read_only_tools: Vec::new(),
             }
         }
     };
@@ -1082,23 +1168,35 @@ fn check_mcp_server_runtime(node: &Path, server: &Path) -> McpRuntimeHealth {
                 stderr
             }),
             generation: None,
+            read_only_tools: Vec::new(),
         };
     }
 
-    match parse_mcp_initialize_response(&stdout) {
-        Ok(()) => McpRuntimeHealth {
+    match (
+        parse_mcp_initialize_response(&stdout),
+        parse_mcp_read_only_tools(&stdout),
+    ) {
+        (Ok(()), Ok(read_only_tools)) => McpRuntimeHealth {
             healthy: true,
             error: None,
             generation: parse_mcp_health_response(&stdout).ok(),
+            read_only_tools,
         },
-        Err(e) => McpRuntimeHealth {
+        (initialize, tools) => {
+            let error = initialize
+                .err()
+                .or_else(|| tools.err())
+                .unwrap_or_else(|| "MCP runtime probe failed".to_string());
+            McpRuntimeHealth {
             healthy: false,
             error: Some(if stderr.is_empty() {
-                e
+                error
             } else {
-                format!("{e}. stderr: {stderr}")
+                format!("{error}. stderr: {stderr}")
             }),
             generation: None,
+            read_only_tools: Vec::new(),
+        }
         },
     }
 }
@@ -1107,7 +1205,15 @@ fn write_codex_mcp_config_at(
     cfg_path: &Path,
     node: &Path,
     server: &Path,
+    read_only_tools: &[String],
 ) -> Result<CanonicalMigrationResult, String> {
+    if !read_only_tools
+        .iter()
+        .any(|name| name == "knowledge_capabilities")
+        || !read_only_tools.iter().any(|name| name == "knowledge_context")
+    {
+        return Err("MCP read-only tool manifest is missing required Penguin tools".to_string());
+    }
     if let Some(parent) = cfg_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
@@ -1183,13 +1289,25 @@ fn write_codex_mcp_config_at(
     let mut penguin = Table::new();
     penguin["command"] = value(node.to_string_lossy().to_string());
     penguin["args"] = value(args);
+    // Codex's `approval_policy = "never"` otherwise blocks even read-only MCP
+    // calls in a fresh non-interactive session. The bundled MCP manifest marks
+    // reads with `readOnlyHint`; `writes` auto-allows only those reads while
+    // preserving confirmation for index, note, import, and other mutations.
+    penguin["default_tools_approval_mode"] = value("writes");
+    let mut tools = Table::new();
+    for name in read_only_tools {
+        let mut tool = Table::new();
+        tool["approval_mode"] = value("approve");
+        tools.insert(name, Item::Table(tool));
+    }
+    penguin["tools"] = Item::Table(tools);
 
     servers.insert("penguin", Item::Table(penguin));
     let preserved_servers = servers.len().saturating_sub(1);
     let rendered = doc.to_string();
     let written = existing_raw.as_deref() != Some(rendered.as_str());
     if written {
-        std::fs::write(cfg_path, rendered).map_err(|e| e.to_string())?;
+        write_atomic(cfg_path, &rendered)?;
     }
     Ok(CanonicalMigrationResult {
         canonical: "penguin",
@@ -1260,6 +1378,7 @@ pub(crate) struct McpInstallResult {
     wrote_config: bool,
     changed_clients: Vec<String>,
     unchanged_clients: Vec<String>,
+    skipped_clients: Vec<String>,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -1418,7 +1537,20 @@ pub(crate) async fn mcp_install_to_local_clients<R: tauri::Runtime>(
 fn mcp_install_to_local_clients_blocking<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
 ) -> Result<McpInstallResult, String> {
-    let _ = ensure_stable_mcp_server(app)?;
+    let (server, bundled_node) = ensure_stable_mcp_server(app)?;
+    let node = bundled_node
+        .or_else(detect_node_path)
+        .ok_or("Node.js not detected for MCP tool manifest validation")?;
+    let health = check_mcp_server_runtime(&node, &server);
+    if !health.healthy {
+        return Err(health
+            .error
+            .unwrap_or_else(|| "MCP runtime validation failed".to_string()));
+    }
+    let read_only_tools = health.read_only_tools;
+    let _config_guard = MCP_CLIENT_CONFIG_LOCK
+        .lock()
+        .map_err(|_| "MCP client configuration lock poisoned".to_string())?;
     let launcher = install_stable_mcp_launcher()?;
     let home = dirs::home_dir().ok_or("No home directory")?;
 
@@ -1439,7 +1571,12 @@ fn mcp_install_to_local_clients_blocking<R: tauri::Runtime>(
                 write_claude_desktop_mcp_config_at(cfg_path, &launcher, Path::new(""))?
             }
             _ => {
-                write_codex_mcp_config_at(cfg_path, &launcher, Path::new(""))?
+                write_codex_mcp_config_at(
+                    cfg_path,
+                    &launcher,
+                    Path::new(""),
+                    &read_only_tools,
+                )?
             }
         };
         configured.push(format!("{} ({})", name, cfg_path.display()));
@@ -1467,6 +1604,7 @@ fn mcp_install_to_local_clients_blocking<R: tauri::Runtime>(
         wrote_config: !changed_clients.is_empty(),
         changed_clients,
         unchanged_clients,
+        skipped_clients: skipped.iter().map(|name| (*name).to_string()).collect(),
     })
 }
 
@@ -1561,6 +1699,7 @@ mod mcp_config_tests {
                         healthy: true,
                         error: None,
                         generation: None,
+                        read_only_tools: vec!["knowledge_capabilities".to_string()],
                     }
                 }
             },
@@ -1571,6 +1710,14 @@ mod mcp_config_tests {
                     Ok(PathBuf::from("launcher"))
                 }
             },
+            {
+                let events = Arc::clone(&events);
+                move |launcher: &Path| {
+                    assert_eq!(launcher, Path::new("launcher"));
+                    record("client-configure", &events);
+                    Ok(())
+                }
+            },
         );
 
         assert_eq!(
@@ -1579,7 +1726,8 @@ mod mcp_config_tests {
                 "runtime-sync",
                 "ensure-server",
                 "initialize-health",
-                "launcher-install"
+                "launcher-install",
+                "client-configure"
             ]
         );
         assert!(result.runtime_sync_error.is_none());
@@ -1588,6 +1736,7 @@ mod mcp_config_tests {
         assert!(result.health_error.is_none());
         assert!(!result.node_missing);
         assert!(result.launcher_error.is_none());
+        assert!(result.client_config_error.is_none());
     }
 
     #[test]
@@ -1619,17 +1768,30 @@ mod mcp_config_tests {
                     Ok(PathBuf::from("launcher"))
                 }
             },
+            {
+                let events = Arc::clone(&events);
+                move |_| {
+                    events.lock().unwrap().push("client-configure");
+                    Ok(())
+                }
+            },
         );
 
         assert_eq!(
             *events.lock().unwrap(),
-            vec!["runtime-sync", "ensure-server", "launcher-install"]
+            vec![
+                "runtime-sync",
+                "ensure-server",
+                "launcher-install",
+                "client-configure"
+            ]
         );
         assert_eq!(result.runtime_sync_error.as_deref(), Some("sync failed"));
         assert_eq!(result.migration_error.as_deref(), Some("migration failed"));
         assert!(!result.health_checked);
         assert!(!result.node_missing);
         assert!(result.launcher_error.is_none());
+        assert!(result.client_config_error.is_none());
     }
 
     #[test]
@@ -1640,6 +1802,7 @@ mod mcp_config_tests {
             || None,
             |_, _| panic!("initialize health must not run without Node.js"),
             || Ok(PathBuf::from("launcher")),
+            |_| Ok(()),
         );
 
         assert!(result.migration_error.is_none());
@@ -1647,6 +1810,7 @@ mod mcp_config_tests {
         assert!(result.node_missing);
         assert!(result.health_error.is_none());
         assert!(result.launcher_error.is_none());
+        assert!(result.client_config_error.is_none());
     }
 
     #[test]
@@ -1659,8 +1823,10 @@ mod mcp_config_tests {
                 healthy: false,
                 error: Some("invalid initialize response".to_string()),
                 generation: None,
+                read_only_tools: Vec::new(),
             },
             || Ok(PathBuf::from("launcher")),
+            |_| Ok(()),
         );
 
         assert!(result.migration_error.is_none());
@@ -1670,6 +1836,27 @@ mod mcp_config_tests {
             Some("invalid initialize response")
         );
         assert!(result.launcher_error.is_none());
+        assert!(result.client_config_error.is_none());
+    }
+
+    #[test]
+    fn codex_configured_check_accepts_the_canonical_auto_synced_entry() {
+        let root = scratch_dir("codex-configured-check");
+        let config = root.join("config.toml");
+        let launcher = stable_mcp_launcher_path().expect("test home must be available");
+        let read_only_tools = [
+            "knowledge_capabilities".to_string(),
+            "knowledge_context".to_string(),
+        ];
+
+        write_codex_mcp_config_at(&config, &launcher, Path::new(""), &read_only_tools).unwrap();
+
+        assert!(
+            codex_mcp_configured_at(&config),
+            "a canonical entry written by automatic MCP sync must be reported configured"
+        );
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(unix)]
@@ -1683,7 +1870,7 @@ mod mcp_config_tests {
         fs::write(&server, "unused").unwrap();
         fs::write(
             &node,
-            "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"result\":{\"serverInfo\":{\"name\":\"penguin-mcp\"}}}'\n",
+            "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"result\":{\"serverInfo\":{\"name\":\"penguin-mcp\"}}}' '{\"result\":{\"tools\":[{\"name\":\"knowledge_capabilities\",\"annotations\":{\"readOnlyHint\":true}},{\"name\":\"knowledge_context\",\"annotations\":{\"readOnlyHint\":true}}]}}'\n",
         )
         .unwrap();
         let mut permissions = fs::metadata(&node).unwrap().permissions();
@@ -1696,7 +1883,7 @@ mod mcp_config_tests {
 
         fs::write(
             &node,
-            "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"result\":{\"serverInfo\":{\"name\":\"other-server\"}}}'\n",
+            "#!/bin/sh\ncat >/dev/null\nprintf '%s\\n' '{\"result\":{\"serverInfo\":{\"name\":\"other-server\"}}}' '{\"result\":{\"tools\":[{\"name\":\"knowledge_capabilities\",\"annotations\":{\"readOnlyHint\":true}},{\"name\":\"knowledge_context\",\"annotations\":{\"readOnlyHint\":true}}]}}'\n",
         )
         .unwrap();
         let unhealthy = check_mcp_server_runtime(&node, &server);
@@ -2227,7 +2414,13 @@ mod mcp_config_tests {
             "[mcp_servers.other]\ncommand = \"other-mcp\"\n\n[mcp_servers.pengvi]\ncommand = \"/usr/bin/node\"\nargs = [\"/Users/u/.penguin/runtimes/v1/dist/index.js\"]\n",
         )
         .unwrap();
-        write_codex_mcp_config_at(&codex_path, &launcher, Path::new("")).unwrap();
+        write_codex_mcp_config_at(
+            &codex_path,
+            &launcher,
+            Path::new(""),
+            &["knowledge_capabilities".to_string(), "knowledge_context".to_string()],
+        )
+        .unwrap();
         let codex = fs::read_to_string(&codex_path).unwrap();
         assert!(codex.contains(&format!("command = \"{}\"", launcher.display())));
         assert!(codex.contains("args = []"));
@@ -2251,6 +2444,7 @@ mod mcp_config_tests {
             &cfg_path,
             &PathBuf::from("/Users/u/.penguin/mcp/node"),
             &PathBuf::from("/Users/u/.penguin/mcp/dist/index.js"),
+            &["knowledge_capabilities".to_string(), "knowledge_context".to_string()],
         )
         .unwrap();
         let saved = fs::read_to_string(&cfg_path).unwrap();
@@ -2276,6 +2470,11 @@ mod mcp_config_tests {
             &cfg_path,
             &dirs::home_dir().unwrap().join(".penguin/bin/penguin-mcp"),
             Path::new(""),
+            &[
+                "knowledge_capabilities".to_string(),
+                "knowledge_context".to_string(),
+                "knowledge_search".to_string(),
+            ],
         )
         .unwrap();
 
@@ -2287,7 +2486,25 @@ mod mcp_config_tests {
             dirs::home_dir().unwrap().join(".penguin/bin/penguin-mcp").display()
         )));
         assert!(saved.contains("args = []"));
+        assert!(saved.contains("default_tools_approval_mode = \"writes\""));
+        assert!(saved.contains("[mcp_servers.penguin.tools.knowledge_capabilities]"));
+        assert!(saved.contains("[mcp_servers.penguin.tools.knowledge_context]"));
+        assert!(saved.contains("approval_mode = \"approve\""));
         assert!(codex_mcp_configured_at(&cfg_path));
+
+        let _ = fs::remove_dir_all(cfg_path.parent().unwrap());
+    }
+
+    #[test]
+    fn codex_mcp_configuration_requires_safe_read_tool_approval_mode() {
+        let cfg_path = temp_config_path("codex-approval-mode");
+        fs::write(
+            &cfg_path,
+            "[mcp_servers.penguin]\ncommand = \"/Users/u/.penguin/bin/penguin-mcp\"\nargs = []\n",
+        )
+        .unwrap();
+
+        assert!(!codex_mcp_configured_at(&cfg_path));
 
         let _ = fs::remove_dir_all(cfg_path.parent().unwrap());
     }

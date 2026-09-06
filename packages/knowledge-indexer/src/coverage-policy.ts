@@ -51,6 +51,17 @@ function isGeneratedPath(filePath: string): boolean {
   return /(^|\/)(?:dist|build|generated|coverage|\.next)\//i.test(normalized) || /\.min\.(?:js|mjs|cjs|css)$/i.test(normalized) || /[.-]bundle\.js$/i.test(normalized);
 }
 
+/** Package-manager caches are machine-local transport artifacts, not a
+ * repository's source or vendored code. They must remain outside the corpus
+ * even when exactSearchVendor is enabled; otherwise a local pnpm store can add
+ * tens of thousands of duplicate package blobs and dominate natural search. */
+export function isPackageCachePath(filePath: string): boolean {
+  const normalized = normalizePath(filePath);
+  return /(^|\/)(?:\.pnpm-store|\.npm)(?:\/|$)/i.test(normalized)
+    || /(^|\/)\.yarn\/(?:cache|unplugged)(?:\/|$)/i.test(normalized)
+    || /(^|\/)\.bun\/install\/cache(?:\/|$)/i.test(normalized);
+}
+
 function isVendorPath(filePath: string): boolean {
   return /(^|\/)(?:public|static|assets|www|TestPage)\/(?:[^/]+\/)*(?:lib|libs|vendor|common)\//i.test(normalizePath(filePath));
 }
@@ -65,6 +76,9 @@ export function classifyCoveragePath(
   }
   if (isSecretPath(normalized, policy.secretPaths)) {
     return { status: "excluded", reasonCode: "secret_policy", reason: "secret path excluded by policy", classification: "secret" };
+  }
+  if (isPackageCachePath(normalized)) {
+    return { status: "excluded", reasonCode: "vendor_policy", reason: "package-manager cache excluded from repository corpus", classification: "vendor" };
   }
   if (isGeneratedPath(normalized)) {
     if (!policy.exactSearchGenerated) {

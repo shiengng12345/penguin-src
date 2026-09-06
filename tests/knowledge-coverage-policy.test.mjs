@@ -24,6 +24,20 @@ test("coverage policy excludes secrets and path escapes before content reads", (
   assert.equal(escaped.reasonCode, "outside_workspace");
 });
 
+test("coverage policy never treats package-manager caches as repository source", () => {
+  for (const filePath of [
+    ".pnpm-store/v3/files/aa/blob",
+    ".npm/_cacache/content-v2/blob",
+    ".yarn/cache/package.zip",
+    ".yarn/unplugged/package/index.js",
+    ".bun/install/cache/package",
+  ]) {
+    const result = classifyCoveragePath(filePath, DEFAULT_COVERAGE_POLICY);
+    assert.equal(result.status, "excluded", filePath);
+    assert.equal(result.reasonCode, "vendor_policy", filePath);
+  }
+});
+
 test("generated/vendor exclusions require an explicit stricter local policy", () => {
   assert.equal(classifyCoveragePath("dist/app.js", { ...DEFAULT_COVERAGE_POLICY, exactSearchGenerated: false }).reasonCode, "generated_policy");
   assert.equal(classifyCoveragePath("public/vendor/lib.js", { ...DEFAULT_COVERAGE_POLICY, exactSearchVendor: false }).reasonCode, "vendor_policy");

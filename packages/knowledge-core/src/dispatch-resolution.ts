@@ -1,11 +1,42 @@
 export type DispatchStatus = "verified" | "candidate" | "unavailable";
 export type DispatchEvidenceKind = "ast_exact" | "type_resolution" | "framework_adapter" | "runtime_observation";
+export type FrameworkEdgeType = "injects" | "provides" | "implements" | "dispatches_to";
+export interface FrameworkEdgeEvidence {
+  origin: "parser" | "framework_adapter" | "runtime";
+  method: "EXTRACTED" | "DI_MODULE_PROVIDER" | "INTERFACE_IMPLEMENTATION" | "RUNTIME_OBSERVED";
+  confidence: number;
+  scope: "revision" | "environment";
+  provenance: { filePath: string; startLine?: number; token?: string };
+}
 export interface DispatchImplementation { identityKey: string; filePath?: string; framework?: "nestjs" | "spring" | "go" | "rust" | "generic"; providerToken?: string; }
 export interface DispatchRequest { revisionId: string; environment?: string; receiverType?: string; method: string; implementations: DispatchImplementation[]; resolvedType?: string; dependencyToken?: string; providers?: DispatchImplementation[]; }
 export interface DispatchTarget extends DispatchImplementation { evidence: DispatchEvidenceKind; revisionId: string; environment?: string; }
 export interface DispatchResolution { status: DispatchStatus; hopType: "interface_method" | "dependency_injection" | "runtime_observation"; targets: DispatchTarget[]; explanation: string; revisionId: string; environment?: string; }
 export interface RuntimeDispatchObservation { revisionId: string; environment: string; targetIdentityKey: string; observedAt: string; }
 export interface FrameworkDispatchAdapter { id: "nestjs" | "spring" | "go" | "rust"; resolve(request: DispatchRequest): DispatchImplementation[]; }
+
+/** Canonical evidence mapping used when a framework adapter becomes graph data. */
+export function frameworkEdgeEvidence(input: {
+  edgeType: FrameworkEdgeType;
+  filePath: string;
+  startLine?: number;
+  token?: string;
+  scope?: "revision" | "environment";
+  confidence?: number;
+}): FrameworkEdgeEvidence {
+  const interfaceEdge = input.edgeType === "implements" || input.edgeType === "dispatches_to";
+  return {
+    origin: "framework_adapter",
+    method: interfaceEdge ? "INTERFACE_IMPLEMENTATION" : "DI_MODULE_PROVIDER",
+    confidence: input.confidence ?? 1,
+    scope: input.scope ?? "revision",
+    provenance: {
+      filePath: input.filePath,
+      ...(input.startLine == null ? {} : { startLine: input.startLine }),
+      ...(input.token ? { token: input.token } : {}),
+    },
+  };
+}
 
 const BUILTIN_FRAMEWORK_ADAPTERS: FrameworkDispatchAdapter[] = [
   { id: "nestjs", resolve: (request) => (request.providers ?? []).filter((item) => item.framework === "nestjs") },

@@ -4,7 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
-import { KnowledgeStore, GitTopologyStore, SourceStore, SourceSnapshotStore, getSourceHit, searchSource } from "../packages/knowledge-core/dist/index.js";
+import { KnowledgeStore, GitTopologyStore, SourceStore, SourceSnapshotStore, getSourceHit, searchSource, searchSourceTerms } from "../packages/knowledge-core/dist/index.js";
 
 function openStore() {
   const dir = mkdtempSync(join(tmpdir(), "pk-source-search-"));
@@ -107,4 +107,59 @@ test("source search does not materialize a snapshot after an indexed trigram mis
   const hits = searchSource(store, { snapshotId: snapshot.id, repoId: "repo-1" }, { query: "cpfLookupResults", mode: "exact", options: { caseSensitive: true, wholeWord: false } });
   assert.deepEqual(hits, []);
   store.close();
+});
+
+test("source search without trigram prefilters decoded blobs inside SQLite", () => {
+  const store = openStore();
+  const snapshot = new GitTopologyStore(store).createBuildingSnapshot({ snapshotKey: "sqlite-prefilter", repoId: "repo-1", parserVersion: "p", resolverVersion: "r", schemaVersion: 10 });
+  const wanted = addSource(store, "src/wanted.ts", "SqlPrefilterNeedle\n");
+  const noise = addSource(store, "src/noise.ts", "unrelated\n".repeat(100));
+  const cow = new SourceSnapshotStore(store);
+  cow.replaceOverlay(snapshot.id, [{ op: "add", path: "src/wanted.ts", sourceFactId: wanted }, { op: "add", path: "src/noise.ts", sourceFactId: noise }]);
+  cow.materializeManifest(snapshot.id);
+  const prepare = store.db.prepare.bind(store.db);
+  const statements = [];
+  store.db.prepare = (sql) => { statements.push(String(sql)); return prepare(sql); };
+  try {
+    const hits = searchSource(store, { snapshotId: snapshot.id, repoId: "repo-1" }, { query: "sqlprefilterneedle", mode: "substring", options: { caseSensitive: false, wholeWord: false } });
+    assert.equal(hits.length, 1);
+    assert.ok(statements.some((sql) => /instr\(lower\(b\.decoded_content\), lower\(\?\)\)/i.test(sql)));
+  } finally {
+    store.db.prepare = prepare;
+    store.close();
+  }
+});
+
+test("multi-term source search scans decoded content once without repeated SQL lowercase transforms", () => {
+  const store = openStore();
+  const snapshot = new GitTopologyStore(store).createBuildingSnapshot({ snapshotKey: "multi-term-prefilter", repoId: "repo-1", parserVersion: "p", resolverVersion: "r", schemaVersion: 10 });
+  const both = addSource(store, "src/both.ts", "PLAYER withdrawal Approval\n");
+  const one = addSource(store, "src/one.ts", "Player profile\n");
+  const noise = addSource(store, "src/noise.ts", "unrelated\n".repeat(100));
+  const cow = new SourceSnapshotStore(store);
+  cow.replaceOverlay(snapshot.id, [
+    { op: "add", path: "src/both.ts", sourceFactId: both },
+    { op: "add", path: "src/one.ts", sourceFactId: one },
+    { op: "add", path: "src/noise.ts", sourceFactId: noise },
+  ]);
+  cow.materializeManifest(snapshot.id);
+  const prepare = store.db.prepare.bind(store.db);
+  const statements = [];
+  store.db.prepare = (sql) => { statements.push(String(sql)); return prepare(sql); };
+  try {
+    const hits = searchSourceTerms(
+      store,
+      { snapshotId: snapshot.id, repoId: "repo-1" },
+      ["player", "withdrawal", "approval"],
+      { mode: "substring", options: { caseSensitive: false, wholeWord: false, includeGenerated: false, includeVendor: false } },
+    );
+    assert.deepEqual(new Set(hits.map((hit) => hit.term)), new Set(["player", "withdrawal", "approval"]));
+    const decodedScans = statements.filter((sql) => /JOIN source_blobs b/i.test(sql));
+    assert.equal(decodedScans.length, 1, decodedScans.join("\n---\n"));
+    assert.doesNotMatch(decodedScans[0], /instr\(lower\(b\.decoded_content\)/i);
+    assert.equal((decodedScans[0].match(/b\.decoded_content LIKE \? ESCAPE/gi) ?? []).length, 3);
+  } finally {
+    store.db.prepare = prepare;
+    store.close();
+  }
 });

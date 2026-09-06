@@ -18,6 +18,7 @@ export type SearchLane =
   | "graph"
   | "note"
   | "semantic"
+  | "vector"
   | "evidence";
 
 export interface RevisionSelector {
@@ -139,6 +140,13 @@ export interface SearchHit {
   nodeId?: string;
   /** That symbol's name, so the handle is legible before it is used. */
   symbol?: string;
+  /** Per-result lane decomposition for reproducible hybrid retrieval. */
+  retrievalProvenance?: {
+    lanes: Array<{ lane: "exact" | "source" | "symbol" | "graph" | "vector"; rank: number; score?: number }>;
+    embeddingSpaceId?: string;
+    chunkId?: string;
+    retrievalFingerprint: string;
+  };
 }
 
 export interface SearchDiagnostics {
@@ -162,6 +170,15 @@ export interface SearchDiagnostics {
   }>;
   searchedLanes: SearchLane[];
   skippedLanes: Array<{ lane: SearchLane; reason: string }>;
+  semantic: {
+    requested: boolean;
+    applied: boolean;
+    reason: string | null;
+    ready: number;
+    expected: number;
+    activeGenerationIds: string[];
+    lanesUsed: SearchLane[];
+  };
   coverage: {
     discovered: number;
     admitted: number;
@@ -182,10 +199,32 @@ export interface SearchDiagnostics {
 export interface SearchResponse {
   schemaVersion: "2";
   hits: SearchHit[];
+  /** Common evidence fields are duplicated at the response root so a CLI/MCP
+   * consumer can inspect trust without knowing a transport-specific wrapper. */
+  scope?: Record<string, unknown> | null;
+  revision?: Record<string, unknown> | null;
+  freshness?: Record<string, unknown>;
+  coverage?: Record<string, unknown>;
+  completeness?: "complete" | "lower_bound" | "partial" | "unknown";
+  proofStatus?: "proven" | "not_proven" | "candidate" | "unresolved";
+  candidateCount?: number;
+  returnedCount?: number;
+  truncated?: boolean;
+  cursor?: string | null;
+  /** Canonical trust envelope used by MCP/CLI consumers. Root fields are kept
+   * for convenience, but these counts and statuses must describe the same hit
+   * set rather than the pre-semantic deterministic pass. */
+  evidence?: Record<string, unknown> & {
+    proofStatus: "proven" | "not_proven" | "candidate" | "unresolved";
+    candidateCount: number | null;
+    returnedCount: number;
+    truncated: boolean;
+    cursor: string | null;
+  };
   diagnostics: SearchDiagnostics;
   /** A typed scope failure is still a valid machine-readable v2 response. */
   error?: {
-    code: "REPOSITORY_NOT_FOUND" | "SCOPE_EMPTY";
+    code: "REPOSITORY_NOT_FOUND" | "WORKSPACE_NOT_FOUND" | "SCOPE_EMPTY" | "MODE_UNAVAILABLE";
     message: string;
     details: Record<string, unknown>;
     retryable: boolean;

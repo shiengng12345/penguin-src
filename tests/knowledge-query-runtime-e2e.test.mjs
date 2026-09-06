@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
-import { KnowledgeStore, GitTopologyStore, SourceStore, SourceSnapshotStore } from "../packages/knowledge-core/dist/index.js";
+import { pathToFileURL } from "node:url";
+import { EmbeddingLifecycle, KnowledgeStore, GitTopologyStore, SourceStore, SourceSnapshotStore, createEmbeddingSpace } from "../packages/knowledge-core/dist/index.js";
+import { QueryWorkerPool } from "../packages/knowledge-cli/dist/query-server.js";
 
 function createFixture() {
   const dir = mkdtempSync(join(tmpdir(), "penguin-query-runtime-"));
@@ -37,6 +39,22 @@ function createFixture() {
   const cow = new SourceSnapshotStore(store);
   cow.replaceOverlay(snapshot.id, [{ op: "add", path: "src/runtime.ts", sourceFactId: fact }]);
   cow.materializeManifest(snapshot.id);
+  const space = createEmbeddingSpace(store, {
+    providerId: "fixture",
+    modelId: "query-runtime",
+    weightsDigest: "a".repeat(64),
+    tokenizerDigest: "b".repeat(64),
+    dimensions: 2,
+    pooling: "mean",
+    normalization: "none",
+    chunkerVersion: "v1",
+  });
+  new EmbeddingLifecycle(store).createGeneration({
+    spaceId: space.id,
+    snapshotId: snapshot.id,
+    scopeKey: `repo:${repoId}`,
+    expectedChunks: 1,
+  });
   store.close();
   return { dir, dbPath, ledgerPath, snapshotId: snapshot.id, repoId };
 }
@@ -88,13 +106,42 @@ test("resident query runtime speaks JSONL and returns real source search results
     const hello = await reader.next((frame) => frame.type === "hello");
     assert.equal(hello.protocolVersion, 1);
     assert.equal(typeof hello.capabilityHash, "string");
-    assert.equal(hello.schemaVersion, 14);
+    assert.equal(hello.schemaVersion, 18);
 
     child.stdin.write(JSON.stringify({ type: "request", id: "caps", capabilityId: "knowledge.capabilities", input: {} }) + "\n");
     const capabilities = await reader.next((frame) => frame.id === "caps");
     assert.equal(capabilities.ok, true);
     assert.equal(capabilities.result.capabilityHash, hello.capabilityHash);
     assert.ok(capabilities.result.capabilities.some((item) => item.id === "knowledge.search"));
+
+    const operationToken = "query-runtime-operation";
+    child.stdin.write(JSON.stringify({ type: "request", id: "semantic-control", capabilityId: "knowledge.semantic_control", input: {
+      action: "pause",
+      scopeKey: `repo:${fixture.repoId}`,
+      operationToken,
+    } }) + "\n");
+    const controlled = await reader.next((frame) => frame.id === "semantic-control");
+    assert.equal(controlled.ok, true);
+    assert.equal(controlled.result.operationToken, operationToken);
+    assert.equal(controlled.result.status.scopeKey, `repo:${fixture.repoId}`);
+
+    child.stdin.write(JSON.stringify({ type: "request", id: "semantic-replay", capabilityId: "knowledge.semantic_control", input: {
+      action: "pause",
+      scopeKey: `repo:${fixture.repoId}`,
+      operationToken,
+    } }) + "\n");
+    const replayed = await reader.next((frame) => frame.id === "semantic-replay");
+    assert.equal(replayed.ok, true);
+    assert.equal(replayed.result.operationToken, operationToken);
+
+    child.stdin.write(JSON.stringify({ type: "request", id: "semantic-conflict", capabilityId: "knowledge.semantic_control", input: {
+      action: "resume",
+      scopeKey: `repo:${fixture.repoId}`,
+      operationToken,
+    } }) + "\n");
+    const conflict = await reader.next((frame) => frame.id === "semantic-conflict");
+    assert.equal(conflict.ok, false);
+    assert.equal(conflict.error.code, "OPERATION_TOKEN_CONFLICT");
 
     child.stdin.write(JSON.stringify({ type: "request", id: "compat", capabilityId: "knowledge.cli", input: { args: ["status", "--json"] } }) + "\n");
     const compat = await reader.next((frame) => frame.id === "compat");
@@ -112,6 +159,36 @@ test("resident query runtime speaks JSONL and returns real source search results
     assert.equal(search.result.hits.length, 1);
     assert.equal(search.result.hits[0].locator.filePath, "src/runtime.ts");
     assert.equal(search.result.hits[0].evidence[0].status, "verified");
+    for (const phase of ["scopeResolution", "count", "candidateSelection", "hydration", "evidence", "serialization", "total"]) {
+      assert.equal(typeof search.result.diagnostics.timingsMs[phase], "number", `missing timing phase ${phase}`);
+      assert.ok(search.result.diagnostics.timingsMs[phase] >= 0, `negative timing phase ${phase}`);
+    }
+
+    child.stdin.write(JSON.stringify({ type: "request", id: "bad-cursor", capabilityId: "knowledge.search", input: {
+      query: "ResidentNeedle",
+      mode: "exact",
+      scope: { revisions: [{ repoId: fixture.repoId, snapshotId: fixture.snapshotId }] },
+      page: { limit: 10, cursor: "not-a-real-cursor" },
+    } }) + "\n");
+    const badCursor = await reader.next((frame) => frame.id === "bad-cursor");
+    assert.equal(badCursor.ok, false);
+    assert.equal(badCursor.error.code, "CURSOR_INVALID");
+
+    child.stdin.write(JSON.stringify({ type: "request", id: "bad-schema", capabilityId: "knowledge.search", input: {
+      query: "ResidentNeedle",
+      mode: "not-a-supported-mode",
+      page: { limit: 10 },
+    } }) + "\n");
+    const badSchema = await reader.next((frame) => frame.id === "bad-schema");
+    assert.equal(badSchema.ok, false);
+    assert.equal(badSchema.error.code, "INVALID_SEARCH_REQUEST");
+
+    child.stdin.write(JSON.stringify({ type: "request", id: "bad-scope", capabilityId: "knowledge.semantic_status", input: {
+      scopeKey: "repo-that-does-not-exist",
+    } }) + "\n");
+    const badScope = await reader.next((frame) => frame.id === "bad-scope");
+    assert.equal(badScope.ok, false);
+    assert.equal(badScope.error.code, "SCOPE_NOT_FOUND");
 
     child.stdin.write(JSON.stringify({ type: "request", id: "hit", capabilityId: "knowledge.get_hit", input: {
       snapshotId: fixture.snapshotId,
@@ -141,6 +218,43 @@ test("resident query runtime speaks JSONL and returns real source search results
     child.stdin.end();
     await new Promise((resolve) => child.once("close", resolve));
     rmSync(fixture.dir, { recursive: true, force: true });
+  }
+});
+
+test("query timeout is a typed actionable error with budget and requested scope", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "penguin-query-timeout-"));
+  const workerPath = join(dir, "slow-worker.cjs");
+  writeFileSync(workerPath, [
+    "const { parentPort } = require('node:worker_threads');",
+    "parentPort.on('message', (request) => { const deadline = Date.now() + 100; while (Date.now() < deadline) {} });",
+  ].join("\n"));
+  const pool = new QueryWorkerPool({
+    dbPath: join(dir, "unused.db"),
+    ledgerPath: join(dir, "unused.jsonl"),
+    workerUrl: pathToFileURL(workerPath),
+    size: 1,
+    timeoutMs: 10,
+  });
+  const input = {
+    query: "ResidentNeedle",
+    scope: { revisions: [{ repoId: "repo-timeout", snapshotId: "snapshot-timeout" }] },
+    page: { limit: 3 },
+  };
+  try {
+    await assert.rejects(pool.run("knowledge.search", input), (error) => {
+      assert.equal(error.code, "QUERY_TIMEOUT");
+      assert.equal(error.details.capability, "knowledge.search");
+      assert.equal(typeof error.details.elapsedMs, "number");
+      assert.ok(error.details.elapsedMs >= error.details.budgetMs);
+      assert.equal(error.details.budgetMs, 10);
+      assert.deepEqual(error.details.scope, input.scope);
+      assert.match(error.details.nextAction, /retry/i);
+      assert.match(error.remediation, /scope|limit/i);
+      return true;
+    });
+  } finally {
+    await pool.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });
 

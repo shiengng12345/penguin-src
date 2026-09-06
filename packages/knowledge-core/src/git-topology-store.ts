@@ -49,6 +49,32 @@ export interface RevisionReference {
   snapshotId?: string;
 }
 
+export interface RevisionTruth {
+  repoId: string;
+  branchId: string;
+  snapshotId: string;
+  indexedCommit: string;
+  currentHead: string | null;
+  worktreeDirty: boolean | null;
+  alignment: "aligned" | "head_advanced" | "dirty" | "unknown";
+  checkedAt: string;
+  revisionGeneration: number;
+}
+
+export interface PublishIndexedSnapshotInput {
+  branchId: string;
+  snapshotId: string;
+  headCommit: string | null;
+  indexedCommit: string | null;
+  worktreeState: "clean" | "dirty" | "unknown" | "not_applicable";
+  worktreeFingerprint: string | null;
+  dirtyFiles: string[];
+  parserVersion: string;
+  resolverVersion: string;
+  schemaVersion: number;
+  staleReason: string | null;
+}
+
 interface SnapshotRow {
   id: string;
   snapshot_key: string;
@@ -110,30 +136,66 @@ export class GitTopologyStore {
   }
 
   createBuildingSnapshot(input: CreateSnapshotInput): RevisionSnapshot {
+    return this.createOrGetBuildingSnapshot(input).snapshot;
+  }
+
+  /**
+   * Atomically claim a snapshot key for construction. Callers that create
+   * derived snapshots need to distinguish a newly-created `building` row from
+   * an existing builder; otherwise a first request can mistake its own row for
+   * a concurrent job and report BUSY forever.
+   */
+  createOrGetBuildingSnapshot(input: CreateSnapshotInput): { snapshot: RevisionSnapshot; created: boolean } {
     const now = new Date().toISOString();
-    const row = this.store.db.prepare(
-      `INSERT INTO revision_snapshots
-       (id, snapshot_key, repo_id, commit_sha, worktree_fingerprint, parser_version,
-        resolver_version, schema_version, base_snapshot_id, merge_base_sha, state,
-        created_at, last_accessed_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'building', ?, ?)
-       ON CONFLICT(snapshot_key) DO UPDATE SET last_accessed_at=excluded.last_accessed_at
-       RETURNING *`,
-    ).get(
-      `snapshot_${randomUUID()}`,
-      input.snapshotKey,
-      input.repoId,
-      input.commitSha ?? null,
-      input.worktreeFingerprint ?? null,
-      input.parserVersion,
-      input.resolverVersion,
-      input.schemaVersion,
-      input.baseSnapshotId ?? null,
-      input.mergeBaseSha ?? null,
-      now,
-      now,
-    ) as SnapshotRow;
-    return snapshotOf(row);
+    const tx = this.store.db.transaction(() => {
+      const inserted = this.store.db.prepare(
+        `INSERT INTO revision_snapshots
+         (id, snapshot_key, repo_id, commit_sha, worktree_fingerprint, parser_version,
+          resolver_version, schema_version, base_snapshot_id, merge_base_sha, state,
+          created_at, last_accessed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'building', ?, ?)
+         ON CONFLICT(snapshot_key) DO NOTHING`,
+      ).run(
+        `snapshot_${randomUUID()}`,
+        input.snapshotKey,
+        input.repoId,
+        input.commitSha ?? null,
+        input.worktreeFingerprint ?? null,
+        input.parserVersion,
+        input.resolverVersion,
+        input.schemaVersion,
+        input.baseSnapshotId ?? null,
+        input.mergeBaseSha ?? null,
+        now,
+        now,
+      );
+      if (inserted.changes === 0) {
+        const rebound = this.store.db.prepare(`
+          UPDATE revision_snapshots
+             SET commit_sha=?, worktree_fingerprint=?, parser_version=?, resolver_version=?,
+                 schema_version=?, base_snapshot_id=?, merge_base_sha=?, last_accessed_at=?
+           WHERE snapshot_key=? AND repo_id=? AND state IN ('failed','cold')
+        `).run(
+          input.commitSha ?? null,
+          input.worktreeFingerprint ?? null,
+          input.parserVersion,
+          input.resolverVersion,
+          input.schemaVersion,
+          input.baseSnapshotId ?? null,
+          input.mergeBaseSha ?? null,
+          now,
+          input.snapshotKey,
+          input.repoId,
+        );
+        if (rebound.changes === 0) {
+          this.store.db.prepare("UPDATE revision_snapshots SET last_accessed_at=? WHERE snapshot_key=?").run(now, input.snapshotKey);
+        }
+      }
+      const row = this.store.db.prepare("SELECT * FROM revision_snapshots WHERE snapshot_key=?").get(input.snapshotKey) as SnapshotRow | undefined;
+      if (!row) throw new Error(`snapshot key was not persisted: ${input.snapshotKey}`);
+      return { snapshot: snapshotOf(row), created: inserted.changes === 1 };
+    });
+    return tx();
   }
 
   getSnapshot(snapshotId: string): RevisionSnapshot | null {
@@ -171,6 +233,90 @@ export class GitTopologyStore {
       this.store.db.prepare("UPDATE revision_snapshots SET last_accessed_at=? WHERE id=?").run(now, input.snapshotId);
     });
     tx();
+  }
+
+  /**
+   * Publishes the graph revision and every branch truth field in one SQLite
+   * transaction. Parser work may legitimately be a no-op; revision identity
+   * is Git metadata and must advance independently of parsed-file counts.
+   */
+  publishIndexedSnapshot(input: PublishIndexedSnapshotInput): RevisionTruth {
+    const tx = this.store.db.transaction((): RevisionTruth => {
+      const snapshot = this.store.db.prepare("SELECT * FROM revision_snapshots WHERE id=?").get(input.snapshotId) as SnapshotRow | undefined;
+      if (!snapshot) throw new Error(`snapshot not found: ${input.snapshotId}`);
+      if (snapshot.state !== "building" && snapshot.state !== "ready") {
+        throw new Error(`snapshot ${input.snapshotId} is not publishable from state ${snapshot.state}`);
+      }
+      const branch = this.store.db.prepare("SELECT repo_id FROM branches WHERE id=?").get(input.branchId) as { repo_id: string } | undefined;
+      if (!branch) throw new Error(`branch not found: ${input.branchId}`);
+      if (branch.repo_id !== snapshot.repo_id) throw new Error("snapshot and branch belong to different repositories");
+
+      const now = new Date().toISOString();
+      if (snapshot.state === "building") {
+        const ready = this.store.db.prepare(
+          "UPDATE revision_snapshots SET state='ready', published_at=COALESCE(published_at, ?), last_accessed_at=? WHERE id=? AND state='building'",
+        ).run(now, now, input.snapshotId);
+        if (ready.changes !== 1) throw new Error(`snapshot ${input.snapshotId} could not be marked ready`);
+      } else {
+        this.store.db.prepare("UPDATE revision_snapshots SET last_accessed_at=? WHERE id=?").run(now, input.snapshotId);
+      }
+
+      const result = this.store.db.prepare(
+        `UPDATE branches SET current_snapshot_id=?, head_commit=?, last_indexed_commit=?,
+          last_indexed_at=?, indexed_worktree_state=?, indexed_worktree_fingerprint=?,
+          indexed_dirty_files=?, parser_version=?, resolver_version=?,
+          indexed_schema_version=?, stale_reason=?, last_accessed_at=?, status='live'
+         WHERE id=?`,
+      ).run(
+        input.snapshotId,
+        input.headCommit,
+        input.indexedCommit,
+        now,
+        input.worktreeState,
+        input.worktreeFingerprint,
+        JSON.stringify(input.dirtyFiles),
+        input.parserVersion,
+        input.resolverVersion,
+        input.schemaVersion,
+        input.staleReason,
+        now,
+        input.branchId,
+      );
+      if (result.changes !== 1) throw new Error(`branch not found: ${input.branchId}`);
+
+      this.store.db.prepare("INSERT OR IGNORE INTO meta(key,value) VALUES ('revision_generation','0')").run();
+      this.store.db.prepare("UPDATE meta SET value=CAST(value AS INTEGER)+1 WHERE key='revision_generation'").run();
+      const generation = this.store.db.prepare("SELECT value FROM meta WHERE key='revision_generation'").get() as { value: string } | undefined;
+      const revisionGeneration = Number(generation?.value);
+      if (!Number.isSafeInteger(revisionGeneration) || revisionGeneration < 1) {
+        throw new Error("revision_generation is invalid after publication");
+      }
+
+      const worktreeDirty = input.worktreeState === "dirty"
+        ? true
+        : input.worktreeState === "clean" || input.worktreeState === "not_applicable"
+          ? false
+          : null;
+      const alignment: RevisionTruth["alignment"] = worktreeDirty === true
+        ? "dirty"
+        : input.indexedCommit == null || input.headCommit == null
+          ? "unknown"
+          : input.indexedCommit === input.headCommit
+            ? "aligned"
+            : "head_advanced";
+      return {
+        repoId: branch.repo_id,
+        branchId: input.branchId,
+        snapshotId: input.snapshotId,
+        indexedCommit: input.indexedCommit ?? snapshot.commit_sha ?? input.headCommit ?? "",
+        currentHead: input.headCommit,
+        worktreeDirty,
+        alignment,
+        checkedAt: now,
+        revisionGeneration,
+      };
+    });
+    return tx();
   }
 
   pointBranchAtSnapshot(branchId: string, snapshotId: string): void {

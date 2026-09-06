@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
-import { spawn } from "node:child_process";
+import { mkdtempSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import { readFile as readFileP, writeFile as writeFileP, unlink as unlinkP } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -9,8 +9,8 @@ import { join } from "node:path";
 import { test } from "node:test";
 import ts from "typescript";
 import { build } from "esbuild";
-import { KnowledgeStore, GitTopologyStore, SourceStore, SourceSnapshotStore, searchKnowledge } from "../packages/knowledge-core/dist/index.js";
-import { CAPABILITIES } from "../packages/knowledge-contracts/dist/index.js";
+import { KnowledgeStore, GitTopologyStore, SourceStore, SourceSnapshotStore, SavedQueryStore, EmbeddingLifecycle, createEmbeddingSpace, embeddingSpaceIdentity, searchKnowledge, SCHEMA_VERSION } from "../packages/knowledge-core/dist/index.js";
+import { CAPABILITIES, validateCapabilityOutput } from "../packages/knowledge-contracts/dist/index.js";
 import { runCli } from "../packages/knowledge-cli/dist/index.js";
 
 // knowledge-tools.ts is bundled into the MCP server (esbuild → single file), so
@@ -45,7 +45,39 @@ async function loadTools() {
   await build({ entryPoints: [new URL("../packages/mcp/src/knowledge-tool-defs.ts", import.meta.url).pathname], bundle: true, format: "esm", platform: "node", outfile: defs });
   return { ...(await import(`file://${defs}`)), ...(await import(`file://${handler}`)) };
 }
-const { KNOWLEDGE_TOOL_DEFS, isKnowledgeTool, handleKnowledgeTool, runKnowledgeTool, createMutationConfirmationToken, mutationGuard, unsupportedArguments, STRICT_TOOL_ARGUMENTS } = await loadTools();
+const { KNOWLEDGE_TOOL_DEFS, MCP_LISTED_TOOL_DEFS, isKnowledgeTool, handleKnowledgeTool, runKnowledgeTool, createMutationConfirmationToken, mutationGuard, unsupportedArguments, STRICT_TOOL_ARGUMENTS } = await loadTools();
+
+function createJsonLineReader(child) {
+  let buffer = "";
+  const frames = [];
+  const waiters = [];
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    buffer += chunk;
+    let newline;
+    while ((newline = buffer.indexOf("\n")) >= 0) {
+      const line = buffer.slice(0, newline).trim();
+      buffer = buffer.slice(newline + 1);
+      if (!line) continue;
+      const frame = JSON.parse(line);
+      const waiter = waiters.find((candidate) => !candidate.predicate || candidate.predicate(frame));
+      if (waiter) {
+        waiters.splice(waiters.indexOf(waiter), 1);
+        waiter.resolve(frame);
+      } else frames.push(frame);
+    }
+  });
+  return {
+    next(predicate, timeoutMs = 20_000) {
+      const queued = frames.findIndex((frame) => !predicate || predicate(frame));
+      if (queued >= 0) return Promise.resolve(frames.splice(queued, 1)[0]);
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error("timed out waiting for MCP frame")), timeoutMs);
+        waiters.push({ predicate, resolve: (frame) => { clearTimeout(timer); resolve(frame); } });
+      });
+    },
+  };
+}
 
 function seed() {
   const dir = mkdtempSync(join(tmpdir(), "pk-mcp-"));
@@ -76,7 +108,7 @@ function seedSearchSnapshot(store, { name, rootPath, filePath, content }) {
     repoId,
     parserVersion: "test-parser",
     resolverVersion: "test-resolver",
-    schemaVersion: 14,
+    schemaVersion: SCHEMA_VERSION,
   });
   const raw = Buffer.from(content, "utf8");
   const contentHash = createHash("sha256").update(raw).digest("hex");
@@ -147,13 +179,507 @@ test("knowledge_search publishes its canonical scope, options, and page contract
   assert.equal(properties.page.properties.limit.type, "number");
 });
 
+test("all primary discovery tools publish actionable canonical input schemas", () => {
+  const requiredProperties = {
+    get_node: ["id", "identity_key", "repo"],
+    knowledge_doctor: ["mutation_preflight"],
+    knowledge_files: ["repo", "branch"],
+    knowledge_explain: ["target", "repo"],
+    knowledge_local_graph: ["node", "target", "depth"],
+    knowledge_onboarding_generate: ["repo"],
+  };
+  for (const [name, expected] of Object.entries(requiredProperties)) {
+    const def = KNOWLEDGE_TOOL_DEFS.find((tool) => tool.name === name);
+    assert.ok(def, `${name} must be registered`);
+    const keys = Object.keys(def.inputSchema.properties ?? {});
+    for (const key of expected) assert.ok(keys.includes(key), `${name} schema must advertise ${key}`);
+    assert.ok(keys.length > 0, `${name} must not publish an empty schema`);
+  }
+});
+
+test("compact support is advertised only for operations with a reachable compact contract", () => {
+  const compactCapabilities = CAPABILITIES
+    .filter((capability) => capability.supportsCompact)
+    .map((capability) => capability.id)
+    .sort();
+  assert.deepEqual(compactCapabilities, [
+    "knowledge.capabilities",
+    "knowledge.dead_code",
+    "knowledge.endpoints",
+    "knowledge.flow",
+    "knowledge.index_status",
+    "knowledge.search",
+  ]);
+
+  const flow = KNOWLEDGE_TOOL_DEFS.find((tool) => tool.name === "knowledge_flow");
+  assert.ok(Object.hasOwn(flow.inputSchema.properties, "limit"));
+  assert.ok(Object.hasOwn(flow.inputSchema.properties, "compact"));
+
+  const repositoryGraph = KNOWLEDGE_TOOL_DEFS.find((tool) => tool.name === "knowledge_repository_graph");
+  assert.deepEqual(repositoryGraph.inputSchema.required, ["repo"]);
+  assert.ok(Object.hasOwn(repositoryGraph.inputSchema.properties, "limit"));
+  assert.ok(Object.hasOwn(repositoryGraph.inputSchema.properties, "edge_limit"));
+
+  const doctor = KNOWLEDGE_TOOL_DEFS.find((tool) => tool.name === "knowledge_doctor");
+  assert.ok(Object.hasOwn(doctor.inputSchema.properties, "deep"));
+});
+
+test("owner index mutations publish root requirements and standard MCP safety annotations", () => {
+  for (const name of ["knowledge_repository_register", "knowledge_index", "knowledge_rebuild"]) {
+    const def = MCP_LISTED_TOOL_DEFS.find((tool) => tool.name === name);
+    assert.ok(def, `${name} must be listed`);
+    assert.deepEqual(def.inputSchema.required, ["confirmed", "confirmation_token"]);
+    assert.deepEqual(def.inputSchema.anyOf, [
+      { required: ["root_path"] },
+      { required: ["path"] },
+    ]);
+    assert.deepEqual(def.annotations, {
+      title: def["x-penguin-capability-id"],
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: false,
+    });
+  }
+});
+
+test("knowledge_doctor validates owner mutations without performing them", () => {
+  const { store } = seed();
+  const beforeRepos = store.db.prepare("SELECT COUNT(*) AS count FROM repos").get().count;
+  const result = handleKnowledgeTool("knowledge_doctor", {
+    mutation_preflight: {
+      action: "rebuild",
+      root_path: process.cwd(),
+    },
+  }, store);
+
+  assert.equal(result.status, "valid");
+  assert.equal(result.readOnly, true);
+  assert.equal(result.mutationPerformed, false);
+  assert.equal(result.capability, "knowledge.rebuild");
+  assert.equal(result.action, "rebuild");
+  assert.equal(result.rootPath, process.cwd());
+  assert.equal(result.confirmationRequired, true);
+  assert.deepEqual(result.annotations, {
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: false,
+    openWorldHint: false,
+  });
+  assert.deepEqual(result.nextAction, {
+    tool: "knowledge_rebuild",
+    arguments: { root_path: process.cwd(), confirmed: true },
+    ownerApprovalRequired: true,
+  });
+  assert.equal(store.db.prepare("SELECT COUNT(*) AS count FROM repos").get().count, beforeRepos);
+  store.close();
+});
+
+test("knowledge_doctor mutation preflight returns typed errors before any mutation", () => {
+  const { store } = seed();
+  const missingRoot = handleKnowledgeTool("knowledge_doctor", {
+    mutation_preflight: { action: "index" },
+  }, store);
+  assert.equal(missingRoot.error.code, "ROOT_PATH_REQUIRED");
+  assert.equal(missingRoot.error.retryable, false);
+
+  const invalidAction = handleKnowledgeTool("knowledge_doctor", {
+    mutation_preflight: { action: "remove", root_path: process.cwd() },
+  }, store);
+  assert.equal(invalidAction.error.code, "MUTATION_PREFLIGHT_INVALID");
+  assert.equal(invalidAction.error.retryable, false);
+  assert.match(invalidAction.error.remediation, /register|index|rebuild/i);
+
+  const outsideWorkspaceRoot = mkdtempSync(join(tmpdir(), "outside-penguin-workspace-"));
+  execFileSync("git", ["init", "--quiet", outsideWorkspaceRoot]);
+  const outsideWorkspace = handleKnowledgeTool("knowledge_doctor", {
+    mutation_preflight: { action: "register", root_path: outsideWorkspaceRoot },
+  }, store);
+  assert.equal(outsideWorkspace.error.code, "ROOT_PATH_OUT_OF_SCOPE");
+  assert.equal(outsideWorkspace.error.retryable, false);
+  assert.match(outsideWorkspace.error.remediation, /configured workspace roots/i);
+
+  const relativeMissingRoot = handleKnowledgeTool("knowledge_doctor", {
+    mutation_preflight: { action: "rebuild", root_path: "not-an-absolute-path" },
+  }, store);
+  assert.equal(relativeMissingRoot.error.code, "MUTATION_PREFLIGHT_INVALID");
+  assert.equal(relativeMissingRoot.error.retryable, false);
+  assert.match(relativeMissingRoot.error.remediation, /absolute.*existing repository/i);
+  assert.equal(relativeMissingRoot.nextAction, undefined);
+
+  const absoluteMissingRoot = handleKnowledgeTool("knowledge_doctor", {
+    mutation_preflight: { action: "rebuild", root_path: join(process.cwd(), "not-an-existing-repository") },
+  }, store);
+  assert.equal(absoluteMissingRoot.error.code, "MUTATION_PREFLIGHT_INVALID");
+  assert.equal(absoluteMissingRoot.error.retryable, false);
+  assert.match(absoluteMissingRoot.error.remediation, /existing repository/i);
+  assert.equal(absoluteMissingRoot.nextAction, undefined);
+  store.close();
+});
+
+test("knowledge_doctor accepts exact registered roots for index and rebuild but not registration", () => {
+  const { store } = seed();
+  const registeredRoot = mkdtempSync(join(tmpdir(), "pk-mcp-registered-owner-root-"));
+  execFileSync("git", ["init", "--quiet", registeredRoot]);
+  store.registerRepo({ name: "registered-owner-root", rootPath: registeredRoot });
+
+  for (const action of ["index", "rebuild"]) {
+    const result = handleKnowledgeTool("knowledge_doctor", {
+      mutation_preflight: { action, root_path: registeredRoot },
+    }, store);
+    assert.equal(result.status, "valid", JSON.stringify(result));
+    assert.equal(result.rootPath, realpathSync.native(registeredRoot));
+    assert.equal(result.mutationPerformed, false);
+  }
+
+  const register = handleKnowledgeTool("knowledge_doctor", {
+    mutation_preflight: { action: "register", root_path: registeredRoot },
+  }, store);
+  assert.equal(register.error.code, "ROOT_PATH_OUT_OF_SCOPE");
+  store.close();
+});
+
+test("knowledge_doctor is bounded by default and makes the expensive integrity scan explicit", () => {
+  const { store } = seed();
+  const bounded = handleKnowledgeTool("knowledge_doctor", {}, store);
+  assert.equal(bounded.mode, "bounded");
+  assert.equal(bounded.integrity.status, "not_run");
+  assert.equal(bounded.integrity.deepRequired, true);
+  assert.equal(bounded.foreignKeys.status, "not_run");
+  assert.ok(bounded.registeredRepositories.some((repo) => repo.name === "r" && repo.rootPath === "/r"));
+  assert.ok(Array.isArray(bounded.configuredWorkspaceRoots));
+
+  const deep = handleKnowledgeTool("knowledge_doctor", { deep: true }, store);
+  assert.equal(deep.mode, "deep");
+  assert.equal(deep.integrity.status, "ok");
+  assert.deepEqual(deep.foreignKeys.violations, []);
+  store.close();
+});
+
+test("get_node names the accepted key when the caller uses an unsupported alias", () => {
+  const { store, login } = seed();
+  const result = handleKnowledgeTool("get_node", { node: login }, store);
+  assert.equal(result.error.code, "MISSING_REQUIRED_ARGUMENT");
+  assert.deepEqual(result.error.details.requiredAnyOf, ["id", "identity_key"]);
+  assert.match(result.error.message, /id.*identity_key/i);
+  store.close();
+});
+
+test("unknown node and endpoint targets return typed remediation errors", () => {
+  const { store } = seed();
+  const node = handleKnowledgeTool("get_node", { id: "node_missing" }, store);
+  assert.equal(node.error.code, "NODE_NOT_FOUND");
+  assert.match(node.error.remediation, /knowledge_search/i);
+
+  const endpoint = handleKnowledgeTool("knowledge_flow", {
+    target: "grpc://missing.Service/Call",
+    repo: "r",
+  }, store);
+  assert.equal(endpoint.error.code, "ENDPOINT_NOT_FOUND");
+  assert.match(endpoint.error.remediation, /knowledge_endpoints|endpoint/i);
+  store.close();
+});
+
+test("graph trust separates current storage schema from the indexed parser format", () => {
+  const { store, branch, login } = seed();
+  store.db.prepare("UPDATE branches SET indexed_schema_version=17 WHERE id=?").run(branch);
+  const result = handleKnowledgeTool("knowledge_context", { target: login, repo: "r" }, store);
+  assert.equal(result.error.code, "SCHEMA_OUTDATED");
+  assert.equal(result.error.details.runtimeSchemaVersion, SCHEMA_VERSION);
+  assert.equal(result.error.details.indexedSchemaVersion, 17);
+  store.close();
+});
+
+test("knowledge_affected reports the same completeness metadata for an equivalent path and node", () => {
+  const { store, login } = seed();
+  const byPath = handleKnowledgeTool("knowledge_affected", { repo: "r", path: "a.ts" }, store);
+  const byNode = handleKnowledgeTool("knowledge_affected", { repo: "r", node: login }, store);
+  assert.equal(byNode.candidateCount, byPath.candidateCount);
+  assert.equal(byNode.returnedCount, byPath.returnedCount);
+  assert.equal(byNode.totalIsExact, byPath.totalIsExact);
+  assert.equal(byNode.completeness, byPath.completeness);
+  assert.deepEqual(byNode.evidence.gaps, byPath.evidence.gaps);
+  store.close();
+});
+
+test("node affected preserves symbol granularity while context may surface file-level test evidence", () => {
+  const { store, repoId, branch, login } = seed();
+  const provider = store.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::provider`, title: "provider", repoId });
+  const spec = store.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::login-spec`, title: "login.spec", repoId });
+  for (const [nodeId, filePath] of [[provider, "a.ts"], [spec, "a.spec.ts"]]) {
+    store.upsertSymbolVersion({ nodeId, branchId: branch, commitSha: "c0", filePath, lang: "ts", kind: "function", contentHash: `h_${nodeId}`, status: "fresh", startLine: 1, endLine: 3 });
+  }
+  store.replaceFileEdges({ branchId: branch, filePath: "a.spec.ts", edges: [
+    { src: spec, dst: provider, edgeType: "tests", origin: "parser", method: "EXTRACTED" },
+  ] });
+  const byPath = handleKnowledgeTool("knowledge_affected", { repo: "r", path: "a.ts" }, store);
+  const byNode = handleKnowledgeTool("knowledge_affected", { repo: "r", node: login }, store);
+  const context = handleKnowledgeTool("knowledge_context", { repo: "r", target: login }, store);
+  assert.deepEqual(byNode.tests, []);
+  assert.equal(byNode.impacted.some((item) => item.nodeId === provider), false);
+  assert.ok(byPath.tests.some((item) => item.nodeId === spec));
+  assert.ok(byPath.changed.some((item) => item.nodeId === provider));
+  assert.ok(context.tests.some((item) => item.nodeId === spec), "context must surface file-level test evidence for the stable node handoff");
+  store.close();
+});
+
+test("canonical nested semantic option reaches the async semantic adapter", async () => {
+  const { store, repoId } = seed();
+  const response = await runKnowledgeTool("knowledge_search", {
+    query: "login behavior",
+    contract_version: "2",
+    scope: { revisions: [{ repoId }] },
+    options: { semantic: "blend" },
+    page: { limit: 5 },
+  }, { store });
+  assert.notEqual(response.diagnostics?.semantic?.reason, "async_semantic_lane_required", JSON.stringify(response));
+  store.close();
+});
+
+test("knowledge_explain applies the requested repository scope to duplicate symbol names", async () => {
+  const { store, repoId, login } = seed();
+  const otherRepoId = store.registerRepo({ name: "other", rootPath: "/other" });
+  const otherBranch = store.registerBranch({ repoId: otherRepoId, name: "main", status: "live" });
+  const otherLogin = store.upsertNode({
+    nodeType: "symbol",
+    identityKey: `${otherRepoId}::login`,
+    title: "login",
+    repoId: otherRepoId,
+  });
+  store.indexSymbolText({ nodeId: otherLogin, name: "login", signature: "(other)" });
+  store.upsertSymbolVersion({
+    nodeId: otherLogin,
+    branchId: otherBranch,
+    commitSha: "other-c0",
+    filePath: "other.ts",
+    lang: "ts",
+    kind: "function",
+    contentHash: "other-login",
+    status: "fresh",
+    startLine: 1,
+    endLine: 3,
+  });
+
+  const result = await runKnowledgeTool("knowledge_explain", { target: "login", repo: "r" }, { store });
+
+  assert.equal(result.context.focus?.nodeId, login, JSON.stringify(result));
+  assert.equal(result.context.ambiguous, null, JSON.stringify(result));
+  assert.equal(result.context.evidence?.scope?.repoId ?? result.context.scope?.repoId, repoId, JSON.stringify(result));
+
+  const scopedMiss = await runKnowledgeTool("knowledge_explain", { target: otherLogin, repo: "r" }, { store });
+  assert.equal(scopedMiss.context.focus, null, JSON.stringify(scopedMiss));
+  assert.equal(scopedMiss.confidence, "unknown", JSON.stringify(scopedMiss));
+
+  const unknownRepo = await runKnowledgeTool("knowledge_explain", { target: "login", repo: "missing" }, { store });
+  assert.equal(unknownRepo.error?.code, "REPOSITORY_NOT_FOUND", JSON.stringify(unknownRepo));
+  store.close();
+});
+
+test("architecture endpoint count uses the same repository ownership rule as endpoint inventory", () => {
+  const { store, repoId, branch, caller } = seed();
+  const ownedEndpoint = store.upsertNode({ nodeType: "endpoint", identityKey: "grpc://owned.Service/Call", title: "owned.Service/Call", repoId, meta: { protocol: "grpc" } });
+  const globalEndpoint = store.upsertNode({ nodeType: "endpoint", identityKey: "grpc://shared.Service/Call", title: "shared.Service/Call", repoId: null, meta: { protocol: "grpc" } });
+  store.db.prepare("INSERT INTO endpoint_memberships(endpoint_id,repo_id,role,file_path,locator_node_id,created_at) VALUES (?,?,?,?,?,?)")
+    .run(globalEndpoint, repoId, "consumer", "src/client.ts", null, new Date().toISOString());
+  store.replaceFileEdges({ branchId: branch, filePath: "endpoint.ts", edges: [
+    { src: ownedEndpoint, dst: caller, edgeType: "handles", origin: "parser", method: "EXTRACTED" },
+  ] });
+
+  const architecture = handleKnowledgeTool("get_architecture", { repo: "r" }, store);
+  const endpoints = handleKnowledgeTool("knowledge_endpoints", { repo: "r", limit: 10 }, store);
+  assert.equal(architecture.nodeCounts.endpoint, endpoints.candidateCount);
+  assert.equal(architecture.nodeCounts.endpoint, 2);
+
+  const compact = handleKnowledgeTool("knowledge_endpoints", { repo: "r", limit: 10, compact: true }, store);
+  const normal = handleKnowledgeTool("knowledge_endpoints", { repo: "r", limit: 10, compact: false }, store);
+  const owned = compact.items.find((item) => item.nodeId === ownedEndpoint);
+  assert.equal(owned.handlers.length, 1);
+  assert.equal("firstHopRelations" in owned, false, "identical endpoint relation aliases must not be duplicated");
+  assert.equal("evidence" in compact, false, "compact responses must omit the root evidence mirror");
+  assert.ok(compact.stats.compactRatio < 1, JSON.stringify(compact.stats));
+  assert.equal(normal.stats.rawBytesEstimate, normal.stats.sentBytesEstimate);
+  assert.equal(normal.stats.compactRatio, 1);
+  assert.equal(compact.stats.rawBytesEstimate, normal.stats.sentBytesEstimate);
+  const flow = handleKnowledgeTool("knowledge_flow", { target: globalEndpoint, repo: "r" }, store);
+  assert.equal(flow.target.repoId, repoId);
+  store.close();
+});
+
+test("knowledge_flow is bounded, truthful about truncation, and compact removes duplicate projections", () => {
+  const { store, repoId, branch, login } = seed();
+  let parent = login;
+  for (let index = 0; index < 8; index += 1) {
+    const child = store.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::flow-child-${index}`, title: `flowChild${index}`, repoId });
+    store.upsertSymbolVersion({
+      nodeId: child,
+      branchId: branch,
+      commitSha: "c0",
+      filePath: `flow-${index}.ts`,
+      lang: "ts",
+      kind: "function",
+      contentHash: `flow-${index}`,
+      status: "fresh",
+      startLine: 1,
+      endLine: 2,
+    });
+    store.replaceFileEdges({ branchId: branch, filePath: `flow-${index}.ts`, edges: [
+      { src: parent, dst: child, edgeType: "calls", origin: "parser", method: "EXTRACTED" },
+    ] });
+    parent = child;
+  }
+
+  const normal = handleKnowledgeTool("knowledge_flow", { target: login, repo: "r", limit: 3 }, store);
+  const compact = handleKnowledgeTool("knowledge_flow", { target: login, repo: "r", limit: 3, compact: true }, store);
+  assert.equal(normal.steps.length, 3);
+  assert.equal(normal.returnedCount, 3);
+  assert.equal(normal.truncated, true);
+  assert.equal(normal.totalIsExact, false);
+  assert.equal(compact.steps.length, 3);
+  assert.equal("executionSteps" in compact, false);
+  assert.equal("referenceSteps" in compact, false);
+  assert.equal("evidence" in compact, false);
+  assert.ok(compact.stats.sentBytesEstimate < normal.stats.sentBytesEstimate);
+  assert.equal("sentBytes" in compact.stats, false);
+  store.close();
+});
+
+test("knowledge_repository_graph defaults to the live revision and returns typed bounded errors", () => {
+  const { store } = seed();
+  const graph = handleKnowledgeTool("knowledge_repository_graph", { repo: "r", limit: 2, edge_limit: 2 }, store);
+  assert.equal(graph.repo.name, "r");
+  assert.ok(graph.revision);
+  assert.ok(graph.nodes.length <= 2);
+  assert.ok(graph.edges.length <= 2);
+  assert.equal(graph.returnedCount, graph.nodes.length);
+
+  const missingRepo = handleKnowledgeTool("knowledge_repository_graph", { repo: "missing" }, store);
+  assert.equal(missingRepo.error.code, "REPOSITORY_NOT_FOUND");
+  assert.match(missingRepo.error.remediation, /status_panel|repository/i);
+
+  const missingBranch = handleKnowledgeTool("knowledge_repository_graph", { repo: "r", branch: "missing" }, store);
+  assert.equal(missingBranch.error.code, "BRANCH_NOT_FOUND");
+  assert.match(missingBranch.error.remediation, /branch|status_panel/i);
+  store.close();
+});
+
+test("context counters include importer payloads and keep the evidence mirror aligned", () => {
+  const { store, repoId, branch, login } = seed();
+  const targetFile = store.upsertNode({ nodeType: "file", identityKey: `${repoId}::file::a.ts`, title: "a.ts", repoId });
+  const importerFile = store.upsertNode({ nodeType: "file", identityKey: `${repoId}::file::consumer.ts`, title: "consumer.ts", repoId });
+  store.replaceFileEdges({ branchId: branch, filePath: "a.ts", edges: [
+    { src: targetFile, dst: login, edgeType: "defines", origin: "parser", method: "EXTRACTED" },
+  ] });
+  store.replaceFileEdges({ branchId: branch, filePath: "consumer.ts", edges: [
+    { src: importerFile, dst: targetFile, edgeType: "imports", origin: "parser", method: "EXTRACTED" },
+  ] });
+
+  const result = handleKnowledgeTool("knowledge_context", { target: login, repo: "r" }, store);
+  assert.equal(result.importers.length, 1);
+  assert.ok(result.returnedCount >= result.importers.length);
+  assert.equal(result.evidence.returnedCount, result.returnedCount);
+  store.close();
+});
+
+test("knowledge_context publishes and consumes a signed non-overlapping continuation cursor", () => {
+  const { store, repoId, branch, login } = seed();
+  for (let index = 0; index < 12; index += 1) {
+    const caller = store.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::page-caller-${index}`, title: `pageCaller${index}`, repoId });
+    store.upsertSymbolVersion({ nodeId: caller, branchId: branch, commitSha: "c0", filePath: `caller-${index}.ts`, lang: "ts", kind: "function", contentHash: `caller-${index}`, status: "fresh", startLine: 1, endLine: 2 });
+    store.db.prepare("INSERT INTO edges(id,src,dst,edge_type,branch_id,origin,method,confidence,provenance,status) VALUES (?,?,?,?,?,?,?,?,?,?)")
+      .run(`context-page-${index}`, caller, login, "calls", branch, "parser", "EXTRACTED", 1, "{}", "active");
+  }
+  const first = handleKnowledgeTool("knowledge_context", { target: login, repo: "r", limit: 5 }, store);
+  const second = handleKnowledgeTool("knowledge_context", { target: login, repo: "r", limit: 5, cursor: first.cursor }, store);
+  assert.ok(first.cursor);
+  assert.equal(first.callers.length, 5);
+  assert.equal(second.callers.length, 5);
+  assert.equal(first.callers.some((item) => second.callers.some((candidate) => candidate.nodeId === item.nodeId)), false);
+  assert.equal(second.evidence.cursor, second.cursor);
+  const schema = KNOWLEDGE_TOOL_DEFS.find((tool) => tool.name === "knowledge_context").inputSchema;
+  assert.ok(Object.hasOwn(schema.properties, "cursor"));
+  store.close();
+});
+
+test("knowledge_context keeps mixed-relation totals stable and identifies relation occurrences", () => {
+  const { store, repoId, branch, login, caller } = seed();
+  for (let index = 0; index < 4; index += 1) {
+    const nodeId = store.upsertNode({
+      nodeType: "symbol",
+      identityKey: `${repoId}::mixed-page-caller-${index}`,
+      title: `mixedPageCaller${index}`,
+      repoId,
+    });
+    store.upsertSymbolVersion({
+      nodeId,
+      branchId: branch,
+      commitSha: "c0",
+      filePath: `mixed-caller-${index}.ts`,
+      lang: "ts",
+      kind: "function",
+      contentHash: `mixed-caller-${index}`,
+      status: "fresh",
+      startLine: 1,
+      endLine: 2,
+    });
+    store.db.prepare("INSERT INTO edges(id,src,dst,edge_type,branch_id,origin,method,confidence,provenance,status) VALUES (?,?,?,?,?,?,?,?,?,?)")
+      .run(`context-mixed-call-${index}`, nodeId, login, "calls", branch, "parser", "EXTRACTED", 1, "{}", "active");
+  }
+  store.db.prepare("INSERT INTO edges(id,src,dst,edge_type,branch_id,origin,method,confidence,provenance,status) VALUES (?,?,?,?,?,?,?,?,?,?)")
+    .run("context-mixed-reference", caller, login, "references", branch, "parser", "EXTRACTED", 1, "{}", "active");
+
+  const pages = [];
+  let cursor;
+  do {
+    const page = handleKnowledgeTool("knowledge_context", {
+      target: login,
+      repo: "r",
+      limit: 2,
+      ...(cursor ? { cursor } : {}),
+    }, store);
+    pages.push(page);
+    cursor = page.cursor ?? undefined;
+  } while (cursor && pages.length < 10);
+
+  assert.ok(pages.length >= 3);
+  assert.equal(cursor, undefined, "context continuation must deterministically exhaust");
+  assert.ok(pages.every((page) => page.returnedCount <= 2));
+  assert.ok(pages.every((page) => page.totalIsExact === true));
+  assert.equal(new Set(pages.map((page) => page.candidateCount)).size, 1);
+
+  const relationItems = pages.flatMap((page) => [
+    ...page.callers,
+    ...page.referencedBy,
+  ]);
+  assert.equal(relationItems.length, 6);
+  assert.ok(relationItems.every((item) => typeof item.relationType === "string"));
+  assert.ok(relationItems.every((item) => typeof item.relationItemId === "string"));
+  assert.equal(new Set(relationItems.map((item) => item.relationItemId)).size, relationItems.length);
+  const callerOccurrences = relationItems.filter((item) => item.nodeId === caller);
+  assert.deepEqual(new Set(callerOccurrences.map((item) => item.relationType)), new Set(["callers", "referencedBy"]));
+  store.close();
+});
+
+test("explore confidence counts inferred edges present in its call path", () => {
+  const { store, repoId, branch, login } = seed();
+  const inferred = store.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::inferred`, title: "inferred", repoId });
+  store.upsertSymbolVersion({ nodeId: inferred, branchId: branch, commitSha: "c0", filePath: "inferred.ts", lang: "ts", kind: "function", contentHash: "h_inferred", status: "fresh", startLine: 1, endLine: 2 });
+  store.replaceFileEdges({ branchId: branch, filePath: "inferred-edge.ts", edges: [
+    { src: login, dst: inferred, edgeType: "injects", origin: "parser", method: "DI_MODULE_PROVIDER", confidence: 0.4 },
+  ] });
+
+  const result = handleKnowledgeTool("knowledge_explore", { target: login, repo: "r" }, store);
+  assert.ok(result.callPath.some((step) => step.graphEvidence?.evidenceState === "inferred"));
+  assert.ok(result.confidence.inferredEdges >= 1);
+  store.close();
+});
+
 test("MCP mutations are disabled by default and require an operation-scoped token", async () => {
   const oldMode = process.env.PENGUIN_MCP_MUTATIONS;
   const oldSecret = process.env.PENGUIN_MCP_CONFIRMATION_SECRET;
   delete process.env.PENGUIN_MCP_MUTATIONS;
   delete process.env.PENGUIN_MCP_CONFIRMATION_SECRET;
   const input = { id: "term", canonical_name: "Term", definition: "definition" };
-  assert.equal((await runKnowledgeTool("knowledge_ontology_upsert", input)).error, "MUTATION_DISABLED");
+  assert.equal((await runKnowledgeTool("knowledge_ontology_upsert", input)).error.code, "MUTATION_DISABLED");
   process.env.PENGUIN_MCP_MUTATIONS = "enabled";
   process.env.PENGUIN_MCP_CONFIRMATION_SECRET = "test-confirmation-secret";
   assert.equal(mutationGuard("knowledge_ontology_upsert", input).error, "CONFIRMATION_TOKEN_REQUIRED");
@@ -161,6 +687,88 @@ test("MCP mutations are disabled by default and require an operation-scoped toke
   assert.match(token, /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
   assert.equal(mutationGuard("knowledge_ontology_upsert", { ...input, confirmation_token: `${token}tampered` }).error, "CONFIRMATION_TOKEN_INVALID");
   assert.deepEqual(mutationGuard("knowledge_ontology_upsert", { ...input, confirmation_token: token }), { capabilityId: "knowledge.ontology.upsert" });
+  if (oldMode === undefined) delete process.env.PENGUIN_MCP_MUTATIONS; else process.env.PENGUIN_MCP_MUTATIONS = oldMode;
+  if (oldSecret === undefined) delete process.env.PENGUIN_MCP_CONFIRMATION_SECRET; else process.env.PENGUIN_MCP_CONFIRMATION_SECRET = oldSecret;
+});
+
+test("semantic control wire contract requires correlation and MCP confirmation tokens", async () => {
+  const oldMode = process.env.PENGUIN_MCP_MUTATIONS;
+  const oldSecret = process.env.PENGUIN_MCP_CONFIRMATION_SECRET;
+  process.env.PENGUIN_MCP_MUTATIONS = "enabled";
+  process.env.PENGUIN_MCP_CONFIRMATION_SECRET = "semantic-confirmation-secret";
+  const { store, repoId } = seed();
+  const space = createEmbeddingSpace(store, embeddingSpaceIdentity({
+    providerId: "fixture", modelId: "mcp-control", weightsDigest: "a".repeat(64),
+    tokenizerDigest: "b".repeat(64), dimensions: 2, pooling: "mean",
+    normalization: "none", chunkerVersion: "v1",
+  }));
+  const generation = new EmbeddingLifecycle(store).createGeneration({
+    spaceId: space.id, snapshotId: "snapshot-control", scopeKey: `repo:${repoId}`, expectedChunks: 1,
+  });
+  const base = { action: "cancel", scopeKey: `repo:${repoId}`, generationId: generation.id, operationToken: "semantic-operation-123" };
+
+  const schema = MCP_LISTED_TOOL_DEFS.find((tool) => tool.name === "knowledge_semantic_control").inputSchema;
+  assert.deepEqual(schema.required, ["action", "scopeKey", "operationToken", "confirmation_token"]);
+  assert.ok(schema.properties.confirmation_token);
+
+  const withoutConfirmation = await runKnowledgeTool("knowledge_semantic_control", base, { store });
+  assert.equal(withoutConfirmation.error.code, "CONFIRMATION_TOKEN_REQUIRED");
+
+  const confirmationToken = createMutationConfirmationToken("knowledge.semantic_control", base, { secret: "semantic-confirmation-secret" });
+  const accepted = await runKnowledgeTool("knowledge_semantic_control", { ...base, confirmation_token: confirmationToken }, { store });
+  assert.equal(accepted.accepted, true);
+  assert.equal(accepted.operationToken, base.operationToken);
+  const replayed = await runKnowledgeTool("knowledge_semantic_control", { ...base, confirmation_token: confirmationToken }, { store });
+  assert.equal(replayed.accepted, true, "same operation token must not execute cancel twice");
+  assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM knowledge_audit_events WHERE capability_id='knowledge.semantic_control'").get().n, 1);
+
+  const conflicting = { action: "pause", scopeKey: base.scopeKey, operationToken: base.operationToken };
+  const conflictingConfirmation = createMutationConfirmationToken("knowledge.semantic_control", conflicting, { secret: "semantic-confirmation-secret" });
+  const conflict = await runKnowledgeTool("knowledge_semantic_control", { ...conflicting, confirmation_token: conflictingConfirmation }, { store });
+  assert.equal(conflict.error.code, "OPERATION_TOKEN_CONFLICT");
+
+  const missingOperation = { action: "resume", scopeKey: "repo:repo" };
+  const missingOperationToken = createMutationConfirmationToken("knowledge.semantic_control", missingOperation, { secret: "semantic-confirmation-secret" });
+  const rejected = await runKnowledgeTool("knowledge_semantic_control", { ...missingOperation, confirmation_token: missingOperationToken }, { store });
+  assert.equal(rejected.error.code, "INVALID_SEMANTIC_CONTRACT");
+
+  store.close();
+  if (oldMode === undefined) delete process.env.PENGUIN_MCP_MUTATIONS; else process.env.PENGUIN_MCP_MUTATIONS = oldMode;
+  if (oldSecret === undefined) delete process.env.PENGUIN_MCP_CONFIRMATION_SECRET; else process.env.PENGUIN_MCP_CONFIRMATION_SECRET = oldSecret;
+});
+
+test("semantic resume replay retries wake after a post-commit failure", async () => {
+  const oldMode = process.env.PENGUIN_MCP_MUTATIONS;
+  const oldSecret = process.env.PENGUIN_MCP_CONFIRMATION_SECRET;
+  process.env.PENGUIN_MCP_MUTATIONS = "enabled";
+  process.env.PENGUIN_MCP_CONFIRMATION_SECRET = "semantic-replay-secret";
+  const { store, repoId } = seed();
+  const space = createEmbeddingSpace(store, embeddingSpaceIdentity({
+    providerId: "fixture", modelId: "mcp-replay", weightsDigest: "c".repeat(64),
+    tokenizerDigest: "d".repeat(64), dimensions: 2, pooling: "mean",
+    normalization: "none", chunkerVersion: "v1",
+  }));
+  new EmbeddingLifecycle(store).createGeneration({
+    spaceId: space.id, snapshotId: "snapshot-replay", scopeKey: `repo:${repoId}`, expectedChunks: 1,
+  });
+  const request = { action: "resume", scopeKey: `repo:${repoId}`, operationToken: "semantic-replay-operation" };
+  const confirmationToken = createMutationConfirmationToken("knowledge.semantic_control", request, { secret: "semantic-replay-secret" });
+  let wakes = 0;
+  const options = {
+    store,
+    invokeLocalCli: async () => {
+      wakes += 1;
+      if (wakes === 1) throw new Error("simulated MCP wake failure");
+      return { status: "started", pid: 123, reason: null, logPath: "/tmp/semantic-worker.log" };
+    },
+  };
+  const first = await runKnowledgeTool("knowledge_semantic_control", { ...request, confirmation_token: confirmationToken }, options);
+  const recovered = await runKnowledgeTool("knowledge_semantic_control", { ...request, confirmation_token: confirmationToken }, options);
+  assert.match(first.error.message, /simulated MCP wake failure/);
+  assert.equal(recovered.worker.status, "started");
+  assert.equal(wakes, 2);
+  assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM knowledge_audit_events WHERE capability_id='knowledge.semantic_control'").get().n, 1);
+  store.close();
   if (oldMode === undefined) delete process.env.PENGUIN_MCP_MUTATIONS; else process.env.PENGUIN_MCP_MUTATIONS = oldMode;
   if (oldSecret === undefined) delete process.env.PENGUIN_MCP_CONFIRMATION_SECRET; else process.env.PENGUIN_MCP_CONFIRMATION_SECRET = oldSecret;
 });
@@ -175,7 +783,7 @@ test("MCP set_master_branch explicitly replaces the canonical branch", () => {
   assert.equal(result.previousBranchId, null);
   assert.equal(store.getDefaultBranch(repoId).id, feature);
   const rejected = handleKnowledgeTool("set_master_branch", { repo: "r", branch: "(detached)" }, store);
-  assert.match(rejected.error, /detached|canonical/i);
+  assert.match(rejected.error.message, /detached|canonical/i);
   store.close();
 });
 
@@ -232,7 +840,10 @@ test("knowledge_search includes sensitive notes by default and redacts them only
 test("knowledge_search rejects an empty query instead of enumerating the index", () => {
   const { store } = seed();
   const result = handleKnowledgeTool("knowledge_search", { query: "" }, store);
-  assert.match(result.error, /requires a non-empty/i);
+  assert.match(result.error.message, /requires a non-empty/i);
+  assert.equal(result.error.code, "INVALID_QUERY");
+  assert.equal(result.error.retryable, false);
+  assert.match(result.error.details.remediation, /non-empty/i);
   store.close();
 });
 
@@ -241,7 +852,23 @@ test("knowledge_search resolves repository roots and rejects unknown repo select
   const byRoot = handleKnowledgeTool("knowledge_search", { query: "login", repo: "/r" }, store);
   assert.equal(byRoot.error, undefined, "registered root path must be accepted as a repository selector");
   const missing = handleKnowledgeTool("knowledge_search", { query: "login", repo: "/missing-repo", mode: "exact", contract_version: "2" }, store);
-  assert.equal(missing.error, "REPOSITORY_NOT_FOUND");
+  assert.equal(missing.error.code, "REPOSITORY_NOT_FOUND");
+  assert.equal(missing.error.retryable, false);
+  assert.match(missing.error.details.remediation, /status/i);
+  store.close();
+});
+
+test("knowledge_search keeps an unknown canonical repository distinct from a missing branch", () => {
+  const { store } = seed();
+  const missing = handleKnowledgeTool("knowledge_search", {
+    query: "x",
+    mode: "exact",
+    scope: { revisions: [{ repoName: "NO-SUCH-REPO-R22", branch: "main" }] },
+    page: { limit: 3 },
+  }, store);
+  assert.equal(missing.error.code, "REPOSITORY_NOT_FOUND");
+  assert.match(missing.error.details.remediation, /index_status/);
+  assert.doesNotMatch(JSON.stringify(missing.error), /penguin\s|--repo|--branch/);
   store.close();
 });
 
@@ -375,11 +1002,331 @@ test("MCP get_architecture / find_communities / find_dead_code call the same fun
   assert.ok(Array.isArray(comm.communities));
 
   const dead = handleKnowledgeTool("find_dead_code", { limit: 5 }, store);
-  assert.ok(Array.isArray(dead.candidates));
+  assert.ok(Array.isArray(dead.items));
+  assert.equal("candidates" in dead, false, "dead-code items must not be emitted twice");
   // `caller` has no incoming edges at all → a real dead-code candidate.
-  assert.ok(dead.candidates.some((c) => c.nodeId === caller));
+  assert.ok(dead.items.some((c) => c.nodeId === caller));
   // `login` IS called (by caller) → must not appear as dead code.
-  assert.ok(!dead.candidates.some((c) => c.nodeId === login));
+  assert.ok(!dead.items.some((c) => c.nodeId === login));
+  store.close();
+});
+
+test("dead-code normal and compact responses publish honest byte statistics", () => {
+  const { store } = seed();
+  const normal = handleKnowledgeTool("find_dead_code", { limit: 5, compact: false }, store);
+  const compact = handleKnowledgeTool("find_dead_code", { limit: 5, compact: true }, store);
+  assert.equal(normal.compact, false);
+  assert.equal(compact.compact, true);
+  assert.equal(normal.stats.rawBytesEstimate, compact.stats.rawBytesEstimate);
+  assert.equal(normal.stats.sentBytesEstimate, normal.stats.rawBytesEstimate);
+  assert.equal(normal.stats.compactRatio, 1);
+  assert.ok(compact.stats.sentBytesEstimate < normal.stats.sentBytesEstimate);
+  assert.ok(compact.stats.compactRatio < 1);
+  assert.deepEqual(compact.items.map((item) => item.nodeId), normal.items.map((item) => item.nodeId));
+  store.close();
+});
+
+test("MCP read capabilities expose root total timing consistently", async () => {
+  const { store, caller } = seed();
+  const responses = await Promise.all([
+    runKnowledgeTool("knowledge_endpoints", { repo: "r", limit: 5 }, { store }),
+    runKnowledgeTool("knowledge_affected", { repo: "r", node: caller }, { store }),
+    runKnowledgeTool("knowledge_semantic_status", {}, { store }),
+  ]);
+  for (const response of responses.slice(0, 2)) {
+    assert.equal(typeof response.timingsMs?.total, "number", JSON.stringify(response).slice(0, 500));
+    assert.ok(response.timingsMs.total >= 0);
+  }
+  assert.equal(responses[2].timingsMs, undefined, "closed semantic status contract must not receive transport-only fields");
+  assert.deepEqual(validateCapabilityOutput("knowledge.semantic_status", responses[2]), responses[2]);
+  store.close();
+});
+
+test("MCP bounded search exposes the same measurable phase timing shape", async () => {
+  const { store } = seed();
+  const dbPath = store.db.name;
+  const ledgerPath = store.ledgerPath;
+  store.close();
+  const server = spawn(process.execPath, ["packages/mcp/dist/index.js"], {
+    env: {
+      ...process.env,
+      PENGUIN_KNOWLEDGE_DB: dbPath,
+      PENGUIN_KNOWLEDGE_LEDGER: ledgerPath,
+      PENGUIN_CLI_LAUNCHER: join(tmpdir(), "penguin-c3-not-installed"),
+    },
+    stdio: ["pipe", "pipe", "ignore"],
+  });
+  const reader = createJsonLineReader(server);
+  try {
+    server.stdin.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "c3-test", version: "1" } },
+    }) + "\n");
+    await reader.next((frame) => frame.id === 1);
+    server.stdin.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: { name: "knowledge_search", arguments: { query: "login", contract_version: "2", repo: "r", limit: 5 } },
+    }) + "\n");
+    const reply = await reader.next((frame) => frame.id === 2);
+    assert.equal(reply.error, undefined, JSON.stringify(reply));
+    const response = reply.result.structuredContent;
+    const timings = response.diagnostics.timingsMs;
+    for (const phase of ["scopeResolution", "count", "candidateSelection", "hydration", "evidence", "serialization", "total"]) {
+      assert.equal(typeof timings?.[phase], "number", phase);
+      assert.ok(timings[phase] >= 0, phase);
+    }
+  } finally {
+    server.kill();
+    if (server.exitCode === null && server.signalCode === null) {
+      await new Promise((resolve) => server.once("close", resolve));
+    }
+  }
+});
+
+test("MCP bounded timeout preserves an actionable typed payload", async () => {
+  const { store, repoId } = seed();
+  const dbPath = store.db.name;
+  const ledgerPath = store.ledgerPath;
+  store.close();
+  const server = spawn(process.execPath, ["packages/mcp/dist/index.js"], {
+    env: {
+      ...process.env,
+      PENGUIN_KNOWLEDGE_DB: dbPath,
+      PENGUIN_KNOWLEDGE_LEDGER: ledgerPath,
+      PENGUIN_MCP_QUERY_WORKERS: "1",
+      PENGUIN_MCP_QUERY_TIMEOUT_MS: "1",
+      PENGUIN_CLI_LAUNCHER: join(tmpdir(), "penguin-c3-timeout-not-installed"),
+    },
+    stdio: ["pipe", "pipe", "ignore"],
+  });
+  const reader = createJsonLineReader(server);
+  try {
+    server.stdin.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "initialize",
+      params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "c3-timeout-test", version: "1" } },
+    }) + "\n");
+    await reader.next((frame) => frame.id === 1);
+    server.stdin.write(JSON.stringify({
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: {
+        name: "knowledge_search",
+        arguments: { query: "login", contract_version: "2", scope: { revisions: [{ repoId }] }, limit: 5 },
+      },
+    }) + "\n");
+    const reply = await reader.next((frame) => frame.id === 2);
+    assert.equal(reply.error, undefined, JSON.stringify(reply));
+    const error = reply.result.structuredContent.error;
+    assert.equal(error.code, "QUERY_TIMEOUT");
+    assert.equal(error.details.capability, "knowledge.search");
+    assert.equal(error.details.budgetMs, 1);
+    assert.deepEqual(error.details.scope, { revisions: [{ repoId }] });
+    assert.match(error.details.nextAction, /retry/i);
+    assert.match(error.remediation, /scope|limit/i);
+  } finally {
+    server.kill();
+    if (server.exitCode === null && server.signalCode === null) {
+      await new Promise((resolve) => server.once("close", resolve));
+    }
+  }
+});
+
+test("MCP bounded search preserves typed cursor and schema errors", async () => {
+  const { store, repoId } = seed();
+  const cursor = await runKnowledgeTool("knowledge_search", {
+    query: "login",
+    contract_version: "2",
+    scope: { revisions: [{ repoId }] },
+    limit: 5,
+    cursor: "not-a-real-cursor",
+  }, { store });
+  assert.equal(cursor.error.code, "CURSOR_INVALID");
+
+  const schema = await runKnowledgeTool("knowledge_search", {
+    query: "login",
+    contract_version: "2",
+    mode: "not-a-supported-mode",
+    limit: 5,
+  }, { store });
+  assert.equal(schema.error.code, "INVALID_SEARCH_REQUEST", JSON.stringify(schema));
+  store.close();
+});
+
+test("get_architecture honours repo scope and reports the resolved revision", () => {
+  const { store, repoId } = seed();
+  const otherRepoId = store.registerRepo({ name: "other", rootPath: "/other" });
+  store.registerBranch({ repoId: otherRepoId, name: "main", status: "live" });
+  store.upsertNode({ nodeType: "endpoint", identityKey: `${otherRepoId}::foreign`, title: "foreign endpoint", repoId: otherRepoId });
+
+  const scoped = handleKnowledgeTool("get_architecture", { repo: "r", branch: "main" }, store);
+
+  assert.deepEqual(scoped.repos, [{ name: "r", branches: 1 }]);
+  assert.equal(scoped.revision?.repoId, repoId);
+  assert.equal(scoped.revision?.branch, "main");
+  assert.equal(scoped.locator?.repoName, "r");
+  assert.ok(!scoped.entryPoints.includes("foreign endpoint"));
+  store.close();
+});
+
+test("knowledge_note_list filters by repo and provides stable cursor pagination", async () => {
+  const { store, repoId } = seed();
+  const notesDir = mkdtempSync(join(tmpdir(), "pk-mcp-notes-"));
+  for (const [id, title] of [["scoped-a", "Scoped A"], ["scoped-b", "Scoped B"], ["global", "Global"]]) {
+    writeFileSync(join(notesDir, `${id}.md`), `---\nid: ${id}\ntitle: ${title}\n---\nbody\n`);
+    store.upsertNode({ nodeType: "note", identityKey: id, title, repoId: id === "global" ? undefined : repoId });
+  }
+
+  const first = await runKnowledgeTool("knowledge_note_list", { repo: "r", branch: "main", limit: 1 }, { store, notesDir });
+  const second = await runKnowledgeTool("knowledge_note_list", { repo: "r", branch: "main", limit: 1, cursor: first.nextCursor }, { store, notesDir });
+
+  assert.equal(first.items.length, 1);
+  assert.equal(second.items.length, 1);
+  assert.ok(first.nextCursor);
+  assert.equal(second.nextCursor, null);
+  assert.equal(first.candidateCount, 2);
+  assert.equal(second.candidateCount, 2);
+  assert.equal(first.items[0].scope.repoId, repoId);
+  assert.equal(second.items[0].scope.repoId, repoId);
+  assert.notEqual(first.items[0].path, second.items[0].path);
+  assert.equal(first.locator?.repoName, "r");
+  store.close();
+});
+
+test("knowledge_files consumes the cursor it advertises without repeating paths", () => {
+  const { store, repoId, branch } = seed();
+  const insert = store.db.prepare(`INSERT INTO files_index
+    (id,repo_id,branch_id,file_path,lang,size_bytes,indexed_at,status)
+    VALUES (?,?,?,?,?,?,?,'indexed')`);
+  for (const [index, path] of ["a.ts", "b.ts", "c.ts"].entries()) {
+    insert.run(`file-${index}`, repoId, branch, path, "ts", 10, new Date().toISOString());
+  }
+  const first = handleKnowledgeTool("knowledge_files", { repo: "r", limit: 2 }, store);
+  assert.deepEqual(first.items.map((item) => item.filePath), ["a.ts", "b.ts"]);
+  assert.equal(typeof first.nextCursor, "string");
+  const second = handleKnowledgeTool("knowledge_files", { repo: "r", limit: 2, cursor: first.nextCursor }, store);
+  assert.deepEqual(second.items.map((item) => item.filePath), ["c.ts"]);
+  assert.equal(second.nextCursor, null);
+  assert.equal(new Set([...first.items, ...second.items].map((item) => item.filePath)).size, 3);
+  store.close();
+});
+
+test("knowledge_files includes admitted source-only files and reconciles its exact total", () => {
+  const { store } = seed();
+  const scoped = seedSearchSnapshot(store, {
+    name: "source-only-repo",
+    rootPath: "/source-only-repo",
+    filePath: "README.md",
+    content: "Searchable documentation without parser graph facts\n",
+  });
+
+  const result = handleKnowledgeTool("knowledge_files", {
+    repo: "source-only-repo",
+    snapshot_id: scoped.snapshotId,
+  }, store);
+
+  assert.equal(result.candidateCount, 1);
+  assert.equal(result.totalIsExact, true);
+  assert.deepEqual(result.items, [{
+    filePath: "README.md",
+    lang: null,
+    status: "source_only",
+    sizeBytes: null,
+    indexedAt: null,
+    error: null,
+  }]);
+  assert.deepEqual(result.reconciliation, {
+    admittedSourceFiles: 1,
+    graphParsedFiles: 0,
+    sourceAndGraphFiles: 0,
+    sourceOnlyFiles: 1,
+    graphOnlyFiles: 0,
+    candidateFiles: 1,
+    equations: [
+      "admittedSourceFiles = sourceAndGraphFiles + sourceOnlyFiles",
+      "graphParsedFiles = sourceAndGraphFiles + graphOnlyFiles",
+      "candidateFiles = admittedSourceFiles + graphOnlyFiles",
+    ],
+    reconciles: true,
+  });
+  store.close();
+});
+
+test("knowledge_saved_query_run applies caller pagination to the saved request", () => {
+  const { store } = seed();
+  const scoped = seedSearchSnapshot(store, {
+    name: "saved-query-repo",
+    rootPath: "/saved-query-repo",
+    filePath: "src/saved.ts",
+    content: "SavedQueryNeedle\nSavedQueryNeedle\n",
+  });
+  new SavedQueryStore(store).write({
+    name: "saved-two-hits",
+    request: {
+      query: "SavedQueryNeedle",
+      mode: "exact",
+      scope: { revisions: [{ repoId: scoped.repoId, snapshotId: scoped.snapshotId }] },
+      options: { caseSensitive: true },
+      page: { limit: 100 },
+    },
+  });
+  const first = handleKnowledgeTool("knowledge_saved_query_run", { name: "saved-two-hits", limit: 1 }, store);
+  assert.equal(first.hits.length, 1);
+  assert.equal(typeof first.page.nextCursor, "string");
+  const second = handleKnowledgeTool("knowledge_saved_query_run", { name: "saved-two-hits", limit: 1, cursor: first.page.nextCursor }, store);
+  assert.equal(second.hits.length, 1);
+  assert.notEqual(second.hits[0].hitId, first.hits[0].hitId);
+  store.close();
+});
+
+test("find_dead_code emits a stable cursor and preserves total count across pages", () => {
+  const { store, repoId, branch } = seed();
+  const topology = new GitTopologyStore(store);
+  const snapshot = topology.createBuildingSnapshot({
+    snapshotKey: "dead-code-main",
+    repoId,
+    parserVersion: "test-parser",
+    resolverVersion: "test-resolver",
+    schemaVersion: 18,
+  });
+  topology.markSnapshotReady(snapshot.id);
+  topology.publishSnapshot({ branchId: branch, snapshotId: snapshot.id, headCommit: "c0" });
+  for (let index = 0; index < 4; index += 1) {
+    const nodeId = store.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::dead-${index}`, title: `dead-${index}`, repoId });
+    store.upsertSymbolVersion({
+      nodeId,
+      branchId: branch,
+      commitSha: "c0",
+      filePath: `dead-${index}.ts`,
+      lang: "ts",
+      kind: "function",
+      contentHash: `dead-hash-${index}`,
+      status: "fresh",
+      startLine: index + 1,
+      endLine: index + 1,
+    });
+  }
+
+  const first = handleKnowledgeTool("find_dead_code", { repo: "r", branch: "main", limit: 2 }, store);
+  const second = handleKnowledgeTool("find_dead_code", { repo: "r", branch: "main", limit: 2, cursor: first.nextCursor }, store);
+
+  assert.equal(first.items.length, 2);
+  assert.equal(second.items.length, 2);
+  assert.equal("candidates" in first, false);
+  assert.equal("candidates" in second, false);
+  assert.ok(first.nextCursor);
+  assert.equal(first.candidateCount, 5);
+  assert.equal(second.candidateCount, 5);
+  assert.equal(first.items.some((item) => second.items.some((candidate) => candidate.nodeId === item.nodeId)), false);
+  const [cursorBody] = first.nextCursor.split(".");
+  const cursorPayload = JSON.parse(Buffer.from(cursorBody, "base64url").toString("utf8"));
+  assert.equal(cursorPayload.revision, `repo:${repoId}|snapshot:${snapshot.id}`);
   store.close();
 });
 
@@ -395,17 +1342,44 @@ test("MCP suggest_links → list_suggestions → accept round-trips", () => {
 
 test("null store → not-initialized hint (no crash)", () => {
   const r = handleKnowledgeTool("knowledge_search", { query: "x" }, null);
-  assert.match(r.error, /not initialized/);
+  assert.match(r.error.message, /not initialized/);
 });
 
 test("knowledge capability negotiation exposes the shared tuple and rejects incompatible majors", () => {
   const current = handleKnowledgeTool("knowledge_capabilities", { contract_version: "2" }, null);
   assert.equal(current.contractVersion, "2");
-  assert.equal(current.schemaVersion, "14");
+  assert.equal(current.schemaVersion, "18");
   assert.equal(typeof current.capabilityHash, "string");
   assert.equal(typeof current.buildId, "string");
+  const rebuild = current.capabilities.find((capability) => capability.id === "knowledge.rebuild");
+  assert.deepEqual(rebuild.annotations, {
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: false,
+    openWorldHint: false,
+  });
   const incompatible = handleKnowledgeTool("knowledge_capabilities", { contract_version: "99" }, null);
   assert.equal(incompatible.error.code, "CAPABILITY_MISMATCH");
+});
+
+test("knowledge_capabilities compact mode is consumable by an MCP client", () => {
+  const compact = handleKnowledgeTool("knowledge_capabilities", { compact: true }, null);
+  const serialized = JSON.stringify(compact);
+  assert.equal(compact.compact, true);
+  assert.equal(compact.capabilityCount, compact.registrations.length);
+  assert.ok(serialized.length < 8_000, `compact manifest is ${serialized.length} characters`);
+  assert.ok(compact.registrations.every((registration) => typeof registration.capabilityId === "string"));
+  assert.ok(compact.registrations.every((registration) => typeof registration.status === "string"));
+});
+
+test("async MCP dispatcher uses the same compact capability contract", async () => {
+  const { store } = seed();
+  const compact = await runKnowledgeTool("knowledge_capabilities", { compact: true }, { store });
+  assert.equal(compact.compact, true);
+  assert.equal(compact.capabilityCount, compact.registrations.length);
+  assert.ok(compact.schemaReferences.input.includes("input.v2"));
+  assert.ok(JSON.stringify(compact).length < 8_000);
+  store.close();
 });
 
 test("index_status compact mode returns the shared bounded projection", () => {
@@ -435,7 +1409,7 @@ test("MCP markdown source sync uses the shared source corpus", () => {
 test("MCP external source removal is confirmation guarded", () => {
   const { store } = seed();
   const source = handleKnowledgeTool("knowledge_source_register", { type: "url", location: "https://docs.example.com" }, store);
-  assert.equal(handleKnowledgeTool("knowledge_source_remove", { id: source.id }, store).error, "CONFIRMATION_REQUIRED");
+  assert.equal(handleKnowledgeTool("knowledge_source_remove", { id: source.id }, store).error.code, "CONFIRMATION_REQUIRED");
   assert.deepEqual(handleKnowledgeTool("knowledge_source_remove", { id: source.id, confirmed: true }, store), { ok: true, id: source.id });
   store.close();
 });
@@ -450,7 +1424,7 @@ test("MCP external Postgres source lifecycle accepts a host-owned read-only adap
   const client = { query: async (sql) => sql.includes("information_schema.columns") ? { rows: [{ table_schema: "public", table_name: "players", column_name: "id", data_type: "uuid", is_nullable: "NO", ordinal_position: 1 }] } : { rows: [] } };
   const synced = await handleKnowledgeTool("knowledge_source_sync", { id: source.id }, store, { postgresSchemaClient: client });
   assert.equal(synced.tables, 1);
-  assert.equal(handleKnowledgeTool("knowledge_source_remove", { id: source.id }, store).error, "CONFIRMATION_REQUIRED");
+  assert.equal(handleKnowledgeTool("knowledge_source_remove", { id: source.id }, store).error.code, "CONFIRMATION_REQUIRED");
   assert.deepEqual(handleKnowledgeTool("knowledge_source_remove", { id: source.id, confirmed: true }, store), { ok: true, id: source.id });
   store.close();
 });
@@ -462,7 +1436,7 @@ test("200 canonical search requests keep core, CLI and MCP semantic fields align
   const store = KnowledgeStore.open({ dbPath, ledgerPath });
   const repoId = store.registerRepo({ name: "parity", rootPath: dir });
   const branchId = store.registerBranch({ repoId, name: "main", status: "snapshot", checkoutPath: dir });
-  const snapshot = new GitTopologyStore(store).createBuildingSnapshot({ snapshotKey: "parity-main", repoId, parserVersion: "p", resolverVersion: "r", schemaVersion: 13 });
+  const snapshot = new GitTopologyStore(store).createBuildingSnapshot({ snapshotKey: "parity-main", repoId, parserVersion: "p", resolverVersion: "r", schemaVersion: SCHEMA_VERSION });
   const content = Array.from({ length: 200 }, (_, index) => `ParityNeedle${String(index).padStart(3, "0")} appears here.\n`).join("");
   const raw = Buffer.from(content);
   const hash = (await import("node:crypto")).createHash("sha256").update(raw).digest("hex");
@@ -592,7 +1566,7 @@ test("knowledge_search / get_node / explore_graph adapt the query layer", () => 
 test("get-hit rejects hydration from a different originating revision", () => {
   const { store } = seed();
   const result = handleKnowledgeTool("knowledge_get_hit", { snapshot_id: "snapshot-current", original_revision_id: "snapshot-old", file_path: "a.ts" }, store);
-  assert.equal(result.error, "HIT_REVISION_MISMATCH");
+  assert.equal(result.error.code, "HIT_REVISION_MISMATCH");
   store.close();
 });
 
@@ -606,7 +1580,7 @@ test("write_note link_pages records a ledger event; refuses sensitive", () => {
   const noteId = store.upsertNode({ nodeType: "note", identityKey: "cred.md", title: "Cred" });
   store.indexNoteText({ nodeId: noteId, path: "cred.md", title: "Cred", body: "x", sensitive: true, mcpAccess: "denied", contentHash: "h" });
   const refused = handleKnowledgeTool("write_note", { action: "link_pages", src: noteId, dst: login }, store);
-  assert.match(refused.error, /sensitive/);
+  assert.match(refused.error.message, /sensitive/);
   store.close();
 });
 
@@ -625,13 +1599,15 @@ test("tools/list advertises a tiered, explore-first surface without hiding any c
   // capabilities (file_symbols, callers, callees, flow, affected...), which
   // cost an agent two unanswerable questions. The ceiling now guards against
   // drifting back toward the unreadable 119, not against completeness.
-  assert.ok(listed.length <= 60, `listed ${listed.length} tools — re-tier rather than append`);
+  assert.ok(listed.length <= 62, `listed ${listed.length} tools — re-tier rather than append`);
   assert.ok(KNOWLEDGE_TOOL_DEFS.length > 100, "full manifest still carries every capability");
 
   // Nothing is removed: every listed tool stays dispatchable, and so do the
   // placeholders that are no longer advertised.
   for (const name of listed) assert.ok(isKnowledgeTool(name), name);
   assert.ok(isKnowledgeTool("knowledge_onboarding_generate"), "unlisted capability still callable");
+  assert.ok(listed.includes("knowledge_index"), "MCP-only coverage remediation must expose index");
+  assert.ok(listed.includes("knowledge_rebuild"), "MCP-only recovery must expose rebuild");
 
   // Tier labelling: core tools carry no prefix, later tiers announce
   // themselves so the agent knows they are not the default move.
@@ -728,12 +1704,12 @@ test("find_dead_code scopes by repo and path through MCP", () => {
   const { store } = seed();
   const scoped = handleKnowledgeTool("find_dead_code", { repo: "r", path: "a.ts" }, store);
   assert.equal(scoped.scope.repo, "r", "the answer reports the scope it used");
-  assert.ok(scoped.candidates.some((c) => c.title === "caller"), "caller has no inbound edges");
-  assert.ok(!scoped.candidates.some((c) => c.title === "login"), "login is called");
-  assert.ok(scoped.candidates.every((c) => c.filePath), "candidates carry coordinates");
+  assert.ok(scoped.items.some((c) => c.title === "caller"), "caller has no inbound edges");
+  assert.ok(!scoped.items.some((c) => c.title === "login"), "login is called");
+  assert.ok(scoped.items.every((c) => c.filePath), "items carry coordinates");
 
   const missed = handleKnowledgeTool("find_dead_code", { repo: "r", path: "other/" }, store);
-  assert.deepEqual(missed.candidates, [], "a prefix that matches nothing returns nothing");
+  assert.deepEqual(missed.items, [], "a prefix that matches nothing returns nothing");
 
   const unknown = handleKnowledgeTool("find_dead_code", { repo: "no-such-repo" }, store);
   assert.match(unknown.note, /no indexed repo matches/);
@@ -788,5 +1764,82 @@ test("a source hit inside a symbol carries that symbol's node id", () => {
   assert.ok(located, `expected a hit in src/svc.ts, got ${JSON.stringify(hits.map((h) => h.locator?.filePath))}`);
   assert.equal(located.nodeId, nodeId, "the handle points at the symbol containing the hit");
   assert.equal(located.symbol, "findSomething", "and names it, so the handle is legible before use");
+  store.close();
+});
+
+test("unknown repo on knowledge_coverage returns typed REPOSITORY_NOT_FOUND error", () => {
+  const { store } = seed();
+  try {
+    const result = handleKnowledgeTool("knowledge_coverage", { repo: "nonexistent-repo" }, store);
+    assert.equal(result.error.code, "REPOSITORY_NOT_FOUND");
+    assert.match(result.error.message, /nonexistent-repo/);
+    assert.equal(typeof result.error.retryable, "boolean");
+  } finally {
+    store.close();
+  }
+});
+
+test("unknown repo on knowledge_service_graph returns typed error", () => {
+  const { store } = seed();
+  try {
+    const result = handleKnowledgeTool("knowledge_service_graph", { repo: "nonexistent-repo" }, store);
+    assert.ok(result.error.code);
+    assert.equal(typeof result.error.message, "string");
+    assert.equal(typeof result.error.retryable, "boolean");
+  } finally {
+    store.close();
+  }
+});
+
+test("missing required argument on knowledge_search returns typed error", () => {
+  const { store } = seed();
+  try {
+    const result = handleKnowledgeTool("knowledge_search", {}, store);
+    assert.ok(result.error.code);
+    assert.ok(result.error.message);
+    assert.equal(typeof result.error.retryable, "boolean");
+  } finally {
+    store.close();
+  }
+});
+
+test("invalid semantic mode on knowledge_search returns typed error", () => {
+  const { store } = seed();
+  try {
+    const result = handleKnowledgeTool("knowledge_search", { query: "test", semantic: "invalid-mode" }, store);
+    if (result.error) {
+      assert.ok(result.error.code);
+      assert.ok(result.error.message);
+      assert.equal(typeof result.error.retryable, "boolean");
+    }
+  } finally {
+    store.close();
+  }
+});
+
+test("malformed cursor on knowledge_endpoints returns CURSOR_INVALID error", () => {
+  const { store } = seed();
+  try {
+    const result = handleKnowledgeTool("knowledge_endpoints", { protocol: "grpc", cursor: "malformed-cursor" }, store);
+    assert.equal(result.error.code, "CURSOR_INVALID");
+    assert.equal(typeof result.error.retryable, "boolean");
+  } finally {
+    store.close();
+  }
+});
+
+test("wrong cursor family and tampered cursor remain distinct through MCP", () => {
+  const { store, repoId } = seed();
+  for (let index = 0; index < 2; index += 1) {
+    const endpointId = store.upsertGrpcEndpoint({ packageName: "cursor.v1", service: "CursorService", method: `Method${index}` });
+    store.replaceEndpointMembershipsForFile({ repoId, filePath: `proto/cursor-${index}.proto`, memberships: [{ endpointId, role: "declaration" }] });
+  }
+  const page = handleKnowledgeTool("knowledge_endpoints", { repo: "r", protocol: "grpc", limit: 1 }, store);
+  assert.ok(page.nextCursor);
+  const wrongFamily = handleKnowledgeTool("knowledge_search", { query: "login", contract_version: "2", repo: "r", limit: 1, cursor: page.nextCursor }, store);
+  const tampered = handleKnowledgeTool("knowledge_search", { query: "login", contract_version: "2", repo: "r", limit: 1, cursor: `${page.nextCursor.slice(0, -1)}x` }, store);
+  assert.equal(wrongFamily.error.code, "CURSOR_OPERATION_MISMATCH");
+  assert.equal(tampered.error.code, "CURSOR_INVALID");
+  assert.match(wrongFamily.error.details.remediation, /restart search pagination/i);
   store.close();
 });

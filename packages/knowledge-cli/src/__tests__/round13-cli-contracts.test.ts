@@ -108,7 +108,7 @@ test("CLI exposes the runtime identity contract through capabilities", async () 
   const payload = lastJson(lines);
 
   assert.equal(code, 0);
-  assert.equal(payload?.schemaVersion, "14");
+    assert.equal(payload?.schemaVersion, "18");
   assert.equal(payload?.contractVersion, "2");
   assert.equal(payload?.buildId, process.env.PENGUIN_BUILD_ID ?? "local");
   assert.match(String(payload?.capabilityHash), /^[a-f0-9]{64}$/);

@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import type { KnowledgeStore } from "./store.js";
 import { canonicalPathForCheck } from "./workspace-scope.js";
+import { assertRuntimeIndexCompatible } from "./runtime-compatibility.js";
 import { resolveRevisionContext, type RevisionContext, type RevisionSelector } from "./revision.js";
 import {
   warning,
@@ -24,11 +25,32 @@ export interface GitState {
 
 export type GitStateReader = (rootPath: string) => GitState | null; // null = git unavailable
 
-function git(rootPath: string, args: string[]): string {
+export type GitStatusRunner = (rootPath: string, args: string[]) => string;
+
+const runGitStatus: GitStatusRunner = (rootPath, args) => {
   return execFileSync("git", ["-C", rootPath, ...args], {
     encoding: "utf8",
     stdio: ["ignore", "pipe", "ignore"],
-  }).trim();
+  });
+};
+
+function parseGitStatusPorcelainV2(output: string): GitState {
+  let branch: string | null = null;
+  let headSha: string | null = null;
+  let dirty = false;
+  for (const record of output.split("\0")) {
+    if (!record) continue;
+    if (record.startsWith("# branch.oid ")) {
+      const oid = record.slice("# branch.oid ".length);
+      headSha = oid === "(initial)" || oid === "(unknown)" ? null : oid;
+    } else if (record.startsWith("# branch.head ")) {
+      const head = record.slice("# branch.head ".length);
+      branch = head === "(detached)" || head === "(unknown)" ? null : head;
+    } else if (!record.startsWith("# ")) {
+      dirty = true;
+    }
+  }
+  return { branch, headSha, dirty };
 }
 
 /**
@@ -36,28 +58,27 @@ function git(rootPath: string, args: string[]): string {
  * as knowledge-indexer's git-topology.ts `git()` helper (not imported from
  * there — knowledge-core must not depend on knowledge-indexer).
  */
-export function readGitStateDefault(rootPath: string): GitState | null {
+export function readGitStateDefault(
+  rootPath: string,
+  run: GitStatusRunner = runGitStatus,
+): GitState | null {
   try {
-    const branchRaw = git(rootPath, ["branch", "--show-current"]);
-    const branch = branchRaw === "" ? null : branchRaw;
-    const headSha = git(rootPath, ["rev-parse", "HEAD"]);
-    const dirty = git(rootPath, ["status", "--porcelain=v1"]).length > 0;
-    return { branch, headSha, dirty };
+    return parseGitStatusPorcelainV2(
+      run(rootPath, ["status", "--porcelain=v2", "--branch", "-z"]),
+    );
   } catch {
     return null;
   }
 }
 
 /**
- * Wraps a GitStateReader with a per-rootPath TTL memoizing cache. Git state
- * (branch/HEAD/dirty) rarely changes within the span of a few seconds, but
- * `readGitStateDefault` shells out 3 git subprocesses per call — expensive
- * when a long-lived server resolves scope on every query. `null` results
- * (git-unavailable) are cached too, since re-probing an unavailable repo on
- * every call is just as wasteful.
+ * Wraps a GitStateReader with a per-rootPath TTL memoizing cache. This helper
+ * is only safe when its lifetime is bounded to one request. A long-lived MCP
+ * process must not retain it across requests because a Git/index publication
+ * can complete inside the TTL window.
  *
- * Only used as the module-level default reader; callers that inject
- * `input.readGitState` bypass this cache entirely.
+ * Callers that need request-local de-duplication may create one reader and
+ * discard it after assembling that response.
  */
 export function cachedGitStateReader(
   ttlMs = 2000,
@@ -77,12 +98,9 @@ export function cachedGitStateReader(
   };
 }
 
-// Shared module-level cached reader: git state (branch/HEAD) rarely changes
-// within the span of a scope resolution or a status-panel poll, and a fresh
-// reader per call/module would defeat the TTL memoization cachedGitStateReader
-// provides — and would mean the same rootPath gets introspected twice per
-// window (once here, once in status-panel.ts) instead of sharing one cache.
-export const defaultGitReader = cachedGitStateReader();
+// Every public request must observe live Git. Never replace this with a
+// module-level TTL cache: index completion is an external invalidation event.
+export const defaultGitReader: GitStateReader = readGitStateDefault;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -186,6 +204,10 @@ function getBranchRow(store: KnowledgeStore, branchId: string | undefined): Bran
   return row ?? null;
 }
 
+function assertScopeRuntimeCompatible(store: KnowledgeStore, context: RevisionContext): void {
+  if (context.branchId) assertRuntimeIndexCompatible(store, context.branchId);
+}
+
 function mapWorktreeState(raw: string | null | undefined): WorktreeState {
   if (raw === "clean" || raw === "dirty" || raw === "snapshot" || raw === "unknown") return raw;
   return "unknown";
@@ -261,6 +283,7 @@ export function resolveQueryScope(store: KnowledgeStore, input: ResolveQueryScop
     }
 
     const branchRow = getBranchRow(store, context.branchId);
+    assertScopeRuntimeCompatible(store, context);
     return { revision: context, locator: buildLocator(repoRow, context, branchRow), alignment: "explicit", warnings };
   }
 
@@ -271,6 +294,7 @@ export function resolveQueryScope(store: KnowledgeStore, input: ResolveQueryScop
     // git unavailable or detached HEAD → sole-live-branch fallback rule.
     const context = resolveOrThrowScopeNotFound(store, { repoId });
     const branchRow = getBranchRow(store, context.branchId);
+    assertScopeRuntimeCompatible(store, context);
     const warnings = [
       warning(
         "GIT_UNAVAILABLE",
@@ -287,9 +311,11 @@ export function resolveQueryScope(store: KnowledgeStore, input: ResolveQueryScop
   if (resolution.status === "resolved") {
     const context = resolution.context;
     const branchRow = getBranchRow(store, context.branchId);
+    assertScopeRuntimeCompatible(store, context);
     const warnings: StructuredWarning[] = [];
+    const revisionBehind = (branchRow?.lastIndexedCommit ?? null) !== gitState.headSha;
 
-    if ((branchRow?.lastIndexedCommit ?? null) !== gitState.headSha) {
+    if (revisionBehind) {
       warnings.push(
         warning(
           "REVISION_BEHIND",
@@ -301,13 +327,19 @@ export function resolveQueryScope(store: KnowledgeStore, input: ResolveQueryScop
       warnings.push(warning("WORKTREE_DRIFT", `worktree at "${repoRow.rootPath}" has uncommitted changes`));
     }
 
-    return { revision: context, locator: buildLocator(repoRow, context, branchRow), alignment: "aligned", warnings };
+    return {
+      revision: context,
+      locator: buildLocator(repoRow, context, branchRow),
+      alignment: revisionBehind ? "revision_behind" : "aligned",
+      warnings,
+    };
   }
 
   if (resolution.status === "not_found") {
     if (input.allowFallback) {
       const context = resolveOrThrowScopeNotFound(store, { repoId });
       const branchRow = getBranchRow(store, context.branchId);
+      assertScopeRuntimeCompatible(store, context);
       const warnings = [
         warning(
           "BRANCH_NOT_INDEXED_FALLBACK",
@@ -318,7 +350,7 @@ export function resolveQueryScope(store: KnowledgeStore, input: ResolveQueryScop
     }
     throw new ScopeResolutionError(
       "BRANCH_NOT_INDEXED",
-      `checked-out branch "${gitState.branch}" is not indexed; run \`penguin index\` to index branch "${gitState.branch}"`,
+      `checked-out branch "${gitState.branch}" is not indexed; the owner must call knowledge_index for branch "${gitState.branch}"`,
       toCandidates(resolution.candidates),
     );
   }

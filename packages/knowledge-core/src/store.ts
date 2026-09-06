@@ -1,5 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import type DatabaseCtor from "better-sqlite3";
+import {
+  canonicalGrpcIdentity,
+  grpcIdentityAliases,
+  type GrpcIdentityInput,
+} from "@penguin/knowledge-contracts";
 import { Ledger, readLedgerFile } from "./ledger.js";
 import { canonicalJson } from "./canonical.js";
 
@@ -52,13 +58,33 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
+const INDEX_MARKER_TTL_MS = 30 * 60_000;
+
+type IndexMarkerDetails = {
+  scope: "global" | "branch";
+  branchId?: string;
+  startedAt?: string;
+};
+
+function indexWriterBusyError(message: string, details: IndexMarkerDetails): Error & {
+  code: string;
+  retryable: boolean;
+  details: IndexMarkerDetails;
+} {
+  return Object.assign(new Error(message), {
+    code: "INDEX_WRITER_BUSY",
+    retryable: true,
+    details,
+  });
+}
+
 export interface ParsedEdge {
   src: string;
   dst: string | null;
   rawTarget?: string | null;
   edgeType: string;
   origin: "parser";
-  method: "EXTRACTED" | "INFERRED";
+  method: "EXTRACTED" | "INFERRED" | "DI_MODULE_PROVIDER" | "INTERFACE_IMPLEMENTATION" | "RUNTIME_OBSERVED";
   confidence?: number;
   // Cross-service edges to a GLOBAL (repo-less) gRPC endpoint are persisted
   // branch-less (branch_id IS NULL) so branch-scoped traversal — which each
@@ -81,6 +107,16 @@ export interface NodeRow {
   title: string;
   meta: string;
   created_at: string;
+}
+
+export type EndpointMembershipRole = "provider" | "consumer" | "declaration";
+
+export interface EndpointMembership {
+  endpointId: string;
+  repoId: string;
+  role: EndpointMembershipRole;
+  filePath: string;
+  locatorNodeId: string | null;
 }
 
 export interface SearchHit {
@@ -191,10 +227,12 @@ export class KnowledgeStore {
     dbPath: string;
     ledgerPath: string;
     allowSchemaMutation?: boolean;
+    skipMaintenance?: boolean;
     onSchemaMaintenance?: (event: SchemaMaintenanceEvent) => void;
   }): KnowledgeStore {
     const db = openDatabase(opts.dbPath, {
       allowSchemaMutation: opts.allowSchemaMutation,
+      skipMaintenance: opts.skipMaintenance,
       onSchemaMaintenance: opts.onSchemaMaintenance,
     });
     const { ledger, read } = Ledger.open(opts.ledgerPath);
@@ -273,6 +311,132 @@ export class KnowledgeStore {
     return row.id;
   }
 
+  upsertGrpcEndpoint(input: GrpcIdentityInput & {
+    title?: string;
+    meta?: Record<string, unknown>;
+  }): string {
+    const requestedCanonical = canonicalGrpcIdentity(input);
+    const requestedAliases = grpcIdentityAliases(input);
+    const requestedServicePath = requestedCanonical
+      .slice("grpc::".length, requestedCanonical.lastIndexOf("."));
+    const requestedIsQualified = requestedServicePath.includes(".");
+    const tx = this.db.transaction(() => {
+      const direct = this.db.prepare(
+        "SELECT id, identity_key AS identityKey, title, meta FROM nodes WHERE node_type='endpoint' AND identity_key=? COLLATE NOCASE",
+      ).get(requestedCanonical) as { id: string; identityKey: string; title: string; meta: string } | undefined;
+
+      let endpoint = direct;
+      if (!endpoint) {
+        let candidates: Array<{ id: string; identityKey: string; title: string; meta: string }>;
+        if (requestedIsQualified) {
+          // A newly discovered package may promote one earlier unqualified
+          // placeholder, but it must never steal another package's canonical
+          // endpoint merely because both expose Service.Method.
+          const unqualifiedIdentity = requestedAliases.find((alias) => alias.startsWith("grpc::"));
+          candidates = unqualifiedIdentity
+            ? this.db.prepare(
+                `SELECT id, identity_key AS identityKey, title, meta
+                   FROM nodes
+                  WHERE node_type='endpoint' AND identity_key=? COLLATE NOCASE`,
+              ).all(unqualifiedIdentity) as Array<{ id: string; identityKey: string; title: string; meta: string }>
+            : [];
+        } else {
+          const keys = [requestedCanonical, ...requestedAliases];
+          const placeholders = keys.map(() => "?").join(",");
+          candidates = this.db.prepare(
+            `SELECT DISTINCT n.id, n.identity_key AS identityKey, n.title, n.meta
+               FROM nodes n
+               LEFT JOIN endpoint_aliases a ON a.endpoint_id=n.id
+              WHERE n.node_type='endpoint'
+                AND (n.identity_key COLLATE NOCASE IN (${placeholders})
+                  OR a.alias_key COLLATE NOCASE IN (${placeholders}))
+              ORDER BY n.id`,
+          ).all(...keys, ...keys) as Array<{ id: string; identityKey: string; title: string; meta: string }>;
+        }
+        if (candidates.length > 1) {
+          throw Object.assign(
+            new Error(`AMBIGUOUS_GRPC_ENDPOINT_IDENTITY: ${requestedCanonical}`),
+            { code: "AMBIGUOUS_GRPC_ENDPOINT_IDENTITY", candidates: candidates.map((candidate) => candidate.id) },
+          );
+        }
+        endpoint = candidates[0];
+      }
+
+      if (!endpoint) {
+        const id = this.upsertNode({
+          nodeType: "endpoint",
+          identityKey: requestedCanonical,
+          repoId: null,
+          title: input.title ?? `gRPC ${requestedCanonical.slice("grpc::".length, requestedCanonical.lastIndexOf("."))}.${input.method}`,
+          meta: input.meta,
+        });
+        endpoint = this.db.prepare(
+          "SELECT id, identity_key AS identityKey, title, meta FROM nodes WHERE id=?",
+        ).get(id) as { id: string; identityKey: string; title: string; meta: string };
+      }
+
+      const existingServicePath = endpoint.identityKey.startsWith("grpc::")
+        ? endpoint.identityKey.slice("grpc::".length, endpoint.identityKey.lastIndexOf("."))
+        : "";
+      const existingIsQualified = existingServicePath.includes(".");
+      const finalCanonical = requestedIsQualified || !existingIsQualified
+        ? requestedCanonical
+        : endpoint.identityKey;
+      const previousIdentity = endpoint.identityKey;
+      const finalServicePath = finalCanonical.slice("grpc::".length, finalCanonical.lastIndexOf("."));
+      const finalServiceSplit = finalServicePath.lastIndexOf(".");
+      const finalPackageName = finalServiceSplit > 0 ? finalServicePath.slice(0, finalServiceSplit) : null;
+      const finalService = finalServiceSplit > 0 ? finalServicePath.slice(finalServiceSplit + 1) : finalServicePath;
+      let existingMeta: Record<string, unknown> = {};
+      try { existingMeta = JSON.parse(endpoint.meta) as Record<string, unknown>; } catch { /* replace invalid derived metadata */ }
+      const incomingIsDeclaration = typeof input.meta?.source === "string";
+      const existingHasDeclaration = typeof existingMeta.source === "string";
+      const stableMethod = incomingIsDeclaration || !existingHasDeclaration
+        ? input.method
+        : typeof existingMeta.method === "string" ? existingMeta.method : input.method;
+      const mergedMeta = {
+        ...existingMeta,
+        ...(input.meta ?? {}),
+        protocol: "grpc",
+        packageName: finalPackageName,
+        service: finalService,
+        // Proto declarations preserve the contract spelling. Handler and
+        // consumer discovery may enrich metadata, but cannot make the final
+        // value depend on which ingestion lane happened to write last.
+        method: stableMethod,
+      };
+      const preferredTitle = input.title
+        ?? `gRPC ${finalServicePath}.${input.method}`;
+
+      this.db.prepare(
+        `UPDATE nodes SET identity_key=?, repo_id=NULL, title=?, meta=? WHERE id=?`,
+      ).run(
+        finalCanonical,
+        requestedIsQualified || !existingIsQualified ? preferredTitle : endpoint.title,
+        JSON.stringify(mergedMeta),
+        endpoint.id,
+      );
+
+      const aliases = new Set([
+        ...requestedAliases,
+        ...(previousIdentity.toLowerCase() !== finalCanonical.toLowerCase() ? [previousIdentity] : []),
+        ...(requestedCanonical.toLowerCase() !== finalCanonical.toLowerCase() ? [requestedCanonical] : []),
+      ]);
+      const insertAlias = this.db.prepare(
+        `INSERT INTO endpoint_aliases(endpoint_id,alias_key,alias_type,created_at)
+         VALUES (?,?,?,?)
+         ON CONFLICT(endpoint_id,alias_key) DO UPDATE SET alias_type=excluded.alias_type`,
+      );
+      const now = new Date().toISOString();
+      for (const alias of aliases) {
+        if (alias.toLowerCase() === finalCanonical.toLowerCase()) continue;
+        insertAlias.run(endpoint.id, alias, "grpc_identity", now);
+      }
+      return endpoint.id;
+    });
+    return tx();
+  }
+
   getNode(id: string): NodeRow | null {
     return (
       (this.db.prepare("SELECT * FROM nodes WHERE id = ?").get(id) as
@@ -303,11 +467,11 @@ export class KnowledgeStore {
   }
 
   getRepoByRoot(rootPath: string): RepoRow | null {
-    return (
-      (this.db.prepare("SELECT * FROM repos WHERE root_path = ?").get(rootPath) as
-        | RepoRow
-        | undefined) ?? null
-    );
+    const exact = this.db.prepare("SELECT * FROM repos WHERE root_path = ?").get(rootPath) as RepoRow | undefined;
+    if (exact) return exact;
+    const target = canonicalPathForCheck(rootPath);
+    const rows = this.db.prepare("SELECT * FROM repos").all() as RepoRow[];
+    return rows.find((repo) => canonicalPathForCheck(repo.root_path) === target) ?? null;
   }
 
   // Accepts EITHER a repo's internal id OR its display name (case-insensitive)
@@ -322,10 +486,9 @@ export class KnowledgeStore {
       .all(idOrName) as { id: string }[];
     if (byName.length > 0) return byName.map((r) => r.id);
     const canonicalRoot = canonicalPathForCheck(idOrName);
-    const byPath = this.db
-      .prepare("SELECT id FROM repos WHERE root_path = ?")
-      .get(canonicalRoot) as { id: string } | undefined;
-    return byPath ? [byPath.id] : [];
+    const byPath = this.db.prepare("SELECT id, root_path AS rootPath FROM repos").all() as Array<{ id: string; rootPath: string }>;
+    const match = byPath.find((row) => canonicalPathForCheck(row.rootPath) === canonicalRoot);
+    return match ? [match.id] : [];
   }
 
   registerBranch(p: {
@@ -362,6 +525,34 @@ export class KnowledgeStore {
         .prepare("SELECT * FROM branches WHERE repo_id = ? AND name = ?")
         .get(repoId, name) as BranchRow | undefined) ?? null
     );
+  }
+
+  /** Clear only a proven orphan snapshot pointer. This is the defensive half
+   * of full-reset recovery: old databases or interrupted maintenance may keep
+   * a branch row after its rebuildable snapshot was removed. The compare-and-
+   * update predicate cannot clobber a snapshot published concurrently. */
+  repairOrphanBranchSnapshot(branchId: string): boolean {
+    const row = this.db.prepare(
+      "SELECT current_snapshot_id AS snapshotId FROM branches WHERE id=?",
+    ).get(branchId) as { snapshotId: string | null } | undefined;
+    if (!row?.snapshotId) return false;
+    if (this.db.prepare("SELECT 1 FROM revision_snapshots WHERE id=?").get(row.snapshotId)) return false;
+    const repaired = this.db.prepare(`
+      UPDATE branches
+         SET current_snapshot_id=NULL,
+             last_indexed_commit=NULL,
+             last_indexed_at=NULL,
+             indexed_worktree_state='unknown',
+             indexed_worktree_fingerprint=NULL,
+             indexed_dirty_files='[]',
+             parser_version=NULL,
+             resolver_version=NULL,
+             indexed_schema_version=NULL,
+             stale_reason='orphan_snapshot_pointer'
+       WHERE id=? AND current_snapshot_id=?
+         AND NOT EXISTS (SELECT 1 FROM revision_snapshots WHERE id=?)
+    `).run(branchId, row.snapshotId, row.snapshotId);
+    return repaired.changes === 1;
   }
 
   // A checkout has ONE branch checked out at a time: after indexing `keep` at
@@ -814,6 +1005,135 @@ export class KnowledgeStore {
 
   // 解析产出的代码边：同 file+branch 全量替换（§6.3 增量语义）。
   // 非 parser 边在这里是实现错误，不是数据——直接抛。
+  private writeEndpointMembership(input: EndpointMembership): void {
+    this.db.prepare(
+      `INSERT INTO endpoint_memberships
+         (endpoint_id,repo_id,role,file_path,locator_node_id,created_at)
+       VALUES (?,?,?,?,?,?)
+       ON CONFLICT(endpoint_id,repo_id,role,file_path) DO UPDATE SET
+         locator_node_id=excluded.locator_node_id`,
+    ).run(
+      input.endpointId,
+      input.repoId,
+      input.role,
+      input.filePath,
+      input.locatorNodeId,
+      new Date().toISOString(),
+    );
+  }
+
+  private replaceEndpointMembershipRows(
+    repoId: string,
+    filePath: string,
+    memberships: EndpointMembership[],
+  ): void {
+    this.db.prepare(
+      "DELETE FROM endpoint_memberships WHERE repo_id=? AND file_path=?",
+    ).run(repoId, filePath);
+    for (const membership of memberships) this.writeEndpointMembership(membership);
+  }
+
+  replaceEndpointMembershipsForFile(input: {
+    repoId: string;
+    filePath: string;
+    memberships: Array<{
+      endpointId: string;
+      role: EndpointMembershipRole;
+      locatorNodeId?: string | null;
+    }>;
+  }): void {
+    const memberships = input.memberships.map((membership) => ({
+      endpointId: membership.endpointId,
+      repoId: input.repoId,
+      role: membership.role,
+      filePath: input.filePath,
+      locatorNodeId: membership.locatorNodeId ?? null,
+    }));
+    this.db.transaction(() => {
+      this.replaceEndpointMembershipRows(input.repoId, input.filePath, memberships);
+    })();
+  }
+
+  private endpointMembershipsFromEdges(
+    repoId: string,
+    filePath: string,
+    edges: ParsedEdge[],
+  ): EndpointMembership[] {
+    const memberships = new Map<string, EndpointMembership>();
+    for (const edge of edges) {
+      if (!edge.dst) continue;
+      const src = this.getNode(edge.src);
+      const dst = this.getNode(edge.dst);
+      let membership: EndpointMembership | null = null;
+      if (src?.node_type === "endpoint" && edge.edgeType === "handles") {
+        membership = {
+          endpointId: src.id,
+          repoId,
+          role: dst?.node_type === "symbol" ? "provider" : "declaration",
+          filePath,
+          locatorNodeId: edge.dst,
+        };
+      } else if (src?.node_type === "endpoint" && edge.edgeType === "declares") {
+        membership = {
+          endpointId: src.id,
+          repoId,
+          role: "declaration",
+          filePath,
+          locatorNodeId: edge.dst,
+        };
+      } else if (dst?.node_type === "endpoint" && edge.edgeType === "invokes") {
+        membership = {
+          endpointId: dst.id,
+          repoId,
+          role: "consumer",
+          filePath,
+          locatorNodeId: edge.src,
+        };
+      }
+      if (membership) {
+        memberships.set(`${membership.endpointId}\u0000${membership.role}`, membership);
+      }
+    }
+    return [...memberships.values()];
+  }
+
+  listEndpointMemberships(endpointId: string, repoId?: string): EndpointMembership[] {
+    const rows = this.db.prepare(
+      `SELECT endpoint_id AS endpointId, repo_id AS repoId, role,
+              file_path AS filePath, locator_node_id AS locatorNodeId
+         FROM endpoint_memberships
+        WHERE endpoint_id=? ${repoId ? "AND repo_id=?" : ""}
+        ORDER BY repo_id, role, file_path`,
+    ).all(...(repoId ? [endpointId, repoId] : [endpointId])) as EndpointMembership[];
+    return rows;
+  }
+
+  endpointHandlerStatus(
+    endpointId: string,
+    repoId?: string,
+  ): "handled" | "proto_only" | "incomplete" {
+    const params = repoId ? [endpointId, repoId] : [endpointId];
+    const repoClause = repoId ? "AND em.repo_id=?" : "";
+    const implementation = this.db.prepare(
+      `SELECT 1
+         FROM endpoint_memberships em
+         JOIN nodes n ON n.id=em.locator_node_id AND n.node_type='symbol'
+        WHERE em.endpoint_id=? ${repoClause}
+          AND em.role='provider'
+          AND EXISTS (
+            SELECT 1 FROM symbol_versions sv
+             WHERE sv.node_id=em.locator_node_id AND sv.status='fresh'
+          )
+        LIMIT 1`,
+    ).get(...params);
+    if (implementation) return "handled";
+    const declaration = this.db.prepare(
+      `SELECT 1 FROM endpoint_memberships em
+        WHERE em.endpoint_id=? ${repoClause} AND em.role='declaration' LIMIT 1`,
+    ).get(...params);
+    return declaration ? "proto_only" : "incomplete";
+  }
+
   replaceFileEdges(p: {
     repoId?: string;
     branchId?: string;
@@ -831,6 +1151,7 @@ export class KnowledgeStore {
       "SELECT repo_id AS repoId FROM branches WHERE id = ?",
     ).get(p.branchId) as { repoId: string } | undefined)?.repoId : undefined);
     if (!repoId) throw new Error(`repo not found for parser edge replacement branch ${p.branchId ?? "(global)"}`);
+    const endpointMemberships = this.endpointMembershipsFromEdges(repoId, p.filePath, p.edges);
     if (!p.branchId) {
       if (p.edges.some((edge) => !edge.branchless)) {
         throw new Error("branchId is required when replacing branch-scoped parser edges");
@@ -854,6 +1175,7 @@ export class KnowledgeStore {
             edge.sourceType ?? null,
           );
         }
+        this.replaceEndpointMembershipRows(repoId, p.filePath, endpointMemberships);
       });
       replaceGlobal();
       return "replaced";
@@ -903,7 +1225,14 @@ export class KnowledgeStore {
             AND json_extract(provenance, '$.repo') = ?
             AND json_extract(provenance, '$.file') = ?`,
       ).get(repoId, p.filePath) as { count: number }).count;
-      if (scopedCount + globalCount === cachedSet.edgeCount) return "cached";
+      if (scopedCount + globalCount === cachedSet.edgeCount) {
+        this.replaceEndpointMembershipsForFile({
+          repoId,
+          filePath: p.filePath,
+          memberships: endpointMemberships,
+        });
+        return "cached";
+      }
     }
     const existingRows = [
       ...(this.db.prepare(
@@ -959,6 +1288,7 @@ export class KnowledgeStore {
         repoId, p.branchId, p.filePath, desiredFingerprints.length,
         desiredSetFingerprint, new Date().toISOString(),
       );
+      this.replaceEndpointMembershipRows(repoId, p.filePath, endpointMemberships);
       return "compared";
     }
     // Branch-scoped parser edges for this file (identity = branch + file).
@@ -1007,19 +1337,35 @@ export class KnowledgeStore {
         repoId, p.branchId, p.filePath, desiredFingerprints.length,
         desiredSetFingerprint, new Date().toISOString(),
       );
+      this.replaceEndpointMembershipRows(repoId, p.filePath, endpointMemberships);
     });
     tx();
     return "replaced";
   }
 
-  // Direct identity lookup (no alias fallback) — used to check whether a
-  // gRPC endpoint node has appeared yet before replaying a pending frontend
-  // edge; resolveIdentity() is the fuller alias-aware variant used elsewhere.
+  // Endpoint identities are parser-derived and may have package-qualified
+  // aliases. Return an alias only when it identifies exactly one endpoint;
+  // an unqualified alias shared by two packages must stay ambiguous.
   findNodeIdByIdentity(identityKey: string): string | null {
+    // Most parser-produced keys are already canonical and should use the
+    // ordinary identity index. Keep the case-insensitive compatibility lookup
+    // as a fallback for older endpoint rows without forcing every traversal
+    // hop through a full-table NOCASE scan.
     const r = this.db
       .prepare("SELECT id FROM nodes WHERE identity_key = ?")
       .get(identityKey) as { id: string } | undefined;
-    return r?.id ?? null;
+    if (r) return r.id;
+    const folded = this.db
+      .prepare("SELECT id FROM nodes WHERE identity_key = ? COLLATE NOCASE LIMIT 2")
+      .all(identityKey) as Array<{ id: string }>;
+    if (folded.length === 1) return folded[0].id;
+    const aliases = this.db.prepare(
+      `SELECT DISTINCT endpoint_id AS id
+         FROM endpoint_aliases
+        WHERE alias_key=? COLLATE NOCASE
+        ORDER BY endpoint_id LIMIT 2`,
+    ).all(identityKey) as Array<{ id: string }>;
+    return aliases.length === 1 ? aliases[0].id : null;
   }
 
   // Native method-name uniqueness mode: given a lowercased method name,
@@ -1090,10 +1436,8 @@ export class KnowledgeStore {
 
   // For every pending row whose gRPC endpoint node now exists, insert the
   // branch-less `invokes` edge and delete the row. Returns count replayed.
-  // NOTE: the key formula below must stay byte-identical to
-  // knowledge-indexer's grpcEndpointKey() (`grpc::${service}.${method.toLowerCase()}`)
-  // — inlined here rather than imported, since store.ts (core) must not
-  // depend on the indexer package (wrong dependency direction).
+  // The key formula is shared through knowledge-contracts, which is the
+  // dependency direction used by both core and the indexer.
   //
   // service === "" is the native-uniqueness-mode "resolve-by-method-later"
   // marker (pipeline.ts enqueues it when a method-name resolution found ZERO
@@ -1123,7 +1467,7 @@ export class KnowledgeStore {
     for (const row of rows) {
       let endpointId: string | null;
       if (row.service !== "") {
-        const key = `grpc::${row.service}.${String(row.function_name).toLowerCase()}`;
+        const key = canonicalGrpcIdentity({ service: row.service, method: row.function_name });
         endpointId = this.findNodeIdByIdentity(key);
         if (!endpointId) continue; // still deferred: leave the row
       } else {
@@ -1134,7 +1478,7 @@ export class KnowledgeStore {
           continue;
         }
         if (services.length === 0) continue; // still missing: leave the row
-        const key = `grpc::${services[0]}.${String(row.function_name).toLowerCase()}`;
+        const key = canonicalGrpcIdentity({ service: services[0], method: row.function_name });
         endpointId = this.findNodeIdByIdentity(key);
         if (!endpointId) continue; // defensive: leave the row
       }
@@ -1153,6 +1497,13 @@ export class KnowledgeStore {
         JSON.stringify({ file: row.file_path, repo: row.repo_id }),
         row.source_type,
       );
+      this.writeEndpointMembership({
+        endpointId,
+        repoId: row.repo_id,
+        role: "consumer",
+        filePath: row.file_path,
+        locatorNodeId: row.src_node_id,
+      });
       del.run(row.id);
       replayed += 1;
     }
@@ -1296,10 +1647,11 @@ export class KnowledgeStore {
 
   searchText(
     query: string,
-    opts?: { types?: string[]; includeSensitive?: boolean; limit?: number },
+    opts?: { types?: string[]; includeSensitive?: boolean; limit?: number; repoIds?: string[] },
   ): SearchHit[] {
     const limit = opts?.limit ?? 50;
-    const cacheKey = JSON.stringify({ query, types: opts?.types ?? null, includeSensitive: opts?.includeSensitive === true, limit });
+    const repoIds = [...new Set(opts?.repoIds ?? [])].sort();
+    const cacheKey = JSON.stringify({ query, types: opts?.types ?? null, includeSensitive: opts?.includeSensitive === true, limit, repoIds });
     const cached = this.ftsCache.get(cacheKey);
     if (cached) { this.ftsCacheHits += 1; return cached.map((hit) => ({ ...hit })); }
     this.ftsCacheMisses += 1;
@@ -1317,7 +1669,12 @@ export class KnowledgeStore {
       ? terms.map((t) => `"${t.replace(/"/g, '""')}"`).join(" ")
       : `"${query.replace(/"/g, '""')}"`;
 
-    const noteRows = this.db
+    const repoPredicate = repoIds.length > 0
+      ? ` AND n.repo_id IN (${repoIds.map(() => "?").join(",")})`
+      : "";
+    const wantsAllTypes = !opts?.types?.length;
+    const noteRows = wantsAllTypes || opts.types!.includes("note")
+      ? this.db
       .prepare(
         `SELECT n.id AS nodeId, n.node_type AS nodeType, n.title AS title,
                 n.identity_key AS identityKey, ni.path AS filePath, NULL AS branch,
@@ -1328,17 +1685,20 @@ export class KnowledgeStore {
          JOIN notes_index ni ON ni.node_id = f.node_id
          WHERE fts_notes MATCH ?
            AND (? = 1 OR (ni.sensitive = 0 AND ni.mcp_access = 'allowed'))
+           ${repoPredicate}
          ORDER BY rank
          LIMIT ?`,
       )
-      .all(match, opts?.includeSensitive ? 1 : 0, limit) as SearchHit[];
+      .all(match, opts?.includeSensitive ? 1 : 0, ...repoIds, limit) as SearchHit[]
+      : [];
 
     // LEFT JOIN symbol_versions: symbols indexed via indexSymbolText() alone
     // (no full pipeline run, e.g. some test fixtures) have no version row —
     // filePath/branch must degrade to null rather than dropping the hit.
     // Preferring status='fresh' picks the live branch's copy when a symbol
     // has versions across multiple branches; falls back to any version.
-    const symbolRows = this.db
+    const symbolRows = wantsAllTypes || opts.types!.includes("symbol")
+      ? this.db
       .prepare(
         `SELECT n.id AS nodeId, n.node_type AS nodeType, n.title AS title,
                 n.identity_key AS identityKey, sv.file_path AS filePath, br.name AS branch,
@@ -1353,10 +1713,12 @@ export class KnowledgeStore {
          LEFT JOIN branches br ON br.id = sv.branch_id
          WHERE fts_symbols MATCH ?
            AND (sv.id IS NULL OR sv.status = 'fresh')
+           ${repoPredicate}
          ORDER BY rank
          LIMIT ?`,
       )
-      .all(match, limit) as SearchHit[];
+      .all(match, ...repoIds, limit) as SearchHit[]
+      : [];
 
     // bm25 is lower-is-more-relevant; sort the merged note+symbol set by it
     // (nulls-safe fallback to 0) so relevance ordering holds across both kinds.
@@ -1390,6 +1752,15 @@ export class KnowledgeStore {
       .get(key) as { node_id: string } | undefined;
     if (alias) return { nodeId: alias.node_id, via: "alias" };
 
+    const endpointAliases = this.db.prepare(
+      `SELECT DISTINCT a.endpoint_id AS nodeId
+         FROM endpoint_aliases a
+         JOIN nodes n ON n.id=a.endpoint_id AND n.node_type='endpoint'
+        WHERE a.alias_key=? COLLATE NOCASE
+        ORDER BY a.endpoint_id LIMIT 2`,
+    ).all(key) as Array<{ nodeId: string }>;
+    if (endpointAliases.length === 1) return { nodeId: endpointAliases[0].nodeId, via: "alias" };
+
     // Backward compatibility for pre file-scoped symbol keys such as
     // `repo_x::PlayerClientGrpc.getPlayerInfo`. New symbol identities include
     // the physical file path to avoid collapsing copied classes. Resolve the
@@ -1412,58 +1783,141 @@ export class KnowledgeStore {
     return null;
   }
 
-  // Cross-process "index in progress" marker for a branch (meta table). The
+  // Cross-process "index in progress" markers (meta table). The
   // in-process IndexTaskLock cannot guard app↔CLI races: every app call is its
-  // own CLI process. A marker only blocks while its recorded pid is STILL
-  // ALIVE — a crashed/killed indexer (never reaches its releaseIndexMarker
-  // cleanup) must not lock retries out for the full 30 minutes just because
-  // its timestamp is recent. The age check remains as a bounded fallback
-  // (e.g. pid-reuse races), so a live-but-hung process still self-clears
-  // after 30 minutes either way.
-  acquireIndexMarker(branchId: string): void {
-    const key = `index_lock::${branchId}`;
-    const row = this.db.prepare("SELECT value FROM meta WHERE key = ?").get(key) as
-      | { value: string }
-      | undefined;
-    if (row) {
+  // own CLI process. There are two levels deliberately:
+  //
+  //   index_lock::global       one writer for this SQLite database
+  //   index_lock::<branch-id>  one writer for this branch
+  //
+  // The global marker is important because branch markers alone allow two
+  // different repositories/branches to enter long WAL transactions at the
+  // same time. That is the source of the intermittent raw SQLITE_BUSY errors
+  // seen by the Tauri/MCP surfaces. A marker only blocks while its recorded
+  // pid is STILL ALIVE — a crashed/killed indexer (never reaches cleanup)
+  // must not lock retries out for the full 30 minutes just because its
+  // timestamp is recent. The age check remains a bounded fallback (e.g.
+  // pid-reuse races), so a live-but-hung process still self-clears after the
+  // TTL rather than permanently wedging the database.
+  private acquireIndexMarkerKey(key: string, details: IndexMarkerDetails, message: (startedAt: string) => string): void {
+    const value = JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() });
+    const insert = () => {
+      try {
+        return this.db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)").run(key, value);
+      } catch (error) {
+        // A full reset planning transaction can hold a real SQLite RESERVED
+        // lock while its marker remains readable in WAL mode. Convert a raw
+        // busy result into the same retryable writer contract instead of
+        // leaking SQLITE_BUSY to CLI/MCP callers.
+        if ((error as { code?: string }).code === "SQLITE_BUSY") {
+          throw indexWriterBusyError("database writer is busy; retry after the current operation completes", details);
+        }
+        throw error;
+      }
+    };
+    const inserted = this.db.prepare("SELECT value FROM meta WHERE key = ?").get(key) == null
+      ? insert()
+      : { changes: 0 };
+    if (inserted.changes === 1) return;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const row = this.db.prepare("SELECT value FROM meta WHERE key = ?").get(key) as
+        | { value: string }
+        | undefined;
+      if (!row) {
+        if (insert().changes === 1) return;
+        continue;
+      }
       try {
         const v = JSON.parse(row.value) as { pid?: number; startedAt?: string };
         const age = Date.now() - Date.parse(v.startedAt ?? "");
         const stillRunning = typeof v.pid === "number" && isPidAlive(v.pid);
-        if (stillRunning && Number.isFinite(age) && age < 30 * 60_000) {
-          throw new Error(`index already running for this branch (started ${v.startedAt})`);
+        if (stillRunning && Number.isFinite(age) && age < INDEX_MARKER_TTL_MS) {
+          throw indexWriterBusyError(message(v.startedAt ?? "unknown"), {
+            ...details,
+            ...(v.startedAt ? { startedAt: v.startedAt } : {}),
+          });
         }
-      } catch (e) {
-        if (e instanceof Error && /already running/.test(e.message)) throw e;
-        // unparseable marker → treat as stale
+      } catch (error) {
+        if (error instanceof Error && (error as { code?: string }).code === "INDEX_WRITER_BUSY") throw error;
+        // An unparseable marker is stale and can be replaced using the
+        // compare-and-swap below. This also keeps old marker formats usable.
       }
+      const replaced = this.db.prepare("UPDATE meta SET value=? WHERE key=? AND value=?").run(value, key, row.value);
+      if (replaced.changes === 1) return;
     }
-    this.db
-      .prepare(
-        "INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-      )
-      .run(key, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+    throw indexWriterBusyError("index marker changed concurrently; retry the index operation", details);
+  }
+
+  acquireIndexMarker(branchId: string): void {
+    const resetFencePath = `${this.db.name}.full-reset.lock`;
+    if (existsSync(resetFencePath)) {
+      throw indexWriterBusyError("a guarded full-corpus reset is active — retry after the owner completes or recovers it", {
+        scope: "global",
+      });
+    }
+    // Acquire the database-wide writer lease first. The branch lease remains
+    // useful to query/status code and preserves the previous branch-level
+    // contract for callers that need to explain which branch is busy.
+    this.acquireIndexMarkerKey(
+      "index_lock::global",
+      { scope: "global" },
+      (startedAt) => `index already running for another repository or branch (started ${startedAt})`,
+    );
+    try {
+      // Close the check-then-acquire race: a reset may have published its
+      // durable fence immediately after the first filesystem check.
+      if (existsSync(resetFencePath)) {
+        throw indexWriterBusyError("a guarded full-corpus reset became active while acquiring the writer lease", {
+          scope: "global",
+        });
+      }
+      this.acquireIndexMarkerKey(
+        `index_lock::${branchId}`,
+        { scope: "branch", branchId },
+        (startedAt) => `index already running for this branch (started ${startedAt})`,
+      );
+    } catch (error) {
+      // Do not leave the global lease behind when a branch marker loses a
+      // race. The compare-and-delete is scoped to this process PID.
+      this.releaseIndexWriterMarker();
+      throw error;
+    }
+  }
+
+  private releaseIndexWriterMarker(): void {
+    this.db.prepare("DELETE FROM meta WHERE key = ? AND json_extract(value,'$.pid')=?").run("index_lock::global", process.pid);
   }
 
   releaseIndexMarker(branchId: string): void {
-    this.db.prepare("DELETE FROM meta WHERE key = ?").run(`index_lock::${branchId}`);
+    this.db.prepare("DELETE FROM meta WHERE key = ? AND json_extract(value,'$.pid')=?").run(`index_lock::${branchId}`, process.pid);
+    this.releaseIndexWriterMarker();
   }
 
-  private assertNoFreshIndexMarker(branchId: string): void {
+  private assertFreshIndexMarker(key: string, details: IndexMarkerDetails): void {
     const row = this.db
       .prepare("SELECT value FROM meta WHERE key = ?")
-      .get(`index_lock::${branchId}`) as { value: string } | undefined;
+      .get(key) as { value: string } | undefined;
     if (!row) return;
     try {
       const v = JSON.parse(row.value) as { pid?: number; startedAt?: string };
       const age = Date.now() - Date.parse(v.startedAt ?? "");
       const stillRunning = typeof v.pid === "number" && isPidAlive(v.pid);
-      if (stillRunning && Number.isFinite(age) && age < 30 * 60_000) {
-        throw new Error("an index is currently running for this branch — retry after it finishes");
+      if (stillRunning && Number.isFinite(age) && age < INDEX_MARKER_TTL_MS) {
+        throw indexWriterBusyError(
+          details.scope === "global"
+            ? "an index is currently running — retry after it finishes"
+            : "an index is currently running for this branch — retry after it finishes",
+          { ...details, ...(v.startedAt ? { startedAt: v.startedAt } : {}) },
+        );
       }
-    } catch (e) {
-      if (e instanceof Error && /currently running/.test(e.message)) throw e;
+    } catch (error) {
+      if (error instanceof Error && (error as { code?: string }).code === "INDEX_WRITER_BUSY") throw error;
     }
+  }
+
+  private assertNoFreshIndexMarker(branchId: string): void {
+    this.assertFreshIndexMarker("index_lock::global", { scope: "global" });
+    this.assertFreshIndexMarker(`index_lock::${branchId}`, { scope: "branch", branchId });
   }
 
   // Toggle a branch's pinned flag. Pinned branches are exempt from every
@@ -1524,6 +1978,10 @@ export class KnowledgeStore {
         -- later replay insert an orphan-src edge — drop them with the node.
         DELETE FROM pending_frontend_edges WHERE src_node_id IN (SELECT id FROM gc_nodes);
         DELETE FROM node_aliases WHERE node_id IN (SELECT id FROM gc_nodes);
+        DELETE FROM endpoint_aliases WHERE endpoint_id IN (SELECT id FROM gc_nodes);
+        DELETE FROM endpoint_memberships
+          WHERE endpoint_id IN (SELECT id FROM gc_nodes)
+             OR locator_node_id IN (SELECT id FROM gc_nodes);
       `);
       const gcNodeIds = this.db.prepare("SELECT id FROM gc_nodes").all() as Array<{ id: string }>;
       for (const row of gcNodeIds) this.deleteSymbolText(row.id);
@@ -1538,8 +1996,8 @@ export class KnowledgeStore {
   // Remove one repo and ALL its derived data (nodes, edges, versions, file
   // checkpoints, FTS rows, pending frontend rows, branches). Parser data only —
   // rebuildable by re-indexing; the append-only ledger stays untouched. Global
-  // (repo-less) gRPC endpoint nodes survive: other repos may reference them,
-  // and dangling ones are hidden by the UI / cleaned by their own pass.
+  // Repo-less gRPC endpoints survive only while another repository membership
+  // or graph edge still makes them traversable.
   removeRepo(repoId: string): void {
     const tx = this.db.transaction(() => {
       // Edges: branch-scoped (this repo's branches), branchless parser edges
@@ -1572,11 +2030,45 @@ export class KnowledgeStore {
       ).run(repoId);
       this.db.prepare("DELETE FROM parser_edge_sets WHERE repo_id = ?").run(repoId);
       this.db.prepare("DELETE FROM pending_frontend_edges WHERE repo_id = ?").run(repoId);
+      this.db.prepare("DELETE FROM endpoint_memberships WHERE repo_id = ?").run(repoId);
       this.db.prepare("DELETE FROM files_index WHERE repo_id = ?").run(repoId);
       this.db.prepare("DELETE FROM workspace_repos WHERE repo_id = ?").run(repoId);
       this.db.prepare("DELETE FROM nodes WHERE repo_id = ?").run(repoId);
       this.db.prepare("DELETE FROM branches WHERE repo_id = ?").run(repoId);
       this.db.prepare("DELETE FROM repos WHERE id = ?").run(repoId);
+      this.db.exec(`
+        CREATE TEMP TABLE IF NOT EXISTS orphan_global_endpoints (id TEXT PRIMARY KEY);
+        DELETE FROM orphan_global_endpoints;
+        INSERT INTO orphan_global_endpoints
+        SELECT n.id
+          FROM nodes n
+         WHERE n.node_type='endpoint'
+           AND n.repo_id IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM endpoint_memberships m WHERE m.endpoint_id=n.id
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM edges e WHERE e.src=n.id OR e.dst=n.id
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM node_aliases a WHERE a.node_id=n.id
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM notes_index ni WHERE ni.node_id=n.id
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM credential_entries ce WHERE ce.node_id=n.id
+           )
+           AND NOT EXISTS (
+             SELECT 1 FROM response_samples rs
+              WHERE rs.endpoint_id=n.id OR rs.endpoint_key=n.identity_key
+           );
+        DELETE FROM endpoint_aliases
+         WHERE endpoint_id IN (SELECT id FROM orphan_global_endpoints);
+        DELETE FROM nodes
+         WHERE id IN (SELECT id FROM orphan_global_endpoints);
+        DROP TABLE orphan_global_endpoints;
+      `);
     });
     tx();
   }
@@ -1626,7 +2118,13 @@ export class KnowledgeStore {
       reason: string | null;
       validFrom: string | null;
       validTo: string | null;
-    }>;
+      }>;
+  }
+
+  getEndpointAliases(endpointId: string): string[] {
+    return (this.db.prepare(
+      "SELECT alias_key AS aliasKey FROM endpoint_aliases WHERE endpoint_id=? ORDER BY alias_key COLLATE NOCASE",
+    ).all(endpointId) as Array<{ aliasKey: string }>).map((row) => row.aliasKey);
   }
 
   // §9：启动/定期对账。账本领先 → 自动 replay 追平；

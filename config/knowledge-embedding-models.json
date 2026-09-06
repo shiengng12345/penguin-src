@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "policy": {
+    "mode": "pinned-local-only",
+    "requireVerifiedWeightsAndTokenizer": true,
+    "requireRedistributableLicense": true,
+    "allowRemoteProviderByDefault": false,
+    "allowDebugVectorFallback": false
+  },
+  "selected": {
+    "providerId": "local",
+    "modelId": "nomic-ai/nomic-embed-text-v1.5",
+    "revision": "e9b6763023c676ca8431644204f50c2b100d9aab",
+    "bundleDirectory": "nomic-embed-text-v1.5",
+    "modelFile": "onnx/model_quantized.onnx",
+    "tokenizerFile": "tokenizer.json",
+    "dimensions": 768,
+    "maxTokens": 2048,
+    "pooling": "mean",
+    "normalization": "l2",
+    "dtype": "q8",
+    "documentPrefix": "search_document: ",
+    "queryPrefix": "search_query: ",
+    "license": "Apache-2.0",
+    "runtimeDownloadAllowed": false,
+    "assets": [
+      {
+        "path": "config.json",
+        "sha256": "9ab00bd92cee80a569f708140b7b6c1661a65891ff3765b1519e181ba2f2c92b",
+        "bytes": 2538
+      },
+      {
+        "path": "tokenizer.json",
+        "sha256": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+        "bytes": 711396
+      },
+      {
+        "path": "tokenizer_config.json",
+        "sha256": "d7e0000bcc80134debd2222220427e6bf5fa20a669f40a0d0d1409cc18e0a9bc",
+        "bytes": 1191
+      },
+      {
+        "path": "special_tokens_map.json",
+        "sha256": "5d5b662e421ea9fac075174bb0688ee0d9431699900b90662acd44b2a350503a",
+        "bytes": 695
+      },
+      {
+        "path": "onnx/model_quantized.onnx",
+        "sha256": "b4342336debaea79de872370664b0aaeb67dea4605513d00ee236ea871a81f27",
+        "bytes": 137296292
+      }
+    ]
+  },
+  "candidates": [
+    "nomic-ai/nomic-embed-text-v1.5"
+  ]
+}

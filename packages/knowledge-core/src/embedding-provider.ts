@@ -1,8 +1,20 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, normalize } from "node:path";
 
-export interface EmbeddingProvider { id: string; modelId: string; modelHash: string; dimensions: number; maxTokens: number; embed(texts: string[]): Promise<Float32Array[]>; health(): Promise<{ ok: boolean; reason?: string }>; }
+export interface EmbeddingProvider {
+  id: string;
+  modelId: string;
+  modelHash: string;
+  dimensions: number;
+  maxTokens: number;
+  embed(texts: string[]): Promise<Float32Array[]>;
+  /** Optional role-specific path for models with asymmetric retrieval prompts. */
+  embedDocuments?(texts: string[]): Promise<Float32Array[]>;
+  /** Optional role-specific path for models with asymmetric retrieval prompts. */
+  embedQuery?(text: string): Promise<Float32Array>;
+  health(): Promise<{ ok: boolean; reason?: string }>;
+}
 
 export interface RemoteEmbeddingProviderOptions {
   id: string; modelId: string; endpoint: string; dimensions: number; maxTokens: number;
@@ -46,6 +58,65 @@ export interface LocalModelDescriptor extends LocalModelManifest {
   directory: string;
   modelHash: string;
   modelPath: string;
+}
+
+/**
+ * A release-grade local embedding manifest. The weights and tokenizer are
+ * separate inputs because changing either one changes the vector space.
+ * `license` is required so a model cannot enter a bundled release without a
+ * recorded redistribution decision.
+ */
+export interface LocalEmbeddingManifest {
+  providerId: "local";
+  modelId: string;
+  modelFile: string;
+  weightsDigest: string;
+  tokenizerFile: string;
+  tokenizerDigest: string;
+  dimensions: number;
+  maxTokens: number;
+  pooling: string;
+  normalization: string;
+  license: string;
+  sourceRevision?: string;
+  dtype?: string;
+  documentPrefix?: string;
+  queryPrefix?: string;
+  runtimeDownloadAllowed?: boolean;
+}
+
+export interface LocalEmbeddingDescriptor extends LocalEmbeddingManifest {
+  directory: string;
+  modelPath: string;
+  tokenizerPath: string;
+}
+
+function isSafeLocalFile(value: unknown): value is string {
+  if (typeof value !== "string" || !value || value.includes("\\") || isAbsolute(value)) return false;
+  const normalized = normalize(value).replaceAll("\\", "/");
+  return normalized === value
+    && normalized !== "."
+    && normalized !== ".."
+    && !normalized.startsWith("../")
+    && normalized.split("/").every((segment) => /^[a-zA-Z0-9._-]+$/.test(segment) && segment !== "." && segment !== "..");
+}
+
+/** Validate both local model inputs before an inference backend is opened. */
+export function inspectLocalEmbeddingDirectory(directory: string): LocalEmbeddingDescriptor {
+  let manifest: LocalEmbeddingManifest;
+  try { manifest = JSON.parse(readFileSync(join(directory, "manifest.json"), "utf8")) as LocalEmbeddingManifest; } catch { throw new Error("LOCAL_EMBEDDING_MANIFEST_INVALID"); }
+  if (!manifest || manifest.providerId !== "local" || typeof manifest.modelId !== "string" || !manifest.modelId || !isSafeLocalFile(manifest.modelFile) || !isSafeLocalFile(manifest.tokenizerFile) || !/^[a-f0-9]{64}$/i.test(manifest.weightsDigest) || !/^[a-f0-9]{64}$/i.test(manifest.tokenizerDigest) || !Number.isInteger(manifest.dimensions) || manifest.dimensions <= 0 || !Number.isInteger(manifest.maxTokens) || manifest.maxTokens <= 0 || typeof manifest.pooling !== "string" || !manifest.pooling || typeof manifest.normalization !== "string" || !manifest.normalization || typeof manifest.license !== "string" || !manifest.license.trim() || (manifest.dtype !== undefined && (typeof manifest.dtype !== "string" || !manifest.dtype)) || (manifest.documentPrefix !== undefined && typeof manifest.documentPrefix !== "string") || (manifest.queryPrefix !== undefined && typeof manifest.queryPrefix !== "string") || (manifest.runtimeDownloadAllowed !== undefined && typeof manifest.runtimeDownloadAllowed !== "boolean")) throw new Error("LOCAL_EMBEDDING_MANIFEST_INVALID");
+  const modelPath = join(directory, manifest.modelFile);
+  const tokenizerPath = join(directory, manifest.tokenizerFile);
+  let modelBytes: Buffer;
+  let tokenizerBytes: Buffer;
+  try { modelBytes = readFileSync(modelPath); } catch { throw new Error("LOCAL_EMBEDDING_MODEL_MISSING"); }
+  try { tokenizerBytes = readFileSync(tokenizerPath); } catch { throw new Error("LOCAL_EMBEDDING_TOKENIZER_MISSING"); }
+  const weightsDigest = createHash("sha256").update(modelBytes).digest("hex");
+  const tokenizerDigest = createHash("sha256").update(tokenizerBytes).digest("hex");
+  if (weightsDigest !== manifest.weightsDigest.toLowerCase()) throw new Error("LOCAL_EMBEDDING_MODEL_HASH_MISMATCH");
+  if (tokenizerDigest !== manifest.tokenizerDigest.toLowerCase()) throw new Error("LOCAL_EMBEDDING_TOKENIZER_HASH_MISMATCH");
+  return { ...manifest, weightsDigest, tokenizerDigest, directory, modelPath, tokenizerPath };
 }
 
 /**

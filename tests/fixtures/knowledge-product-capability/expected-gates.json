@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "source": "Round 26 product capability closure",
+  "gates": [
+    "schema-skew",
+    "endpoint-filter-latency",
+    "endpoint-cursor-continuation",
+    "semantic-empty-state",
+    "semantic-no-active-overhead",
+    "scope-kinds-symbol",
+    "explain-repo-scope",
+    "mutation-root-safety",
+    "affected-symbol-granularity",
+    "affected-impact-edges",
+    "endpoint-locator",
+    "flow-truncation-continuation",
+    "stable-candidate-count",
+    "context-continuation-dedup",
+    "canonical-onboarding-tools",
+    "timeout-remediation",
+    "corpus-reconciliation",
+    "same-name-repository-ambiguity",
+    "unresolved-reference-classification"
+  ]
+}

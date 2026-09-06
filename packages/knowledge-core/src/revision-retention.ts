@@ -28,7 +28,7 @@ export interface RevisionCollectionApplyResult {
   skipped: Array<{ id: string; reason: "reference_changed" | "lock_unavailable" | "not_collectible" }>;
 }
 
-type Snapshot = { id: string; state: string; repo_id: string; created_at: string; last_accessed_at: string; pinned: number; base_snapshot_id: string | null; commit_sha: string | null; worktree_fingerprint: string | null };
+type Snapshot = { id: string; state: string; repo_id: string; created_at: string; last_accessed_at: string; pinned: number; base_snapshot_id: string | null; commit_sha: string | null; worktree_fingerprint: string | null; insertion_order: number };
 
 function assertSourceCorpusOrphanFree(store: KnowledgeStore): void {
   const checks = [
@@ -39,7 +39,7 @@ function assertSourceCorpusOrphanFree(store: KnowledgeStore): void {
 }
 
 export function planRevisionCollection(store: KnowledgeStore, repoId: string, policy: RevisionRetentionPolicy = DEFAULT_REVISION_RETENTION): RevisionCollectionPlan {
-  const snapshots = store.db.prepare("SELECT id,state,repo_id,created_at,last_accessed_at,pinned,base_snapshot_id,commit_sha,worktree_fingerprint FROM revision_snapshots WHERE repo_id=? AND state IN ('ready','cold') ORDER BY last_accessed_at DESC, id").all(repoId) as Snapshot[];
+  const snapshots = store.db.prepare("SELECT rowid AS insertion_order,id,state,repo_id,created_at,last_accessed_at,pinned,base_snapshot_id,commit_sha,worktree_fingerprint FROM revision_snapshots WHERE repo_id=? AND state IN ('ready','cold') ORDER BY last_accessed_at DESC, rowid DESC, id").all(repoId) as Snapshot[];
   const reasons = new Map<string, Set<string>>();
   const protect = (id: string, reason: string) => { if (!reasons.has(id)) reasons.set(id, new Set()); reasons.get(id)!.add(reason); };
   for (const row of store.db.prepare("SELECT current_snapshot_id, default_branch, pinned, status, deleted_at, recover_until FROM branches WHERE repo_id=?").all(repoId) as Array<{ current_snapshot_id: string | null; default_branch: number; pinned: number; status: string; deleted_at: string | null; recover_until: string | null }>) {
@@ -102,7 +102,15 @@ export function planRevisionCollection(store: KnowledgeStore, repoId: string, po
     const held = newestPerRevision.get(key);
     // `snapshots` is ordered by last_accessed_at DESC, so the first wins; fall
     // back to created_at when access times tie, which they do on a fresh index.
-    if (!held || Date.parse(row.created_at) > Date.parse(held.created_at)) newestPerRevision.set(key, row);
+    // ISO timestamps only have millisecond precision, so several snapshots
+    // created in one indexing burst can have the exact same created_at. The
+    // rowid is the insertion sequence for this ordinary rowid table and makes
+    // that tie explicit; otherwise an arbitrary older snapshot could receive
+    // hot protection while the live newest snapshot is excluded, leaving one
+    // superseded snapshot immortal on every rebuild.
+    const rowCreatedAt = Date.parse(row.created_at);
+    const heldCreatedAt = held ? Date.parse(held.created_at) : Number.NaN;
+    if (!held || rowCreatedAt > heldCreatedAt || (rowCreatedAt === heldCreatedAt && row.insertion_order > held.insertion_order)) newestPerRevision.set(key, row);
   }
   const distinctNewest = unprotected.filter((row) => newestPerRevision.get(revisionKey(row)) === row);
   for (const row of distinctNewest.slice(0, policy.maxHotFeatureViews)) protect(row.id, "hot_feature_limit");

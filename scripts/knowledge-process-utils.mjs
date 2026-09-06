@@ -19,9 +19,11 @@ export function processEnv(root, overrides = {}) {
   };
 }
 
-export function runCli({ node, bundle, args, cwd, env, timeoutMs = 30_000 }) {
+export function runCli({ node, bundle, command, args, cwd, env, timeoutMs = 30_000 }) {
   const started = Date.now();
-  const result = spawnSync(node, [bundle, ...args], {
+  const executable = command ?? node;
+  const commandArgs = command ? args : [bundle, ...args];
+  const result = spawnSync(executable, commandArgs, {
     cwd,
     env,
     encoding: "utf8",
@@ -30,7 +32,7 @@ export function runCli({ node, bundle, args, cwd, env, timeoutMs = 30_000 }) {
   });
   return {
     kind: "cli",
-    args,
+    args: commandArgs,
     exitCode: result.error?.code === "ETIMEDOUT" ? 124 : result.status ?? 1,
     signal: result.signal ?? null,
     durationMs: Date.now() - started,
@@ -195,4 +197,27 @@ export function normalizeForParity(value) {
     .filter(([key]) => !volatile.has(key))
     .sort(([left], [right]) => left.localeCompare(right))
     .map(([key, item]) => [key, normalizeForParity(item)]));
+}
+
+export function duplicateValues(items, keyFn) {
+  const counts = new Map();
+  for (const item of items) {
+    const key = keyFn(item);
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .filter(([, count]) => count > 1)
+    .map(([key]) => key)
+    .sort();
+}
+
+export function validKnowledgeErrorEnvelope(value, expectedCode) {
+  return Boolean(value)
+    && typeof value.code === "string"
+    && value.code.length > 0
+    && value.code !== "not-classified"
+    && (!expectedCode || value.code === expectedCode)
+    && typeof value.message === "string"
+    && value.message.length > 0
+    && typeof value.retryable === "boolean";
 }

@@ -182,6 +182,7 @@ export function SettingsDialog({
         wroteConfig: boolean;
         changedClients: string[];
         unchangedClients: string[];
+        skippedClients: string[];
       }>("mcp_install_to_local_clients");
       setMcpInstallMsg(result.message);
       setMcpConfigWriteResult(result.wroteConfig ? "written" : "unchanged");
@@ -682,6 +683,15 @@ export function SettingsDialog({
                       : mcpView.copyDisabledNotice}
               </p>
             )}
+
+            <div className="mt-3 rounded-md border border-border/60 bg-background/40 p-3">
+              <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                Semantic retrieval / 语义检索
+              </p>
+              <p className="mt-1 text-[11px] text-muted-foreground">
+                Durable progress, model identity, heartbeat, Pause, Resume, Retry and Cancel are shown in Wiki → Graph. Settings only manages the shared MCP runtime.
+              </p>
+            </div>
 
             <Button
               variant="outline"

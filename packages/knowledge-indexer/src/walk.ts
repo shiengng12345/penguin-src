@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, relative } from "node:path";
-import { DEFAULT_COVERAGE_POLICY, classifyCoveragePath, type CoveragePolicy } from "./coverage-policy.js";
+import { DEFAULT_COVERAGE_POLICY, classifyCoveragePath, isPackageCachePath, type CoveragePolicy } from "./coverage-policy.js";
 import { classifyTextBuffer } from "./text-classifier.js";
 import type { DiscoveredFile, DiscoveryReport } from "./coverage.js";
 
@@ -15,7 +15,7 @@ export interface WalkedFile {
 const ALWAYS_IGNORE = new Set([
   ".git", "node_modules", "target", "dist", "build", ".next", ".turbo",
   "vendor", "bower_components", "coverage", ".nyc_output",
-  "__pycache__", ".venv", "venv", ".idea", ".vscode",
+  "__pycache__", ".venv", "venv", ".idea", ".vscode", ".pnpm-store", ".npm",
 ]);
 
 const DEFAULT_MAX_BYTES = 1_000_000;
@@ -81,7 +81,7 @@ export function* walkRepoFiles(
       const abs = join(dir, entry.name);
       const rel = relative(rootPath, abs).split("\\").join("/");
       if (entry.isDirectory()) {
-        if (ALWAYS_IGNORE.has(entry.name) || ignored(rel, entry.name) || VENDOR_PATH_RE.test(`${rel}/`)) continue;
+        if (ALWAYS_IGNORE.has(entry.name) || isPackageCachePath(rel) || ignored(rel, entry.name) || VENDOR_PATH_RE.test(`${rel}/`)) continue;
         yield* walk(abs);
       } else if (entry.isFile()) {
         if (ignored(rel, entry.name) || MINIFIED_NAME.test(entry.name) || VENDOR_PATH_RE.test(rel)) continue;
@@ -150,9 +150,11 @@ export function discoverRepoCoverage(
   const policy = { ...DEFAULT_COVERAGE_POLICY, ...options };
   const tracked = new Set(gitPaths(rootPath, ["ls-files", "--cached", "-z"]));
   const gitlinks = gitlinkPaths(rootPath);
-  const candidates = gitPaths(rootPath, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"]);
+  const candidates = gitPaths(rootPath, ["ls-files", "--cached", "--others", "--exclude-standard", "-z"])
+    .filter((filePath) => !isPackageCachePath(filePath));
   const ignoredAll = policy.includeIgnoredMetadata
     ? gitPaths(rootPath, ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"])
+      .filter((filePath) => !isPackageCachePath(filePath))
     : [];
   const ignored = ignoredAll.slice(0, policy.ignoredMetadataMaxEntries);
   const result: DiscoveredFile[] = [];

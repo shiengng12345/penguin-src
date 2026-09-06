@@ -38,7 +38,7 @@ test("context on an un-indexed checked-out branch exits 4 with BRANCH_NOT_INDEXE
   const lines = [];
   const code = await runCli(["context", "Alpha", "--json"], cliDeps(store, rootPath, lines));
   assert.equal(code, 4);
-  assert.match(lines.join("\n"), /penguin index/);
+  assert.match(lines.join("\n"), /knowledge_index/);
   store.close();
 });
 
@@ -155,7 +155,7 @@ test("query-server knowledge.cli bridge does NOT inject --allow-fallback: an un-
   assert.equal(response.ok, false, `expected the bridge to surface a structured error, not answer: ${JSON.stringify(response)}`);
   assert.equal(response.error.code, "BRANCH_NOT_INDEXED");
   assert.match(response.error.message, /feature-x/);
-  assert.match(response.error.message, /penguin index/);
+  assert.match(response.error.message, /knowledge_index/);
   // store.close() is called by runQueryServer itself.
 });
 

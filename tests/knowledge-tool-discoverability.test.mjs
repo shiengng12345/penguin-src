@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { MCP_IMPLEMENTED_CAPABILITIES } from "../packages/knowledge-contracts/dist/index.js";
+import { CAPABILITIES, MCP_IMPLEMENTED_CAPABILITIES } from "../packages/knowledge-contracts/dist/index.js";
 import { KNOWLEDGE_TOOL_DEFS, MCP_LISTED_TOOL_DEFS } from "../packages/mcp/dist/knowledge-tool-defs.js";
 
 // The first pass at collapsing tools/list from 119 entries assumed the
@@ -33,6 +33,8 @@ test("the primitives an agent needs are all discoverable", () => {
     "knowledge_context",
     "knowledge_search",
     "knowledge_get_hit",
+    "knowledge_semantic_status",
+    "knowledge_semantic_control",
     "get_node",
   ]) {
     assert.ok(listed.has(name), `${name} must be discoverable from tools/list`);
@@ -69,7 +71,7 @@ test("the listing stays short enough to scan", () => {
   // The point of curating is that an agent can read the list. Restoring the
   // read-only capabilities must not drift back toward 119.
   assert.ok(
-    MCP_LISTED_TOOL_DEFS.length <= 60,
+    MCP_LISTED_TOOL_DEFS.length <= 62,
     `listing grew to ${MCP_LISTED_TOOL_DEFS.length} — re-tier instead of appending`,
   );
   assert.ok(KNOWLEDGE_TOOL_DEFS.length > 100, "the full manifest is still complete for parity checks");
@@ -79,6 +81,26 @@ test("every listed tool is dispatchable", async () => {
   const { isKnowledgeTool } = await import("../packages/mcp/dist/knowledge-tool-defs.js");
   for (const tool of MCP_LISTED_TOOL_DEFS) {
     assert.ok(isKnowledgeTool(tool.name), `${tool.name} is advertised but not dispatchable`);
+  }
+});
+
+test("listed knowledge tools advertise trustworthy read-only annotations", () => {
+  const capabilities = new Map(CAPABILITIES.map((capability) => [capability.id, capability]));
+  for (const tool of MCP_LISTED_TOOL_DEFS) {
+    const capabilityId = tool["x-penguin-capability-id"];
+    assert.ok(capabilityId, `${tool.name} must expose its canonical capability id`);
+    const capability = capabilities.get(capabilityId);
+    assert.ok(capability, `${tool.name} maps to unknown capability ${capabilityId}`);
+    assert.equal(
+      tool.annotations?.readOnlyHint,
+      !capability.mutating,
+      `${tool.name} readOnlyHint must match ${capabilityId}.mutating`,
+    );
+    assert.equal(
+      tool.annotations?.destructiveHint,
+      capability.mutating,
+      `${tool.name} destructiveHint must match ${capabilityId}.mutating`,
+    );
   }
 });
 

@@ -1,5 +1,5 @@
 import type { ParsedEdge } from "@penguin/knowledge-core";
-import type { ExtractedRef, ExtractedSymbol } from "./extract.js";
+import type { ExtractedReceiverBinding, ExtractedRef, ExtractedSymbol } from "./extract.js";
 
 // Resolution backend over already-indexed symbols in the same repo+branch.
 // Implemented against KnowledgeStore in 2d; a fake satisfies it in tests.
@@ -7,7 +7,7 @@ export interface SymbolIndex {
   byQualifiedName(qualifiedName: string): string | null; // → nodeId
   // Bare-name candidates carry the file they're defined in so resolution can
   // scope to the current file + its imports (Plan B / import-scoped resolution).
-  bareNameCandidates(bareName: string): Array<{ id: string; filePath: string | null }>;
+  bareNameCandidates(bareName: string): Array<{ id: string; filePath: string | null; qualifiedName?: string | null }>;
 }
 
 export interface ResolvedEdges {
@@ -23,6 +23,38 @@ export interface ResolvedEdges {
   // most important calls went to an external SDK, with confidence "high" and
   // no gap reported. Recording them turns "unknown" from silence into data.
   externalCalls: ExternalCallFact[];
+  /** Every abstained reference, including external and ambiguous cases, with
+   * enough source information for the revision-scoped coverage work queue. */
+  unresolvedItems: UnresolvedReferenceItem[];
+}
+
+export interface UnresolvedReferenceItem {
+  rawTarget: string;
+  reasonCode: string;
+  reason: string;
+  line: number;
+  sourceNodeId: string | null;
+  classification: UnresolvedReferenceClassification;
+}
+
+export type UnresolvedReferenceClassification =
+  | "external_dependency"
+  | "language_builtin"
+  | "dynamic_dispatch"
+  | "generated_code"
+  | "no_enclosing_symbol"
+  | "ambiguous_internal"
+  | "missing_internal";
+
+/** Stable public taxonomy for every abstained reference; never hides the raw reason. */
+export function classifyUnresolvedReference(reasonCode: string, filePath = ""): UnresolvedReferenceClassification {
+  if (/(?:^|\/)(?:generated|gen)(?:\/|$)|\.generated\.|\.g\.(?:ts|js)$|_pb\.(?:ts|js|rs)$|\.pb\.(?:ts|js|rs)$/iu.test(filePath)) return "generated_code";
+  if (["external_package", "external_namespace"].includes(reasonCode)) return "external_dependency";
+  if (["platform_member", "generic_or_builtin"].includes(reasonCode)) return "language_builtin";
+  if (["rust_dynamic_dispatch", "unresolved_receiver"].includes(reasonCode)) return "dynamic_dispatch";
+  if (reasonCode === "no_enclosing_symbol") return "no_enclosing_symbol";
+  if (reasonCode.startsWith("ambiguous_") || reasonCode === "ambiguous_candidates") return "ambiguous_internal";
+  return "missing_internal";
 }
 
 export interface ExternalCallFact {
@@ -150,11 +182,16 @@ export function resolveRefs(input: {
   // bindings the resolver can tell that the name came from outside the repo
   // and must not be bound to a same-named local symbol.
   importBindings?: Map<string, string>;
+  /** Constructor property bindings for receiver-aware TypeScript calls. */
+  receiverBindings?: ExtractedReceiverBinding[];
+  /** The source language is needed for Rust dynamic-dispatch abstention. */
+  language?: string;
 }): ResolvedEdges {
   const edges: ParsedEdge[] = [];
   let unresolved = 0;
   const unresolvedNames: string[] = [];
   const externalCalls: ExternalCallFact[] = [];
+  const unresolvedItems: UnresolvedReferenceItem[] = [];
 
   const fileByBare = new Map<string, ExtractedSymbol[]>();
   for (const s of input.fileSymbols) {
@@ -163,9 +200,35 @@ export function resolveRefs(input: {
     fileByBare.set(s.name, arr);
   }
 
-  const push = (src: string, dst: string, edgeType: string, method: "EXTRACTED" | "INFERRED", confidence?: number) => {
+  const push = (
+    src: string,
+    dst: string,
+    edgeType: string,
+    method: "EXTRACTED" | "INFERRED",
+    confidence?: number,
+    provenance?: Record<string, unknown>,
+  ) => {
     if (src === dst) return; // no self-loops
-    edges.push({ src, dst, edgeType, origin: "parser", method, ...(confidence != null ? { confidence } : {}) });
+    edges.push({
+      src,
+      dst,
+      edgeType,
+      origin: "parser",
+      method,
+      ...(confidence != null ? { confidence } : {}),
+      ...(provenance ? { provenance } : {}),
+    });
+  };
+  const markUnresolved = (ref: ExtractedRef, sourceNodeId: string | null, reasonCode: string, reason: string): void => {
+    unresolved += 1;
+    unresolvedItems.push({
+      rawTarget: ref.rawName,
+      reasonCode,
+      reason,
+      line: ref.startLine,
+      sourceNodeId,
+      classification: classifyUnresolvedReference(reasonCode, input.currentFile ?? ""),
+    });
   };
 
   for (const ref of input.refs) {
@@ -180,10 +243,70 @@ export function resolveRefs(input: {
       ? input.fileSymbolIds.get(ref.enclosingQualifiedName) ?? null
       : null;
     if (!src) {
-      unresolved += 1;
+      markUnresolved(ref, null, "no_enclosing_symbol", "reference has no enclosing indexed symbol");
       continue;
     }
     const bare = bareOf(ref.rawName);
+
+    // A TypeScript DI property is stronger evidence than a bare method name.
+    // Resolve `this.versionService.version()` against the declared
+    // `VersionService` type before same-file/global name matching can choose a
+    // different `version` method.
+    if (ref.kind === "call" && ref.memberReceiver && input.receiverBindings?.length) {
+      const receiverMatch = /^this\.([A-Za-z_$][\w$]*)/u.exec(ref.memberReceiver.trim());
+      const binding = receiverMatch
+        ? input.receiverBindings.find((candidate) => (
+          candidate.propertyName === receiverMatch[1]
+          && Boolean(ref.enclosingQualifiedName)
+          && (ref.enclosingQualifiedName === candidate.ownerQualifiedName
+            || ref.enclosingQualifiedName!.startsWith(`${candidate.ownerQualifiedName}.`))
+        ))
+        : undefined;
+      if (binding) {
+        const expectedQualifiedNames = [
+          `${binding.typeName}.${bare}`,
+          `${binding.typeName}::${bare}`,
+        ];
+        const exactTargets = [...new Set(expectedQualifiedNames
+          .map((qualifiedName) => input.lookup.byQualifiedName(qualifiedName))
+          .filter((id): id is string => Boolean(id) && id !== src))];
+        const candidates = input.lookup.bareNameCandidates(bare)
+          .filter((candidate) => candidate.id !== src)
+          .filter((candidate) => {
+            if (binding.typeFilePath && candidate.filePath === binding.typeFilePath) return true;
+            if (candidate.qualifiedName) {
+              return expectedQualifiedNames.includes(candidate.qualifiedName)
+                || expectedQualifiedNames.some((name) => candidate.qualifiedName!.endsWith(`.${name}`));
+            }
+            return false;
+          });
+        const receiverTargets = [...new Set([...exactTargets, ...candidates.map((candidate) => candidate.id)])];
+        if (receiverTargets.length === 1) {
+          push(src, receiverTargets[0], edgeType, "EXTRACTED", undefined, {
+            resolution: "receiver_binding",
+            receiver: ref.memberReceiver,
+            receiverProperty: binding.propertyName,
+            receiverType: binding.typeName,
+            startLine: ref.startLine,
+          });
+        } else {
+          markUnresolved(ref, src, receiverTargets.length > 1 ? "ambiguous_receiver" : "unresolved_receiver", receiverTargets.length > 1
+            ? `receiver type ${binding.typeName} has multiple ${bare} targets`
+            : `receiver type ${binding.typeName} has no indexed ${bare} target`);
+        }
+        continue;
+      }
+    }
+
+    // Rust field/scoped receiver calls do not carry enough static type
+    // information to prove an implementation. In particular, a local
+    // function named `collect` or `is_empty` must never receive an edge from
+    // `games.into_iter().collect()` or `String::new().is_empty()`.
+    if (input.language === "rust" && ref.kind === "call" && ref.memberReceiver
+      && !/^(?:self|Self)$/u.test(ref.memberReceiver.trim())) {
+      markUnresolved(ref, src, "rust_dynamic_dispatch", "Rust receiver call requires type/trait evidence not available in this pass");
+      continue;
+    }
 
     // JSX is syntactically explicit but its target can still be ambiguous.
     // Resolve only a same-file, exact qualified, or unique imported/repo
@@ -211,7 +334,7 @@ export function resolveRefs(input: {
       if (unique) {
         push(src, unique.id, edgeType, "INFERRED", 0.5);
       } else {
-        unresolved += 1;
+        markUnresolved(ref, src, "jsx_target_unresolved", "JSX target is missing or ambiguous");
       }
       continue;
     }
@@ -235,7 +358,7 @@ export function resolveRefs(input: {
     // run first so legitimate shadowing (`class Date { static now() {} }`) is
     // still treated as user code rather than as the JavaScript global.
     if (ref.kind === "call" && isPlatformMemberReceiver(ref.memberReceiver)) {
-      unresolved += 1;
+      markUnresolved(ref, src, "platform_member", "platform/runtime member has no repository target");
       continue;
     }
 
@@ -281,7 +404,7 @@ export function resolveRefs(input: {
         line: ref.startLine,
         enclosingQualifiedName: ref.enclosingQualifiedName ?? null,
       });
-      unresolved += 1;
+      markUnresolved(ref, src, "external_package", "import resolves outside the indexed repository");
       continue;
     }
 
@@ -308,7 +431,7 @@ export function resolveRefs(input: {
         line: ref.startLine,
         enclosingQualifiedName: ref.enclosingQualifiedName ?? null,
       });
-      unresolved += 1;
+      markUnresolved(ref, src, "external_namespace", "namespace receiver resolves outside the indexed repository");
       continue;
     }
 
@@ -336,7 +459,7 @@ export function resolveRefs(input: {
       }
       if (scoped.length > 1) {
         // still ambiguous even after import scoping → refuse to guess
-        unresolved += 1;
+        markUnresolved(ref, src, "ambiguous_import", "multiple imported repository targets remain");
         continue;
       }
     }
@@ -353,7 +476,7 @@ export function resolveRefs(input: {
       // file imports repository code. External SDK/framework receivers have no
       // internal imported file and must not schedule an unrelated second pass.
       if (candidates.length === 0 && input.importedFiles.size > 0) unresolvedNames.push(bare);
-      unresolved += 1;
+      markUnresolved(ref, src, "unresolved_member_or_type", "member or type target is not resolvable from file/import scope");
       continue;
     }
 
@@ -364,7 +487,7 @@ export function resolveRefs(input: {
       if (candidates.length === 0 && input.importedFiles && input.importedFiles.size > 0) {
         unresolvedNames.push(bare);
       }
-      unresolved += 1;
+      markUnresolved(ref, src, "generic_or_builtin", "generic or runtime name was not safely bound");
       continue;
     }
 
@@ -382,9 +505,9 @@ export function resolveRefs(input: {
       if (candidates.length === 0 && input.importedFiles && input.importedFiles.size > 0) {
         unresolvedNames.push(bare);
       }
-      unresolved += 1; // 0 candidates, or too ambiguous to guess
+      markUnresolved(ref, src, candidates.length === 0 ? "no_candidate" : "ambiguous_candidates", candidates.length === 0 ? "no indexed target candidate" : "too many target candidates to guess safely");
     }
   }
 
-  return { edges, unresolved, unresolvedNames, externalCalls };
+  return { edges, unresolved, unresolvedNames, externalCalls, unresolvedItems };
 }

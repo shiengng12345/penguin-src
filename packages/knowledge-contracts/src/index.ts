@@ -6,4 +6,7 @@ export * from "./response.js";
 export * from "./cursor.js";
 export * from "./surface.js";
 export * from "./locator.js";
+export * from "./endpoint-identity.js";
+export * from "./endpoint-inventory.js";
+export * from "./semantic.js";
 export { canonicalInputSchema, listCanonicalInputSchemas, type KnowledgeInputSchema } from "./input-schemas.js";

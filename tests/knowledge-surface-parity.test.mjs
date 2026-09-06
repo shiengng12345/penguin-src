@@ -44,6 +44,10 @@ test("CLI/MCP/Wiki registration contracts expose required IDs and explicit statu
       registrations.map((registration) => registration.capabilityId).filter((id) => implemented.has(id)),
     );
   }
+  for (const registration of listMcpRegistrations()) {
+    assert.match(registration.advertisedTool, /^knowledge_[a-z0-9_]+$/);
+    assert.equal(registration.invocationMode, "direct");
+  }
 });
 
 test("CLI capability endpoint publishes the same canonical manifest hash", () => {
@@ -93,7 +97,15 @@ test("canonical alias registry has no private capability IDs and adapters carry 
 test("all registered output validators reject non-JSON adapter output", () => {
   for (const registration of [...listCliRegistrations(), ...listMcpRegistrations(), ...listWikiRegistrations()]) {
     if (registration.capabilityId === "knowledge.search") continue;
-    assert.throws(() => registration.validateOutput({ invalid: () => "not JSON" }), /JSON-compatible/);
+    assert.throws(() => registration.validateOutput({ invalid: () => "not JSON" }), /JSON-compatible|semantic/i);
+  }
+});
+
+test("semantic registrations reject JSON-compatible but contract-invalid output", () => {
+  for (const registration of [...listCliRegistrations(), ...listMcpRegistrations(), ...listWikiRegistrations()]) {
+    if (registration.capabilityId === "knowledge.semantic_status" || registration.capabilityId === "knowledge.semantic_control") {
+      assert.throws(() => registration.validateOutput({ garbage: true }), /semantic/i);
+    }
   }
 });
 
@@ -101,8 +113,56 @@ test("every MCP tool input schema equals the canonical contract schema", () => {
   const registrations = new Map(listMcpRegistrations().map((registration) => [registration.capabilityId, registration]));
   for (const tool of KNOWLEDGE_TOOL_DEFS) {
     const capabilityId = tool["x-penguin-capability-id"];
+    // Legacy aliases are callable compatibility spellings; the generated
+    // canonical tool owns the full-manifest ID. tools/list projects the alias
+    // with that ID for existing Claude/Codex prompts.
+    if (!capabilityId && CAPABILITY_ALIASES[tool.name]) continue;
     assert.ok(capabilityId, `${tool.name} has no canonical capability id`);
     assert.deepEqual(tool.inputSchema, canonicalInputSchema(capabilityId), `${tool.name} input schema drift`);
     assert.deepEqual(registrations.get(capabilityId)?.inputSchema, canonicalInputSchema(capabilityId), `${capabilityId} registration schema drift`);
+  }
+});
+
+test("every MCP registration has exactly one canonical wire name", () => {
+  const registrations = listMcpRegistrations();
+  const wireNames = new Map();
+  for (const registration of registrations) {
+    assert.ok(registration.advertisedTool, `${registration.capabilityId} has no advertisedTool`);
+    assert.ok(!wireNames.has(registration.advertisedTool), `duplicate wire name: ${registration.advertisedTool}`);
+    wireNames.set(registration.advertisedTool, registration.capabilityId);
+  }
+});
+
+test("every advertised MCP name is callable", () => {
+  const registrations = listMcpRegistrations();
+  const advertised = new Set(registrations.map((r) => r.advertisedTool));
+  const callable = new Set(KNOWLEDGE_TOOL_DEFS.map((t) => t.name));
+  for (const name of advertised) {
+    assert.ok(callable.has(name), `advertised ${name} is not in KNOWLEDGE_TOOL_DEFS`);
+  }
+});
+
+test("MCP aliases resolve to the same capability as canonical names", () => {
+  const registrations = new Map(listMcpRegistrations().map((r) => [r.capabilityId, r]));
+  for (const [alias, canonicalId] of Object.entries(CAPABILITY_ALIASES)) {
+    const aliasedTool = KNOWLEDGE_TOOL_DEFS.find((t) => t.name === alias);
+    const canonicalTool = KNOWLEDGE_TOOL_DEFS.find((t) => t["x-penguin-capability-id"] === canonicalId);
+    if (!aliasedTool || !canonicalTool) continue;
+    const aliasCapabilityId = aliasedTool["x-penguin-capability-id"] ?? canonicalId;
+    assert.equal(aliasCapabilityId, canonicalId, `alias ${alias} does not resolve to ${canonicalId}`);
+  }
+});
+
+test("no listed tool has an empty schema unless its capability explicitly accepts no arguments", () => {
+  for (const tool of KNOWLEDGE_TOOL_DEFS) {
+    const schema = tool.inputSchema;
+    if (!schema || (schema.type === "object" && (!schema.properties || Object.keys(schema.properties).length === 0) && !schema.required?.length)) {
+      const capabilityId = tool["x-penguin-capability-id"];
+      if (capabilityId) {
+        const canonical = canonicalInputSchema(capabilityId);
+        assert.ok(canonical.type === "object" && (!canonical.properties || Object.keys(canonical.properties).length === 0),
+          `${tool.name} has empty schema but canonical schema for ${capabilityId} expects arguments`);
+      }
+    }
   }
 });

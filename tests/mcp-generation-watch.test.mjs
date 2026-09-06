@@ -6,16 +6,17 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   unlinkSync,
   utimesSync,
   writeFileSync,
 } from "node:fs";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
@@ -178,9 +179,19 @@ function writeVersionedRuntime(runtimeRoot, buildId, appVersion) {
   const generation = join(runtimeRoot, buildId);
   const mcpDist = join(generation, "mcp", "dist");
   mkdirSync(mcpDist, { recursive: true });
+  // The runtime manifest is a complete generation contract.  The MCP
+  // launcher validates the shared parser payload even for a health-only
+  // session, so keep this fixture honest instead of testing an impossible
+  // partially-installed generation.
+  mkdirSync(join(generation, "wasm"), { recursive: true });
+  writeFileSync(join(generation, "wasm", "tree-sitter.wasm"), "fixture-wasm");
   copyFileSync(new URL("../packages/mcp/dist/index.js", import.meta.url), join(mcpDist, "index.js"));
   writeFileSync(join(generation, "package.json"), JSON.stringify({ type: "module" }));
-  symlinkSync(process.execPath, join(generation, "node"));
+  // Keep the node entry physically inside the generation.  A symlink to the
+  // developer's system Node would violate the launcher boundary contract;
+  // this tiny in-generation shim still runs the same test interpreter.
+  writeFileSync(join(generation, "node"), `#!/bin/sh\nexec ${process.execPath} "$@"\n`);
+  chmodSync(join(generation, "node"), 0o755);
   writeFileSync(
     join(generation, "manifest.json"),
     JSON.stringify({
@@ -188,6 +199,10 @@ function writeVersionedRuntime(runtimeRoot, buildId, appVersion) {
       ready: true,
       buildId,
       appVersion,
+      capabilityHash: "a".repeat(64),
+      contractSchemaVersion: 18,
+      contractVersion: "2",
+      modelHash: "b".repeat(64),
       nodePath: "node",
       mcpEntry: "mcp/dist/index.js",
       wasmPath: "wasm",
@@ -288,5 +303,46 @@ test("real stable wrapper passes its temporary HOME runtime root to the MCP sess
     }
   } finally {
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+test("upgrade replay report proves the fresh launcher moved to runtime B", () => {
+  const dir = mkdtempSync(join(tmpdir(), "pgv-upgrade-report-"));
+  const reportPath = join(dir, "upgrade-report.md");
+  try {
+    const result = spawnSync(process.execPath, ["scripts/knowledge-install-upgrade-test.mjs"], {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        PENGUIN_INSTALL_UPGRADE_REPORT: reportPath,
+      },
+      encoding: "utf8",
+      timeout: 30_000,
+      maxBuffer: 16 * 1024 * 1024,
+    });
+
+    assert.equal(
+      result.status,
+      0,
+      `upgrade replay script failed.\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+
+    const report = readFileSync(reportPath, "utf8");
+    const match = report.match(/```json\n([\s\S]*?)\n```/u);
+    assert.ok(match, `upgrade report did not contain a JSON evidence block:\n${report}`);
+    const evidence = JSON.parse(match[1]);
+    const session = evidence.sessions[0];
+
+    assert.equal(session.old.afterUpgrade.availableBuildId, "runtime-B");
+    assert.equal(session.old.outdatedContract.action, "restart_mcp_session");
+    assert.equal(session.fresh.runningBuildId, "runtime-B");
+    assert.equal(session.fresh.cli.buildId, "runtime-B");
+    assert.equal(session.fresh.mcp.buildId, "runtime-B");
+    assert.equal(session.fresh.cli.capabilityHash, session.fresh.mcp.capabilityHash);
+    assert.equal(basename(session.old.selectedRuntimePath), "runtime-A");
+    assert.equal(basename(session.fresh.selectedRuntimePath), "runtime-B");
+    assert.notEqual(session.fresh.selectedRuntimePath, session.old.selectedRuntimePath);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });

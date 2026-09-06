@@ -5,7 +5,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
-import { KnowledgeStore } from "../packages/knowledge-core/dist/index.js";
+import { KnowledgeStore, buildStatusPanel } from "../packages/knowledge-core/dist/index.js";
 import { runQueryServer } from "../packages/knowledge-cli/dist/query-server.js";
 
 const GIT_ENV = { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
@@ -67,7 +67,7 @@ test("knowledge.status_panel: repo on main indexed at head reports aligned, with
   const response = await sendStatusPanelRequest(store);
   assert.equal(response.ok, true, `expected ok response: ${JSON.stringify(response)}`);
   assert.equal(response.result.db.connected, true);
-  assert.equal(response.result.db.schemaVersion, 14);
+  assert.equal(response.result.db.schemaVersion, 18);
   assert.equal(response.result.repos.length, 1);
   const repo = response.result.repos[0];
   assert.equal(repo.repoId, repoId);
@@ -121,6 +121,26 @@ test("knowledge.status_panel: indexed commit differs from head reports behind", 
   store.close();
 });
 
+test("knowledge.status_panel: live git drift always explains behind when stored stale reason is absent", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "penguin-status-panel-"));
+  const store = KnowledgeStore.open({ dbPath: join(dir, "knowledge.db"), ledgerPath: join(dir, "ledger.jsonl") });
+  const rootPath = join(dir, "repo");
+  const liveHead = initGitRepo(rootPath, "main");
+  const repoId = store.registerRepo({ name: "demo", rootPath });
+  const branchId = store.registerBranch({ repoId, name: "main", headCommit: "indexed-sha", status: "live" });
+  store.db
+    .prepare("UPDATE branches SET last_indexed_commit=?, last_indexed_at=?, stale_reason=NULL WHERE id=?")
+    .run("indexed-sha", "2026-08-01T00:00:00.000Z", branchId);
+
+  const response = await sendStatusPanelRequest(store);
+  assert.equal(response.ok, true, `expected ok response: ${JSON.stringify(response)}`);
+  const repo = response.result.repos[0];
+  assert.equal(repo.revisionAlignment, "behind");
+  assert.equal(repo.staleReason, "git_head_differs_from_indexed_commit");
+  assert.notEqual(liveHead, "indexed-sha");
+  store.close();
+});
+
 test("knowledge.status_panel: repo root with no git repo reports git_unavailable and falls back to the sole live branch", async () => {
   const dir = mkdtempSync(join(tmpdir(), "penguin-status-panel-"));
   const store = KnowledgeStore.open({ dbPath: join(dir, "knowledge.db"), ledgerPath: join(dir, "ledger.jsonl") });
@@ -163,7 +183,35 @@ test("knowledge.status_panel: no registered repos returns an empty repos array w
   const store = KnowledgeStore.open({ dbPath: join(dir, "knowledge.db"), ledgerPath: join(dir, "ledger.jsonl") });
   const response = await sendStatusPanelRequest(store);
   assert.equal(response.ok, true, `expected ok response: ${JSON.stringify(response)}`);
-  assert.equal(response.result.db.schemaVersion, 14);
+  assert.equal(response.result.db.schemaVersion, 18);
   assert.deepEqual(response.result.repos, []);
+  store.close();
+});
+
+test("buildStatusPanel probes each repo exactly once with an injected request-local Git reader", () => {
+  const dir = mkdtempSync(join(tmpdir(), "penguin-status-panel-many-"));
+  const store = KnowledgeStore.open({ dbPath: join(dir, "knowledge.db"), ledgerPath: join(dir, "ledger.jsonl") });
+  const roots = new Set();
+  for (let index = 0; index < 25; index += 1) {
+    const rootPath = join(dir, `repo-${index}`);
+    roots.add(rootPath);
+    const repoId = store.registerRepo({ name: `repo-${index}`, rootPath });
+    const branchId = store.registerBranch({ repoId, name: "main", headCommit: `sha-${index}`, status: "live" });
+    store.db.prepare("UPDATE branches SET last_indexed_commit=? WHERE id=?").run(`sha-${index}`, branchId);
+  }
+
+  const calls = new Map();
+  const panel = buildStatusPanel(store, {
+    readGitState: (rootPath) => {
+      calls.set(rootPath, (calls.get(rootPath) ?? 0) + 1);
+      const index = Number(rootPath.slice(rootPath.lastIndexOf("-") + 1));
+      return { branch: "main", headSha: `sha-${index}`, dirty: false };
+    },
+  });
+
+  assert.equal(panel.repos.length, 25);
+  assert.equal(calls.size, 25);
+  for (const rootPath of roots) assert.equal(calls.get(rootPath), 1);
+  assert.ok(panel.repos.every((repo) => repo.revisionAlignment === "aligned"));
   store.close();
 });

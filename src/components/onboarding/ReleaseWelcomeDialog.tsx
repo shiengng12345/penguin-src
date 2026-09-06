@@ -10,6 +10,14 @@ import { APP_VALUE_KEYS } from "@/lib/persistence-keys";
 
 type McpRefreshState = "refreshing" | "ready" | "needs-attention";
 
+interface McpInstallResult {
+  message: string;
+  wroteConfig: boolean;
+  changedClients: string[];
+  unchangedClients: string[];
+  skippedClients: string[];
+}
+
 interface ReleaseWelcomeDialogProps {
   onOpenMcpSettings: () => void;
 }
@@ -45,7 +53,7 @@ export function ReleaseWelcomeDialog({ onOpenMcpSettings }: ReleaseWelcomeDialog
         try {
           // This refreshes the stable ~/.penguin/mcp runtime and rewrites only
           // detected Claude/Codex clients to the canonical `penguin` entry.
-          await invoke<string>("mcp_install_to_local_clients");
+          await invoke<McpInstallResult>("mcp_install_to_local_clients");
           if (active) setMcpRefreshState("ready");
         } catch {
           // A machine with no supported AI client, or an unwritable client

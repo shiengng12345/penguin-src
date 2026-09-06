@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 
 export interface GitContext {
@@ -15,6 +15,7 @@ export interface GitContext {
   // must never make dirty source look committed.
   worktreeState: "clean" | "dirty" | "unknown" | "not_applicable";
   dirtyFiles: string[];
+  untrackedFiles: string[];
   worktreeFingerprint: string;
   statusError: string | null;
 }
@@ -22,6 +23,7 @@ export interface GitContext {
 interface WorktreeStatus {
   state: "clean" | "dirty" | "unknown";
   files: string[];
+  untrackedFiles: string[];
   fingerprint: string;
   error: string | null;
 }
@@ -65,6 +67,7 @@ function readWorktreeStatus(checkoutPath: string, commit: string | null): Worktr
     return {
       state: files.length > 0 ? "dirty" : "clean",
       files,
+      untrackedFiles: untracked.split("\0").filter(Boolean).sort(),
       fingerprint: fingerprintWorktree(checkoutPath, commit, files),
       error: null,
     };
@@ -73,6 +76,7 @@ function readWorktreeStatus(checkoutPath: string, commit: string | null): Worktr
     return {
       state: "unknown",
       files: [],
+      untrackedFiles: [],
       fingerprint: fingerprintWorktree(checkoutPath, commit, []),
       error: message,
     };
@@ -156,15 +160,20 @@ function resolveRef(gitDir: string, ref: string): string | null {
 // CLI, §4.8). Non-git → implicit "(workdir)" branch so downstream code has one
 // path (the "code edges carry branch_id" rule needs no special-case).
 export function readGitContext(rootPath: string): GitContext {
-  const found = findGitDir(rootPath);
+  let canonicalInput: string;
+  try { canonicalInput = realpathSync.native(rootPath); }
+  catch { canonicalInput = resolve(rootPath); }
+  const found = findGitDir(canonicalInput);
   // A git repo's identity is its WORKTREE ROOT, not the arbitrary subdir passed
   // in — so indexing repo/ and repo/src-tauri/ resolve to the same repo (no
   // duplicate). Non-git falls back to the given path.
-  const checkoutPath = found ? found.worktreeRoot : resolve(rootPath);
+  const checkoutPath = found
+    ? (realpathSync.native(found.worktreeRoot) ?? found.worktreeRoot)
+    : canonicalInput;
   if (!found || !existsSync(join(found.gitDir, "HEAD"))) {
     return {
       isGit: false, branch: "(workdir)", commit: null, checkoutPath, repoName: null,
-      worktreeState: "not_applicable", dirtyFiles: [],
+      worktreeState: "not_applicable", dirtyFiles: [], untrackedFiles: [],
       worktreeFingerprint: fingerprintWorktree(checkoutPath, null, []), statusError: null,
     };
   }
@@ -179,7 +188,7 @@ export function readGitContext(rootPath: string): GitContext {
     const status = readWorktreeStatus(checkoutPath, commit);
     return {
       isGit: true, branch, commit, checkoutPath, repoName,
-      worktreeState: status.state, dirtyFiles: status.files,
+      worktreeState: status.state, dirtyFiles: status.files, untrackedFiles: status.untrackedFiles,
       worktreeFingerprint: status.fingerprint, statusError: status.error,
     };
   }
@@ -188,13 +197,13 @@ export function readGitContext(rootPath: string): GitContext {
     const status = readWorktreeStatus(checkoutPath, head);
     return {
       isGit: true, branch: "(detached)", commit: head, checkoutPath, repoName,
-      worktreeState: status.state, dirtyFiles: status.files,
+      worktreeState: status.state, dirtyFiles: status.files, untrackedFiles: status.untrackedFiles,
       worktreeFingerprint: status.fingerprint, statusError: status.error,
     };
   }
   return {
     isGit: true, branch: "(workdir)", commit: null, checkoutPath, repoName,
-    worktreeState: "unknown", dirtyFiles: [],
+    worktreeState: "unknown", dirtyFiles: [], untrackedFiles: [],
     worktreeFingerprint: fingerprintWorktree(checkoutPath, null, []),
     statusError: "HEAD is neither a symbolic ref nor a commit hash",
   };

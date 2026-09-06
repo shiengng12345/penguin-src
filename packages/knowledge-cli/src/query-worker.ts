@@ -1,6 +1,13 @@
 import { parentPort, workerData } from "node:worker_threads";
 import type { SearchRequest, SearchResponse } from "@penguin/knowledge-contracts";
-import { KnowledgeStore, resolveRevisionContext, searchKnowledge, serviceGraph } from "@penguin/knowledge-core";
+import {
+  KnowledgeStore,
+  openBundledEmbeddingProvider,
+  resolveRevisionContext,
+  searchKnowledgeAsync,
+  serviceGraph,
+  type EmbeddingProvider,
+} from "@penguin/knowledge-core";
 
 interface WorkerRequest {
   type: "run";
@@ -18,7 +25,26 @@ const store = KnowledgeStore.open({
   allowSchemaMutation: false,
 });
 
-function runSearch(input: SearchRequest): SearchResponse {
+// Query workers are resident for the lifetime of the Tauri query server. Keep
+// the model promise in this worker instead of opening Nomic for every search:
+// the first semantic request pays the model-load cost, while subsequent
+// requests reuse the same ONNX session and only pay query embedding plus
+// SQLite vector retrieval. A rejected promise is cleared so a transient model
+// startup failure can be retried after the runtime has recovered.
+let semanticProviderPromise: Promise<EmbeddingProvider | undefined> | null = null;
+
+async function optionalBundledSemanticProvider() {
+  if (!semanticProviderPromise) {
+    semanticProviderPromise = openBundledEmbeddingProvider().catch((error) => {
+      semanticProviderPromise = null;
+      if (String((error as Error).message ?? error) === "LOCAL_EMBEDDING_MODEL_NOT_INSTALLED") return undefined;
+      throw error;
+    });
+  }
+  return semanticProviderPromise;
+}
+
+async function runSearch(input: SearchRequest): Promise<SearchResponse> {
   const requested = input.scope?.revisions ?? [];
   const scopes: Array<{ repoId?: string; snapshotId: string }> = [];
   const scopeWarnings: Array<{ code: string; message: string }> = [];
@@ -65,7 +91,15 @@ function runSearch(input: SearchRequest): SearchResponse {
   const request = requested.length
     ? { ...input, scope: scopes.length ? { ...restScope, revisions: scopes } : restScope }
     : input;
-  const response = searchKnowledge(request, { store, ...(scopes.length ? { scopes } : {}) });
+  const response = await searchKnowledgeAsync(request, {
+    store,
+    ...(scopes.length ? { scopes } : {}),
+    // searchKnowledgeAsync only invokes the factory when the request opts into
+    // semantic retrieval. Passing the resident factory here makes the Tauri
+    // query runtime feature-complete with CLI/MCP while preserving the fast
+    // deterministic path for ordinary searches.
+    semanticProviderFactory: optionalBundledSemanticProvider,
+  });
   return scopeWarnings.length
     ? {
       ...response,
@@ -77,7 +111,7 @@ function runSearch(input: SearchRequest): SearchResponse {
     : response;
 }
 
-parentPort.on("message", (request: WorkerRequest) => {
+parentPort.on("message", async (request: WorkerRequest) => {
   if (request.type !== "run") return;
   if (request.capabilityId !== "knowledge.search" && request.capabilityId !== "knowledge.warmup") return;
   try {
@@ -88,7 +122,7 @@ parentPort.on("message", (request: WorkerRequest) => {
     // warmup makes a click that lands mid-warmup wait for it to finish.
     const result = request.capabilityId === "knowledge.warmup"
       ? { warmed: serviceGraph(store).nodes.length }
-      : runSearch(request.input);
+      : await runSearch(request.input);
     parentPort!.postMessage({ type: "result", id: request.id, ok: true, result });
   } catch (error) {
     parentPort!.postMessage({
@@ -98,6 +132,9 @@ parentPort.on("message", (request: WorkerRequest) => {
       error: {
         code: (error as { code?: string }).code ?? "INTERNAL",
         message: String((error as Error).message ?? error),
+        ...((error as { details?: Record<string, unknown> }).details ? { details: (error as { details: Record<string, unknown> }).details } : {}),
+        ...((error as { retryable?: boolean }).retryable !== undefined ? { retryable: Boolean((error as { retryable?: boolean }).retryable) } : {}),
+        ...((error as { remediation?: string }).remediation ? { remediation: (error as { remediation: string }).remediation } : {}),
       },
     });
   }

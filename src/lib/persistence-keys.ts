@@ -44,6 +44,10 @@ export const APP_VALUE_KEYS = {
   wikiPinnedSavedQueries: "penguin-wiki-pinned-saved-queries",
   wikiPreviewLines: "penguin-wiki-preview-lines",
   wikiRecentQueries: "penguin-wiki-recent-queries",
+  // Full-corpus jobs survive webview reloads and app restarts through the
+  // SQLite app_kv bridge. Legacy browser storage is migrated by the shared
+  // persistence layer on the next launch.
+  fullCorpusStatusPath: "penguin.full-corpus.status-path",
   devModeEnabled: "penguin-dev-mode-enabled",
   devModeToken: "penguin-dev-mode-token",
   devModeAdminToken: "penguin-dev-mode-admin-token",

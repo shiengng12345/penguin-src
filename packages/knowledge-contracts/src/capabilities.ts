@@ -2,6 +2,10 @@ import { createHash } from "node:crypto";
 
 export type Surface = "cli" | "mcp" | "wiki";
 
+/** Additive graph response contract carried by graph/flow hops. */
+export const GRAPH_EDGE_EVIDENCE_CONTRACT_VERSION = "1";
+export const GRAPH_EDGE_EVIDENCE_SCHEMA_ID = "knowledge.graph.edge-evidence.v1";
+
 export interface CapabilityDefinition {
   id: string;
   version: number;
@@ -12,6 +16,12 @@ export interface CapabilityDefinition {
   supportsCursor: boolean;
   mutating: boolean;
   confirmation: "required" | "not_required";
+  annotations: {
+    readOnlyHint: boolean;
+    destructiveHint: boolean;
+    idempotentHint: boolean;
+    openWorldHint: false;
+  };
   inputSchemaId: string;
   outputSchemaId: string;
 }
@@ -30,6 +40,8 @@ const CAPABILITY_ID_LIST = [
   "knowledge.branch.pin",
   "knowledge.index_status",
   "knowledge.status_panel",
+  "knowledge.semantic_status",
+  "knowledge.semantic_control",
   "knowledge.set_master_branch",
   "knowledge.snapshot.list",
   "knowledge.get_node",
@@ -54,6 +66,7 @@ const CAPABILITY_ID_LIST = [
   "knowledge.compare_branches",
   "knowledge.files",
   "knowledge.file_symbols",
+  "knowledge.endpoints",
   "knowledge.dead_code",
   "knowledge.package_dependencies",
   "knowledge.dependency_path",
@@ -124,6 +137,8 @@ const WIKI_CAPABILITY_IDS = new Set([
   "knowledge.capabilities",
   "knowledge.index_status",
   "knowledge.status_panel",
+  "knowledge.semantic_status",
+  "knowledge.semantic_control",
   "knowledge.get_node",
   "knowledge.callers",
   "knowledge.callees",
@@ -176,6 +191,7 @@ const MUTATING_IDS = new Set([
   "knowledge.repository.remove",
   "knowledge.branch.pin",
   "knowledge.set_master_branch",
+  "knowledge.semantic_control",
   "knowledge.response_sample.capture",
   "knowledge.incident.create",
   "knowledge.note.create",
@@ -216,6 +232,35 @@ function isMutating(id: string): boolean {
   return MUTATING_IDS.has(id) || MUTATING_PREFIXES.some((prefix) => id.startsWith(prefix));
 }
 
+// Cursor support is a wire-contract claim, not a synonym for read-only. Keep
+// this list aligned with canonicalInputSchema and the handlers that actually
+// emit/consume signed continuation tokens.
+const CURSOR_CAPABILITY_IDS = new Set([
+  "knowledge.search",
+  "knowledge.context",
+  "knowledge.note.list",
+  "knowledge.saved_query.run",
+  "knowledge.dead_code",
+  "knowledge.coverage",
+  "knowledge.endpoints",
+  "knowledge.file_symbols",
+  "knowledge.files",
+]);
+
+// Compact support is an explicit wire capability, not a synonym for
+// read-only. Only advertise it when the canonical request has a reachable
+// compact mode and the handler actually returns a smaller, meaning-preserving
+// projection. Over-advertising this flag makes fresh MCP consumers send an
+// argument the server rejects or silently ignores.
+const COMPACT_CAPABILITY_IDS = new Set([
+  "knowledge.capabilities",
+  "knowledge.search",
+  "knowledge.index_status",
+  "knowledge.flow",
+  "knowledge.endpoints",
+  "knowledge.dead_code",
+]);
+
 function createCapability(id: string): CapabilityDefinition {
   const mutating = isMutating(id);
   const requiredOn: Surface[] = ["cli", "mcp"];
@@ -226,10 +271,16 @@ function createCapability(id: string): CapabilityDefinition {
     title: id,
     coreOperation: id,
     requiredOn,
-    supportsCompact: !mutating,
-    supportsCursor: !mutating,
+    supportsCompact: COMPACT_CAPABILITY_IDS.has(id),
+    supportsCursor: CURSOR_CAPABILITY_IDS.has(id),
     mutating,
     confirmation: mutating ? "required" : "not_required",
+    annotations: {
+      readOnlyHint: !mutating,
+      destructiveHint: mutating,
+      idempotentHint: !mutating,
+      openWorldHint: false,
+    },
     inputSchemaId: id + ".input.v2",
     outputSchemaId: id + ".output.v2",
   };
@@ -253,6 +304,7 @@ export function capabilityHash(
     supportsCursor: capability.supportsCursor,
     mutating: capability.mutating,
     confirmation: capability.confirmation,
+    annotations: capability.annotations,
     inputSchemaId: capability.inputSchemaId,
     outputSchemaId: capability.outputSchemaId,
   }));

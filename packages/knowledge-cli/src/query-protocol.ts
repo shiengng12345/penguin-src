@@ -4,7 +4,7 @@ export interface QueryHello { type: "hello"; protocolVersion: 1; capabilityHash:
 export interface QueryRequest { type: "request"; id: string; capabilityId: string; input: unknown; protocolVersion?: number; }
 export interface QueryCancel { type: "cancel"; id: string; }
 export type QueryFrame = QueryRequest | QueryCancel;
-export type QueryResponse = { type: "response"; id: string; ok: true; result: unknown } | { type: "response"; id: string; ok: false; error: { code: string; message: string; retryable: boolean; details?: Record<string, unknown> } };
+export type QueryResponse = { type: "response"; id: string; ok: true; result: unknown } | { type: "response"; id: string; ok: false; error: { code: string; message: string; retryable: boolean; details?: Record<string, unknown>; remediation?: string } };
 
 export function queryHello(schemaVersion: number): QueryHello { return { type: "hello", protocolVersion: 1, capabilityHash: capabilityHash(CAPABILITIES), schemaVersion }; }
 export function encodeFrame(frame: unknown): string { return JSON.stringify(frame) + "\n"; }
@@ -23,12 +23,12 @@ export function parseFrame(line: string): QueryFrame {
 
 export async function dispatchQueryFrame(frame: QueryFrame, invoke: (capabilityId: string, input: unknown, signal?: AbortSignal) => Promise<unknown>, cancelled = new Set<string>(), active = new Map<string, AbortController>()): Promise<QueryResponse | null> {
   if (frame.type === "cancel") { cancelled.add(frame.id); active.get(frame.id)?.abort(); return null; }
-  if (cancelled.has(frame.id)) return { type: "response", id: frame.id, ok: false, error: { code: "CANCELLED", message: "request was cancelled", retryable: false } };
+  if (cancelled.has(frame.id)) return { type: "response", id: frame.id, ok: false, error: normalizeKnowledgeError({ code: "CANCELLED", message: "request was cancelled", retryable: false }) };
   const controller = new AbortController();
   active.set(frame.id, controller);
   try {
     const result = await invoke(frame.capabilityId, frame.input, controller.signal);
-    if (cancelled.has(frame.id) || controller.signal.aborted) return { type: "response", id: frame.id, ok: false, error: { code: "CANCELLED", message: "request was cancelled", retryable: false } };
+    if (cancelled.has(frame.id) || controller.signal.aborted) return { type: "response", id: frame.id, ok: false, error: normalizeKnowledgeError({ code: "CANCELLED", message: "request was cancelled", retryable: false }) };
     return { type: "response", id: frame.id, ok: true, result };
   }
   catch (error) { return { type: "response", id: frame.id, ok: false, error: normalizeKnowledgeError(error) }; }

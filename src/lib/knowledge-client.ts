@@ -3,6 +3,23 @@
 // CLI/MCP, §8.3) except db_status which is a cheap direct read. The UI adds no
 // query logic — it's a view over the shared implementation.
 import { invoke } from "@tauri-apps/api/core";
+import {
+  validateSemanticControlRequest,
+  validateSemanticControlResult,
+  validateSemanticStatusResponse,
+  type SemanticControlAction,
+  type SemanticControlResult,
+  type SemanticStatusResponse,
+} from "../../packages/knowledge-contracts/src/semantic.js";
+
+export type {
+  SemanticControlAction,
+  SemanticControlResult,
+  SemanticGenerationState,
+  SemanticStatus,
+  SemanticStatusResponse,
+  SemanticWorkerWakeResult,
+} from "../../packages/knowledge-contracts/src/semantic.js";
 
 export function formatKnowledgeError(error: unknown): string {
   const raw = String((error as Error).message ?? error);
@@ -98,10 +115,19 @@ export async function knowledgeCliSetup(): Promise<CliSetupStatus> {
   return invoke<CliSetupStatus>("knowledge_cli_setup");
 }
 
-// Configure the penguin MCP server into Claude Desktop / Claude Code / Codex
-// (idempotent config merges; returns a human summary).
-export async function mcpInstallToLocalClients(): Promise<string> {
-  return invoke<string>("mcp_install_to_local_clients");
+// Configure the penguin MCP server into Claude Desktop / Claude Code / Codex.
+// The merge is idempotent and returns per-client facts so onboarding and the
+// release updater never have to parse a human message to know what happened.
+export interface McpInstallResult {
+  message: string;
+  wroteConfig: boolean;
+  changedClients: string[];
+  unchangedClients: string[];
+  skippedClients: string[];
+}
+
+export async function mcpInstallToLocalClients(): Promise<McpInstallResult> {
+  return invoke<McpInstallResult>("mcp_install_to_local_clients");
 }
 
 // Write/refresh the global Penguin guidance block in the instruction files of
@@ -370,10 +396,61 @@ export interface StorageReport {
   gc: { lastRun: StorageGcRun | null; hotFeatureLimit: number; trigramEnabled: boolean };
   maintenance: { running: boolean; action: "collect" | "vacuum" | "analyze" | null; startedAt: string | null; lastResult: StorageMaintenanceResult | null };
   repos: Array<{ repoId: string; repoName: string; snapshots: number; files: number; lastIndexedAt: string | null }>;
+  semantic: {
+    ready: boolean;
+    backend: "sqlite-vec" | "unavailable" | "debug-fallback";
+    reason: string | null;
+    embeddingSpaces: number;
+    activeGenerations: number;
+    stagingGenerations: number;
+    expectedChunks: number;
+    readyJobs: number;
+    pendingJobs: number;
+    failedJobs: number;
+    readyRefs: number;
+    vectorRows: number;
+    orphanRefs: number;
+    orphanVectors: number;
+    modelDiskBytes: number | null;
+    lastCheckpoint: string | null;
+  };
 }
 
 export function knowledgeStorageReport(options: KnowledgeRequestOptions = {}): Promise<StorageReport> {
   return canonicalQuery<StorageReport>("knowledge.storage_report", {}, options.signal);
+}
+
+export async function knowledgeSemanticStatus(scopeKey?: string): Promise<SemanticStatusResponse> {
+  const raw = await invoke<string>("knowledge_semantic_status", { scopeKey: scopeKey ?? null });
+  return validateSemanticStatusResponse(JSON.parse(raw));
+}
+
+export async function knowledgeSemanticControl(
+  action: SemanticControlAction,
+  scopeKey: string,
+  generationId?: string,
+  options: { operationToken?: string } = {},
+): Promise<SemanticControlResult> {
+  const operationToken = options.operationToken ?? globalThis.crypto?.randomUUID?.()
+    ?? `semantic-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const request = validateSemanticControlRequest({
+    action,
+    scopeKey,
+    ...(generationId === undefined ? {} : { generationId }),
+    operationToken,
+  });
+  const raw = await invoke<string>("knowledge_semantic_control", {
+    action: request.action,
+    scopeKey: request.scopeKey,
+    generationId: request.generationId ?? null,
+    operationToken: request.operationToken,
+  });
+  return validateSemanticControlResult(JSON.parse(raw));
+}
+
+export async function onSemanticStatusChanged(cb: (payload: unknown) => void): Promise<() => void> {
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<unknown>("knowledge-semantic-status-changed", (event) => cb(event.payload));
 }
 
 // Mutating; long-running for vacuum (the resident runtime holds the response
@@ -398,6 +475,99 @@ export async function knowledgeReindex(path?: string): Promise<KnowledgeIndexRep
   evidenceCache.clear();
   statusPanelCache = null;
   return JSON.parse(raw) as KnowledgeIndexReport;
+}
+
+export type KnowledgeCorpusMode = "index" | "rebuild" | "both";
+export type KnowledgeCorpusControlAction = "pause" | "resume" | "cancel" | "retry";
+export type KnowledgeCorpusJobState = "running" | "paused" | "completed" | "failed" | "cancelled";
+export type KnowledgeCorpusPhase = "index" | "rebuild" | "semantic" | "verify";
+
+export interface KnowledgeCorpusJob {
+  jobId: string;
+  rootPath: string;
+  repoIds: string[];
+  phase: KnowledgeCorpusPhase;
+  currentRepoId: string | null;
+  completedRepos: number;
+  totalRepos: number;
+  parsed: number;
+  skipped: number;
+  errors: number;
+  startedAt: string;
+  updatedAt: string;
+  state: KnowledgeCorpusJobState;
+  mode: KnowledgeCorpusMode;
+  statusPath: string;
+  controlPath: string;
+  heartbeatAt: string;
+  lastFile: string | null;
+  queueWaitMs: number;
+  executionMs: number;
+  retryCount: number;
+  lastError: string | null;
+  remediation: string | null;
+}
+
+export interface KnowledgeCorpusLaunch {
+  statusPath: string;
+  controlPath: string;
+  pid: number;
+}
+
+export interface KnowledgeCorpusProgress {
+  phase: "scan" | "index" | "complete";
+  done?: number;
+  total?: number;
+  file?: string;
+  rootPath: string;
+  job: KnowledgeCorpusJob;
+}
+
+export async function knowledgeCorpusStart(
+  path?: string,
+  mode: KnowledgeCorpusMode = "both",
+  statusPath?: string,
+): Promise<KnowledgeCorpusLaunch> {
+  const launch = await invoke<KnowledgeCorpusLaunch>("knowledge_corpus_start", {
+    path: path ?? null,
+    mode,
+    statusPath: statusPath ?? null,
+  });
+  return launch;
+}
+
+export async function knowledgeCorpusStatus(statusPath: string): Promise<KnowledgeCorpusJob> {
+  const raw = await invoke<string>("knowledge_corpus_status", { statusPath });
+  return JSON.parse(raw) as KnowledgeCorpusJob;
+}
+
+export async function knowledgeCorpusControl(
+  action: KnowledgeCorpusControlAction,
+  statusPath: string,
+): Promise<Record<string, unknown>> {
+  const raw = await invoke<string>("knowledge_corpus_control", { action, statusPath });
+  return JSON.parse(raw) as Record<string, unknown>;
+}
+
+export async function knowledgeCorpusReconcile(
+  path?: string,
+  strict = false,
+): Promise<Record<string, unknown>> {
+  const raw = await invoke<string>("knowledge_corpus_reconcile", {
+    path: path ?? null,
+    strict,
+  });
+  return JSON.parse(raw) as Record<string, unknown>;
+}
+
+export async function onCorpusProgress(cb: (payload: KnowledgeCorpusProgress) => void): Promise<() => void> {
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<KnowledgeCorpusProgress>("knowledge-corpus-progress", (event) => cb(event.payload));
+}
+
+export async function onCorpusStatusChanged(cb: (payload: unknown) => void): Promise<() => void> {
+  const { listen } = await import("@tauri-apps/api/event");
+  return listen<unknown>("knowledge-corpus-status-changed", (event) => cb(event.payload));
 }
 
 // —— Index browse (repo → branch → file → symbol) + graph view (Plan 8 ②) ——

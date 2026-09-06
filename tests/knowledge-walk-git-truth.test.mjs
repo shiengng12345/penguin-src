@@ -86,3 +86,14 @@ test("discovery records symlink itself and marks outside-workspace target", () =
   assert.equal(file?.coverageStatus, "excluded");
   assert.equal(file?.reasonCode, "outside_workspace");
 });
+
+test("discovery omits untracked package-manager caches from the repository corpus", () => {
+  const repo = mkdtempSync(join(tmpdir(), "pk-discovery-package-cache-"));
+  git(repo, "init", "-q");
+  mkdirSync(join(repo, ".pnpm-store", "v3", "files", "aa"), { recursive: true });
+  writeFileSync(join(repo, ".pnpm-store", "v3", "files", "aa", "blob"), "retry failed app push mission".repeat(100));
+  writeFileSync(join(repo, "service.ts"), "export const service = true;\n");
+  const report = discoverRepoCoverage(repo);
+  assert.equal(report.files.some((file) => file.relativePath.startsWith(".pnpm-store/")), false);
+  assert.equal(report.files.some((file) => file.relativePath === "service.ts"), true);
+});

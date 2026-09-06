@@ -1,5 +1,6 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { createHash } from "node:crypto";
+import { resolve } from "node:path";
 import {
   buildContextPack,
   buildExplorePack,
@@ -7,7 +8,6 @@ import {
   buildFlow,
   renderFlowMarkdown,
   affectedByFiles,
-  affectedByNode,
   architecture,
   communities,
   timeline,
@@ -37,7 +37,9 @@ import {
   getSourceHit,
   searchRegex,
   searchKnowledge,
+  searchKnowledgeAsync,
   graphQuery,
+  listCoverageDebt,
   packageDependencies,
   dependencyPath,
   OntologyStore,
@@ -76,26 +78,61 @@ import {
   ScopeResolutionError,
   resolveTarget,
   TargetResolutionError,
+  reconcileCorpus,
+  openBundledEmbeddingProvider,
+  resolveBundledEmbeddingSpaceIdentity,
+  listSemanticStatuses,
+  resolveSemanticScopeKey,
+  applySemanticRuntimeState,
+  createFullResetPlan,
+  executeFullReset,
+  finalizeFullReset,
+  readResetManifest,
+  recoverFullReset,
+  reissueFullResetPlan,
+  rollbackFullReset,
+  executeSemanticControl,
   SCHEMA_VERSION,
   HmacOperationCursorCodec,
+  resolveLocalCursorSecret,
   type GraphMode,
   type KnowledgeStore,
+  type VerifiedLocalEmbeddingProvider,
 } from "@penguin/knowledge-core";
-import { indexRepo, indexRevision, RevisionIndexCoordinator, KNOWLEDGE_PARSER_VERSION, KNOWLEDGE_RESOLVER_VERSION, startWatcher, createNote, createIncident, appendNote, writeNoteBody, readNote, listNotes, reindexNotesDir, listDanglingNoteLinks, listEvidenceNotes, setEvidenceStatus, evidenceDoctor, repairEvidence, readGitContext, type EvidenceLifecycle } from "@penguin/knowledge-indexer";
+import { indexRepo, indexRevision, RevisionIndexCoordinator, KNOWLEDGE_PARSER_VERSION, KNOWLEDGE_RESOLVER_VERSION, prepareWorkingTreeOverlay, startWatcher, createNote, createIncident, appendNote, writeNoteBody, readNote, listNotes, reindexNotesDir, listDanglingNoteLinks, listEvidenceNotes, setEvidenceStatus, evidenceDoctor, repairEvidence, readGitContext, collectIndependentCorpusOracle, discoverFullCorpusRepositories, readFullCorpusJob, requestFullCorpusCancel, requestFullCorpusPause, requestFullCorpusResume, retryFullCorpus, runFullCorpus, type EvidenceLifecycle } from "@penguin/knowledge-indexer";
+import { listPublicNotes, publicEvidenceSummaries } from "@penguin/knowledge-indexer/notes";
 import { resolveProvider, aiComplete } from "./ai.js";
 import { hashHookTarget, loadHookSessionState, runClaudeHook, saveHookSessionState, selectPromptTargets } from "./claude-hook.js";
 import { createIndexRenderer } from "./render-progress.js";
 import { discoverSubRepos, isGitRepo, type RepoCandidate } from "./multi-repo.js";
 import { runApiDocCommand } from "./api-doc-command.js";
 import { runCallCommand } from "./call-command.js";
-import { createKnowledgeApiDocAdapter } from "./api-doc-knowledge-adapter.js";
+import { createKnowledgeApiDocAdapter, currentApiDocRevisionIds } from "./api-doc-knowledge-adapter.js";
 import { createLarkProcessRunner, LarkCliDocumentClient, type LarkProcessRunner } from "./lark-document-client.js";
-import { CAPABILITIES, capabilityHash, knowledgeErrorEnvelope, listCliRegistrations, scopeResolutionErrorEnvelope, warning, type ScopeEnvelope } from "@penguin/knowledge-contracts";
+import { CAPABILITIES, capabilityHash, knowledgeErrorEnvelope, listCliRegistrations, scopeResolutionErrorEnvelope, validateSemanticControlRequest, validateSemanticStatusResponse, warning, type EndpointProvenanceKind, type ScopeEnvelope } from "@penguin/knowledge-contracts";
 import { runQueryServer } from "./query-server.js";
 import { parseCliArguments } from "./args.js";
+import { runtimeIdentity } from "./runtime-identity.js";
+import { ensureSemanticWorker, runSemanticWorkerWithProcessSignals } from "./semantic-worker.js";
 export { listCliRegistrations } from "@penguin/knowledge-contracts";
 export { LarkDocumentBindingStore, type LarkDocumentBinding, type ExplicitBindingInput, type LarkBindingCandidate } from "./api-doc-binding-store.js";
 export { parseCliArguments, type ParsedCliArguments } from "./args.js";
+
+async function optionalBundledSemanticProvider(): Promise<VerifiedLocalEmbeddingProvider | undefined> {
+  try { return await openBundledEmbeddingProvider(); }
+  catch (error) {
+    if (String((error as Error).message ?? error) === "LOCAL_EMBEDDING_MODEL_NOT_INSTALLED") return undefined;
+    throw error;
+  }
+}
+
+function semanticIndexOptions() {
+  try { return { enabled: true, space: resolveBundledEmbeddingSpaceIdentity() }; }
+  catch (error) {
+    if (String((error as Error).message ?? error) === "LOCAL_EMBEDDING_MODEL_NOT_INSTALLED") return { enabled: true };
+    throw error;
+  }
+}
 
 export interface CliDeps {
   cwd: string;
@@ -108,7 +145,7 @@ export interface CliDeps {
   // read verbs can refuse when none exists without creating a half-baked DB.
   // `allowSchemaMutation: false` (passed for READ_VERBS) makes an outdated
   // schema throw SCHEMA_OUTDATED instead of running DDL/migrations.
-  openStore: (opts?: { allowSchemaMutation?: boolean }) => KnowledgeStore;
+  openStore: (opts?: { allowSchemaMutation?: boolean; skipMaintenance?: boolean }) => KnowledgeStore;
   storeExists: () => boolean;
   // Optional install helper: (targetBinName) → creates the PATH symlink,
   // returns the linked path. Omitted in tests (install then prints guidance).
@@ -142,11 +179,15 @@ export interface CliDeps {
   // Optional host-owned read-only Postgres adapter. The core never stores or
   // receives credentials; production wiring resolves credentialEntryId here.
   postgresSchemaClient?: import("@penguin/knowledge-core").PostgresSchemaClient;
+  // The executable isolates each source oracle in its own process so loading
+  // every Tree-sitter grammar across a large corpus cannot exhaust native WASM
+  // memory. In-process integrations may omit this and use the direct collector.
+  collectCorpusOracle?: typeof collectIndependentCorpusOracle;
 }
 
 const READ_VERBS = new Set([
   "capabilities", "search", "node", "callers", "calls", "callees", "impact", "backlinks",
-  "path", "recent", "compare", "status", "suggestions", "snapshots", "doctor",
+  "path", "recent", "compare", "status", "suggestions", "snapshots", "doctor", "version",
   "files", "filesymbols", "endpoints", "endpoint-identity", "hit", "get-hit", "graph-query", "graph", "repograph", "services", "tags", "context", "explore", "locate", "flow", "affected", "architecture", "communities", "timeline", "samples", "deadcode", "coverage", "why", "domain", "onboarding", "recall",
 ]);
 
@@ -155,18 +196,10 @@ const READ_VERBS = new Set([
 // is an error; silently choosing alphabetical history is unsafe.
 function resolveRepoId(store: KnowledgeStore, s: string | undefined): string | null {
   if (!s) return null;
-  const row = store.db
-    .prepare("SELECT id FROM repos WHERE id=? OR name=? LIMIT 1")
-    .get(s, s) as { id: string } | undefined;
-  if (row?.id) return row.id;
-  // Accept the canonical repository root as a first-class selector. This is
-  // important for cross-repo workspaces: a human/agent usually has a path,
-  // while the registry name may be a generated display name.
-  const target = canonicalPathForCheck(s);
-  const pathRow = store.db
-    .prepare("SELECT id FROM repos WHERE root_path=? LIMIT 1")
-    .get(target) as { id: string } | undefined;
-  return pathRow?.id ?? null;
+  // Keep selector resolution identical to the core registry, including
+  // canonical matching for macOS `/var` and `/private/var` aliases. This is
+  // used by commands such as `master` as well as scoped query verbs.
+  return store.resolveRepoIds(s)[0] ?? null;
 }
 
 function resolveBranchId(store: KnowledgeStore, repoId: string, s: string | undefined): string | null {
@@ -348,7 +381,7 @@ const GRAPH_VERB_MODE: Record<string, GraphMode> = {
 };
 
 const EVENT_OUTPUT = new WeakMap<object, boolean>();
-const OPERATION_CURSOR_CODEC = new HmacOperationCursorCodec(process.env.PENGUIN_CURSOR_SECRET ?? "penguin-operation-cursor-v1");
+const OPERATION_CURSOR_CODEC = new HmacOperationCursorCodec(resolveLocalCursorSecret());
 function operationCursorScope(operation: "endpoints" | "filesymbols" | "deadcode", scope: string, revision: string | null = null) {
   return { operation, scope, revision } as const;
 }
@@ -415,8 +448,17 @@ function emit(deps: CliDeps, json: boolean, human: string, data: unknown, scope?
   deps.out(footer ? `${human}\n${footer}` : human);
 }
 
-function emitCliError(deps: CliDeps, json: boolean, code: string, message: string, exitCode: number, details?: Record<string, unknown>): number {
-  if (json) deps.out(JSON.stringify({ error: knowledgeErrorEnvelope(code, message, details), exitCode }));
+function emitCliError(
+  deps: CliDeps,
+  json: boolean,
+  code: string,
+  message: string,
+  exitCode: number,
+  details?: Record<string, unknown>,
+  retryable = false,
+  remediation?: string,
+): number {
+  if (json) deps.out(JSON.stringify({ error: knowledgeErrorEnvelope(code, message, details, retryable, remediation), exitCode }));
   else deps.err(message);
   return exitCode;
 }
@@ -431,6 +473,13 @@ function operationToken(operation: string, scope: unknown): string {
 }
 
 function confirmationValue(argv: string[]): string | null {
+  const operationInline = argv.find((arg) => arg.startsWith("--operation-token="));
+  if (operationInline) return operationInline.slice("--operation-token=".length);
+  const operationIndex = argv.indexOf("--operation-token");
+  if (operationIndex >= 0) {
+    const operationNext = argv[operationIndex + 1];
+    return operationNext && !operationNext.startsWith("--") ? operationNext : null;
+  }
   const inline = argv.find((arg) => arg.startsWith("--confirm="));
   if (inline) return inline.slice("--confirm=".length);
   const index = argv.indexOf("--confirm");
@@ -448,7 +497,7 @@ function confirmationAccepted(argv: string[], expected: string): boolean {
 
 function requireOperationToken(deps: CliDeps, argv: string[], operation: string, scope: unknown): boolean {
   if (!deps.requireOperationConfirmation) return true;
-  if (process.env.PENGUIN_KNOWLEDGE_TRUSTED_BACKGROUND === "1" && ["init", "index", "rebuild"].includes(operation)) return true;
+  if (process.env.PENGUIN_KNOWLEDGE_TRUSTED_BACKGROUND === "1" && ["init", "index", "rebuild", "corpus.run"].includes(operation)) return true;
   const expected = operationToken(operation, scope);
   const value = confirmationValue(argv);
   if (value === expected) return true;
@@ -461,6 +510,10 @@ const HELP = `penguin — Penguin Knowledge CLI
   penguin init [path]           register + first-index a repo (folder of repos → interactive picker)
   penguin index [path]          one-shot incremental index
   penguin rebuild [path]        full re-index (parser-derived data)
+  penguin corpus run [path]     cold-index every Git repo below a parent (index → rebuild)
+  penguin corpus reconcile [path]       independently reconcile source vs persisted truth
+  penguin corpus status --status <file>  read a durable corpus job status
+  penguin corpus pause|resume|cancel|retry --status <file>  control a corpus job
   penguin materialize <repo> (--branch <name> | --commit <sha>) on-demand immutable revision
   penguin watch [path]          long-running auto-index (debounced, stays running until killed)
   penguin remove <repo> [br]    remove a repo (or one branch) from the index
@@ -532,12 +585,13 @@ const CANONICAL_HELP = `${HELP}\nCanonical capability IDs (use \'penguin capabil
 const CLI_QUERY_CONTRACTS = {
   schemaVersion: "1",
   commands: {
+    ...Object.fromEntries([...READ_VERBS].map((name) => [name, { usage: `penguin ${name} ...`, success: 0 }])),
+    corpus: { usage: "corpus run|status|pause|resume|cancel|retry ...", success: 0 },
     endpoints: { usage: "endpoints [repo] [--protocol <protocol>] [--limit <n>] [--cursor <token>] [--json]", success: 0, json: "{items,returnedCount,candidateCount,totalIsExact,nextCursor}" },
-    "endpoint-identity": { usage: "endpoint-identity <rendered-title> <canonical-identity> <node-id> [--json]", success: 0, mismatch: 1, invalid: 2, json: "{forms,equal,rootNodeId,parentNodeId,completeness}" },
+    "endpoint-identity": { usage: "endpoint-identity <rendered-title> <canonical-identity> [node-id] [--json]", success: 0, mismatch: 1, invalid: 2, json: "{forms,equal,rootNodeId,parentNodeId,completeness}" },
     filesymbols: { usage: "filesymbols <repo> <branch> <path> [--limit <n>] [--cursor <token>] [--json]", success: 0, invalidCursor: 2, json: "{items,returnedCount,candidateCount,totalIsExact,nextCursor}" },
     deadcode: { usage: "deadcode --repo <repo> [--path <prefix>] [--limit <n>] [--cursor <token>] [--json]", success: 0, invalidCursor: 2, json: "{candidates,returnedCount,candidateCount,totalIsExact,nextCursor,truncated}" },
     explain: { usage: "explain <symbol|endpoint> [--provider <name>] [--model <name>] [--key <key>] [--json]", success: 0 },
-    ...Object.fromEntries([...READ_VERBS].map((name) => [name, { usage: `penguin ${name} ...`, success: 0 }])),
   },
   cursor: { ordering: "filePath,startLine,nodeId", scopeChecked: true, exhausted: "nextCursor:null", invalidExitCode: 2 },
 };
@@ -559,7 +613,161 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
   const flags = parsed.flags;
   EVENT_OUTPUT.set(deps, flags.includes("--events-jsonl"));
   const { positional: pos, optionValue, optionValues, numberOption } = parsed;
-  const json = flags.includes("--json");
+  const json = parsed.json;
+  if (parsed.error) {
+    return emitCliError(deps, json, parsed.error.code, parsed.error.message, 2, {
+      option: parsed.error.option,
+      remediation: "run `penguin help --json` or `<command> --help` for the accepted grammar",
+    });
+  }
+
+  // Runtime identity is useful even before `penguin init`; it diagnoses the
+  // installed CLI/MCP generation instead of confusing a missing knowledge DB
+  // with a missing runtime.
+  if (verb === "--version" || verb === "version") {
+    const identity = runtimeIdentity();
+    if (json) deps.out(JSON.stringify(identity));
+    else deps.out(`${identity.appVersion} (${identity.buildId})`);
+    return 0;
+  }
+
+  if (verb === "doctor" && !deps.storeExists()) {
+    const identity = runtimeIdentity();
+    const report = {
+      status: "knowledge_db_unavailable",
+      runtime: identity,
+      remediation: "run `penguin init` or open Penguin once to create the knowledge database",
+    };
+    emit(deps, json, `runtime ${identity.buildId}; knowledge database unavailable`, report);
+    return 3;
+  }
+
+  if (verb === "semantic") {
+    if (!deps.storeExists()) return emitCliError(deps, json, "KNOWLEDGE_DB_UNAVAILABLE", "no knowledge database — run `penguin init` first", 3);
+    const action = pos[0] ?? "status";
+    let store: KnowledgeStore;
+    try {
+      store = deps.openStore();
+    } catch {
+      return emitCliError(
+        deps,
+        json,
+        "KNOWLEDGE_DB_OPEN_FAILED",
+        "KNOWLEDGE_DB_OPEN_FAILED: knowledge database could not be opened; restore it from a valid backup or rebuild the local index",
+        3,
+      );
+    }
+    try {
+      if (action === "worker") {
+        const availableRuntime = runtimeIdentity();
+        // The stable launcher pins PENGUIN_BUILD_ID before it executes this
+        // bundle. Read availability separately so an activation that flips
+        // `current` cannot let the running generation certify itself.
+        const availableBuildId = availableRuntime.generation.availableBuildId;
+        const pinnedBuildId = process.env.PENGUIN_BUILD_ID?.trim() || "unproven:PENGUIN_BUILD_ID";
+        const runningRuntime = runtimeIdentity({
+          manifest: null,
+          runningBuildId: pinnedBuildId,
+          availableBuildId,
+        });
+        const result = await runSemanticWorkerWithProcessSignals({
+          store,
+          runtimeIdentity: {
+            buildId: runningRuntime.buildId,
+            capabilityHash: runningRuntime.capabilityHash,
+            schemaVersion: runningRuntime.schemaVersion,
+            modelHash: runningRuntime.modelHash,
+          },
+          expectedRuntimeIdentity: {
+            buildId: availableBuildId,
+            capabilityHash: availableRuntime.capabilityHash,
+            schemaVersion: availableRuntime.schemaVersion,
+            modelHash: availableRuntime.modelHash,
+          },
+          ...(numberOption("batch") !== undefined ? { batchSize: numberOption("batch") } : {}),
+        });
+        emit(deps, json, `semantic worker: ${result.status}`, result);
+        return result.status === "version_mismatch" ? 5 : result.status === "model_unavailable" ? 3 : 0;
+      }
+      if (action === "wake") {
+        const result = ensureSemanticWorker({ store, cwd: deps.cwd });
+        emit(deps, json, `semantic worker: ${result.status}`, result);
+        return result.status === "start_failed" || result.status === "version_mismatch" ? 5 : 0;
+      }
+      if (action === "status") {
+        const requestedScopeKey = optionValue("scope");
+        const scope = requestedScopeKey ? resolveSemanticScopeKey(store, requestedScopeKey) : undefined;
+        if (scope && !scope.resolvedScopeKey) {
+          return emitCliError(
+            deps,
+            json,
+            scope.ambiguousRepoIds?.length ? "SCOPE_AMBIGUOUS" : "SCOPE_NOT_FOUND",
+            `semantic scope was not found: ${requestedScopeKey}; valid scopes: ${scope.validScopeKeys.join(", ") || "none"}; repositories: ${scope.validRepositoryNames.join(", ") || "none"}`,
+            2,
+          );
+        }
+        const statuses = applySemanticRuntimeState(
+          listSemanticStatuses(store, scope?.resolvedScopeKey),
+          runtimeIdentity().generation,
+        );
+        const response = validateSemanticStatusResponse({
+          statuses,
+          ...(scope ? { requestedScopeKey: scope.requestedScopeKey, resolvedScopeKey: scope.resolvedScopeKey } : {}),
+        });
+        emit(deps, json, statuses.length ? statuses.map((status) => `${status.scopeKey}: ${status.state} ${status.ready}/${status.expected}`).join("\n") : "semantic: no generations", response);
+        return 0;
+      }
+      if (!["pause", "resume", "retry", "cancel"].includes(action)) {
+        return emitCliError(deps, json, "INVALID_ARGUMENT", "usage: penguin semantic status|wake|worker|pause|resume|retry|cancel", 2);
+      }
+      const scopeKey = optionValue("scope");
+      const generationId = optionValue("generation") ?? pos[1];
+      if (!scopeKey || ((action === "retry" || action === "cancel") && !generationId)) {
+        return emitCliError(deps, json, "INVALID_ARGUMENT", `${action} requires --scope${action === "retry" || action === "cancel" ? " and --generation" : ""}`, 2);
+      }
+      const operationScope = { action, scopeKey, ...(generationId ? { generationId } : {}) };
+      const issuedOperationToken = operationToken(`semantic.${action}`, operationScope);
+      let controlRequest;
+      try {
+        controlRequest = validateSemanticControlRequest({
+          ...operationScope,
+          operationToken: flags.includes("--dry-run")
+            ? issuedOperationToken
+            : (confirmationValue(argv) ?? issuedOperationToken),
+        });
+      } catch (error) {
+        const contractError = error as Error & { code?: string; details?: Record<string, unknown> };
+        return emitCliError(deps, json, contractError.code ?? "INVALID_SEMANTIC_CONTRACT", contractError.message, 2, contractError.details);
+      }
+      if (flags.includes("--dry-run")) {
+        emit(deps, json, `dry-run semantic ${action}`, { ...operationScope, operationToken: issuedOperationToken, mutated: false });
+        return 0;
+      }
+      if (!requireOperationToken(deps, argv, `semantic.${action}`, operationScope)) return 6;
+      try {
+        const result = await executeSemanticControl({
+          store,
+          request: controlRequest,
+          runtimeState: runtimeIdentity().generation,
+          wake: () => ensureSemanticWorker({ store, cwd: deps.cwd }),
+        });
+        emit(deps, json, `semantic ${action}: ${result.status.state}`, result);
+        return 0;
+      } catch (error) {
+        const operationalError = error as Error & { code?: string; details?: Record<string, unknown> };
+        return emitCliError(
+          deps,
+          json,
+          operationalError.code ?? "SEMANTIC_CONTROL_FAILED",
+          operationalError.message,
+          operationalError.code === "OPERATION_TOKEN_CONFLICT" ? 2 : 1,
+          operationalError.details,
+        );
+      }
+    } finally {
+      store.close();
+    }
+  }
   // Secret material must never be placed in argv. CI/automation can pass the
   // name of an environment variable or an already-open file descriptor.
   const artifactPassphrase = (): string | undefined => {
@@ -580,9 +788,16 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
     return undefined;
   };
 
+  if (flags.includes("--help") && verb && verb !== "help") {
+    const contract = (CLI_QUERY_CONTRACTS.commands as Record<string, { usage: string }>)[verb];
+    const usage = contract?.usage ?? `${verb} ...`;
+    deps.out(json ? JSON.stringify({ command: verb, usage }) : `usage: penguin ${usage}`);
+    return 0;
+  }
+
   if (verb === "api-doc") {
     const apiStore = !deps.apiDocSourceAdapter && deps.storeExists() ? deps.openStore() : null;
-    try { return await runApiDocCommand(argv.slice(1), { cwd: deps.cwd, out: deps.out, err: deps.err, json, previewRoot: deps.apiDocPreviewRoot ?? `${deps.cwd}/.penguin/api-docs/previews`, sourceAdapter: deps.apiDocSourceAdapter ?? (apiStore ? createKnowledgeApiDocAdapter(apiStore) : undefined), readStdin: deps.readStdin, bindingPath: deps.apiDocBindingPath, larkClient: deps.apiDocLarkClient ?? (deps.larkProcessRunner ? new LarkCliDocumentClient(deps.larkProcessRunner) : undefined) }); } finally { apiStore?.close(); }
+    try { return await runApiDocCommand(argv.slice(1), { cwd: deps.cwd, out: deps.out, err: deps.err, json, previewRoot: deps.apiDocPreviewRoot ?? `${deps.cwd}/.penguin/api-docs/previews`, sourceAdapter: deps.apiDocSourceAdapter ?? (apiStore ? createKnowledgeApiDocAdapter(apiStore) : undefined), currentRevisionIds: apiStore ? () => currentApiDocRevisionIds(apiStore) : undefined, readStdin: deps.readStdin, bindingPath: deps.apiDocBindingPath, larkClient: deps.apiDocLarkClient ?? (deps.larkProcessRunner ? new LarkCliDocumentClient(deps.larkProcessRunner) : undefined) }); } finally { apiStore?.close(); }
   }
 
   // RPC invocation needs no knowledge store — dispatch before the DB gates so
@@ -596,7 +811,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
     }
   }
 
-  if (!verb || verb === "help") {
+  if (!verb || verb === "help" || verb === "--help") {
     deps.out(json ? JSON.stringify(CLI_QUERY_CONTRACTS) : CANONICAL_HELP);
     return 0;
   }
@@ -715,7 +930,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
         if (!source) { emit(deps, json, "external source not found", { error: "EXTERNAL_SOURCE_NOT_FOUND" }); return 2; }
         if (source.type === "markdown_directory") {
           const fingerprinted = fingerprintMarkdownDirectory(source.location);
-          const report = await indexRepo({ store, rootPath: source.location, mode: "incremental", onProgress: (payload) => emitProgress(deps, payload) });
+          const report = await indexRepo({ store, rootPath: source.location, mode: "incremental", semantic: semanticIndexOptions(), onProgress: (payload) => emitProgress(deps, payload) });
           const synced = sources.markSynced(source.id, { content: fingerprinted.fingerprint, licenseWarning: "external Markdown is untrusted; verify before relying on it" });
           emit(deps, json, `synced ${source.id}`, { source: synced, files: fingerprinted.files.length, index: report });
           return report.errors > 0 ? 1 : 0;
@@ -761,7 +976,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
       if (action === "run") {
         const result = saved.get(pos[1] ?? optionValue("name") ?? "");
         if (!result) { deps.err("saved query not found"); return 1; }
-        const response = await searchKnowledge(result.request as never, { store });
+        const response = await searchKnowledgeAsync(result.request as never, { store });
         emit(deps, json, JSON.stringify(response), response); return 0;
       }
       deps.err("usage: penguin saved-query list|write|run"); return 2;
@@ -850,6 +1065,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
       contractVersion: "2",
       buildId: process.env.PENGUIN_BUILD_ID ?? "local",
       capabilityHash: capabilityHash(CAPABILITIES),
+      modelHash: runtimeIdentity().modelHash,
       capabilities: CAPABILITIES,
       registrations: listCliRegistrations(),
     };
@@ -928,6 +1144,382 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
     }
   }
 
+  // corpus: cold, repository-sharded index/rebuild orchestration. The job
+  // status/control files are deliberately independent of the knowledge DB so
+  // a second CLI process (or Tauri) can inspect and control a long run while
+  // the worker owns the single open writer.
+  if (verb === "corpus") {
+    const action = pos[0] ?? "status";
+    const statusFile = optionValue("status") ?? pos[1];
+    if (action === "reset") {
+      const resetAction = pos[1] ?? "status";
+      const manifestPath = optionValue("manifest");
+      if (!["plan", "status", "execute", "finalize", "recover", "reissue", "rollback"].includes(resetAction)) {
+        return emitCliError(deps, json, "INVALID_ARGUMENT", "usage: penguin corpus reset plan|status|execute|finalize|recover|reissue|rollback", 2);
+      }
+      if (resetAction === "status") {
+        if (!manifestPath) return emitCliError(deps, json, "INVALID_ARGUMENT", "reset status requires --manifest <path>", 2);
+        try {
+          const manifest = readResetManifest(resolve(manifestPath));
+          const safePlan = { ...manifest.plan, confirmationToken: manifest.tokenConsumed ? "consumed" : "redacted" };
+          emit(deps, json, `reset ${manifest.phase}: ${manifest.plan.operationId}`, { ...manifest, plan: safePlan });
+          return 0;
+        } catch (error) {
+          return emitCliError(deps, json, "RESET_STATUS_FAILED", String((error as Error)?.message ?? error), 1, {
+            manifestPath: resolve(manifestPath),
+            remediation: "pass the immutable manifest emitted by `penguin corpus reset plan`",
+          });
+        }
+      }
+      if (!deps.storeExists()) {
+        return emitCliError(deps, json, "KNOWLEDGE_DB_UNAVAILABLE", "corpus reset requires an existing knowledge database", 3);
+      }
+      if (resetAction === "plan") {
+        const backupPath = optionValue("backup");
+        if (!backupPath) return emitCliError(deps, json, "INVALID_ARGUMENT", "reset plan requires --backup <path>", 2);
+        let rootPath: string;
+        try {
+          const configuredRoots = process.env.PENGUIN_KNOWLEDGE_ALLOWED_ROOTS;
+          const roots = configuredRoots === undefined ? null : parseWorkspaceRoots(configuredRoots, deps.cwd);
+          rootPath = roots
+            ? assertWorkspacePath(pos[2] ?? deps.cwd, roots, "reset root")
+            : canonicalPathForCheck(pos[2] ?? deps.cwd);
+        } catch (error) {
+          return emitCliError(deps, json, "INVALID_ARGUMENT", String((error as Error)?.message ?? error), 2);
+        }
+        const store = deps.openStore();
+        try {
+          const minimumFreeBytesAfterBackup = numberOption("minimum-free-after-bytes");
+          const expiresInMs = numberOption("expires-in-ms");
+          const result = await createFullResetPlan({ db: store.db }, {
+            rootPath,
+            databasePath: store.db.name,
+            backupPath: resolve(backupPath),
+            ...(manifestPath ? { manifestPath: resolve(manifestPath) } : {}),
+            ...(minimumFreeBytesAfterBackup !== undefined ? { minimumFreeBytesAfterBackup } : {}),
+            ...(expiresInMs !== undefined ? { expiresInMs } : {}),
+          });
+          const payload = {
+            plan: result.plan,
+            backup: result.backup,
+            baseline: {
+              databaseInstanceId: result.baseline.databaseInstanceId,
+              databaseDataVersion: result.baseline.databaseDataVersion,
+              databaseBytes: result.baseline.databaseBytes,
+              walBytes: result.baseline.walBytes,
+              shmBytes: result.baseline.shmBytes,
+              repositoryCount: result.baseline.repositories.length,
+              sourceGroundTruthHash: result.baseline.sourceGroundTruthHash,
+              sourceGroundTruthComplete: result.baseline.sourceGroundTruthComplete,
+              sourceGroundTruthGaps: result.baseline.sourceGroundTruthGaps,
+            },
+            protectedAssetCounts: result.plan.protectedAssetCounts,
+            protectedAssetHashes: result.plan.protectedAssetHashes,
+          };
+          emit(deps, json, `reset planned: ${result.plan.operationId}; review and execute with --confirm=<token>`, payload);
+          return 0;
+        } catch (error) {
+          const code = (error as { code?: string }).code ?? "RESET_PLAN_FAILED";
+          return emitCliError(deps, json, code, String((error as Error)?.message ?? error), 1, {
+            rootPath,
+            backupPath: resolve(backupPath),
+            remediation: code === "DATABASE_BACKUP_INSUFFICIENT_SPACE"
+              ? "free disk space or select a different backup volume; do not lower the reserve without an explicit safety review"
+              : "fix the reported baseline/backup issue and create a new plan",
+          });
+        } finally {
+          store.close();
+        }
+      }
+      if (!manifestPath) return emitCliError(deps, json, "INVALID_ARGUMENT", `reset ${resetAction} requires --manifest <path>`, 2);
+      let manifest: ReturnType<typeof readResetManifest>;
+      try { manifest = readResetManifest(resolve(manifestPath)); }
+      catch (error) { return emitCliError(deps, json, "RESET_MANIFEST_INVALID", String((error as Error)?.message ?? error), 1); }
+      // Reset control-plane actions must not trigger normal write-path
+      // housekeeping while opening a multi-gigabyte database. They perform
+      // their own fences/checkpoints and must reach recovery/execute directly.
+      const store = deps.openStore({ skipMaintenance: true });
+      try {
+        if (resetAction === "execute") {
+          const token = confirmationValue(argv);
+          if (token !== manifest.plan.confirmationToken) {
+            deps.err("full reset is guarded; repeat with the exact --confirm=<token> emitted by reset plan");
+            return 6;
+          }
+          const receipt = executeFullReset({ db: store.db }, manifest.plan, {
+            databasePath: store.db.name,
+            manifestPath: resolve(manifestPath),
+            token,
+          });
+          emit(deps, json, `reset ${receipt.phase}: ${receipt.operationId}`, receipt);
+          return receipt.phase === "reset" ? 0 : 1;
+        }
+        if (resetAction === "finalize") {
+          if (confirmationValue(argv) !== `${manifest.plan.operationId}:finalize`) {
+            deps.err(`reset finalize is guarded; repeat with --confirm=${manifest.plan.operationId}:finalize`);
+            return 6;
+          }
+          const receipt = finalizeFullReset({ db: store.db }, manifest.plan, {
+            databasePath: store.db.name,
+            manifestPath: resolve(manifestPath),
+            confirmed: true,
+          });
+          emit(deps, json, `reset ${receipt.phase}: ${receipt.operationId}`, receipt);
+          return receipt.phase === "reset" ? 0 : 1;
+        }
+        if (resetAction === "recover") {
+          if (confirmationValue(argv) !== `${manifest.plan.operationId}:recover`) {
+            deps.err(`reset recovery is guarded; repeat with --confirm=${manifest.plan.operationId}:recover`);
+            return 6;
+          }
+          const receipt = recoverFullReset({ db: store.db }, {
+            databasePath: store.db.name,
+            manifestPath: resolve(manifestPath),
+            confirmed: true,
+          });
+          emit(deps, json, `reset recovery: ${receipt.recovered ? "recovered" : "no stale fence"}`, receipt);
+          return 0;
+        }
+        if (resetAction === "reissue") {
+          const outputManifest = optionValue("out-manifest");
+          if (!outputManifest) return emitCliError(deps, json, "INVALID_ARGUMENT", "reset reissue requires --out-manifest <path>", 2);
+          if (confirmationValue(argv) !== `${manifest.plan.operationId}:reissue`) {
+            deps.err(`reset reissue is guarded; repeat with --confirm=${manifest.plan.operationId}:reissue`);
+            return 6;
+          }
+          const result = reissueFullResetPlan({ db: store.db }, {
+            sourceManifestPath: resolve(manifestPath),
+            manifestPath: resolve(outputManifest),
+            confirmed: true,
+          });
+          emit(deps, json, `reset reissued: ${result.plan.operationId}`, result);
+          return 0;
+        }
+        const destinationPath = optionValue("out");
+        if (!destinationPath) return emitCliError(deps, json, "INVALID_ARGUMENT", "reset rollback requires --out <fresh-database-path>", 2);
+        if (confirmationValue(argv) !== `${manifest.plan.operationId}:rollback`) {
+          deps.err(`reset rollback is guarded; repeat with --confirm=${manifest.plan.operationId}:rollback`);
+          return 6;
+        }
+        const receipt = rollbackFullReset({ db: store.db }, manifest.plan.backupPath, resolve(destinationPath), { confirmed: true });
+        emit(deps, json, `reset rollback prepared: ${receipt.destinationPath}`, receipt);
+        return 0;
+      } catch (error) {
+        return emitCliError(deps, json, `RESET_${resetAction.toUpperCase()}_FAILED`, String((error as Error)?.message ?? error), 1, {
+          operationId: manifest.plan.operationId,
+          manifestPath: resolve(manifestPath),
+        });
+      } finally {
+        store.close();
+      }
+    }
+    if (!["run", "discover", "reconcile", "oracle", "status", "pause", "resume", "cancel", "retry"].includes(action)) {
+      return emitCliError(deps, json, "INVALID_ARGUMENT", "usage: penguin corpus run|discover|reconcile|status|pause|resume|cancel|retry|reset", 2);
+    }
+    if (action === "retry") {
+      if (!statusFile) {
+        return emitCliError(deps, json, "INVALID_ARGUMENT", "retry requires --status <job-status-file>", 2);
+      }
+      let previous: import("@penguin/knowledge-indexer").FullCorpusJob;
+      try {
+        previous = readFullCorpusJob(statusFile);
+        const configuredRoots = process.env.PENGUIN_KNOWLEDGE_ALLOWED_ROOTS;
+        if (configuredRoots !== undefined) {
+          const roots = parseWorkspaceRoots(configuredRoots, deps.cwd);
+          assertWorkspacePath(previous.rootPath, roots, "corpus root");
+        }
+      } catch (error) {
+        return emitCliError(deps, json, "FULL_CORPUS_JOB_FAILED", String((error as Error)?.message ?? error), 1, {
+          remediation: "check the job status path and ensure its root remains inside the configured workspace",
+        });
+      }
+      const store = deps.openStore();
+      try {
+        const emitEvents = flags.includes("--progress-events") || flags.includes("--events-jsonl");
+        const result = await retryFullCorpus({
+          store,
+          statusPath: statusFile,
+          ...(numberOption("max-attempts") !== undefined ? { maxAttempts: numberOption("max-attempts") } : {}),
+          semantic: semanticIndexOptions(),
+          onProgress: (event) => {
+            if (emitEvents) emitProgress(deps, event);
+          },
+        });
+        const human = `corpus retry ${result.job.state}: ${result.job.phase}, ${result.job.completedRepos}/${result.job.totalRepos} repos, ${result.job.parsed} parsed, ${result.failures.length} failed shard(s)`;
+        emit(deps, json, human, result);
+        return result.job.state === "completed" ? 0 : result.job.state === "cancelled" ? 4 : 1;
+      } catch (error) {
+        return emitCliError(deps, json, "FULL_CORPUS_RETRY_FAILED", String((error as Error)?.message ?? error), 1, {
+          jobId: previous.jobId,
+          statusPath: resolve(statusFile),
+          remediation: "only failed or cancelled terminal jobs can be retried; inspect the durable status first",
+        });
+      } finally {
+        store.close();
+      }
+    }
+    if (action === "status" || action === "pause" || action === "resume" || action === "cancel") {
+      if (!statusFile) {
+        return emitCliError(deps, json, "INVALID_ARGUMENT", `${action} requires --status <job-status-file>`, 2);
+      }
+      try {
+        if (action === "status") {
+          const job = readFullCorpusJob(statusFile);
+          emit(deps, json, `corpus ${job.state}: ${job.phase}, ${job.completedRepos}/${job.totalRepos} repos, ${job.parsed} parsed, ${job.errors} errors`, job);
+          return 0;
+        }
+        const control = action === "pause"
+          ? requestFullCorpusPause(statusFile)
+          : action === "resume"
+            ? requestFullCorpusResume(statusFile)
+            : requestFullCorpusCancel(statusFile);
+        emit(deps, json, `corpus ${action} requested`, { ok: true, action, statusPath: resolve(statusFile), controlPath: control });
+        return 0;
+      } catch (error) {
+        return emitCliError(deps, json, "FULL_CORPUS_JOB_FAILED", String((error as Error)?.message ?? error), 1, {
+          remediation: "check the job status path and run `penguin corpus status --status <file>`",
+        });
+      }
+    }
+
+    let corpusRoot: string;
+    try {
+      const configuredRoots = process.env.PENGUIN_KNOWLEDGE_ALLOWED_ROOTS;
+      const roots = configuredRoots === undefined ? null : parseWorkspaceRoots(configuredRoots, deps.cwd);
+      corpusRoot = roots
+        ? assertWorkspacePath(pos[1] ?? deps.cwd, roots, "corpus root")
+        : canonicalPathForCheck(pos[1] ?? deps.cwd);
+    } catch (error) {
+      return emitCliError(deps, json, "INVALID_ARGUMENT", (error as Error).message, 2);
+    }
+    let repositories: string[];
+    try {
+      repositories = discoverFullCorpusRepositories(corpusRoot);
+    } catch (error) {
+      return emitCliError(deps, json, "FULL_CORPUS_ROOT_INVALID", String((error as Error)?.message ?? error), 2);
+    }
+    if (action === "reconcile") {
+      if (!deps.storeExists()) {
+        return emitCliError(deps, json, "KNOWLEDGE_DB_UNAVAILABLE", "corpus reconcile requires an existing knowledge database", 1, {
+          rootPath: corpusRoot,
+          remediation: "run `penguin corpus run <path>` first, then repeat reconciliation",
+        });
+      }
+      const store = deps.openStore({ allowSchemaMutation: false });
+      try {
+        const reports = [];
+        for (const repositoryRoot of repositories) {
+          const oracle = await (deps.collectCorpusOracle ?? collectIndependentCorpusOracle)(repositoryRoot);
+          const repo = store.getRepoByRoot(oracle.rootPath);
+          if (!repo) {
+            reports.push({ rootPath: oracle.rootPath, status: "incomplete", gaps: ["repository:not_registered"], sourceOracle: oracle });
+            continue;
+          }
+          const branch = store.getBranch(repo.id, oracle.git.branch);
+          if (!branch) {
+            reports.push({ rootPath: oracle.rootPath, status: "incomplete", gaps: ["branch:not_registered"], sourceOracle: oracle });
+            continue;
+          }
+          reports.push({
+            ...reconcileCorpus({
+              store,
+              scope: { repoId: repo.id, branchId: branch.id, snapshotId: branch.current_snapshot_id ?? null },
+              source: {
+                ...oracle.source,
+                gitCommit: oracle.git.commit,
+                worktreeState: oracle.git.worktreeState,
+                worktreeFingerprint: oracle.git.worktreeFingerprint,
+              },
+            }),
+            repo: { id: repo.id, name: repo.name, rootPath: repo.root_path },
+            git: oracle.git,
+            sourceOracle: {
+              endpointOccurrences: oracle.source.endpointOccurrences,
+              endpointRecords: oracle.endpointRecords,
+              parserErrors: oracle.parserErrors,
+              discoveryWarnings: oracle.discoveryWarnings,
+            },
+          });
+        }
+        const failed = reports.filter((report) => report.status !== "passed");
+        const payload = { rootPath: corpusRoot, repositories: reports, ok: failed.length === 0 };
+        emit(deps, json, `corpus reconcile ${payload.ok ? "passed" : "failed"}: ${reports.length} repository shard(s)`, payload);
+        return payload.ok ? 0 : 1;
+      } catch (error) {
+        return emitCliError(deps, json, "FULL_CORPUS_RECONCILE_FAILED", String((error as Error)?.message ?? error), 1, {
+          rootPath: corpusRoot,
+          remediation: "inspect the independent oracle and the repository/branch snapshot scope",
+        });
+      } finally {
+        store.close();
+      }
+    }
+    if (action === "oracle") {
+      try {
+        const oracle = await collectIndependentCorpusOracle(corpusRoot);
+        emit(deps, json, `independent corpus oracle collected for ${oracle.rootPath}`, oracle);
+        return 0;
+      } catch (error) {
+        return emitCliError(deps, json, "FULL_CORPUS_ORACLE_FAILED", String((error as Error)?.message ?? error), 1, {
+          rootPath: corpusRoot,
+          remediation: "inspect source discovery and parser errors for this repository shard",
+        });
+      }
+    }
+    if (action === "discover") {
+      emit(deps, json, `${repositories.length} Git repositories discovered below ${corpusRoot}`, {
+        rootPath: corpusRoot,
+        repositories,
+        totalRepos: repositories.length,
+        mutated: false,
+      });
+      return 0;
+    }
+    const rawMode = optionValue("mode") ?? "both";
+    if (rawMode !== "index" && rawMode !== "rebuild" && rawMode !== "both") {
+      return emitCliError(deps, json, "INVALID_ARGUMENT", "--mode must be index, rebuild, or both", 2);
+    }
+    const modes: import("@penguin/knowledge-indexer").FullCorpusMode[] = rawMode === "both" ? ["index", "rebuild"] : [rawMode];
+    const scope = { rootPath: corpusRoot, repositories, modes };
+    if (flags.includes("--dry-run")) {
+      emit(deps, json, `dry-run corpus run: ${repositories.length} repository shard(s)`, {
+        mode: "dry-run",
+        operation: "corpus.run",
+        ...scope,
+        operationToken: operationToken("corpus.run", scope),
+        mutated: false,
+      });
+      return 0;
+    }
+    if (!requireOperationToken(deps, argv, "corpus.run", scope)) return 6;
+    const store = deps.openStore();
+    try {
+      const emitEvents = flags.includes("--progress-events") || flags.includes("--events-jsonl");
+      const result = await runFullCorpus({
+        store,
+        rootPath: corpusRoot,
+        modes,
+        ...(statusFile ? { statusPath: statusFile } : {}),
+        ...(optionValue("id") ? { jobId: optionValue("id") } : {}),
+        ...(numberOption("max-attempts") !== undefined ? { maxAttempts: numberOption("max-attempts") } : {}),
+        semantic: semanticIndexOptions(),
+        onProgress: (event) => {
+          if (emitEvents) emitProgress(deps, event);
+        },
+      });
+      const human = `corpus ${result.job.state}: ${result.job.phase}, ${result.job.completedRepos}/${result.job.totalRepos} repos, ${result.job.parsed} parsed, ${result.failures.length} failed shard(s)`;
+      emit(deps, json, human, result);
+      return result.job.state === "completed" ? 0 : result.job.state === "cancelled" ? 4 : 1;
+    } catch (error) {
+      return emitCliError(deps, json, "FULL_CORPUS_FAILED", String((error as Error)?.message ?? error), 1, {
+        rootPath: corpusRoot,
+        remediation: "inspect the durable corpus status file before retrying",
+      });
+    } finally {
+      store.close();
+    }
+  }
+
   // write verbs
   if (verb === "init" || verb === "index" || verb === "rebuild") {
     const configuredRoots = process.env.PENGUIN_KNOWLEDGE_ALLOWED_ROOTS;
@@ -973,7 +1565,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
       // stderr (TTY only — bin.ts gates the sink on isTTY).
       const emitEvents = flags.includes("--progress-events") || flags.includes("--events-jsonl");
       const mode = verb === "rebuild" ? "rebuild" : "incremental";
-      for (const target of targets) {
+      for (const [targetIndex, target] of targets.entries()) {
         const renderer = !emitEvents && !json && deps.progress
           ? createIndexRenderer({
               write: deps.progress,
@@ -984,6 +1576,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           : undefined;
           const report = await indexRepo({
           store, rootPath: target, mode,
+            semantic: semanticIndexOptions(),
             onProgress: emitEvents
             ? (p) => {
                 if (EVENT_OUTPUT.get(deps)) {
@@ -995,9 +1588,13 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
             ? (p) => renderer.handle(p)
             : undefined,
         });
-        renderer?.finish(report);
+        const semanticWorker = targetIndex === targets.length - 1
+          ? ensureSemanticWorker({ store, cwd: deps.cwd })
+          : undefined;
+        const outputReport = semanticWorker ? { ...report, semanticWorker } : report;
+        renderer?.finish(outputReport);
         if (emitEvents) {
-          emitProgress(deps, { phase: "complete", rootPath: target, report });
+          emitProgress(deps, { phase: "complete", rootPath: target, report: outputReport });
         }
         // Agent guidance (penguin usage tips for AI coding agents) is written
         // ONLY to the user's global CLAUDE.md/AGENTS.md (the "AI 集成" setup),
@@ -1005,8 +1602,8 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
         // changes in every single indexed repo just from running `init`.
         if (!renderer) {
           emit(deps, json,
-            `${verb}: ${report.branchName} — ${report.parsed} parsed, ${report.skipped} skipped, ${report.deleted} deleted, ${report.renamed} renamed, ${report.errors} errors`,
-            report);
+            `${verb}: ${report.branchName} — ${report.parsed} parsed, ${report.skipped} skipped, ${report.deleted} deleted, ${report.renamed} renamed, ${report.errors} errors; semantic ${report.semantic.status}${report.semantic.status === "queued" ? ` (${report.semantic.chunks} chunks queued)` : ""}${semanticWorker?.status === "start_failed" || semanticWorker?.status === "version_mismatch" ? `; worker ${semanticWorker.status}: ${semanticWorker.reason ?? "unknown"}; run penguin semantic wake after repairing the installed runtime` : ""}`,
+            outputReport);
         }
         // Auto-GC: the retention framework existed but only ran via the
         // manual `penguin revisions gc` verb, so unreferenced resolution sets
@@ -1172,10 +1769,16 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
     const store = deps.openStore();
     try {
       const target = pos[0] ?? readGitContext(deps.cwd).checkoutPath;
-      const norm = target.replace(/\/+$/, "");
-      const row = store.db
-        .prepare("SELECT id, name, root_path AS rootPath FROM repos WHERE name = ? OR root_path = ?")
-        .get(norm, norm) as { id: string; name: string; rootPath: string } | undefined;
+      // The checkout path may be reported through a macOS symlink alias
+      // (`/var` vs `/private/var`). Resolve repo selectors through the same
+      // canonical path boundary used by every scoped query so `master` without
+      // arguments cannot miss the current checkout after a fresh fixture or
+      // an app launch from a symlinked path.
+      const repoId = resolveRepoId(store, target);
+      const row = repoId
+        ? store.db.prepare("SELECT id, name, root_path AS rootPath FROM repos WHERE id = ?")
+          .get(repoId) as { id: string; name: string; rootPath: string } | undefined
+        : undefined;
       if (!row) { deps.err(`no indexed repo matches "${target}" — see \`penguin status\` for names`); return 1; }
       const requested = pos[1];
       const current = readGitContext(pos[0] ? row.rootPath : deps.cwd);
@@ -1252,12 +1855,15 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
       }
       if (sub === "links") {
         const dangling = listDanglingNoteLinks(store, numberOption("limit"));
-        emit(deps, json, dangling.map((link) => `${link.sourcePath ?? link.sourceNodeId}:${link.sourceLine}\t[[${link.rawTarget}${link.targetAnchor ? `#${link.targetAnchor}` : ""}]]\t${link.resolutionStatus}`).join("\n") || "(no dangling links)", dangling);
+        const items = dangling.map((link) => ({ ...link, source: { kind: "wiki_link", path: link.sourcePath ?? null, nodeId: link.sourceNodeId }, timestamp: null, scope: null, revision: null, sensitivity: "unknown", permission: { mcpAccess: "unknown" }, provenanceGaps: ["source_timestamp_unavailable", "permission_state_unavailable"] }));
+        const payload = affectedByFiles.listEnvelope(store, items, { candidateCount: numberOption("limit") ? null : items.length, totalIsExact: !numberOption("limit"), gaps: ["link_permission_provenance_unavailable"] });
+        emit(deps, json, dangling.map((link) => `${link.sourcePath ?? link.sourceNodeId}:${link.sourceLine}\t[[${link.rawTarget}${link.targetAnchor ? `#${link.targetAnchor}` : ""}]]\t${link.resolutionStatus}`).join("\n") || "(no dangling links)", payload);
         return 0;
       }
       if (sub === "list" || sub === undefined) {
-        const notes = listNotes(notesDir);
-        emit(deps, json, notes.join("\n") || "(no notes)", notes);
+        const notes = listPublicNotes({ store, notesDir });
+        const payload = affectedByFiles.listEnvelope(store, notes, { gaps: notes.flatMap((note) => note.provenanceGaps) });
+        emit(deps, json, notes.map((note) => note.path).join("\n") || "(no notes)", payload);
         return 0;
       }
       deps.err("usage: penguin note <new|append|list|reindex|links> …");
@@ -1313,8 +1919,9 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
         emit(deps, json, `captured ${note.slug}`, { ok: true, planId, targetId, note }); return 0;
       }
       if (sub === "list") {
-        const rows = listEvidenceNotes({ store, notesDir, targetId: optionValue("target"), status: optionValue("status") as EvidenceLifecycle | undefined, limit: numberOption("limit") });
-        emit(deps, json, rows.map((row) => `${row.slug}\t${row.status}\t${row.targetId}\t${row.environment}\t${row.project}/${row.logstore}\t${row.observationCount}`).join("\n") || "(no evidence notes)", rows);
+        const rows = publicEvidenceSummaries(listEvidenceNotes({ store, notesDir, targetId: optionValue("target"), status: optionValue("status") as EvidenceLifecycle | undefined, limit: numberOption("limit") }));
+        const payload = affectedByFiles.listEnvelope(store, rows, { candidateCount: numberOption("limit") ? null : rows.length, totalIsExact: !numberOption("limit"), gaps: rows.flatMap((row) => row.provenanceGaps) });
+        emit(deps, json, rows.map((row) => `${row.slug}\t${row.status}\t${row.targetId}\t${row.environment}\t${row.project}/${row.logstore}\t${row.observationCount}`).join("\n") || "(no evidence notes)", payload);
         return 0;
       }
       if (sub === "get") {
@@ -1409,7 +2016,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
         for (const repo of repos) {
           const pointers = store.db.prepare("SELECT id,current_snapshot_id,head_commit,last_indexed_commit,last_indexed_at FROM branches WHERE repo_id=?").all(repo.id) as Array<{ id: string; current_snapshot_id: string | null; head_commit: string | null; last_indexed_commit: string | null; last_indexed_at: string | null }>;
           try {
-            const rebuilt = await indexRepo({ store, rootPath: repo.rootPath, mode: "rebuild" });
+            const rebuilt = await indexRepo({ store, rootPath: repo.rootPath, mode: "rebuild", semantic: semanticIndexOptions() });
             const checks = integrity(repo.id); const orphanCount = Object.values(checks).reduce((sum, value) => sum + value, 0);
             if (orphanCount) throw new Error(`integrity check failed: ${JSON.stringify(checks)}`);
             results.push({ repo: repo.name, report: rebuilt, integrity: checks, status: "migrated" });
@@ -1525,6 +2132,24 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
     }
   }
 
+  // Canonical read path. Keep it ahead of the legacy `snapshot <name>` write
+  // grammar so `snapshot list` cannot accidentally create a snapshot named
+  // "list". The plural `snapshots --json` remains the historical bare array.
+  if (verb === "snapshot" && pos[0] === "list") {
+    if (!deps.storeExists()) { deps.err("no knowledge database — run `penguin init` or open Penguin app first"); return 3; }
+    const store = deps.openStore({ allowSchemaMutation: false });
+    try {
+      const snapshots = store.listSnapshots();
+      const items = snapshots.map((snapshot) => ({ ...snapshot, source: { kind: "ledger_snapshot", id: snapshot.id }, timestamp: snapshot.ts ?? null, scope: null, revision: null, sensitivity: "unknown", permission: { read: "local" }, provenanceGaps: ["repository_scope_unavailable"] }));
+      emit(deps, json,
+        snapshots.map((snapshot) => `${snapshot.ts}\t${snapshot.name}\t${snapshot.nodeIds.length} nodes`).join("\n") || "(no snapshots)",
+        affectedByFiles.listEnvelope(store, items, { gaps: ["snapshot_repository_scope_unavailable"] }));
+      return 0;
+    } finally {
+      store.close();
+    }
+  }
+
   // ledger write verbs (may create the DB, §9)
   if (verb === "accept" || verb === "reject" || verb === "link" || verb === "snapshot" || verb === "remember" || verb === "forget") {
     const store = deps.openStore();
@@ -1599,11 +2224,23 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
       switch (verb) {
         case "coverage": {
           const repoSelector = optionValue("repo") ?? pos[0];
-          const repoId = resolveRepoId(store, repoSelector);
-          if (repoSelector && !repoId) { deps.err(`unknown repo: ${repoSelector}`); return 2; }
-          const summary = (repoId ? store.db.prepare("SELECT COUNT(*) AS discovered, SUM(coverage_status='admitted') AS admitted, SUM(coverage_status<>'admitted') AS excluded, SUM(coverage_status='failed') AS failed FROM coverage_records WHERE repo_id=?").get(repoId) : store.db.prepare("SELECT COUNT(*) AS discovered, SUM(coverage_status='admitted') AS admitted, SUM(coverage_status<>'admitted') AS excluded, SUM(coverage_status='failed') AS failed FROM coverage_records").get()) as { discovered: number; admitted: number; excluded: number; failed: number };
-          const result = { discovered: summary.discovered ?? 0, admitted: summary.admitted ?? 0, excluded: summary.excluded ?? 0, failed: summary.failed ?? 0, stale: 0 };
-          emit(deps, json, `coverage: ${result.admitted} admitted · ${result.excluded} excluded · ${result.failed} failed`, result);
+          let payload;
+          try {
+            payload = listCoverageDebt(store, {
+              ...(repoSelector ? { repo: repoSelector } : {}),
+              ...(optionValue("branch") ? { branchId: optionValue("branch")! } : {}),
+              ...(optionValue("snapshot") ? { revisionId: optionValue("snapshot")! } : {}),
+              ...(optionValue("path") ? { path: optionValue("path")! } : {}),
+              ...(optionValue("kind") ? { kind: optionValue("kind") as "excluded" | "failed" | "stale" | "unresolved" } : {}),
+              ...(optionValue("limit") ? { limit: Number(optionValue("limit")) } : {}),
+              ...(optionValue("cursor") ? { cursor: optionValue("cursor")! } : {}),
+            });
+          } catch (error) {
+            if ((error as { code?: string }).code === "REPOSITORY_NOT_FOUND") return emitCliError(deps, json, "REPOSITORY_NOT_FOUND", String((error as Error).message), 2, (error as { details?: Record<string, unknown> }).details);
+            if ((error as { code?: string }).code === "INVALID_ARGUMENT") return emitCliError(deps, json, "INVALID_ARGUMENT", String((error as Error).message), 2, (error as { details?: Record<string, unknown> }).details);
+            throw error;
+          }
+          emit(deps, json, `coverage debt: ${payload.returnedCount}/${payload.candidateCount ?? "?"} items`, payload);
           return 0;
         }
         case "onboarding": {
@@ -1658,6 +2295,11 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
               markdownPredicates = compiled.markdownPredicates;
             } catch (error) { deps.err(String((error as Error).message ?? error)); return 2; }
           }
+          if (!queryText.trim()) {
+            return emitCliError(deps, json, "INVALID_QUERY", "search requires a non-empty query", 2, {
+              remediation: "provide a non-empty search query",
+            });
+          }
           const revisionKinds = [optionValue("snapshot"), optionValue("commit"), flags.includes("--working-tree") ? "working-tree" : undefined].filter(Boolean);
           if (revisionKinds.length > 1) { deps.err("--snapshot, --commit, and --working-tree are mutually exclusive"); return 2; }
           const repoSelectors = optionValues("repo");
@@ -1668,8 +2310,10 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           const resolvedRepoIds = repoSelectors.map((selector) => resolveRepoId(store, selector));
           if (resolvedRepoIds.some((repoId) => !repoId)) {
             const missing = repoSelectors[resolvedRepoIds.findIndex((repoId) => !repoId)];
-            deps.err(`unknown repo: ${missing}`);
-            return 2;
+            return emitCliError(deps, json, "REPOSITORY_NOT_FOUND", `unknown repo: ${missing}`, 2, {
+              repo: missing,
+              remediation: "run `penguin status --json` and choose an indexed repository",
+            });
           }
           const selectedRepoIds = resolvedRepoIds.filter((repoId): repoId is string => Boolean(repoId));
           let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
@@ -1678,6 +2322,12 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
             try {
               ({ revision, scope } = resolveCliRevision(store, queryText, { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd, { preferCwd: true }));
             } catch (error) {
+              if (error instanceof ScopeResolutionError && optionValue("branch")) {
+                return emitCliError(deps, json, "BRANCH_NOT_FOUND", `branch ${optionValue("branch")} was not found in the indexed repository`, 4, {
+                  repo: optionValue("repo") ?? null,
+                  branch: optionValue("branch"),
+                });
+              }
               return reportScopeResolutionError(deps, error, json);
             }
           }
@@ -1686,6 +2336,49 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           // (see the DEFAULT_WORKSPACE_SCOPE warning below); every other
           // scoped verb hard-errors instead via resolveCliRevision's throw.
           const repoId = selectedRepoIds[0] ?? revision?.repoId ?? null;
+          let workingTreeStatus: import("@penguin/knowledge-core").WorkingTreeOverlayStatus | undefined;
+          if (flags.includes("--working-tree")) {
+            if (!repoId || !revision) {
+              return emitCliError(deps, json, "REPOSITORY_REQUIRED", "--working-tree requires a repository resolved from --repo or the current checkout", 4, {
+                remediation: "run the command inside an indexed repository or pass --repo <repo>",
+              });
+            }
+            const repo = store.db.prepare("SELECT root_path AS rootPath FROM repos WHERE id=?").get(repoId) as { rootPath: string } | undefined;
+            if (!repo) return emitCliError(deps, json, "REPOSITORY_NOT_FOUND", `indexed repository not found: ${repoId}`, 4, { repo: repoId });
+            try {
+              const overlay = await prepareWorkingTreeOverlay({
+                store,
+                rootPath: repo.rootPath,
+                repoId,
+                parserVersion: KNOWLEDGE_PARSER_VERSION,
+                resolverVersion: KNOWLEDGE_RESOLVER_VERSION,
+              });
+              revision = overlay.context;
+              workingTreeStatus = overlay.status;
+              if (scope) {
+                scope = {
+                  ...scope,
+                  alignment: overlay.status.applied ? "explicit" : scope.alignment,
+                  locator: {
+                    ...scope.locator,
+                    snapshotId: overlay.context.snapshotId,
+                    ...(overlay.context.branchId ? { branchId: overlay.context.branchId } : {}),
+                    ...(overlay.context.branch ? { branchName: overlay.context.branch } : {}),
+                    ...(overlay.context.commitSha !== "(worktree)" ? { commitSha: overlay.context.commitSha } : { commitSha: undefined }),
+                    worktreeState: overlay.status.state === "not_applicable" ? "unknown" : overlay.status.state,
+                  },
+                };
+              }
+            } catch (error) {
+              const code = typeof (error as { code?: unknown }).code === "string" ? String((error as { code: string }).code) : "WORKING_TREE_OVERLAY_FAILED";
+              const remediation = code === "WORKING_TREE_BASE_BEHIND"
+                ? "run `penguin index` for the committed HEAD, then retry with --working-tree"
+                : code === "BRANCH_NOT_INDEXED" || code === "WORKING_TREE_BASE_NOT_READY"
+                  ? "run `penguin index` for this repository, then retry with --working-tree"
+                  : "retry after the active working-tree overlay job finishes";
+              return emitCliError(deps, json, code, String((error as Error).message ?? error), code === "WORKING_TREE_OVERLAY_BUSY" ? 3 : 4, { repo: repoId, remediation });
+            }
+          }
           const sourceSnapshotId = revision && !revision.snapshotId.startsWith("legacy:")
             ? revision.snapshotId
             : (revision?.branchId
@@ -1693,12 +2386,23 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
               : null);
           const useV2Search = !flags.includes("--legacy-search");
           if (useV2Search || optionValue("mode") || flags.includes("--compact") || optionValue("cursor")) {
+            const semanticMode = optionValue("semantic");
+            if (semanticMode && !["off", "fallback", "blend"].includes(semanticMode)) {
+              return emitCliError(deps, json, "INVALID_ARGUMENT", `invalid semantic mode: ${semanticMode}`, 2, { semantic: semanticMode, remediation: "use one of: off, fallback, blend" });
+            }
             const revisions = sourceSnapshotId
-              ? [{ ...(repoId ? { repoId } : {}), ...(flags.includes("--working-tree") ? { workingTree: true } : { snapshotId: sourceSnapshotId }) }]
+              ? [{ ...(repoId ? { repoId } : {}), snapshotId: sourceSnapshotId }]
               : selectedRepoIds.length > 0
               ? selectedRepoIds.map((selected) => ({ repoId: selected }))
               : undefined;
-            let response = await searchKnowledge({ query: queryText, mode: mode as never, scope: { ...(revisions ? { revisions } : {}), ...(optionValue("workspace") ? { workspaceId: optionValue("workspace") } : {}), ...((optionValues("path").length || dslPaths.length) ? { paths: [...optionValues("path"), ...dslPaths] } : {}), ...(optionValues("language").length ? { languages: optionValues("language") } : {}), ...(optionValues("kind").length ? { kinds: optionValues("kind") } : {}) }, options: { caseSensitive: flags.includes("--case-sensitive") || !flags.includes("--case-insensitive"), wholeWord: flags.includes("--whole-word"), includeGenerated: flags.includes("--include-generated"), includeVendor: flags.includes("--include-vendor"), includeExcludedMetadata: flags.includes("--include-excluded-metadata"), semantic: (optionValue("semantic") as "off" | "fallback" | "blend" | undefined) ?? "off", compact: flags.includes("--compact"), explain: flags.includes("--explain") }, page: { limit: numberOption("limit") ?? 50, ...(optionValue("cursor") ? { cursor: optionValue("cursor") } : {}) } }, { store, scopes: sourceSnapshotId ? [{ snapshotId: sourceSnapshotId, repoId }] : undefined });
+            let response;
+            try {
+              response = await searchKnowledgeAsync({ query: queryText, mode: mode as never, scope: { ...(revisions ? { revisions } : {}), ...(optionValue("workspace") ? { workspaceId: optionValue("workspace") } : {}), ...((optionValues("path").length || dslPaths.length) ? { paths: [...optionValues("path"), ...dslPaths] } : {}), ...(optionValues("language").length ? { languages: optionValues("language") } : {}), ...(optionValues("kind").length ? { kinds: optionValues("kind") } : {}) }, options: { caseSensitive: flags.includes("--case-sensitive") || !flags.includes("--case-insensitive"), wholeWord: flags.includes("--whole-word"), includeGenerated: flags.includes("--include-generated"), includeVendor: flags.includes("--include-vendor"), includeExcludedMetadata: flags.includes("--include-excluded-metadata"), semantic: (semanticMode as "off" | "fallback" | "blend" | undefined) ?? "off", compact: flags.includes("--compact"), explain: flags.includes("--explain") }, page: { limit: numberOption("limit") ?? 50, ...(optionValue("cursor") ? { cursor: optionValue("cursor") } : {}) } }, { store, scopes: sourceSnapshotId ? [{ snapshotId: sourceSnapshotId, repoId }] : undefined, ...(semanticMode && semanticMode !== "off" ? { semanticProviderFactory: optionalBundledSemanticProvider } : {}) });
+            } catch (error) {
+              const code = typeof (error as { code?: unknown }).code === "string" ? String((error as { code: string }).code) : "INVALID_QUERY";
+              return emitCliError(deps, json, code, String((error as Error).message ?? error), 2);
+            }
+            if (workingTreeStatus) response = { ...response, workingTree: workingTreeStatus };
             if (!repoId && selectedRepoIds.length === 0 && !revision && revisionKinds.length === 0 && !optionValue("workspace")) {
               response = { ...response, diagnostics: { ...response.diagnostics, warnings: [...response.diagnostics.warnings, { code: "DEFAULT_WORKSPACE_SCOPE", message: "cwd is outside an indexed repository; search used the configured workspace scope" }] } };
             }
@@ -1784,6 +2488,11 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
         case "context": {
           // AI Context Pack: --json → structured; default → Markdown for an agent.
           const target = pos.join(" ");
+          if (!target.trim() || /^node:\s*$/u.test(target.trim())) {
+            return emitCliError(deps, json, "INVALID_TARGET", "context requires a non-empty symbol, endpoint, or node id", 1, {
+              remediation: "pass a concrete target such as `penguin context Service.run --json`",
+            });
+          }
           let revision: import("@penguin/knowledge-core").RevisionContext | undefined;
           let scope: ScopeEnvelope | undefined;
           try { ({ revision, scope } = resolveCliRevision(store, target, { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd)); }
@@ -1792,8 +2501,21 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           try {
             targetResolution = resolveTarget(store, target, { repoId: scopedRepoId(store, optionValue("repo")) ?? undefined, revision });
           } catch (error) {
-            if (error instanceof TargetResolutionError && error.code === "TARGET_AMBIGUOUS") deps.err(renderAmbiguousSymbols(target, (error.details.candidates ?? []) as import("@penguin/knowledge-core").SymbolCandidate[]));
-            if (error instanceof TargetResolutionError) return emitCliError(deps, json, error.code, error.message, 1, error.details);
+            if (error instanceof TargetResolutionError && error.code === "TARGET_AMBIGUOUS" && !json) deps.err(renderAmbiguousSymbols(target, (error.details.candidates ?? []) as import("@penguin/knowledge-core").SymbolCandidate[]));
+            if (error instanceof TargetResolutionError) {
+              const code = error.code === "TARGET_NOT_FOUND" ? "NODE_NOT_FOUND" : error.code;
+              if (json && scope) {
+                deps.out(JSON.stringify({
+                  error: knowledgeErrorEnvelope(code, error.message, error.details),
+                  exitCode: 1,
+                  locator: scope.locator,
+                  revision,
+                  alignment: scope.alignment,
+                }));
+                return 1;
+              }
+              return emitCliError(deps, json, code, error.message, 1, error.details);
+            }
             throw error;
           }
           const pack = buildContextPack(store, `node:${targetResolution.nodeId}`, { revision, repoId: scopedRepoId(store, optionValue("repo")) ?? undefined });
@@ -1827,13 +2549,19 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
             deps.err(`no indexed repo matches "${optionValue("repo")}" — see \`penguin status\` for the indexed names`);
             return 2;
           }
-          const pack = buildExplorePack(store, target, {
-            branchId,
-            repoId,
-            revision,
-            depth: numberOption("depth"),
-            limit: numberOption("limit"),
-          });
+          let pack;
+          try {
+            pack = buildExplorePack(store, target, {
+              branchId,
+              repoId,
+              revision,
+              depth: numberOption("depth"),
+              limit: numberOption("limit"),
+            });
+          } catch (error) {
+            if (error instanceof TargetResolutionError) return emitCliError(deps, json, error.code, error.message, 1, error.details);
+            throw error;
+          }
           emit(deps, json, JSON.stringify(pack, null, 2), pack, scope);
           return pack.focus || pack.callPath.length > 0 ? 0 : 1;
         }
@@ -1849,7 +2577,13 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
             targetResolution = resolveTarget(store, target, { repoId: scopedRepoId(store, optionValue("repo")) ?? undefined, revision });
           } catch (error) {
             if (error instanceof TargetResolutionError && error.code === "TARGET_AMBIGUOUS") deps.err(renderAmbiguousSymbols(target, (error.details.candidates ?? []) as import("@penguin/knowledge-core").SymbolCandidate[], "flow"));
-            if (error instanceof TargetResolutionError) return emitCliError(deps, json, error.code, error.message, 1, error.details);
+            if (error instanceof TargetResolutionError) {
+              const endpointLike = /^(?:grpc|http|https|ws|event|endpoint)(?::\/\/|::|:)/iu.test(target);
+              const code = error.code === "TARGET_NOT_FOUND"
+                ? endpointLike ? "ENDPOINT_NOT_FOUND" : "NODE_NOT_FOUND"
+                : error.code;
+              return emitCliError(deps, json, code, error.message, 1, error.details);
+            }
             throw error;
           }
           const flow = buildFlow(store, `node:${targetResolution.nodeId}`, { revision, repoId: scopedRepoId(store, optionValue("repo")) ?? undefined });
@@ -1863,34 +2597,28 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           let scope: ScopeEnvelope | undefined;
           try { ({ revision, scope } = resolveCliRevision(store, pos.length === 1 ? pos[0] : "", { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd)); }
           catch (error) { return reportScopeResolutionError(deps, error, json); }
-          const target = pos.length === 1 ? pos[0] : undefined;
-          let targetResolution: import("@penguin/knowledge-core").ResolvedTarget | null = null;
-          if (target) {
-            try {
-              targetResolution = resolveTarget(store, target, { repoId: optionValue("repo") ? scopedRepoId(store, optionValue("repo")) ?? undefined : undefined, revision });
-            } catch (error) {
-              if (error instanceof TargetResolutionError) {
-                if (error.code === "TARGET_AMBIGUOUS") deps.err(renderAmbiguousSymbols(target, (error.details.candidates ?? []) as import("@penguin/knowledge-core").SymbolCandidate[]));
-                return emitCliError(deps, json, error.code, error.message, 1, error.details);
-              }
-              throw error;
-            }
+          let dispatched: ReturnType<typeof affectedByFiles.dispatch>;
+          try {
+            const request = affectedByFiles.normalize(store, {
+              positional: pos,
+              repoId: revision?.repoId,
+              revision,
+            });
+            dispatched = affectedByFiles.dispatch(store, request);
+          } catch (error) {
+            if (error instanceof affectedByFiles.RequestError) return emitCliError(deps, json, error.code, error.message, 2, error.details);
+            if (error instanceof TargetResolutionError) return emitCliError(deps, json, error.code, error.message, 1, error.details);
+            throw error;
           }
-          const a = targetResolution
-            ? affectedByNode(store, targetResolution.nodeId, { revision, repoId: optionValue("repo") ? scopedRepoId(store, optionValue("repo")) ?? undefined : undefined })
-            : null;
-          if (target && targetResolution && !a) {
-            deps.err(`cannot resolve affected target "${target}" in the selected scope`);
-            return 1;
-          }
-          const fileResult = a ?? affectedByFiles(store, pos, { revision });
+          if ("error" in dispatched) return emitCliError(deps, json, dispatched.error.code, dispatched.error.message, 1);
+          const fileResult = dispatched.result;
           // Without --repo the revision comes from the working directory, so
           // asking about another repo's file matched nothing and reported
           // "changed 0 · impacted 0" — which reads as "this file affects
           // nothing", the most confident kind of wrong answer. If the paths
           // match no file in the resolved scope, say so, and name the repos
           // that DO contain them.
-          if (!a && pos.length > 0 && fileResult.changed.length === 0) {
+          if (dispatched.request.kind === "file" && pos.length > 0 && fileResult.changed.length === 0 && fileResult.totalIsExact !== true) {
             const owners = [...new Set((store.db.prepare(`
               SELECT DISTINCT r.name AS repo
                 FROM symbol_versions sv
@@ -1935,7 +2663,15 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           return 0;
         }
         case "services": {
-          const sg = serviceGraph(store);
+          const repoSelector = optionValue("repo") ?? undefined;
+          const repoId = scopedRepoId(store, repoSelector);
+          if (repoSelector && !repoId) {
+            return emitCliError(deps, json, "REPOSITORY_NOT_FOUND", `no indexed repo matches ${repoSelector}`, 2, {
+              repo: repoSelector,
+              remediation: "run `penguin status --json` and choose an indexed repository",
+            });
+          }
+          const sg = serviceGraph(store, { ...(repoId ? { repoId } : {}) });
           emit(deps, json, `${sg.nodes.length} services/endpoints · ${sg.edges.length} cross-service links`, sg);
           return 0;
         }
@@ -1966,6 +2702,16 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
         case "deadcode": {
           // Same filters the MCP surface has: an unscoped list across every
           // indexed repo is not something anyone can act on.
+          if (pos.length > 0 && !optionValue("repo") && !optionValue("path")) {
+            return emitCliError(deps, json, "SCOPE_AMBIGUOUS", "deadcode does not accept a positional repository; use --repo <repo> or --path <prefix>", 2, {
+              remediation: "pass --repo <repo> to select one repository, optionally with --path <prefix>",
+            });
+          }
+          if (!optionValue("repo") && !optionValue("path")) {
+            return emitCliError(deps, json, "SCOPE_REQUIRED", "deadcode requires an explicit --repo or --path scope", 2, {
+              remediation: "pass --repo <repo> or --path <prefix>",
+            });
+          }
           const deadCursor = optionValue("cursor");
           let deadAfter: { filePath: string; startLine: number; nodeId: string } | undefined;
           if (deadCursor) {
@@ -1977,7 +2723,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
               deadAfter = { filePath, startLine: Number(startLine), nodeId };
             } catch (error) {
               const raw = String((error as Error).message ?? error);
-              return emitCliError(deps, json, raw === "CURSOR_SCOPE_MISMATCH" ? raw : raw === "CURSOR_STALE" ? raw : "CURSOR_INVALID", "invalid or mismatched deadcode cursor", 2);
+              return emitCliError(deps, json, raw === "CURSOR_OPERATION_MISMATCH" || raw === "CURSOR_SCOPE_MISMATCH" ? raw : raw === "CURSOR_STALE" || raw === "CURSOR_EXPIRED" ? raw : "CURSOR_INVALID", "invalid or mismatched deadcode cursor", 2);
             }
           }
           const d = deadCode(store, {
@@ -2003,7 +2749,21 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           const nextCursor = d.truncated && deadItems.length
             ? OPERATION_CURSOR_CODEC.encode({ schemaVersion: "1", contractVersion: "2", operation: "deadcode", scope: deadScopeKey, orderingKey: "filePath,startLine,nodeId", lastKey: `${deadItems.at(-1)!.filePath ?? ""}\u0000${deadItems.at(-1)!.startLine ?? -1}\u0000${deadItems.at(-1)!.nodeId}`, revision: null, expiresAt: new Date(Date.now() + 15 * 60_000).toISOString() })
             : null;
-          const result = { ...d, returnedCount: deadItems.length, nextCursor };
+          const deadRepoId = optionValue("repo") ? resolveRepoId(store, optionValue("repo")) ?? undefined : undefined;
+          const envelope = affectedByFiles.listEnvelope(store, deadItems, {
+            repoId: deadRepoId,
+            branchId: d.scope.branch ?? undefined,
+            scope: d.scope,
+            candidateCount: d.candidateCount,
+            remainingCount: Math.max(0, d.candidateCount - deadItems.length),
+            totalIsExact: d.totalIsExact,
+            truncated: d.truncated,
+            nextCursor,
+            completeness: d.truncated ? "partial" : "lower_bound",
+            proofStatus: deadItems.length ? "candidate" : "not_proven",
+            gaps: ["dynamic_dispatch_and_di_not_proven"],
+          });
+          const result = { ...d, ...envelope, candidates: deadItems };
           emit(deps, json,
             `${d.candidates.length} candidate(s) — ${d.note}\n`
             + deadItems.map(line).join("\n")
@@ -2061,7 +2821,12 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           let scope: ScopeEnvelope | undefined;
           try { ({ revision, scope } = resolveCliRevision(store, pos[0] ?? "", { repo: optionValue("repo"), branch: optionValue("branch"), commitSha: optionValue("commit"), snapshotId: optionValue("snapshot"), allowFallback: flags.includes("--allow-fallback") }, deps.cwd)); }
           catch (error) { return reportScopeResolutionError(deps, error, json); }
-          const res = exploreGraph(store, "path", pos[0] ?? "", { to: pos[1], revision });
+          let res;
+          try { res = exploreGraph(store, "path", pos[0] ?? "", { to: pos[1], revision }); }
+          catch (error) {
+            if (error instanceof TargetResolutionError) return emitCliError(deps, json, error.code, error.message, 1, error.details);
+            throw error;
+          }
           emit(deps, json, res.nodes.map((n) => n.title).join(" → ") || "(no path)", res, scope);
           return 0;
         }
@@ -2084,7 +2849,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           const nodes = (store.db.prepare("SELECT COUNT(*) AS n FROM nodes").get() as { n: number }).n;
           const edges = (store.db.prepare("SELECT COUNT(*) AS n FROM edges").get() as { n: number }).n;
           const pending = listSuggestions(store).length;
-          const report = { ...check, nodes, edges, pendingSuggestions: pending, verify: flags.includes("--verify") };
+          const report = { ...check, nodes, edges, pendingSuggestions: pending, verify: flags.includes("--verify"), runtime: runtimeIdentity() };
           emit(deps, json,
             `ledger seq ${check.ledgerSeq} / materialized ${check.materializedSeq} — ${check.status}` +
               (check.ledgerTruncatedAtLine ? ` (ledger truncated @line ${check.ledgerTruncatedAtLine})` : "") +
@@ -2130,22 +2895,40 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
               .prepare("SELECT id, name FROM repos WHERE id=? OR name=? LIMIT 1")
               .get(repoArg ?? branchArg, repoArg ?? branchArg) as { id: string; name: string } | undefined;
             if (!repoRow) {
-              deps.err(`no indexed repo or branch matches "${repoArg ?? branchArg}" — see \`penguin status\` for the indexed names`);
-              return 2;
+              return emitCliError(deps, json, "REPOSITORY_NOT_FOUND", `no indexed repo matches "${repoArg ?? branchArg}"`, 2, {
+                repo: repoArg ?? branchArg,
+                remediation: "run `penguin status --json` and choose an indexed repository",
+              });
             }
-            const branchName = repoArg ? branchArg : optionValue("branch");
+            const branchName = repoArg ? (branchArg || undefined) : optionValue("branch");
             const row = (branchName
               ? store.getBranch(repoRow.id, branchName)
               : store.db.prepare(
                   "SELECT * FROM branches WHERE repo_id=? AND status='live' ORDER BY last_indexed_at DESC LIMIT 1",
                 ).get(repoRow.id)) as { id: string } | undefined;
             if (!row) {
-              deps.err(`repo "${repoRow.name}" has no ${branchName ? `branch "${branchName}"` : "live branch"} indexed`);
-              return 2;
+              return emitCliError(deps, json, "BRANCH_NOT_FOUND", `repo "${repoRow.name}" has no ${branchName ? `branch "${branchName}"` : "live branch"} indexed`, 2, {
+                repo: repoRow.name,
+                branch: branchName ?? null,
+              });
             }
             branchId = row.id;
           }
           if (!filePath) { deps.err("filesymbols needs a file path"); return 2; }
+          const branchRepo = store.db.prepare("SELECT repo_id AS repoId FROM branches WHERE id=? AND status<>'gone'").get(branchId) as { repoId: string } | undefined;
+          const fileExists = branchRepo && store.db.prepare(`
+            SELECT 1 FROM files_index WHERE repo_id=? AND branch_id=? AND file_path=?
+            UNION ALL SELECT 1 FROM symbol_versions WHERE branch_id=? AND file_path=? AND status<>'deleted'
+            UNION ALL SELECT 1 FROM coverage_records WHERE repo_id=? AND file_path=?
+            LIMIT 1
+          `).get(branchRepo.repoId, branchId, filePath, branchId, filePath, branchRepo.repoId, filePath);
+          if (!fileExists) {
+            return emitCliError(deps, json, "FILE_NOT_FOUND", `file ${filePath} was not found in the selected indexed branch`, 2, {
+              filePath,
+              branchId,
+              repoId: branchRepo?.repoId ?? null,
+            });
+          }
           const syms = listFileSymbols(store, branchId, filePath);
           const requestedLimit = optionValue("limit") ? Math.max(1, Math.min(Number(optionValue("limit")), 500)) : syms.length;
           let symbolPage = syms;
@@ -2159,7 +2942,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
               symbolPage = syms.filter((s) => (s.startLine ?? -1) > startLine || ((s.startLine ?? -1) === startLine && s.nodeId > decodedId));
             } catch (error) {
               const raw = String((error as Error).message ?? error);
-              return emitCliError(deps, json, raw === "CURSOR_SCOPE_MISMATCH" ? raw : raw === "CURSOR_STALE" ? raw : "CURSOR_INVALID", "invalid or mismatched filesymbols cursor", 2);
+              return emitCliError(deps, json, raw === "CURSOR_OPERATION_MISMATCH" || raw === "CURSOR_SCOPE_MISMATCH" ? raw : raw === "CURSOR_STALE" || raw === "CURSOR_EXPIRED" ? raw : "CURSOR_INVALID", "invalid or mismatched filesymbols cursor", 2);
             }
           }
           const symbolItems = symbolPage.slice(0, requestedLimit);
@@ -2168,62 +2951,141 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
             : null;
           const line = (s: typeof syms[number]) =>
             `${s.kind}\t${s.title}${s.startLine != null ? `\t${filePath}:${s.startLine}` : ""}${s.status === "stale" ? " (stale)" : ""}`;
-          emit(deps, json, symbolItems.map(line).join("\n") || `(no symbols indexed for ${filePath})`, optionValue("limit") || symbolCursor
-            ? { items: symbolItems, returnedCount: symbolItems.length, candidateCount: symbolPage.length, totalIsExact: !nextSymbolCursor, truncated: Boolean(nextSymbolCursor), nextCursor: nextSymbolCursor }
-            : syms);
+          const symbolEnvelope = affectedByFiles.listEnvelope(store, symbolItems, {
+            repoId: branchRepo?.repoId,
+            branchId,
+            scope: { repoId: branchRepo?.repoId ?? null, branchId, filePath },
+            candidateCount: syms.length,
+            remainingCount: Math.max(0, symbolPage.length - symbolItems.length),
+            totalIsExact: true,
+            truncated: Boolean(nextSymbolCursor),
+            nextCursor: nextSymbolCursor,
+            completeness: "lower_bound",
+            proofStatus: symbolItems.length ? "candidate" : "not_proven",
+          });
+          emit(deps, json, symbolItems.map(line).join("\n") || `(no symbols indexed for ${filePath})`, symbolEnvelope);
           return 0;
         }
         case "endpoints": {
           const repoArg = optionValue("repo") ?? pos[0];
-          const repoId = repoArg ? scopedRepoId(store, repoArg) : undefined;
-          if (repoArg && !repoId) { deps.err(`no indexed repo matches "${repoArg}"`); return 2; }
-          const protocol = optionValue("protocol");
-          const limit = Number(optionValue("limit") ?? "100");
-          const cursor = optionValue("cursor");
-          const params = [...(repoId ? [repoId] : []), ...(protocol ? [protocol] : [])];
-          const coverageTotals = repoId
-            ? store.db.prepare("SELECT SUM(coverage_status='excluded') AS excluded, SUM(coverage_status='failed') AS failed FROM coverage_records WHERE repo_id=?").get(repoId) as { excluded: number | null; failed: number | null }
-            : null;
-          const endpointCoverageComplete = Boolean(repoId && Number(coverageTotals?.excluded ?? 0) === 0 && Number(coverageTotals?.failed ?? 0) === 0);
-          let rows = store.db.prepare(`SELECT n.id AS nodeId, n.title, n.identity_key AS identityKey, json_extract(n.meta, '$.protocol') AS protocol FROM nodes n WHERE n.node_type='endpoint' ${repoId ? "AND (n.repo_id=? OR n.repo_id IS NULL)" : ""} ${protocol ? "AND json_extract(n.meta, '$.protocol')=?" : ""} ORDER BY n.title, n.id`).all(...params) as Array<{nodeId:string;title:string;identityKey:string;protocol:string|null}>;
-          const scopeKey = `${repoArg ?? "*"}|${protocol ?? "*"}`;
-          if (cursor) {
+          const requestedRepoId = scopedRepoId(store, repoArg);
+          if (repoArg && requestedRepoId === null) {
+            return emitCliError(deps, json, "REPOSITORY_NOT_FOUND", `repository not found: ${repoArg}`, 4, { repo: repoArg });
+          }
+          const branch = optionValue("branch");
+          const commitSha = optionValue("commit");
+          const snapshotId = optionValue("snapshot");
+          const hasExplicitRevisionSelector = Boolean(branch || commitSha || snapshotId);
+          let revision;
+          let resolvedScope;
+          if (hasExplicitRevisionSelector) {
             try {
-              const decoded = OPERATION_CURSOR_CODEC.decode(cursor, operationCursorScope("endpoints", scopeKey));
-              const [title, nodeId] = decoded.lastKey.split("\u0000");
-              if (!title || !nodeId) throw new Error("CURSOR_INVALID");
-              rows = rows.filter((row) => row.title > title || (row.title === title && row.nodeId > nodeId));
+              ({ revision, scope: resolvedScope } = resolveCliRevision(store, "", {
+                repo: repoArg,
+                branch,
+                commitSha,
+                snapshotId,
+              }, deps.cwd));
             } catch (error) {
-              const raw = String((error as Error).message ?? error);
-              return emitCliError(deps, json, raw === "CURSOR_SCOPE_MISMATCH" ? raw : raw === "CURSOR_STALE" ? raw : "CURSOR_INVALID", "invalid or mismatched endpoint cursor", 2);
+              return reportScopeResolutionError(deps, error, json);
             }
           }
-          const page = rows.slice(0, Math.max(1, Math.min(limit, 500)));
-          const nextCursor = rows.length > page.length && page.length > 0
-            ? OPERATION_CURSOR_CODEC.encode({ schemaVersion: "1", contractVersion: "2", operation: "endpoints", scope: scopeKey, orderingKey: "title,nodeId", lastKey: `${page.at(-1)!.title}\u0000${page.at(-1)!.nodeId}`, revision: null, expiresAt: new Date(Date.now() + 15 * 60_000).toISOString() })
+          const repoId = revision?.repoId ?? requestedRepoId ?? undefined;
+          const requestedProtocol = optionValue("protocol");
+          const protocol = requestedProtocol === "rest" ? "http" : requestedProtocol;
+          const service = optionValue("service");
+          const method = optionValue("method");
+          const path = optionValue("path");
+          const handledOnly = flags.includes("--handled-only");
+          const provenanceKind = optionValue("provenance-kind") as EndpointProvenanceKind | undefined;
+          const limit = Number(optionValue("limit") ?? "100");
+          const cursor = optionValue("cursor");
+          const coverageTotals = repoId
+            ? store.db.prepare("SELECT COUNT(*) AS discovered, SUM(coverage_status='excluded') AS excluded, SUM(coverage_status='failed') AS failed FROM coverage_records WHERE repo_id=?").get(repoId) as { discovered: number; excluded: number | null; failed: number | null }
             : null;
-          const result = page.map((row) => {
-            const handlers = store.db.prepare("SELECT n.title, n.repo_id AS repoId FROM edges e JOIN nodes n ON n.id=e.dst WHERE e.src=? AND e.edge_type='handles' AND e.status='active'").all(row.nodeId) as Array<{ title: string; repoId: string | null }>;
-            // An endpoint with no handler is not automatically dead: endpoint
-            // coverage can be incomplete (generated proto, another repo, or a
-            // parser gap). Keep that distinction machine-readable.
-            const handlerStatus = handlers.length ? "handled" : endpointCoverageComplete ? "missing" : repoId ? "incomplete" : "unknown";
-            return {
-              ...row,
-              handlers,
-              handlerStatus,
-              missingHandlerReason: handlers.length ? null : endpointCoverageComplete
-                ? "no_active_handles_edge"
-                : "handler_not_proven_absent: endpoint coverage or generated wiring may be incomplete",
-            };
+          const endpointCoverageComplete = Boolean(repoId && Number(coverageTotals?.discovered ?? 0) > 0 && Number(coverageTotals?.excluded ?? 0) === 0 && Number(coverageTotals?.failed ?? 0) === 0);
+          let endpointPage;
+          try {
+            endpointPage = affectedByFiles.endpointInventoryPage(store, {
+              repoId: repoId ?? undefined,
+              protocol: protocol ?? undefined,
+              service: service ?? undefined,
+              method: method ?? undefined,
+              path: path ?? undefined,
+              handledOnly,
+              provenanceKind,
+              ...(revision ? { scope: {
+                repoId: revision.repoId,
+                branchId: revision.branchId ?? null,
+                revisionId: revision.snapshotId,
+                revision,
+              } } : {}),
+              limit,
+              cursor: cursor ?? undefined,
+            });
+          } catch (error) {
+            const errorCode = (error as { code?: unknown }).code;
+            if (errorCode === "SCHEMA_OUTDATED" || errorCode === "INDEX_NOT_READY") {
+              const compatibilityError = error as {
+                details?: Record<string, unknown>;
+                retryable?: unknown;
+                remediation?: unknown;
+              };
+              return emitCliError(
+                deps,
+                json,
+                String(errorCode),
+                String((error as Error).message),
+                3,
+                compatibilityError.details,
+                compatibilityError.retryable === true,
+                typeof compatibilityError.remediation === "string" ? compatibilityError.remediation : undefined,
+              );
+            }
+            if (errorCode === "INVALID_ARGUMENT") {
+              return emitCliError(deps, json, "INVALID_ARGUMENT", String((error as Error).message), 2, { limit });
+            }
+            if (errorCode === "CURSOR_INVALID" || errorCode === "CURSOR_OPERATION_MISMATCH" || errorCode === "CURSOR_SCOPE_MISMATCH" || errorCode === "CURSOR_STALE" || errorCode === "CURSOR_EXPIRED" || errorCode === "CURSOR_REQUEST_MISMATCH") {
+              return emitCliError(deps, json, String(errorCode), String((error as Error).message), 2, { cursor });
+            }
+            const raw = String((error as Error).message ?? error);
+            const code = raw === "CURSOR_OPERATION_MISMATCH" || raw === "CURSOR_SCOPE_MISMATCH" || raw === "CURSOR_STALE" || raw === "CURSOR_EXPIRED" || raw === "CURSOR_REQUEST_MISMATCH"
+              ? raw
+              : "CURSOR_INVALID";
+            const message = raw.includes("malformed") ? raw : "invalid or mismatched endpoint cursor";
+            return emitCliError(deps, json, code, message, 2, { cursor });
+          }
+          const endpointScope = endpointPage.scope;
+          const result = endpointPage.items.map((row) => ({
+            ...row,
+            missingHandlerReason: row.handlers.length ? null : endpointCoverageComplete
+              ? "no_active_handles_edge"
+              : "handler_not_proven_absent: endpoint coverage or generated wiring may be incomplete",
+          }));
+          const payload = affectedByFiles.listEnvelope(store, result, {
+            repoId: repoId ?? undefined,
+            branchId: endpointScope.branchId ?? undefined,
+            revision: endpointScope.revision ?? undefined,
+            scope: { ...endpointScope },
+            candidateCount: endpointPage.candidateCount,
+            remainingCount: endpointPage.remainingCount,
+            totalIsExact: endpointPage.totalIsExact,
+            truncated: endpointPage.truncated,
+            nextCursor: endpointPage.nextCursor,
+            completeness: endpointCoverageComplete ? "lower_bound" : "partial",
+            proofStatus: result.length ? "candidate" : "not_proven",
+            gaps: endpointCoverageComplete ? [] : ["endpoint_coverage_incomplete"],
           });
-          const payload = { items: result, returnedCount: result.length, candidateCount: rows.length, totalIsExact: !nextCursor, truncated: Boolean(nextCursor), nextCursor };
+          Object.assign(payload, {
+            publication: endpointPage.publication,
+            ...(resolvedScope ? { locator: resolvedScope.locator, alignment: resolvedScope.alignment, warnings: resolvedScope.warnings } : {}),
+          });
           emit(deps, json, result.map((row) => `${row.title} [${row.protocol ?? "unknown"}]${row.handlers.length ? ` → ${row.handlers.map((h) => (h as {title:string}).title).join(", ")}` : " → (no indexed handler)"}`).join("\n") || "(no endpoints)", json ? payload : result);
           return 0;
         }
         case "endpoint-identity": {
           const forms = pos.filter(Boolean).slice(0, 3);
-          if (forms.length !== 3) { deps.err("endpoint-identity needs rendered title, canonical identity, and node id"); return 2; }
+          if (forms.length < 2) { return emitCliError(deps, json, "INVALID_ARGUMENT", "endpoint-identity needs at least rendered title and canonical identity", 2, { remediation: "pass two or three endpoint identity forms" }); }
           const resolve = (value: string) => {
             const endpointId = resolveEndpointId(store, value);
             const direct = store.db.prepare("SELECT id FROM nodes WHERE node_type='endpoint' AND id=? LIMIT 1").get(endpointId) as { id: string } | undefined;
@@ -2233,7 +3095,13 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           };
           const resolved = forms.map((value) => ({ value, nodeId: resolve(value), status: resolve(value) ? "resolved" : "no_match" }));
           const ids = resolved.map((item) => item.nodeId).filter((id): id is string => Boolean(id));
-          const equal = ids.length === 3 && new Set(ids).size === 1;
+          const equal = ids.length === forms.length && new Set(ids).size === 1;
+          if (ids.length === 0) {
+            return emitCliError(deps, json, "ENDPOINT_NOT_FOUND", "endpoint identity could not resolve any supplied form", 1, {
+              forms: resolved,
+              remediation: "use `penguin endpoints --json` to copy an indexed endpoint identity",
+            });
+          }
           const result = { forms: resolved, equal, rootNodeId: equal ? ids[0] : null, parentNodeId: null, completeness: equal ? "complete" : "unknown" };
           emit(deps, json, equal ? `same endpoint: ${ids[0]}` : "endpoint identity mismatch or unresolved", result);
           return equal ? 0 : 1;
@@ -2262,7 +3130,8 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
         }
         case "tags": {
           const tags = listTags(store);
-          emit(deps, json, tags.join("\n") || "(no tags)", tags);
+          const items = tags.map((tag) => ({ tag, source: { kind: "note_index" }, timestamp: null, scope: null, revision: null, sensitivity: "unknown", permission: { mcpAccess: "unknown" }, provenanceGaps: ["source_timestamp_unavailable", "permission_state_unavailable"] }));
+          emit(deps, json, tags.join("\n") || "(no tags)", { ...affectedByFiles.listEnvelope(store, items, { gaps: ["tag_item_provenance_incomplete"] }), tags });
           return 0;
         }
         default: {
@@ -2281,7 +3150,12 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
               deps.cwd,
             ));
           } catch (error) { return reportScopeResolutionError(deps, error, json); }
-          const res = exploreGraph(store, GRAPH_VERB_MODE[verb], pos[0] ?? "", { repoId: graphRepoId ?? revision?.repoId, revision });
+          let res;
+          try { res = exploreGraph(store, GRAPH_VERB_MODE[verb], pos[0] ?? "", { repoId: graphRepoId ?? revision?.repoId, revision }); }
+          catch (error) {
+            if (error instanceof TargetResolutionError) return emitCliError(deps, json, error.code, error.message, 1, error.details);
+            throw error;
+          }
           // An empty node list and a failed lookup are different answers.
           // Rendering both as "(none)" told a caller "nothing calls this" when
           // the truth was "the name matched several symbols and I gave up" —

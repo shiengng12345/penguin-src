@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   KnowledgeStore,
+  EmbeddingLifecycle,
   buildStorageReport,
+  createEmbeddingSpace,
   evaluateStorageHealth,
   runStorageMaintenance,
   recordStorageSample,
@@ -37,6 +39,9 @@ test("buildStorageReport returns file sizes, samples once per day, and never thr
   assert.equal(first.gc.hotFeatureLimit, 20);
   assert.equal(first.maintenance.running, false);
   assert.deepEqual(first.repos, []);
+  assert.equal(first.semantic.ready, false);
+  assert.equal(first.semantic.activeGenerations, 0);
+  assert.equal(first.semantic.reason, "NO_ACTIVE_SPACE");
 
   // Same-day resample updates in place — exactly one row per calendar day.
   buildStorageReport(store);
@@ -44,6 +49,33 @@ test("buildStorageReport returns file sizes, samples once per day, and never thr
   assert.equal(sampleRows.n, 1);
   const report = buildStorageReport(store);
   assert.equal(report.growth.samples.length, 1);
+  store.close();
+});
+
+test("semantic storage report exposes an incomplete staging generation", () => {
+  const store = openStore();
+  const space = createEmbeddingSpace(store, {
+    providerId: "fixture",
+    modelId: "fixture-v1",
+    weightsDigest: "a".repeat(64),
+    tokenizerDigest: "b".repeat(64),
+    dimensions: 2,
+    pooling: "mean",
+    normalization: "l2",
+    chunkerVersion: "semantic-chunker-v1",
+  });
+  new EmbeddingLifecycle(store).createGeneration({
+    spaceId: space.id,
+    snapshotId: "snapshot-1",
+    scopeKey: "repo:fixture",
+    expectedChunks: 1,
+  });
+  const semantic = buildStorageReport(store).semantic;
+  assert.equal(semantic.ready, false);
+  assert.equal(semantic.stagingGenerations, 1);
+  assert.equal(semantic.expectedChunks, 1);
+  assert.equal(semantic.readyRefs, 0);
+  assert.equal(semantic.reason, "EMBEDDING_GENERATION_INCOMPLETE");
   store.close();
 });
 
@@ -56,6 +88,7 @@ test("dbstat table categories are present and human-mappable", () => {
     assert.ok(["graph_edges", "source_content", "fts", "vectors", "symbols", "other"].includes(key), `unknown category ${key}`);
   }
   assert.ok(report.tables.categories.every((category) => category.bytes > 0));
+  assert.equal(typeof report.semantic.modelDiskBytes, "number", "semantic/vector bytes are reported separately after analyze");
   store.close();
 });
 

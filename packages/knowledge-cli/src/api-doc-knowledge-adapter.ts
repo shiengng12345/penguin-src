@@ -8,6 +8,12 @@ function fields(value: unknown, revisionId: string, source: "request" | "respons
 }
 function endpointMeta(store: KnowledgeStore, nodeId: string): Record<string, unknown> { const node = store.getNode(nodeId); return jsonObject(node?.meta); }
 
+export function currentApiDocRevisionIds(store: KnowledgeStore): string[] {
+  const rows = store.db.prepare(`SELECT repo_id AS repoId,id AS branchId,current_snapshot_id AS snapshotId
+    FROM branches WHERE status='live' ORDER BY repo_id,id`).all() as Array<{ repoId: string; branchId: string; snapshotId: string | null }>;
+  return rows.map((row) => `${row.repoId}:${row.snapshotId ?? `legacy:${row.branchId}`}`);
+}
+
 export function createKnowledgeApiDocAdapter(store: KnowledgeStore): DocumentationSourceAdapter {
   return {
     async resolveSubjects(subjects): Promise<SubjectResolution> {

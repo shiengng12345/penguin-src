@@ -5,6 +5,23 @@
 // actual handler (knowledge-tools.ts) is dynamically imported on first call.
 import { isLogInvestigationTool } from "./log-investigation-tool-defs.js";
 import { CAPABILITIES, CAPABILITY_ALIASES, canonicalInputSchema } from "@penguin/knowledge-contracts";
+
+function mcpInputSchema(capabilityId: string) {
+  const schema = canonicalInputSchema(capabilityId);
+  const capability = CAPABILITIES.find((candidate) => candidate.id === capabilityId);
+  if (!capability?.mutating) return schema;
+  return {
+    ...schema,
+    required: [...(schema.required ?? []), "confirmation_token"],
+    properties: {
+      ...schema.properties,
+      confirmation_token: {
+        type: "string",
+        description: "MCP transport authorization confirmation; separate from the canonical operationToken",
+      },
+    },
+  };
+}
 export const KNOWLEDGE_TOOL_DEFS = [
   {
     name: "knowledge_capabilities",
@@ -288,7 +305,16 @@ export const KNOWLEDGE_TOOL_DEFS = [
     description:
       "Repo/branch/language overview: node+edge counts, per-language symbol counts, entry points, and \"hubs\" (highest-fan-in god-nodes — " +
       "the closest thing to 'what's the architecture' or 'what's most depended-on here').",
-    inputSchema: { type: "object", properties: {} },
+    inputSchema: {
+      type: "object",
+      properties: {
+        repo: { type: "string", description: "Repo name or id" },
+        branch: { type: "string" },
+        commit_sha: { type: "string" },
+        snapshot_id: { type: "string" },
+        allow_fallback: { type: "boolean" },
+      },
+    },
   },
   {
     name: "find_communities",
@@ -307,9 +333,11 @@ export const KNOWLEDGE_TOOL_DEFS = [
       type: "object",
       properties: {
         limit: { type: "number" },
+        cursor: { type: "string" },
         repo: { type: "string", description: "Repo name or id" },
         path: { type: "string", description: "Repo-relative path prefix, e.g. apps/promotion/src" },
         branch: { type: "string" },
+        compact: { type: "boolean", description: "Omit compatibility mirrors that duplicate canonical items" },
       },
     },
   },
@@ -346,7 +374,19 @@ for (const tool of KNOWLEDGE_TOOL_DEFS) {
 const CANONICAL_ALIASES: Record<string, string> = { ...CAPABILITY_ALIASES };
 for (const [alias, capabilityId] of Object.entries(CANONICAL_ALIASES)) {
   const tool = KNOWLEDGE_TOOL_DEFS.find((candidate) => candidate.name === alias);
-  if (tool) (tool as { "x-penguin-capability-id"?: string })["x-penguin-capability-id"] = capabilityId;
+  const canonicalName = capabilityId.replaceAll(".", "_");
+  const canonicalExists = KNOWLEDGE_TOOL_DEFS.some((candidate) => candidate.name === canonicalName);
+  // Compatibility aliases remain callable, but the canonical generated
+  // spelling owns the ID in the full manifest. The curated listing below
+  // projects the legacy name with the same ID without duplicating it in the
+  // callable manifest.
+  if (tool && canonicalExists) {
+    delete (tool as { "x-penguin-capability-id"?: string })["x-penguin-capability-id"];
+    const canonicalTool = KNOWLEDGE_TOOL_DEFS.find((candidate) => candidate.name === canonicalName);
+    if (canonicalTool) {
+      canonicalTool.inputSchema = tool.inputSchema;
+    }
+  }
 }
 
 // Input schemas are canonical contract data, not a second MCP-only type
@@ -379,6 +419,11 @@ const TOOL_TIERS: ReadonlyArray<readonly [prefix: string, names: readonly string
     "knowledge_files",
     "get_architecture",
     "index_status",
+    "knowledge_semantic_status",
+    "knowledge_semantic_control",
+    "knowledge_repository_register",
+    "knowledge_index",
+    "knowledge_rebuild",
   ]],
   ["[targeted — use when explore returned too much or the wrong thing] ", [
     // Single-relation queries. Explore returns all relations at once, which is
@@ -398,7 +443,6 @@ const TOOL_TIERS: ReadonlyArray<readonly [prefix: string, names: readonly string
   ]],
   ["[specialised — knowledge_explore usually answers this first] ", [
     "explore_graph",
-    "knowledge_graph_query",
     "knowledge_service_graph",
     "knowledge_local_graph",
     "knowledge_repository_graph",
@@ -409,8 +453,18 @@ const TOOL_TIERS: ReadonlyArray<readonly [prefix: string, names: readonly string
     "dependency_path",
     "compare_branches",
     "knowledge_snapshot_list",
-    "knowledge_timeline",
-    "knowledge_recent",
+    // Timeline/recent remain callable through the full manifest, but are not
+    // advertised: explore already exposes current change context and the two
+    // maintenance views displaced MCP-only index/rebuild recovery from the
+    // bounded tools/list budget.
+    "knowledge_source_list",
+    "knowledge_memory_recall",
+    "knowledge_ontology_list",
+    "knowledge_ontology_link",
+    "knowledge_domain_explain",
+    "knowledge_onboarding_generate",
+    "knowledge_artifact_export",
+    "knowledge_api_doc_export",
     "status_panel",
     "knowledge_doctor",
   ]],
@@ -452,10 +506,24 @@ const TIERED_TOOL_DEFS = KNOWLEDGE_TOOL_DEFS
 
 /** Tools advertised through tools/list — complete canonical manifest. */
 export const MCP_LISTED_TOOL_DEFS = [
-  ...TIERED_TOOL_DEFS,
-  ...KNOWLEDGE_TOOL_DEFS
-    .filter((tool) => !TIER_BY_NAME.has(tool.name))
-    .sort((a, b) => a.name.localeCompare(b.name)),
+  ...TIERED_TOOL_DEFS.map((tool) => {
+    const capabilityId = CANONICAL_ALIASES[tool.name]
+      ?? (tool as { "x-penguin-capability-id"?: string })["x-penguin-capability-id"];
+    const listedTool = capabilityId
+      ? { ...tool, "x-penguin-capability-id": capabilityId, inputSchema: mcpInputSchema(capabilityId) }
+      : tool;
+    const canonicalId = listedTool["x-penguin-capability-id"];
+    const capability = CAPABILITIES.find((candidate) => candidate.id === canonicalId);
+    return capability
+      ? {
+          ...listedTool,
+          annotations: {
+            title: capability.title,
+            ...capability.annotations,
+          },
+        }
+      : listedTool;
+  }),
 ];
 
 // Kept as a separate pure module for release-bundle startup, but accepted by

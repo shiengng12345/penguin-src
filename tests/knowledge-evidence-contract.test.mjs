@@ -6,6 +6,7 @@ import { test } from "node:test";
 import {
   KnowledgeStore,
   affectedByFiles,
+  affectedByNode,
   buildContextPack,
   buildFlow,
   exploreGraph,
@@ -32,6 +33,29 @@ function assertEnvelope(value, label) {
     assert.ok(Object.hasOwn(envelope, key), `${label}.${key} is present`);
   }
   return envelope;
+}
+
+function assertListEnvelope(value, label) {
+  assert.ok(value && typeof value === "object" && !Array.isArray(value), `${label} is not a bare array`);
+  for (const key of ["items", "scope", "revision", "freshness", "coverage", "completeness", "proofStatus", "candidateCount", "returnedCount", "totalIsExact", "truncated", "nextCursor", "gaps"]) {
+    assert.ok(Object.hasOwn(value, key), `${label}.${key} is present`);
+  }
+  assert.ok(Array.isArray(value.items), `${label}.items is an array`);
+  assert.ok(Array.isArray(value.gaps), `${label}.gaps is an array`);
+  return value;
+}
+
+async function cliJson(args, dbPath, ledgerPath, cwd) {
+  const lines = [];
+  const code = await runCli([...args, "--json"], {
+    openStore: () => KnowledgeStore.open({ dbPath, ledgerPath, allowSchemaMutation: false }),
+    storeExists: () => true,
+    cwd,
+    out: (line) => lines.push(line),
+    err: (line) => lines.push(line),
+  });
+  assert.equal(code, 0, lines.join("\n"));
+  return JSON.parse(lines.at(-1));
 }
 
 test("missing target is an explicit not_proven evidence envelope", () => {
@@ -79,6 +103,44 @@ test("unresolved references persist by repo, branch, file and indexing revision 
   store.close();
 });
 
+test("coverage envelope falls back to branch coverage layers when per-file rows are absent", () => {
+  const { store, repoId, branchId, target } = fixture();
+  store.db.prepare(`INSERT INTO coverage_layers
+    (repo_id,branch_id,layer,resolved,total,updated_at)
+    VALUES (?,?,?,?,?,?)`).run(repoId, branchId, "references", 7, 10, new Date().toISOString());
+  const result = buildContextPack(store, `node:${target}`, { repoId, branchId });
+  const envelope = assertEnvelope(result, "context coverage fallback");
+  assert.equal(envelope.coverage.unresolvedReferences, 3);
+  store.close();
+});
+
+test("unresolved reference coverage is null when neither ledger rows nor layer evidence exists", () => {
+  const { store, repoId, branchId, target } = fixture();
+  const result = buildContextPack(store, `node:${target}`, { repoId, branchId });
+  const envelope = assertEnvelope(result, "context unresolved coverage");
+  assert.equal(envelope.coverage.unresolvedReferences, null);
+  assert.ok(envelope.gaps.includes("unresolved_reference_coverage_unavailable"));
+  store.close();
+});
+
+test("relation presence does not claim proof for a lower-bound context pack or graph", () => {
+  const { store, repoId, branchId, target } = fixture();
+  const caller = store.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::caller`, repoId, title: "caller" });
+  store.upsertSymbolVersion({ nodeId: caller, branchId, commitSha: "c1", filePath: "src/caller.ts", lang: "ts", kind: "function", contentHash: "caller", status: "fresh" });
+  store.indexSymbolText({ nodeId: caller, name: "caller", signature: "()" });
+  store.db.prepare(`INSERT INTO edges (id,src,dst,edge_type,branch_id,origin,method,status)
+    VALUES (?,?,?,?,?,?,?,?)`).run("e-caller-target", caller, target, "calls", branchId, "parser", "EXTRACTED", "active");
+
+  const context = buildContextPack(store, `node:${target}`, { repoId, branchId });
+  assert.equal(assertEnvelope(context, "context with relation").proofStatus, "not_proven");
+  const graph = exploreGraph(store, "who_calls", `node:${target}`, { repoId, branchId, limit: 10 });
+  assert.equal(assertEnvelope(graph, "graph with relation").proofStatus, "not_proven");
+  const affected = affectedByNode(store, `node:${target}`, { repoId });
+  assert.ok(affected);
+  assert.equal(assertEnvelope(affected, "node affected").proofStatus, "candidate");
+  store.close();
+});
+
 test("partial flow and MCP response preserve the evidence envelope", async () => {
   const { store, target } = fixture();
   const flow = buildFlow(store, `node:${target}`, { limit: 10 });
@@ -107,4 +169,58 @@ test("affected file result also carries the shared evidence fields", () => {
   assertEnvelope(result, "affected");
   assert.equal(result.returnedCount, result.changed.length + result.impacted.length);
   store.close();
+});
+
+test("CLI and MCP read-only lists share one honest envelope", async () => {
+  const { store, repoId, branchId, dir } = fixture();
+  store.createSnapshot({ name: "fixture-snapshot", nodeIds: [] });
+  const dbPath = store.db.name;
+  const ledgerPath = join(dir, "ledger.jsonl");
+  store.close();
+
+  for (const [cliArgs, mcpName, mcpArgs] of [
+    [["tags"], "knowledge_tag_list", {}],
+    [["snapshot", "list"], "knowledge_snapshot_list", {}],
+    [["coverage", "--repo", repoId], "knowledge_coverage", { repo: repoId }],
+  ]) {
+    const mcpStore = KnowledgeStore.open({ dbPath, ledgerPath, allowSchemaMutation: false });
+    const mcp = assertListEnvelope(handleKnowledgeTool(mcpName, mcpArgs, mcpStore), `MCP ${mcpName}`);
+    mcpStore.close();
+    const cli = assertListEnvelope(await cliJson(cliArgs, dbPath, ledgerPath, dir), `CLI ${cliArgs[0]}`);
+    assert.deepEqual(mcp.items, cli.items, `${mcpName} items parity`);
+    for (const key of ["freshness", "coverage", "completeness", "proofStatus", "candidateCount", "returnedCount", "totalIsExact", "truncated", "nextCursor", "gaps"]) {
+      assert.deepEqual(mcp[key], cli[key], `${mcpName}.${key} parity`);
+    }
+    assert.equal(cli.coverage.unresolvedReferences, null);
+    assert.ok(cli.gaps.includes("unresolved_reference_coverage_unavailable"));
+  }
+
+  const coverage = await cliJson(["coverage", "--repo", repoId], dbPath, ledgerPath, dir);
+  assert.equal(coverage.coverage.status, "unknown");
+  assert.equal(coverage.coverage.admitted, null);
+  assert.equal(coverage.proofStatus, "not_proven");
+  assert.ok(coverage.gaps.includes("coverage_records_empty"));
+  assert.equal(coverage.revision?.branchId, branchId);
+});
+
+test("endpoints, filesymbols and deadcode expose the same list evidence fields", async () => {
+  const { store, repoId, dir } = fixture();
+  const dbPath = store.db.name;
+  const ledgerPath = join(dir, "ledger.jsonl");
+  store.close();
+  for (const [cliArgs, mcpName, mcpArgs] of [
+    [["endpoints", "--repo", repoId], "knowledge_endpoints", { repo: repoId }],
+    [["filesymbols", repoId, "main", "src/target.ts"], "knowledge_file_symbols", { repo: repoId, branch: "main", file_path: "src/target.ts" }],
+    [["deadcode", "--repo", repoId], "knowledge_dead_code", { repo: repoId }],
+  ]) {
+    const mcpStore = KnowledgeStore.open({ dbPath, ledgerPath, allowSchemaMutation: false });
+    const mcp = assertListEnvelope(handleKnowledgeTool(mcpName, mcpArgs, mcpStore), `MCP ${mcpName}`);
+    mcpStore.close();
+    const cli = assertListEnvelope(await cliJson(cliArgs, dbPath, ledgerPath, dir), `CLI ${cliArgs[0]}`);
+    assert.equal(mcp.returnedCount, mcp.items.length);
+    assert.equal(cli.returnedCount, cli.items.length);
+    for (const key of ["freshness", "coverage", "completeness", "proofStatus", "totalIsExact", "truncated", "gaps"]) {
+      assert.deepEqual(mcp[key], cli[key], `${mcpName}.${key} parity`);
+    }
+  }
 });

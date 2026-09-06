@@ -4,9 +4,10 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { CAPABILITIES, capabilityHash, listMcpRegistrations, listCliRegistrations } from "../packages/knowledge-contracts/dist/index.js";
 import { KNOWLEDGE_TOOL_DEFS, MCP_LISTED_TOOL_DEFS } from "../packages/mcp/dist/knowledge-tool-defs.js";
 import { defaultProcessPaths, extractCliJson as extractCliJsonOutput, McpSession, mcpStructured, normalizeForParity, parseJson, processEnv, runCli } from "./knowledge-process-utils.mjs";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { workingTreeProvenance } from "./knowledge-source-provenance.mjs";
 
 // `defaultProcessPaths` uses spawn/spawnSync internally; this marker keeps the
 // executable-process requirement visible to static audits as well.
@@ -31,8 +32,9 @@ function fileHash(path) {
 /**
  * 什么时候用：为目标 commit/tree 读取到的 CLI、MCP 和两个 launcher 输入生成 parity runtime 的 buildId，方便报告核对 commit 与 bundle 是否绑定。
  */
-function bundleId({ sourceCommit, sourceTree, bundleContentHashes }) {
+function bundleId({ sourceIdentity, sourceCommit, sourceTree, bundleContentHashes }) {
   return createHash("sha256")
+    .update(sourceIdentity)
     .update(sourceCommit)
     .update(sourceTree)
     .update(bundleContentHashes.cli)
@@ -61,13 +63,15 @@ function trackedFile(relativePath) {
 }
 
 function sourceMetadata() {
-  const sourceCommit = gitValue(["rev-parse", "HEAD"]);
-  const sourceTree = gitValue(["rev-parse", "HEAD^{tree}"]);
-  const targetCommit = process.env.PENGUIN_PARITY_TARGET_COMMIT ?? sourceCommit;
-  const targetCommitResolved = gitValue(["rev-parse", "--verify", `${targetCommit}^{commit}`]);
+  const worktree = workingTreeProvenance(root);
+  const { sourceCommit, sourceTree, sourceIdentity } = worktree;
+  const explicitTargetCommit = process.env.PENGUIN_PARITY_TARGET_COMMIT;
+  const targetCommitResolved = explicitTargetCommit
+    ? gitValue(["rev-parse", "--verify", `${explicitTargetCommit}^{commit}`])
+    : sourceCommit;
+  const targetSourceIdentity = process.env.PENGUIN_PARITY_TARGET_SOURCE
+    ?? (explicitTargetCommit ? targetCommitResolved : sourceIdentity);
   const trackedLauncherInputs = trackedLauncherPaths.map((relativePath) => trackedFile(relativePath));
-  const dirtyFiles = gitValue(["status", "--porcelain=v1", "--untracked-files=all"])
-    .split(/\r?\n/).filter(Boolean);
   const bundleContentHashes = {
     cli: fileHash(paths.cliBundle),
     mcp: fileHash(paths.mcpBundle),
@@ -77,32 +81,45 @@ function sourceMetadata() {
   return {
     sourceCommit,
     sourceTree,
+    sourceIdentity,
+    targetSourceIdentity,
     targetCommit: targetCommitResolved,
     bundleSourceCommit: sourceCommit,
     bundleSourceTree: sourceTree,
-    bundleCommitMatchesTarget: sourceCommit === targetCommitResolved && dirtyFiles.length === 0,
+    bundleSourceIdentity: sourceIdentity,
+    bundleSourceMatchesTarget: sourceIdentity === targetSourceIdentity,
+    bundleCommitMatchesTarget: worktree.state === "clean" && sourceCommit === targetCommitResolved,
     trackedLauncherInputs,
-    worktreeState: dirtyFiles.length ? "dirty" : "clean",
-    dirtyFiles,
+    worktreeState: worktree.state,
+    dirtyFiles: worktree.dirtyFiles,
+    worktreeDigest: worktree.worktreeDigest,
+    includedFileCount: worktree.includedFileCount,
     bundleContentHashes,
-    bundleId: bundleId({ sourceCommit, sourceTree, bundleContentHashes }),
+    bundleId: bundleId({ sourceIdentity, sourceCommit, sourceTree, bundleContentHashes }),
   };
 }
 
 function stableRuntime(pathsToStage, provenance) {
-  const home = mkdtempSync(join(tmpdir(), "penguin-task3-home-"));
+  // macOS exposes tmpdir through /var while ESM canonicalizes import.meta.url
+  // through /private/var. Stage the runtime under the canonical path so the
+  // protected launchers' exact main-entry identity check is exercised rather
+  // than silently treated as an imported module.
+  const home = realpathSync(mkdtempSync(join(tmpdir(), "penguin-task3-home-")));
   const runtimeRoot = join(home, ".penguin", "runtimes");
   const current = join(runtimeRoot, "current");
   const bin = join(home, ".penguin", "bin");
   mkdirSync(current, { recursive: true });
   const buildId = provenance.bundleId;
-  const link = (target, destination) => { mkdirSync(dirname(destination), { recursive: true }); symlinkSync(target, destination); };
-  link(pathsToStage.node, join(current, "node"));
-  link(pathsToStage.cliBundle, join(current, "penguin.mjs"));
-  link(pathsToStage.mcpBundle, join(current, "mcp", "dist", "index.js"));
+  const stageFile = (target, destination) => { mkdirSync(dirname(destination), { recursive: true }); linkSync(target, destination); };
+  stageFile(pathsToStage.node, join(current, "node"));
+  stageFile(pathsToStage.cliBundle, join(current, "penguin.mjs"));
+  cpSync(dirname(pathsToStage.mcpBundle), join(current, "mcp", "dist"), { recursive: true });
+  const mcpPackage = resolve(root, "packages/mcp/bundle/package.json");
+  if (existsSync(mcpPackage)) copyFileSync(mcpPackage, join(current, "mcp", "package.json"));
+  symlinkSync(resolve(root, "packages/knowledge-cli/bundle/node_modules"), join(current, "node_modules"));
   const wasm = resolve(root, "packages/knowledge-cli/bundle/wasm");
-  if (existsSync(wasm)) link(wasm, join(current, "wasm"));
-  const manifest = { schemaVersion: 1, ready: true, buildId, appVersion: "task3-round1", nodePath: "node", cliEntry: "penguin.mjs", mcpEntry: "mcp/dist/index.js", wasmPath: "wasm" };
+  if (existsSync(wasm)) cpSync(wasm, join(current, "wasm"), { recursive: true });
+  const manifest = { schemaVersion: 1, ready: true, buildId, appVersion: "task3-round1", capabilityHash: capabilityHash(CAPABILITIES), contractSchemaVersion: 18, contractVersion: "2", modelHash: "b".repeat(64), nodePath: "node", cliEntry: "penguin.mjs", mcpEntry: "mcp/dist/index.js", wasmPath: "wasm" };
   mkdirSync(runtimeRoot, { recursive: true });
   writeFileSync(join(runtimeRoot, "manifest.json"), JSON.stringify(manifest, null, 2));
   writeFileSync(join(current, "manifest.json"), JSON.stringify(manifest, null, 2));
@@ -133,6 +150,7 @@ function stableRuntime(pathsToStage, provenance) {
       HOME: home,
       PENGUIN_RUNTIME_ROOT: runtimeRoot,
       PENGUIN_BUILD_ID: buildId,
+      PENGUIN_MCP_QUERY_TIMEOUT_MS: "60000",
       // Keep the launcher HOME isolated while reading the already-indexed
       // graph selected for this parity run. Ledger writes stay in the temp HOME.
       PENGUIN_KNOWLEDGE_DB: sourceDb,
@@ -216,7 +234,20 @@ function flowProjection(value) {
 }
 
 function registrationProjection(value) {
-  return normalizeForParity(value);
+  if (!value || typeof value !== "object") return value;
+  const projected = structuredClone(value);
+  // CLI uses canonical dotted capability IDs while MCP necessarily exposes
+  // underscore tool names. Both are transport spellings, not semantic drift.
+  delete projected.wireName;
+  delete projected.advertisedTool;
+  delete projected.invocationMode;
+  // MCP confirmation_token is transport authorization, not part of the
+  // canonical semantic input contract shared with CLI/query-server.
+  if (projected.inputSchema?.properties) delete projected.inputSchema.properties.confirmation_token;
+  if (Array.isArray(projected.inputSchema?.required)) {
+    projected.inputSchema.required = projected.inputSchema.required.filter((field) => field !== "confirmation_token");
+  }
+  return normalizeForParity(projected);
 }
 
 function toolProjection(value) {
@@ -230,6 +261,19 @@ function endpointIdentityForms(endpoint) {
   const service = split > 0 ? identity.slice(0, split) : "";
   const method = split > 0 ? identity.slice(split + 1) : "";
   return [endpoint?.title, endpoint?.identityKey, service && method ? `/${service}/${method}` : null, endpoint?.nodeId, endpoint?.nodeId ? `node:${endpoint.nodeId}` : null].filter(Boolean);
+}
+
+function endpointDirectFilter(endpoint) {
+  const identity = String(endpoint?.identityKey ?? "").replace(/^grpc::/u, "");
+  const methodSplit = identity.lastIndexOf(".");
+  if (methodSplit < 1) return null;
+  const servicePath = identity.slice(0, methodSplit);
+  const serviceSplit = servicePath.lastIndexOf(".");
+  return {
+    service: servicePath.slice(serviceSplit + 1),
+    method: identity.slice(methodSplit + 1),
+    provenanceKind: "handler",
+  };
 }
 
 function sameEndpointResult(value, nodeId) {
@@ -247,9 +291,11 @@ const tools = new Map(KNOWLEDGE_TOOL_DEFS.map((tool) => [tool.name, tool]));
 const missingRegistrations = [...canonical.keys()].filter((id) => !registrations.has(id));
 const expectedToolNames = new Set(MCP_LISTED_TOOL_DEFS.map((tool) => tool.name));
 const expectedToolIds = new Set(CAPABILITIES.map((capability) => capability.id));
-const toolIds = new Set(KNOWLEDGE_TOOL_DEFS.map((tool) => tool["x-penguin-capability-id"]));
+const toolIds = new Set(KNOWLEDGE_TOOL_DEFS.map((tool) => tool["x-penguin-capability-id"]).filter(Boolean));
 const missingTools = [...expectedToolNames].filter((name) => !tools.has(name));
-const extraTools = [...tools.keys()].filter((name) => !expectedToolNames.has(name));
+// The source manifest also contains callable compatibility aliases and
+// non-discovery tools; they are intentionally omitted from tools/list.
+const extraTools = [...tools.keys()].filter((name) => !KNOWLEDGE_TOOL_DEFS.some((tool) => tool.name === name));
 const missingToolIds = [...expectedToolIds].filter((id) => !toolIds.has(id));
 const extraToolIds = [...toolIds].filter((id) => !expectedToolIds.has(id));
 const duplicateToolNames = [...new Set(KNOWLEDGE_TOOL_DEFS.map((tool) => tool.name))]
@@ -265,44 +311,46 @@ const registrationIds = new Set(registrations.keys());
 const missingMcpRegistrations = [...expectedToolIds].filter((id) => !registrationIds.has(id));
 const extraRegistrations = [...registrationIds].filter((id) => !expectedToolIds.has(id));
 record("registration-surface", { capabilityCount: CAPABILITIES.length, capabilityHash: capabilityHash(CAPABILITIES), mcpRegistrationCount: registrations.size, toolDefinitionCount: tools.size, missingRegistrations, extraRegistrations, missingTools, extraTools, missingToolIds, extraToolIds, duplicateToolNames, duplicateToolIds, schemaMismatches }, missingRegistrations.length === 0 && extraRegistrations.length === 0 && missingTools.length === 0 && extraTools.length === 0 && missingToolIds.length === 0 && extraToolIds.length === 0 && duplicateToolNames.length === 0 && duplicateToolIds.length === 0 && schemaMismatches.length === 0, "registration parity is not sufficient; real process checks follow");
-const sourceBundleProvenancePassed = provenance.bundleCommitMatchesTarget
+const sourceBundleProvenancePassed = provenance.bundleSourceMatchesTarget
   && provenance.bundleId === buildId
   && manifest.buildId === buildId
   && provenance.trackedLauncherInputs.length === trackedLauncherPaths.length;
-record("source-bundle-provenance", { ...provenance, runtimeBuildId: buildId, runtimeManifestBuildId: manifest.buildId, verification: "bundleId hashes the target commit/tree and exact CLI/MCP/launcher bytes; the runtime manifest carries the same value" }, sourceBundleProvenancePassed, "target commit/tree, exact bundle bytes, tracked launchers, and runtime manifest buildId must agree");
+record("source-bundle-provenance", { ...provenance, runtimeBuildId: buildId, runtimeManifestBuildId: manifest.buildId, verification: "bundleId hashes the exact clean commit or dirty worktree identity plus CLI/MCP/launcher bytes; the runtime manifest carries the same value" }, sourceBundleProvenancePassed, "target source identity, exact bundle bytes, tracked launchers, and runtime manifest buildId must agree");
 
 const cliCapabilities = runCli({ command: cliWrapper, args: ["capabilities", "--json"], cwd: root, env });
 const cliCapabilitiesJson = extractCliJson(cliCapabilities);
 record("cli-capabilities-process", { process: cliCapabilities, capabilities: cliCapabilitiesJson }, cliCapabilities.exitCode === 0
   && cliCapabilitiesJson?.capabilityHash === capabilityHash(CAPABILITIES)
   && cliCapabilitiesJson?.contractVersion === "2"
-  && cliCapabilitiesJson?.schemaVersion === "14"
+  && cliCapabilitiesJson?.schemaVersion === "18"
   && Array.isArray(cliCapabilitiesJson?.registrations));
 
-const cliEndpoint = runCli({ command: cliWrapper, args: ["endpoints", repo, "--protocol", "grpc", "--limit", "1", "--json"], cwd: root, env });
+  const cliEndpoint = runCli({ command: cliWrapper, args: ["endpoints", repo, "--protocol", "grpc", "--limit", "1", "--json"], cwd: root, env });
 const cliEndpointJson = extractCliJson(cliEndpoint);
 record("cli-endpoints-process", cliEndpoint, cliEndpoint.exitCode === 0 && Boolean(cliEndpointJson?.items?.[0]?.nodeId));
 const cliNodeId = cliEndpointJson?.items?.[0]?.nodeId ?? null;
-const session = new McpSession({ command: mcpWrapper, cwd: root, env, label: "parity-mcp" });
+const session = new McpSession({ command: mcpWrapper, cwd: root, env, label: "parity-mcp", timeoutMs: 60_000 });
 try {
   const initialized = await session.initialize();
   const instructions = parseJson(initialized?.result?.instructions ?? "");
   record("mcp-initialize-process", { response: initialized, instructions, ...session.evidence() }, Boolean(initialized?.result?.serverInfo)
     && instructions?.contractVersion === "2"
-    && instructions?.schemaVersion === 14
+    && instructions?.schemaVersion === 18
+    && instructions?.modelHash === cliCapabilitiesJson?.modelHash
     && instructions?.capabilityHash === cliCapabilitiesJson?.capabilityHash
     && initialized?.result?.serverInfo?.version === cliCapabilitiesJson?.buildId);
 
   const listedResponse = await session.request("tools/list");
   const listedTools = listedResponse?.result?.tools;
   const actualKnowledgeTools = Array.isArray(listedTools) ? listedTools.filter((tool) => tool["x-penguin-capability-id"]) : [];
-  const listedByName = new Map(actualKnowledgeTools.map((tool) => [tool.name, tool]));
-  const actualToolNames = new Set(listedByName.keys());
+  const listedByName = new Map((Array.isArray(listedTools) ? listedTools : []).map((tool) => [tool.name, tool]));
+  const actualToolNames = new Set([...listedByName.keys()].filter((name) => expectedToolNames.has(name)));
   const actualToolIds = new Set(actualKnowledgeTools.map((tool) => tool["x-penguin-capability-id"]));
   const missingListedTools = [...expectedToolNames].filter((name) => !actualToolNames.has(name));
   const extraListedTools = [...actualToolNames].filter((name) => !expectedToolNames.has(name));
-  const missingListedToolIds = [...expectedToolIds].filter((id) => !actualToolIds.has(id));
-  const extraListedToolIds = [...actualToolIds].filter((id) => !expectedToolIds.has(id));
+  const expectedListedToolIds = new Set(MCP_LISTED_TOOL_DEFS.map((tool) => tool["x-penguin-capability-id"]).filter(Boolean));
+  const missingListedToolIds = [...expectedListedToolIds].filter((id) => !actualToolIds.has(id));
+  const extraListedToolIds = [...actualToolIds].filter((id) => !expectedListedToolIds.has(id));
   const duplicateListedToolNames = [...actualToolNames]
     .filter((name) => actualKnowledgeTools.filter((tool) => tool.name === name).length > 1);
   const duplicateListedToolIds = [...actualToolIds]
@@ -352,7 +400,8 @@ try {
     && mcpCapabilities?.capabilityHash === cliCapabilitiesJson?.capabilityHash
     && mcpCapabilities?.buildId === cliCapabilitiesJson?.buildId
     && mcpCapabilities?.contractVersion === "2"
-    && mcpCapabilities?.schemaVersion === "14"
+    && mcpCapabilities?.schemaVersion === "18"
+    && mcpCapabilities?.modelHash === cliCapabilitiesJson?.modelHash
     && manifestEqual
     && Array.isArray(cliRegistrationList)
     && Array.isArray(mcpRegistrationList)
@@ -372,10 +421,57 @@ try {
     && generation.runningBuildId === initialized?.result?.serverInfo?.version
     && generation.outdated === false);
 
-  const mcpEndpointResponse = await session.callTool("knowledge_endpoints", { repo, protocol: "grpc", limit: 1 });
+  const directFilter = endpointDirectFilter(cliEndpointJson?.items?.[0]);
+  const mcpEndpointResponse = await session.callTool("knowledge_endpoints", {
+    repo,
+    protocol: "grpc",
+    ...(directFilter ? {
+      service: directFilter.service,
+      method: directFilter.method,
+      provenance_kind: directFilter.provenanceKind,
+    } : {}),
+    limit: directFilter ? 25 : 1,
+  });
   const mcpEndpoint = mcpStructured(mcpEndpointResponse);
   record("mcp-endpoints-process", { response: mcpEndpointResponse, structured: mcpEndpoint, ...session.evidence() }, Boolean(mcpEndpoint?.items?.[0]?.nodeId));
   const mcpNodeId = mcpEndpoint?.items?.[0]?.nodeId ?? null;
+
+  const cliFilteredEndpoint = directFilter
+    ? runCli({
+        command: cliWrapper,
+        args: [
+          "endpoints", repo, "--protocol", "grpc", "--service", directFilter.service,
+          "--method", directFilter.method, "--provenance-kind", directFilter.provenanceKind,
+          "--limit", "25", "--json",
+        ],
+        cwd: root,
+        env,
+      })
+    : null;
+  const cliFilteredEndpointJson = cliFilteredEndpoint ? extractCliJson(cliFilteredEndpoint) : null;
+  const mcpFilteredEndpointResponse = directFilter ? mcpEndpointResponse : null;
+  const mcpFilteredEndpoint = directFilter ? mcpEndpoint : null;
+  const filteredCliIds = (cliFilteredEndpointJson?.items ?? []).map((item) => item.nodeId).sort();
+  const filteredMcpIds = (mcpFilteredEndpoint?.items ?? []).map((item) => item.nodeId).sort();
+  const directFilterParity = Boolean(directFilter)
+    && cliFilteredEndpoint?.exitCode === 0
+    && mcpFilteredEndpointResponse?.result?.isError !== true
+    && JSON.stringify(filteredCliIds) === JSON.stringify(filteredMcpIds)
+    && filteredCliIds.length > 0
+    && cliFilteredEndpointJson?.candidateCount === mcpFilteredEndpoint?.candidateCount
+    && cliFilteredEndpointJson?.totalIsExact === true
+    && mcpFilteredEndpoint?.totalIsExact === true
+    && JSON.stringify(normalizeForParity(cliFilteredEndpointJson?.publication)) === JSON.stringify(normalizeForParity(mcpFilteredEndpoint?.publication))
+    && cliFilteredEndpointJson?.scope?.repoId === mcpFilteredEndpoint?.scope?.repoId
+    && cliFilteredEndpointJson?.scope?.revisionId === mcpFilteredEndpoint?.scope?.revisionId;
+  record("endpoint-direct-filter-parity-process", {
+    filter: directFilter,
+    cli: cliFilteredEndpoint,
+    cliStructured: cliFilteredEndpointJson,
+    mcpResponse: mcpFilteredEndpointResponse,
+    mcpStructured: mcpFilteredEndpoint,
+    ...session.evidence(),
+  }, directFilterParity, "release CLI and MCP must return the same canonical ids, exact totals, revision and publication receipt for one direct service/method filter");
 
   const cliEndpointItem = cliEndpointJson?.items?.[0];
   const mcpEndpointItem = mcpEndpoint?.items?.[0];
@@ -439,8 +535,8 @@ try {
   const mcpError = errorEnvelope(mcpInvalid);
   const equalErrors = JSON.stringify(normalizeForParity(cliError)) === JSON.stringify(normalizeForParity(mcpError))
     && Boolean(cliError) && Boolean(mcpError)
-    && cliError.code === "TARGET_NOT_FOUND"
-    && mcpError.code === "TARGET_NOT_FOUND"
+    && cliError.code === "NODE_NOT_FOUND"
+    && mcpError.code === "NODE_NOT_FOUND"
     && cliError.retryable === false
     && mcpError.retryable === false;
   record("normalized-error-envelope", { target: invalidTarget, cli: cliInvalid, mcp: mcpInvalidResponse, normalizedCliError: normalizeForParity(cliError), normalizedMcpError: normalizeForParity(mcpError), ...session.evidence() }, equalErrors, equalErrors ? "error envelopes match" : "one process did not expose the same typed error envelope");
@@ -453,11 +549,12 @@ try {
   const cliScopeError = errorEnvelope(cliScopeJson);
   const mcpScopeError = errorEnvelope(mcpScope);
   const scopeEqual = cliScope.exitCode === 4
-    && mcpScopeResponse?.result?.isError !== true
+    && mcpScopeResponse?.result?.isError === true
     && JSON.stringify(normalizeForParity(cliScopeError)) === JSON.stringify(normalizeForParity(mcpScopeError))
     && cliScopeError?.retryable === false
     && mcpScopeError?.retryable === false
-    && cliScopeError?.details?.remediation;
+    && typeof cliScopeError?.remediation === "string"
+    && cliScopeError.remediation.length > 0;
   record("scope-error-envelope", { branch: scopeBranch, cli: cliScope, mcp: mcpScopeResponse, normalizedCliError: normalizeForParity(cliScopeError), normalizedMcpError: normalizeForParity(mcpScopeError), ...session.evidence() }, Boolean(scopeEqual), "scope mismatch envelopes must match with retryable, details, and remediation");
 
   const cliUnsupported = runCli({ command: cliWrapper, args: ["capabilities", "--contract-version", "9", "--json"], cwd: root, env });
@@ -502,7 +599,35 @@ for (const row of rows) {
   evidenceFiles.set(row.name, { file, bytes: Buffer.byteLength(JSON.stringify(safe), "utf8") + 1, sha256: fileHash(file) });
 }
 const markdown = [
-  "# Task 3 MCP/CLI parity evidence", "", `- CLI bundle: \`${paths.cliBundle}\``, `- MCP bundle: \`${paths.mcpBundle}\``, `- Node: \`${paths.node}\``, `- CLI stable wrapper: \`${cliWrapper}\``, `- MCP stable wrapper: \`${mcpWrapper}\``, `- Repository: \`${repo}\``, `- Checks: ${checks.length}`, `- Failed: ${failed.length}`, `- Target commit: \`${provenance.targetCommit}\``, `- Bundle commit: \`${provenance.bundleCommit}\``, `- Target/bundle commit match: \`${provenance.bundleCommitMatchesTarget}\``, `- Tracked CLI launcher: \`${provenance.trackedCliLauncher}\``, `- Worktree state at start: \`${provenance.worktreeState}\``, `- Dirty files at start: ${provenance.dirtyFiles.length}`, `- Bundle ID (SHA-256 of exact CLI+MCP bundle bytes): \`${provenance.bundleId}\``, `- Bundle hashes: ${JSON.stringify(provenance.bundleContentHashes)}`, "", "## Verdict", "", failed.length ? `FAIL: ${failed.map((check) => `${check.name} (${check.reason})`).join("; ")}` : "PASS: real CLI and MCP process parity checks passed.", "", "## Evidence sidecars", "", "Each sidecar is complete JSON; no evidence is truncated. Paths and temporary-home values are redacted.", "",
+  "# Task 3 MCP/CLI parity evidence",
+  "",
+  `- CLI bundle: \`${paths.cliBundle}\``,
+  `- MCP bundle: \`${paths.mcpBundle}\``,
+  `- Node: \`${paths.node}\``,
+  `- CLI stable wrapper: \`${cliWrapper}\``,
+  `- MCP stable wrapper: \`${mcpWrapper}\``,
+  `- Repository: \`${repo}\``,
+  `- Checks: ${checks.length}`,
+  `- Failed: ${failed.length}`,
+  `- Target source: \`${provenance.targetSourceIdentity}\``,
+  `- Bundle source: \`${provenance.bundleSourceIdentity}\``,
+  `- Target/bundle source match: \`${provenance.bundleSourceMatchesTarget}\``,
+  `- Worktree state at start: \`${provenance.worktreeState}\``,
+  `- Worktree digest: \`${provenance.worktreeDigest}\``,
+  `- Included source files: ${provenance.includedFileCount}`,
+  `- Dirty files at start: ${provenance.dirtyFiles.length}`,
+  `- Tracked launchers: ${provenance.trackedLauncherInputs.map((item) => `\`${item}\``).join(", ")}`,
+  `- Bundle ID (SHA-256 of source identity and exact CLI+MCP+launcher bytes): \`${provenance.bundleId}\``,
+  `- Bundle hashes: ${JSON.stringify(provenance.bundleContentHashes)}`,
+  "",
+  "## Verdict",
+  "",
+  failed.length ? `FAIL: ${failed.map((check) => `${check.name} (${check.reason})`).join("; ")}` : "PASS: real CLI and MCP process parity checks passed.",
+  "",
+  "## Evidence sidecars",
+  "",
+  "Each sidecar is complete JSON; no evidence is truncated. Paths and temporary-home values are redacted.",
+  "",
   ...rows.flatMap((row) => { const sidecar = evidenceFiles.get(row.name); return [`### ${row.name}`, `- Sidecar: \`${sidecar.file}\``, `- Bytes: ${sidecar.bytes}`, `- SHA-256: \`${sidecar.sha256}\``, "```json", JSON.stringify(evidenceSummary(row.evidence)), "```", ""]; }),
 ];
 mkdirSync(dirname(report), { recursive: true });

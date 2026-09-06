@@ -44,6 +44,20 @@ test("openDatabase enables WAL", () => {
   db.close();
 });
 
+test("openDatabase skipMaintenance avoids write-path index housekeeping", () => {
+  const path = tempDbPath();
+  const first = openDatabase(path);
+  first.exec("DROP INDEX idx_semantic_chunks_reuse");
+  first.close();
+
+  const guarded = openDatabase(path, { skipMaintenance: true });
+  assert.equal(
+    guarded.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_semantic_chunks_reuse'").get(),
+    undefined,
+  );
+  guarded.close();
+});
+
 test("events table has origin, method, ledger_seq, workspace_id columns", () => {
   const db = openDatabase(tempDbPath());
   const cols = db.prepare("PRAGMA table_info(events)").all().map((c) => c.name);

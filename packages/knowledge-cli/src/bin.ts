@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -7,6 +8,7 @@ import { KnowledgeStore } from "@penguin/knowledge-core";
 import { readBoundedHookInput } from "./claude-hook.js";
 import { runCli } from "./index.js";
 import { createLarkProcessRunner } from "./lark-document-client.js";
+import type { IndependentCorpusOracle } from "@penguin/knowledge-indexer";
 
 // Default knowledge location (bundled/CLI + app share the same store).
 const DB_PATH = process.env.PENGUIN_KNOWLEDGE_DB ?? join(homedir(), ".penguin", "knowledge", "knowledge.db");
@@ -14,6 +16,35 @@ const LEDGER_PATH = process.env.PENGUIN_KNOWLEDGE_LEDGER ?? join(homedir(), ".pe
 const NOTES_DIR = process.env.PENGUIN_KNOWLEDGE_NOTES ?? join(homedir(), ".penguin", "knowledge", "notes");
 const API_DOC_PREVIEWS = process.env.PENGUIN_API_DOC_PREVIEWS ?? join(homedir(), ".penguin", "knowledge", "api-docs", "previews");
 const HOOK_STATE_DIR = process.env.PENGUIN_HOOK_STATE_DIR ?? join(homedir(), ".penguin", "knowledge", "hook-sessions");
+const SELF_PATH = fileURLToPath(import.meta.url);
+
+function collectCorpusOracleIsolated(rootPath: string): Promise<IndependentCorpusOracle> {
+  return new Promise((resolve, reject) => {
+    execFile(
+      process.execPath,
+      // Oracle workers are one-shot correctness checks, not latency-sensitive
+      // servers. Node 24's parallel TurboFan compilation can exhaust native
+      // Zone memory on the large HTML grammar before JS heap limits apply.
+      // Liftoff-only + one compilation task keeps the same parser semantics
+      // while bounding native compiler memory for heavy repositories.
+      ["--liftoff-only", "--wasm-num-compilation-tasks=1", SELF_PATH, "corpus", "oracle", rootPath, "--json"],
+      { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, env: process.env },
+      (error, stdout, stderr) => {
+        if (error) {
+          reject(new Error(`isolated corpus oracle failed for ${rootPath}: ${stderr.trim() || error.message}`));
+          return;
+        }
+        try {
+          const line = stdout.trim().split("\n").filter(Boolean).at(-1);
+          if (!line) throw new Error("oracle produced no JSON output");
+          resolve(JSON.parse(line) as IndependentCorpusOracle);
+        } catch (parseError) {
+          reject(new Error(`isolated corpus oracle returned invalid JSON for ${rootPath}: ${String((parseError as Error).message ?? parseError)}`));
+        }
+      },
+    );
+  });
+}
 
 runCli(process.argv.slice(2), {
   cwd: process.cwd(),
@@ -33,6 +64,7 @@ runCli(process.argv.slice(2), {
   // operation must first expose a scoped preview token and then receive that
   // exact token back on --confirm. A real TTY can keep the interactive flow.
   requireOperationConfirmation: !(process.stdin.isTTY && process.stdout.isTTY),
+  collectCorpusOracle: collectCorpusOracleIsolated,
   // Machine-parseable progress lines on stderr (stdout stays the --json report).
   // The Rust bridge reads "PENGUIN_PROGRESS {json}" lines → Tauri events.
   progressEvent: (payload) => process.stderr.write(`PENGUIN_PROGRESS ${JSON.stringify(payload)}\n`),
@@ -59,6 +91,7 @@ runCli(process.argv.slice(2), {
       dbPath: DB_PATH,
       ledgerPath: LEDGER_PATH,
       allowSchemaMutation: opts?.allowSchemaMutation,
+      skipMaintenance: opts?.skipMaintenance,
     });
   },
   installSelf: () => {

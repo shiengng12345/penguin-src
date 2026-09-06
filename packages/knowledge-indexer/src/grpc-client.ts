@@ -1,4 +1,5 @@
 import type { Node } from "web-tree-sitter";
+import { canonicalGrpcIdentity } from "@penguin/knowledge-contracts";
 
 // Consumer side of inter-service gRPC (microservice → microservice). Detects
 // `this.x = client.getService<Svc>('Svc')` bindings, then calls on that proxy
@@ -8,6 +9,7 @@ import type { Node } from "web-tree-sitter";
 // through it — this is the cross-repo service call graph.
 
 export interface GrpcClientCall {
+  packageName?: string;
   service: string; // target gRPC service name (e.g. PushService)
   method: string; // called method (camelCase as written on the proxy)
   startLine: number;
@@ -16,8 +18,8 @@ export interface GrpcClientCall {
 
 // Normalize a gRPC method name so provider (PascalCase `SendPush`) and consumer
 // (camelCase `sendPush`) resolve to the same endpoint id.
-export function grpcEndpointKey(service: string, method: string): string {
-  return `grpc::${service}.${method.toLowerCase()}`;
+export function grpcEndpointKey(service: string, method: string, packageName?: string): string {
+  return canonicalGrpcIdentity({ packageName, service, method });
 }
 
 function walk(node: Node, visit: (n: Node) => void): void {
@@ -36,6 +38,14 @@ function receiverVar(objNode: Node | null): string | null {
     if (o?.type === "this" && p) return p.text; // this.pushService
   }
   return null;
+}
+
+function grpcServiceMetadata(value: string): { packageName?: string; service: string } {
+  const normalized = value.trim().replace(/^\.+|\.+$/g, "");
+  const split = normalized.lastIndexOf(".");
+  return split > 0
+    ? { packageName: normalized.slice(0, split), service: normalized.slice(split + 1) }
+    : { service: normalized };
 }
 
 export function extractGrpcClientCalls(root: Node): GrpcClientCall[] {
@@ -89,7 +99,13 @@ export function extractGrpcClientCalls(root: Node): GrpcClientCall[] {
     if (!recv) return;
     const service = proxy.get(recv);
     if (!service) return;
-    calls.push({ service, method, startLine: n.startPosition.row + 1, enclosingQualifiedName: null });
+    const metadata = grpcServiceMetadata(service);
+    calls.push({
+      ...metadata,
+      method,
+      startLine: n.startPosition.row + 1,
+      enclosingQualifiedName: null,
+    });
   });
   return calls;
 }

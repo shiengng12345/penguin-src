@@ -6,18 +6,8 @@ import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
 
-test("Round19: active brief pointer references Round 19 with correct hash", () => {
-  const activeBriefPath = resolve(root, "docs/quality/index-evaluation-brief.md");
+test("Round19: immutable brief retains its frozen content hash", () => {
   const round19BriefPath = resolve(root, "docs/quality/index-evaluation-brief-round19.md");
-
-  // Read the active pointer
-  const activeContent = readFileSync(activeBriefPath, "utf8");
-
-  // Assert it mentions Round 19
-  assert.ok(
-    activeContent.includes("Round 19") || activeContent.includes("round19") || activeContent.includes("Round19"),
-    "Active brief should reference Round 19"
-  );
 
   // Assert Round 19 brief file exists
   let round19Content;
@@ -30,24 +20,8 @@ test("Round19: active brief pointer references Round 19 with correct hash", () =
   // Calculate SHA-256 of Round 19 brief
   const actualHash = createHash("sha256").update(round19Content).digest("hex");
 
-  // Extract hash from active pointer (assuming format includes hash)
-  const hashMatch = activeContent.match(/([a-f0-9]{64})/);
-  if (hashMatch) {
-    const declaredHash = hashMatch[1];
-    assert.equal(
-      actualHash,
-      declaredHash,
-      `Round 19 brief hash mismatch: expected ${declaredHash}, got ${actualHash}`
-    );
-  }
-
-  // Assert the required report filename mentions Round 19
-  assert.ok(
-    activeContent.includes("round19") ||
-    activeContent.includes("Round 19") ||
-    activeContent.includes("Round19"),
-    "Active pointer should specify Round 19 as the active version"
-  );
+  assert.equal(actualHash, "e9cc80008d0a20ad853cf7d002d2f3a31f8ab1a7545314abc0489212034a004a");
+  assert.match(round19Content, /Round 19 Full Closure/);
 });
 
 test("Round19: brief contains complete retained benchmark inventory", () => {

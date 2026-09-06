@@ -95,8 +95,11 @@ test("tags verb lists distinct #tags extracted from note bodies", async () => {
 
   lines.length = 0;
   assert.equal(await runCli(["tags", "--json"], deps), 0);
-  const tags = JSON.parse(lines[0]);
-  assert.deepEqual(tags, ["brazil", "urgent"], "distinct, sorted");
+  const result = JSON.parse(lines[0]);
+  assert.deepEqual(result.tags, ["brazil", "urgent"], "distinct, sorted");
+  assert.deepEqual(result.items.map((item) => item.tag), result.tags);
+  assert.equal(result.returnedCount, 2);
+  assert.equal(result.totalIsExact, true);
 });
 
 test("note new never clobbers — duplicate title gets a -2 slug", async () => {
@@ -113,7 +116,10 @@ test("note list shows the note files", async () => {
   await runCli(["note", "new", "Beta"], deps);
   lines.length = 0;
   await runCli(["note", "list", "--json"], deps);
-  assert.deepEqual(JSON.parse(lines[0]), ["alpha.md", "beta.md"]);
+  const result = JSON.parse(lines[0]);
+  assert.deepEqual(result.items.map((item) => item.path), ["alpha.md", "beta.md"]);
+  assert.equal(result.returnedCount, 2);
+  assert.equal(result.totalIsExact, true);
 });
 
 test("notes survive a DB wipe — reindex rebuilds them from the Markdown on disk", async () => {

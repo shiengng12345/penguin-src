@@ -1,0 +1,515 @@
+{
+  "reportVersion": 1,
+  "mode": "execute",
+  "profile": [
+    "burst"
+  ],
+  "argv": [
+    "--profile",
+    "burst",
+    "--execute",
+    "--root",
+    "/Users/shieng/Desktop/Projects",
+    "--db",
+    "/Users/shieng/.penguin/knowledge/knowledge.db",
+    "--ledger",
+    "/Users/shieng/.penguin/knowledge/ledger.jsonl",
+    "--concurrency",
+    "20",
+    "--no-writers",
+    "--mcp-sessions",
+    "5",
+    "--max-requests",
+    "5000",
+    "--report",
+    "docs/quality/penguin-stress-burst-20260902.json",
+    "--json"
+  ],
+  "rootPath": "/Users/shieng/Desktop/Projects",
+  "databasePath": "/Users/shieng/.penguin/knowledge/knowledge.db",
+  "startedAt": "2026-09-02T13:31:11.211Z",
+  "finishedAt": "2026-09-02T13:37:44.975Z",
+  "reports": [
+    {
+      "reportVersion": 1,
+      "mode": "fixture_or_explicit_corpus",
+      "profile": {
+        "name": "burst",
+        "durationSeconds": 1,
+        "concurrentReaders": 20,
+        "concurrentWriters": 0,
+        "mcpSessions": 5,
+        "queryMix": {
+          "search": 1,
+          "context": 1,
+          "flow": 1,
+          "affected": 1,
+          "domain": 1,
+          "wiki": 1
+        },
+        "rootPath": "/Users/shieng/Desktop/Projects",
+        "maxRequests": 5000
+      },
+      "argv": [
+        "--profile",
+        "burst",
+        "--execute",
+        "--root",
+        "/Users/shieng/Desktop/Projects",
+        "--db",
+        "/Users/shieng/.penguin/knowledge/knowledge.db",
+        "--ledger",
+        "/Users/shieng/.penguin/knowledge/ledger.jsonl",
+        "--concurrency",
+        "20",
+        "--no-writers",
+        "--mcp-sessions",
+        "5",
+        "--max-requests",
+        "5000",
+        "--report",
+        "docs/quality/penguin-stress-burst-20260902.json",
+        "--json"
+      ],
+      "rootPath": "/Users/shieng/Desktop/Projects",
+      "databasePath": "/Users/shieng/.penguin/knowledge/knowledge.db",
+      "startedAt": "2026-09-02T13:31:11.211Z",
+      "finishedAt": "2026-09-02T13:37:44.975Z",
+      "requestCount": 2,
+      "successCount": 2,
+      "typedErrorCount": 0,
+      "rawLockErrorCount": 0,
+      "timeoutCount": 0,
+      "infrastructureErrorCount": 0,
+      "latencyMs": {
+        "count": 2,
+        "p50": 549.2116249999999,
+        "p95": 797.7311746999999,
+        "p99": 819.8218013399999,
+        "min": 273.078792,
+        "max": 825.3444579999999
+      },
+      "errorsByType": {},
+      "errorSamples": [],
+      "operationIds": [
+        "read:burst:0:0",
+        "read:burst:1:1"
+      ],
+      "jobIds": [],
+      "resource": {
+        "samples": [
+          {
+            "sampledAt": "2026-09-02T13:31:11.211Z",
+            "rssBytes": 74465280,
+            "heapUsedBytes": 14161888,
+            "externalBytes": 2772103,
+            "diskBytes": 12073274608,
+            "dbBytes": 12039643136,
+            "walBytes": 31501552,
+            "shmBytes": 2129920,
+            "fdCount": 12,
+            "threadCount": 1,
+            "cpu": {
+              "userCPUTime": 74282,
+              "systemCPUTime": 14484,
+              "maxRSS": 73008,
+              "sharedMemorySize": 0,
+              "unsharedDataSize": 0,
+              "unsharedStackSize": 0,
+              "minorPageFault": 4619,
+              "majorPageFault": 81,
+              "swappedOut": 0,
+              "fsRead": 0,
+              "fsWrite": 0,
+              "ipcSent": 0,
+              "ipcReceived": 1,
+              "signalsCount": 0,
+              "voluntaryContextSwitches": 0,
+              "involuntaryContextSwitches": 191
+            }
+          },
+          {
+            "sampledAt": "2026-09-02T13:31:11.612Z",
+            "rssBytes": 204455936,
+            "heapUsedBytes": 49710328,
+            "externalBytes": 2772107,
+            "diskBytes": 12073274608,
+            "dbBytes": 12039643136,
+            "walBytes": 31501552,
+            "shmBytes": 2129920,
+            "fdCount": 15,
+            "threadCount": 1,
+            "cpu": {
+              "userCPUTime": 247134,
+              "systemCPUTime": 63045,
+              "maxRSS": 199712,
+              "sharedMemorySize": 0,
+              "unsharedDataSize": 0,
+              "unsharedStackSize": 0,
+              "minorPageFault": 12557,
+              "majorPageFault": 83,
+              "swappedOut": 0,
+              "fsRead": 0,
+              "fsWrite": 0,
+              "ipcSent": 0,
+              "ipcReceived": 2,
+              "signalsCount": 0,
+              "voluntaryContextSwitches": 2447,
+              "involuntaryContextSwitches": 480
+            }
+          },
+          {
+            "sampledAt": "2026-09-02T13:37:44.972Z",
+            "rssBytes": 72974336,
+            "heapUsedBytes": 49898992,
+            "externalBytes": 2772604,
+            "diskBytes": 12073274608,
+            "dbBytes": 12039643136,
+            "walBytes": 31501552,
+            "shmBytes": 2129920,
+            "fdCount": 12,
+            "threadCount": 1,
+            "cpu": {
+              "userCPUTime": 22546300,
+              "systemCPUTime": 36628719,
+              "maxRSS": 200208,
+              "sharedMemorySize": 0,
+              "unsharedDataSize": 0,
+              "unsharedStackSize": 0,
+              "minorPageFault": 13677,
+              "majorPageFault": 113,
+              "swappedOut": 0,
+              "fsRead": 0,
+              "fsWrite": 0,
+              "ipcSent": 0,
+              "ipcReceived": 3,
+              "signalsCount": 0,
+              "voluntaryContextSwitches": 3260155,
+              "involuntaryContextSwitches": 93394
+            }
+          }
+        ],
+        "peakRssBytes": 204455936,
+        "peakDiskBytes": 12073274608,
+        "peakWalBytes": 31501552,
+        "fdStart": 12,
+        "fdEnd": 12,
+        "threadStart": 1,
+        "threadEnd": 1,
+        "rssStart": 74465280,
+        "rssEnd": 72974336,
+        "diskStart": 12073274608,
+        "diskEnd": 12073274608
+      },
+      "dbIntegrity": "ok",
+      "integrity": {
+        "quickCheck": "ok",
+        "integrityCheck": "ok",
+        "ok": true
+      },
+      "gaps": [],
+      "validRequestsPassed": true,
+      "repositories": [
+        "/Users/shieng/Desktop/Projects/auth",
+        "/Users/shieng/Desktop/Projects/auth-penguin-benchmark",
+        "/Users/shieng/Desktop/Projects/casino-plus",
+        "/Users/shieng/Desktop/Projects/casino-plus-app",
+        "/Users/shieng/Desktop/Projects/ccmsnt",
+        "/Users/shieng/Desktop/Projects/ccmsrust",
+        "/Users/shieng/Desktop/Projects/claude_code",
+        "/Users/shieng/Desktop/Projects/fly",
+        "/Users/shieng/Desktop/Projects/fpms",
+        "/Users/shieng/Desktop/Projects/FPMS-CCMS",
+        "/Users/shieng/Desktop/Projects/fpmsnt",
+        "/Users/shieng/Desktop/Projects/fpmsXcpms",
+        "/Users/shieng/Desktop/Projects/ntshared",
+        "/Users/shieng/Desktop/Projects/payment",
+        "/Users/shieng/Desktop/Projects/proposal",
+        "/Users/shieng/Desktop/Projects/proposal-sdk",
+        "/Users/shieng/Desktop/Projects/provider",
+        "/Users/shieng/Desktop/Projects/recommend",
+        "/Users/shieng/Desktop/Projects/risk",
+        "/Users/shieng/Desktop/Projects/userengagement",
+        "/Users/shieng/Desktop/Projects/web-debugger"
+      ],
+      "writerRepositories": [
+        "/Users/shieng/Desktop/Projects/auth",
+        "/Users/shieng/Desktop/Projects/auth-penguin-benchmark",
+        "/Users/shieng/Desktop/Projects/casino-plus",
+        "/Users/shieng/Desktop/Projects/casino-plus-app",
+        "/Users/shieng/Desktop/Projects/ccmsnt",
+        "/Users/shieng/Desktop/Projects/ccmsrust",
+        "/Users/shieng/Desktop/Projects/claude_code",
+        "/Users/shieng/Desktop/Projects/fly",
+        "/Users/shieng/Desktop/Projects/fpms",
+        "/Users/shieng/Desktop/Projects/FPMS-CCMS",
+        "/Users/shieng/Desktop/Projects/fpmsnt",
+        "/Users/shieng/Desktop/Projects/fpmsXcpms",
+        "/Users/shieng/Desktop/Projects/ntshared",
+        "/Users/shieng/Desktop/Projects/payment",
+        "/Users/shieng/Desktop/Projects/proposal",
+        "/Users/shieng/Desktop/Projects/proposal-sdk",
+        "/Users/shieng/Desktop/Projects/provider",
+        "/Users/shieng/Desktop/Projects/recommend",
+        "/Users/shieng/Desktop/Projects/risk",
+        "/Users/shieng/Desktop/Projects/userengagement",
+        "/Users/shieng/Desktop/Projects/web-debugger"
+      ],
+      "semantic": {
+        "spaces": 21,
+        "eligible": 1,
+        "unavailable": 0,
+        "states": [
+          {
+            "scopeKey": "repo:repo_a48ec7fb-5987-47df-9198-06969359cb50",
+            "state": "paused",
+            "ready": 40096,
+            "expected": 45007
+          },
+          {
+            "scopeKey": "repo:repo_c5cb9c2b-9245-4892-be53-57890e82dc86",
+            "state": "not_queued",
+            "ready": 0,
+            "expected": 0
+          },
+          {
+            "scopeKey": "repo:repo_45a2ba65-861a-4edd-868b-cefea8ad9197",
+            "state": "not_queued",
+            "ready": 0,
+            "expected": 0
+          },
+          {
+            "scopeKey": "repo:repo_ca2ffba4-b583-40e8-960a-2cd8e875de68",
+            "state": "not_queued",
+            "ready": 0,
+            "expected": 0
+          },
+          {
+            "scopeKey": "repo:repo_479f7ca7-9693-4f75-b5a0-7a4d09b4a7df",
+            "state": "not_queued",
+            "ready": 0,
+            "expected": 0
+          },
+          {
+            "scopeKey": "repo:repo_52c3c449-1317-49b1-aff0-2540ea7a28e5",
+            "state": "not_queued",
+            "ready": 0,
+            "expected": 0
+          },
+          {
+            "scopeKey": "repo:repo_18c909a4-2314-4e67-b24a-918f7950385d",
+            "state": "not_queued",
+            "ready": 0,
+            "expected": 0
+          },
+          {
+            "scopeKey": "repo:repo_5513e90d-a231-455e-9feb-d15d69e93b38",
+            "state": "not_queued",
+            "ready": 0,
+            "expected": 0
+          },
+          {
+            "scopeKey": "repo:repo_f5e835f6-a971-4890-b159-32101b0097ff",
+            "state": "not_queued",
+            "ready": 0,
+            "expected": 0
+          },
+          {
+            "scopeKey": "repo:repo_8297b419-a4fc-49d7-81b7-ad71a5897535",
+            "state": "not_queued",
+            "ready": 0,
+            "expected": 0
+          },
+          {
+            "scopeKey": "repo:repo_c6b7aaf6-5507-4366-8f2f-905e5873d290",
+            "state": "not_queued",
+            "ready": 0,
+            "expected": 0
+          },
+          {
+            "scopeKey": "repo:repo_670fda10-d25a-4ad5-9dc8-50766fefe986",
+            "state": "not_queued",
+            "ready": 0,
+            "expected": 0
+          },
+          {
+            "scopeKey": "repo:repo_e7403354-4fea-40c6-9f85-53b9db708521",
+            "state": "not_queued",
+            "ready": 0,
+            "expected": 0
+          },
+          {
+            "scopeKey": "repo:repo_0a16c4d4-b110-4179-95a3-b3688fee6b09",
+            "state": "not_queued",
+            "ready": 0,
+            "expected": 0
+          },
+          {
+            "scopeKey": "repo:repo_0faad7a0-cbca-4060-97b0-351ca7868864",
+            "state": "not_queued",
+            "ready": 0,
+            "expected": 0
+          },
+          {
+            "scopeKey": "repo:repo_ac05b4a1-d936-46e7-9c0b-89b413d4ccad",
+            "state": "not_queued",
+            "ready": 0,
+            "expected": 0
+          },
+          {
+            "scopeKey": "repo:repo_1b44c7ae-0b6f-471d-b418-b713af6e07f5",
+            "state": "not_queued",
+            "ready": 0,
+            "expected": 0
+          },
+          {
+            "scopeKey": "repo:repo_e55541f5-455e-4c3d-b2b6-7296ec7b5ecc",
+            "state": "not_queued",
+            "ready": 0,
+            "expected": 0
+          },
+          {
+            "scopeKey": "repo:repo_9eab4ce0-e24a-46a7-8cd0-170266b65dbf",
+            "state": "not_queued",
+            "ready": 0,
+            "expected": 0
+          },
+          {
+            "scopeKey": "repo:repo_a5cba493-2b41-4bbe-83b4-ed4863593032",
+            "state": "not_queued",
+            "ready": 0,
+            "expected": 0
+          },
+          {
+            "scopeKey": "repo:repo_51d08e28-ecac-49a9-9098-a9687263411a",
+            "state": "not_queued",
+            "ready": 0,
+            "expected": 0
+          }
+        ]
+      }
+    }
+  ],
+  "requestCount": 2,
+  "successCount": 2,
+  "typedErrorCount": 0,
+  "rawLockErrorCount": 0,
+  "timeoutCount": 0,
+  "infrastructureErrorCount": 0,
+  "latencyMs": {
+    "count": 2,
+    "p50": null,
+    "p95": 797.7311746999999,
+    "p99": 819.8218013399999,
+    "min": 273.078792,
+    "max": 825.3444579999999
+  },
+  "resource": {
+    "samples": [
+      {
+        "sampledAt": "2026-09-02T13:31:11.211Z",
+        "rssBytes": 74465280,
+        "heapUsedBytes": 14161888,
+        "externalBytes": 2772103,
+        "diskBytes": 12073274608,
+        "dbBytes": 12039643136,
+        "walBytes": 31501552,
+        "shmBytes": 2129920,
+        "fdCount": 12,
+        "threadCount": 1,
+        "cpu": {
+          "userCPUTime": 74282,
+          "systemCPUTime": 14484,
+          "maxRSS": 73008,
+          "sharedMemorySize": 0,
+          "unsharedDataSize": 0,
+          "unsharedStackSize": 0,
+          "minorPageFault": 4619,
+          "majorPageFault": 81,
+          "swappedOut": 0,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "ipcSent": 0,
+          "ipcReceived": 1,
+          "signalsCount": 0,
+          "voluntaryContextSwitches": 0,
+          "involuntaryContextSwitches": 191
+        }
+      },
+      {
+        "sampledAt": "2026-09-02T13:31:11.612Z",
+        "rssBytes": 204455936,
+        "heapUsedBytes": 49710328,
+        "externalBytes": 2772107,
+        "diskBytes": 12073274608,
+        "dbBytes": 12039643136,
+        "walBytes": 31501552,
+        "shmBytes": 2129920,
+        "fdCount": 15,
+        "threadCount": 1,
+        "cpu": {
+          "userCPUTime": 247134,
+          "systemCPUTime": 63045,
+          "maxRSS": 199712,
+          "sharedMemorySize": 0,
+          "unsharedDataSize": 0,
+          "unsharedStackSize": 0,
+          "minorPageFault": 12557,
+          "majorPageFault": 83,
+          "swappedOut": 0,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "ipcSent": 0,
+          "ipcReceived": 2,
+          "signalsCount": 0,
+          "voluntaryContextSwitches": 2447,
+          "involuntaryContextSwitches": 480
+        }
+      },
+      {
+        "sampledAt": "2026-09-02T13:37:44.972Z",
+        "rssBytes": 72974336,
+        "heapUsedBytes": 49898992,
+        "externalBytes": 2772604,
+        "diskBytes": 12073274608,
+        "dbBytes": 12039643136,
+        "walBytes": 31501552,
+        "shmBytes": 2129920,
+        "fdCount": 12,
+        "threadCount": 1,
+        "cpu": {
+          "userCPUTime": 22546300,
+          "systemCPUTime": 36628719,
+          "maxRSS": 200208,
+          "sharedMemorySize": 0,
+          "unsharedDataSize": 0,
+          "unsharedStackSize": 0,
+          "minorPageFault": 13677,
+          "majorPageFault": 113,
+          "swappedOut": 0,
+          "fsRead": 0,
+          "fsWrite": 0,
+          "ipcSent": 0,
+          "ipcReceived": 3,
+          "signalsCount": 0,
+          "voluntaryContextSwitches": 3260155,
+          "involuntaryContextSwitches": 93394
+        }
+      }
+    ],
+    "peakRssBytes": 204455936,
+    "peakDiskBytes": 12073274608,
+    "peakWalBytes": 31501552,
+    "fdStart": 12,
+    "fdEnd": 12,
+    "threadStart": 1,
+    "threadEnd": 1,
+    "rssStart": 74465280,
+    "rssEnd": 72974336,
+    "diskStart": 12073274608,
+    "diskEnd": 12073274608
+  },
+  "dbIntegrity": "ok",
+  "gaps": [],
+  "validRequestsPassed": true
+}

@@ -4,7 +4,6 @@ import {
   HardDrive,
   Loader2,
   Network,
-  Search,
   X,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -14,9 +13,10 @@ import { WikiGraph3D } from "@/components/wiki/WikiGraph3D";
 import { WikiContextPane } from "@/components/wiki/WikiContextPane";
 import { ScopeBlockerPanel } from "@/components/wiki/ScopeBlockerPanel";
 import { BranchPickerPopover, type BranchPickerOption } from "@/components/wiki/BranchPickerPopover";
-import { WikiSearchPage } from "@/components/wiki/WikiSearchPage";
 import { WikiStoragePage } from "@/components/wiki/WikiStoragePage";
 import { IndexProgressBanner } from "@/components/wiki/IndexProgressBanner";
+import { CorpusJobPanel } from "@/components/wiki/CorpusJobPanel";
+import { SemanticWorkerPanel } from "@/components/wiki/SemanticWorkerPanel";
 import { WikiOnboarding } from "@/components/wiki/WikiOnboarding";
 import { GraphEmptyState, GraphStatsOverlay, type GraphScope } from "@/components/wiki/GraphStatsOverlay";
 import { WikiStatusFooter } from "@/components/wiki/WikiStatusFooter";
@@ -38,7 +38,7 @@ import {
 
 interface WikiPageProps { onClose: () => void }
 
-type CenterTab = "search" | "graph" | "storage";
+type CenterTab = "graph" | "storage";
 // "home" = the repo/branch datatable (focusId null) — the implicit place
 // every FIRST symbol view was reached from (a graph node click, or nothing
 // yet). Without recording it, the very first symbol opened in a session had
@@ -242,11 +242,12 @@ export function WikiPage({ onClose }: WikiPageProps) {
     <div className="flex h-full flex-col bg-background text-foreground">
       {error && !isNoDatabaseError(error) && <div className="mx-6 mt-3 rounded-md border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-sm text-yellow-200">{error}</div>}
       <IndexProgressBanner />
+      <CorpusJobPanel />
+      <SemanticWorkerPanel />
 
       <div className="flex min-h-0 flex-1 flex-col">
         <section className="flex min-h-0 min-w-0 flex-col bg-background">
           <div className="flex h-12 shrink-0 items-center gap-1 border-b border-border bg-card px-3">
-            <TabBtn on={tab === "search"} onClick={() => setTab("search")} icon={<Search className="h-3.5 w-3.5" />}>Focus</TabBtn>
             <TabBtn on={tab === "graph"} onClick={() => setTab("graph")} icon={<Network className="h-3.5 w-3.5" />}>Graph</TabBtn>
             <TabBtn on={tab === "storage"} onClick={() => setTab("storage")} icon={<HardDrive className="h-3.5 w-3.5" />}>Storage</TabBtn>
             <div className="ml-auto flex items-center gap-2">
@@ -265,7 +266,7 @@ export function WikiPage({ onClose }: WikiPageProps) {
             </div>
           </div>
 
-          {tab === "search" ? <WikiSearchPage /> : tab === "storage" ? <WikiStoragePage /> : (
+          {tab === "storage" ? <WikiStoragePage /> : (
             <div className="relative flex min-h-0 flex-1">
               <div className="relative flex min-w-0 flex-1">
                 {graphBusy ? <div className="flex flex-1 items-center justify-center gap-2 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" /> 加载图谱…</div>

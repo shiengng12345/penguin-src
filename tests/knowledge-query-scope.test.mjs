@@ -4,7 +4,15 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { KnowledgeStore, resolveQueryScope, ScopeResolutionError, cachedGitStateReader } from "../packages/knowledge-core/dist/index.js";
+import * as knowledgeCore from "../packages/knowledge-core/dist/index.js";
+
+const {
+  KnowledgeStore,
+  resolveQueryScope,
+  ScopeResolutionError,
+  cachedGitStateReader,
+  readGitStateDefault,
+} = knowledgeCore;
 
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), "penguin-query-scope-"));
@@ -29,13 +37,13 @@ test("aligned: checked-out branch is indexed at head", () => {
   store.close();
 });
 
-test("behind + dirty: aligned with REVISION_BEHIND and WORKTREE_DRIFT warnings", () => {
+test("behind + dirty: revision_behind with REVISION_BEHIND and WORKTREE_DRIFT warnings", () => {
   const { store, repoId } = fixture();
   const scope = resolveQueryScope(store, {
     repoId,
     readGitState: () => ({ branch: "main", headSha: "sha-newer", dirty: true }),
   });
-  assert.equal(scope.alignment, "aligned");
+  assert.equal(scope.alignment, "revision_behind");
   const codes = scope.warnings.map((w) => w.code).sort();
   assert.deepEqual(codes, ["REVISION_BEHIND", "WORKTREE_DRIFT"]);
   store.close();
@@ -45,7 +53,7 @@ test("checked-out branch not indexed → hard BRANCH_NOT_INDEXED", () => {
   const { store, repoId } = fixture();
   assert.throws(
     () => resolveQueryScope(store, { repoId, readGitState: () => ({ branch: "feature-x", headSha: "sha-f", dirty: false }) }),
-    (err) => err instanceof ScopeResolutionError && err.code === "BRANCH_NOT_INDEXED" && /penguin index/.test(err.message),
+    (err) => err instanceof ScopeResolutionError && err.code === "BRANCH_NOT_INDEXED" && /knowledge_index/.test(err.message),
   );
   store.close();
 });
@@ -109,4 +117,20 @@ test("cachedGitStateReader memoizes per rootPath within TTL and refreshes after"
   clock = 3001;
   assert.equal(reader("/repo-a").headSha, "sha-3"); // TTL expired, re-read
   assert.equal(calls, 3);
+});
+
+test("readGitStateDefault obtains complete Git state with one invocation", () => {
+  let calls = 0;
+  const state = readGitStateDefault("/repo", (rootPath, args) => {
+    calls += 1;
+    assert.equal(rootPath, "/repo");
+    assert.deepEqual(args, ["status", "--porcelain=v2", "--branch", "-z"]);
+    return "# branch.oid abc123\0# branch.head main\0? untracked.ts\0";
+  });
+  assert.equal(calls, 1);
+  assert.deepEqual(state, { branch: "main", headSha: "abc123", dirty: true });
+
+  const detached = readGitStateDefault("/repo", () =>
+    "# branch.oid def456\0# branch.head (detached)\0");
+  assert.deepEqual(detached, { branch: null, headSha: "def456", dirty: false });
 });

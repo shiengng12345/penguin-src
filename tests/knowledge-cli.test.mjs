@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { KnowledgeStore } from "../packages/knowledge-core/dist/index.js";
+import { EmbeddingLifecycle, KnowledgeStore, createEmbeddingSpace } from "../packages/knowledge-core/dist/index.js";
 import { runCli } from "../packages/knowledge-cli/dist/index.js";
 import { CAPABILITIES } from "../packages/knowledge-contracts/dist/index.js";
 
@@ -32,6 +33,23 @@ test("read verb without a DB refuses (exit 3) and does not create one", async ()
   assert.equal(code, 3);
   assert.match(errs.join("\n"), /penguin init/);
   assert.equal(deps.storeExists(), false);
+});
+
+test("endpoints lists scoped protocol endpoints and indexed handlers", async () => {
+  const { deps, lines } = harness();
+  const store = deps.openStore();
+  const repoId = store.registerRepo({ name: "FPMS-NT", rootPath: "/work/fpms" });
+  const branchId = store.registerBranch({ repoId, name: "brazil-v2", status: "live" });
+  const endpoint = store.upsertNode({ nodeType: "endpoint", identityKey: "grpc::Demo.Get", title: "gRPC Demo.Get", repoId: null, meta: { protocol: "grpc", service: "Demo", method: "Get" } });
+  const handler = store.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::DemoController.get`, title: "get", repoId });
+  store.upsertSymbolVersion({ nodeId: handler, branchId, commitSha: "c0", filePath: "src/demo.ts", lang: "ts", kind: "method", contentHash: "h" });
+  store.replaceFileEdges({ branchId, filePath: "src/demo.ts", edges: [{ src: endpoint, dst: handler, edgeType: "handles", origin: "parser", method: "EXTRACTED", branchless: true }] });
+  store.close();
+  assert.equal(await runCli(["endpoints", "FPMS-NT", "--protocol", "grpc", "--json"], deps), 0);
+  const result = JSON.parse(lines.at(-1));
+  assert.equal(result.items.length, 1);
+  assert.equal(result.items[0].title, "gRPC Demo.Get");
+  assert.equal(result.items[0].handlers[0].title, "get");
 });
 
 test("CLI external Postgres source lifecycle uses the injected read-only adapter", async () => {
@@ -71,6 +89,100 @@ test("non-interactive mutations require the exact operation token", async () => 
 
   assert.equal(await runCli(["index", dir, `--confirm=${preview.operationToken}`], deps), 0);
   assert.equal(deps.storeExists(), true);
+});
+
+test("semantic CLI rejects pause/resume generation drift through the canonical validator", async () => {
+  const { deps, lines } = harness();
+  const store = deps.openStore();
+  store.close();
+  const code = await runCli([
+    "semantic", "pause", "--scope", "repo:repo-1", "--generation", "forbidden-generation",
+    "--operation-token", "operation-123", "--json",
+  ], deps);
+  assert.equal(code, 2);
+  assert.equal(JSON.parse(lines.at(-1)).error.code, "INVALID_SEMANTIC_CONTRACT");
+});
+
+test("semantic CLI returns an error envelope for operation token conflicts", async () => {
+  const { deps, lines, errs } = harness();
+  const store = deps.openStore();
+  const repoId = store.registerRepo({ name: "semantic-cli", rootPath: "/semantic-cli" });
+  const space = createEmbeddingSpace(store, {
+    providerId: "fixture",
+    modelId: "cli-conflict",
+    weightsDigest: "a".repeat(64),
+    tokenizerDigest: "b".repeat(64),
+    dimensions: 2,
+    pooling: "mean",
+    normalization: "none",
+    chunkerVersion: "v1",
+  });
+  new EmbeddingLifecycle(store).createGeneration({
+    spaceId: space.id,
+    snapshotId: "snapshot",
+    scopeKey: `repo:${repoId}`,
+    expectedChunks: 1,
+  });
+  new EmbeddingLifecycle(store).applyControl({
+    action: "pause",
+    scopeKey: `repo:${repoId}`,
+    operationToken: "cli-conflict-operation",
+  });
+  store.close();
+
+  const code = await runCli([
+    "semantic", "resume", "--scope", `repo:${repoId}`,
+    "--operation-token", "cli-conflict-operation", "--json",
+  ], deps);
+  assert.equal(code, 2);
+  assert.equal(JSON.parse(lines.at(-1)).error.code, "OPERATION_TOKEN_CONFLICT");
+  assert.equal(errs.some((line) => /\bat\s+\S+.*:\d+/u.test(line)), false, "CLI must not emit a stack trace");
+
+  lines.length = 0;
+  errs.length = 0;
+  const textCode = await runCli([
+    "semantic", "resume", "--scope", `repo:${repoId}`,
+    "--operation-token", "cli-conflict-operation",
+  ], deps);
+  assert.equal(textCode, 2);
+  assert.match(errs.join("\n"), /OPERATION_TOKEN_CONFLICT/);
+  assert.equal(errs.some((line) => /\bat\s+\S+.*:\d+/u.test(line)), false, "text CLI must not emit a stack trace");
+});
+
+function runCorruptSemanticCli(args) {
+  const dir = mkdtempSync(join(tmpdir(), "penguin-corrupt-semantic-"));
+  const dbPath = join(dir, "knowledge.db");
+  writeFileSync(dbPath, "not a sqlite database");
+  const result = spawnSync(process.execPath, ["packages/knowledge-cli/dist/bin.js", "semantic", "status", ...args], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      PENGUIN_KNOWLEDGE_DB: dbPath,
+      PENGUIN_KNOWLEDGE_LEDGER: join(dir, "ledger.jsonl"),
+    },
+    encoding: "utf8",
+  });
+  rmSync(dir, { recursive: true, force: true });
+  return { ...result, dir };
+}
+
+test("semantic status sanitizes corrupt database failures as JSON", () => {
+  const result = runCorruptSemanticCli(["--json"]);
+  assert.equal(result.status, 3);
+  const payload = JSON.parse(result.stdout.trim());
+  assert.equal(payload.error.code, "KNOWLEDGE_DB_OPEN_FAILED");
+  assert.equal(result.stderr, "");
+  assert.doesNotMatch(result.stdout, new RegExp(result.dir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.doesNotMatch(result.stdout, /command-dispatch\.(?:ts|js):\d+|\bat\s+\S+.*:\d+/u);
+});
+
+test("semantic status sanitizes corrupt database failures as text", () => {
+  const result = runCorruptSemanticCli([]);
+  assert.equal(result.status, 3);
+  assert.equal(result.stdout, "");
+  assert.match(result.stderr, /^KNOWLEDGE_DB_OPEN_FAILED: knowledge database could not be opened/i);
+  assert.doesNotMatch(result.stderr, new RegExp(result.dir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  assert.doesNotMatch(result.stderr, /command-dispatch\.(?:ts|js):\d+|\bat\s+\S+.*:\d+/u);
 });
 
 test("onboarding carries hashes and saves only after reviewing its exact token", async () => {
@@ -217,7 +329,18 @@ test("suggestion flow via CLI: link/suggestions/accept + doctor + snapshots", as
 
   lines.length = 0;
   assert.equal(await runCli(["snapshots", "--json"], deps), 0);
-  assert.equal(JSON.parse(lines[0])[0].name, "snap1");
+  const legacySnapshots = JSON.parse(lines[0]);
+  assert.ok(Array.isArray(legacySnapshots), "legacy snapshots --json keeps the historical array contract");
+  assert.equal(legacySnapshots[0].name, "snap1");
+
+  lines.length = 0;
+  assert.equal(await runCli(["snapshot", "list", "--json"], deps), 0);
+  const canonicalSnapshots = JSON.parse(lines[0]);
+  assert.equal(Array.isArray(canonicalSnapshots), false);
+  assert.equal(canonicalSnapshots.items[0].name, "snap1");
+  assert.equal(canonicalSnapshots.returnedCount, 1);
+  assert.equal(canonicalSnapshots.coverage.unresolvedReferences, null);
+  assert.ok(canonicalSnapshots.gaps.includes("unresolved_reference_coverage_unavailable"));
 
   lines.length = 0;
   assert.equal(await runCli(["doctor", "--json"], deps), 0);
@@ -233,6 +356,31 @@ test("install prints guidance when no installSelf provided", async () => {
   const { deps, lines } = harness();
   assert.equal(await runCli(["install"], deps), 0);
   assert.match(lines.join("\n"), /ln -sf|symlink/i);
+});
+
+test("agent-facing CLI grammar rejects silent misrouting and exposes command help", async () => {
+  const { deps, lines } = harness();
+  assert.equal(await runCli(["filesymbols", "--help"], deps), 0);
+  assert.match(lines.at(-1), /filesymbols <repo> <branch> <path>/);
+
+  lines.length = 0;
+  assert.equal(await runCli(["filesymbols", "--file", "src/app.ts", "--json"], deps), 2);
+  const unknown = JSON.parse(lines.at(-1));
+  assert.equal(unknown.error.code, "UNKNOWN_OPTION");
+  assert.equal(unknown.error.details.option, "--file");
+
+  deps.openStore().close();
+  lines.length = 0;
+  assert.equal(await runCli(["deadcode", "FPMS-NT", "--json"], deps), 2);
+  assert.equal(JSON.parse(lines.at(-1)).error.code, "SCOPE_AMBIGUOUS");
+
+  lines.length = 0;
+  assert.equal(await runCli(["context", "node:", "--repo", "FPMS-NT", "--json"], deps), 1);
+  assert.equal(JSON.parse(lines.at(-1)).error.code, "INVALID_TARGET");
+
+  lines.length = 0;
+  assert.equal(await runCli(["endpoint-identity", "NoSuchService.Nope", "NoSuchService.nope", "--json"], deps), 1);
+  assert.equal(JSON.parse(lines.at(-1)).error.code, "ENDPOINT_NOT_FOUND");
 });
 
 test("hook verbs read bounded Claude input and never create or write knowledge", async () => {
@@ -295,7 +443,7 @@ test("v2 unresolvable revision selectors now raise a ScopeResolutionError and ex
   store.close();
   assert.equal(await runCli(["search", "needle", "--mode", "exact", "--repo", "fixture", "--snapshot", "missing", "--json"], deps), 4);
   assert.equal(lines.length, 0);
-  assert.match(errs.join("\n"), /repository not found/);
+  assert.match(errs.join("\n"), /snapshot not found: missing/);
 });
 
 test("unscoped search outside an indexed repo reports its default workspace scope", async () => {

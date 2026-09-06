@@ -10,6 +10,8 @@ export interface ProtoEndpoint {
   filePath: string;
   /** Module name inferred from directory structure */
   module: string;
+  /** 1-based source line of the rpc declaration. */
+  startLine: number;
 }
 
 /**
@@ -59,6 +61,7 @@ export function parseProtoEndpoints(source: string, relPath: string): ProtoEndpo
         method: rpcMatch[1],
         filePath: relPath,
         module,
+        startLine: noComments.slice(0, openBrace + 1 + rpcMatch.index).split("\n").length,
       });
     }
   }

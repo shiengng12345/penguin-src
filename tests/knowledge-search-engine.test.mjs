@@ -4,7 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
-import { KnowledgeStore, GitTopologyStore, SourceStore, SourceSnapshotStore, searchKnowledge, searchKnowledgeAsync, HmacSearchCursorCodec, planSearch, rankSearchHits, semanticLaneScore, recordSearchFeedback, listSearchFeedback, deleteSearchFeedback, exportSearchFeedback, reflectSearchFeedback, listReflectionSuggestions, reviewReflectionSuggestion } from "../packages/knowledge-core/dist/index.js";
+import { KnowledgeStore, GitTopologyStore, FileFactStore, SourceStore, SourceSnapshotStore, createEmbeddingSpace, EmbeddingLifecycle, VectorStore, persistSemanticChunks, embeddingSpaceIdentity, openRevisionView, searchKnowledge, searchKnowledgeAsync, searchLegacyRows, HmacSearchCursorCodec, planSearch, rankSearchHits, semanticLaneScore, recordSearchFeedback, listSearchFeedback, deleteSearchFeedback, exportSearchFeedback, reflectSearchFeedback, listReflectionSuggestions, reviewReflectionSuggestion } from "../packages/knowledge-core/dist/index.js";
 
 function setup() {
   const dir = mkdtempSync(join(tmpdir(), "pk-search-engine-"));
@@ -23,6 +23,16 @@ function setup() {
   return { store, repoId, snapshot };
 }
 
+test("schema indexes revision symbol identity hydration", () => {
+  const { store } = setup();
+  try {
+    const indexes = store.db.prepare("PRAGMA index_list('file_fact_symbols')").all().map((row) => row.name);
+    assert.ok(indexes.includes("idx_file_fact_symbols_identity"), JSON.stringify(indexes));
+  } finally {
+    store.close();
+  }
+});
+
 test("searchKnowledge emits unified v2 response with verified source lane", async () => {
   const { store, repoId, snapshot } = setup();
   const response = await searchKnowledge({ query: "EngineNeedle", mode: "exact", scope: { revisions: [{ repoId, snapshotId: snapshot.id }] }, page: { limit: 1 } }, { store, scopes: [{ repoId, snapshotId: snapshot.id }], cursorSecret: "test-secret" });
@@ -32,8 +42,159 @@ test("searchKnowledge emits unified v2 response with verified source lane", asyn
   assert.equal(response.hits[0].evidence[0].status, "verified");
   assert.equal(response.hits[0].untrustedContent, true);
   assert.equal(typeof response.page.nextCursor, "string");
+  assert.equal(response.truncated, true);
+  assert.equal(response.diagnostics.truncated, true);
   assert.ok(response.diagnostics.searchedLanes.includes("source"));
   store.close();
+});
+
+test("workspace scope restricts every deterministic lane to member repositories", () => {
+  const { store, repoId, snapshot } = setup();
+  const secondRepoId = store.registerRepo({ name: "outside", rootPath: "/outside" });
+  const secondSnapshot = new GitTopologyStore(store).createBuildingSnapshot({ snapshotKey: "outside-main", repoId: secondRepoId, parserVersion: "p", resolverVersion: "r", schemaVersion: 18 });
+  const raw = Buffer.from("export const EngineNeedle = 'outside';\n", "utf8");
+  const contentHash = createHash("sha256").update(raw).digest("hex");
+  const source = new SourceStore(store);
+  const blob = source.putBlob({ contentHash, rawBytes: raw, decodedContent: raw.toString("utf8"), encoding: "utf8" });
+  const fact = source.putSourceFact({ repoId: secondRepoId, filePath: "src/outside.ts", factFingerprint: contentHash, contentHash, sourceBlobId: blob, coverage: { status: "admitted", reasonCode: "text_searchable", classification: "source" } });
+  const cow = new SourceSnapshotStore(store);
+  cow.replaceOverlay(secondSnapshot.id, [{ op: "add", path: "src/outside.ts", sourceFactId: fact }]);
+  cow.materializeManifest(secondSnapshot.id);
+  const workspaceId = store.createWorkspace("inside-only");
+  store.addRepoToWorkspace(workspaceId, repoId);
+
+  const response = searchKnowledge(
+    { query: "EngineNeedle", mode: "exact", scope: { workspaceId }, page: { limit: 20 } },
+    { store, scopes: [{ repoId, snapshotId: snapshot.id }, { repoId: secondRepoId, snapshotId: secondSnapshot.id }] },
+  );
+
+  assert.ok(response.hits.length > 0);
+  assert.ok(response.hits.every((hit) => hit.locator.repoId === repoId), JSON.stringify(response.hits));
+  assert.deepEqual(response.diagnostics.resolvedScope, [{ repoId, snapshotId: snapshot.id }]);
+  store.close();
+});
+
+test("unknown workspace fails before semantic provider startup", async () => {
+  const { store, repoId, snapshot } = setup();
+  let healthCalls = 0;
+  const semanticProvider = {
+    metadata: { provider: "test", model: "test", dimensions: 2, distanceMetric: "cosine", modelHash: "test" },
+    async health() { healthCalls += 1; return { ok: true }; },
+    async embed() { throw new Error("must not embed for an invalid workspace"); },
+  };
+  const response = await searchKnowledgeAsync(
+    { query: "EngineNeedle", mode: "semantic", scope: { workspaceId: "ws_missing" }, page: { limit: 5 } },
+    { store, scopes: [{ repoId, snapshotId: snapshot.id }], semanticProvider },
+  );
+  assert.equal(response.error?.code, "WORKSPACE_NOT_FOUND");
+  assert.equal(response.diagnostics.queryStatus, "SCOPE_ERROR");
+  assert.equal(response.hits.length, 0);
+  assert.equal(healthCalls, 0);
+  store.close();
+});
+
+test("source occurrence hydration selects the symbol from the resolved branch", () => {
+  const { store, repoId, snapshot } = setup();
+  const selectedBranch = store.registerBranch({ repoId, name: "selected", status: "live" });
+  const otherBranch = store.registerBranch({ repoId, name: "other", status: "live" });
+  store.db.prepare("UPDATE branches SET current_snapshot_id=?,last_indexed_commit=? WHERE id=?")
+    .run(snapshot.id, "selected-commit", selectedBranch);
+  const selectedNode = store.upsertNode({ nodeType: "symbol", identityKey: "fixture::selected::EngineNeedle", repoId, title: "SelectedEngineNeedle" });
+  const otherNode = store.upsertNode({ nodeType: "symbol", identityKey: "fixture::other::EngineNeedle", repoId, title: "OtherEngineNeedle" });
+  store.upsertSymbolVersion({ nodeId: selectedNode, branchId: selectedBranch, commitSha: "selected-commit", filePath: "src/engine.ts", lang: "typescript", kind: "function", startLine: 1, endLine: 2, contentHash: "selected", status: "fresh" });
+  store.upsertSymbolVersion({ nodeId: otherNode, branchId: otherBranch, commitSha: "other-commit", filePath: "src/engine.ts", lang: "typescript", kind: "function", startLine: 1, endLine: 1, contentHash: "other", status: "fresh" });
+
+  const response = searchKnowledge(
+    { query: "EngineNeedle", mode: "exact", scope: { revisions: [{ repoId, snapshotId: snapshot.id }] }, page: { limit: 10 } },
+    { store, scopes: [{ repoId, snapshotId: snapshot.id }] },
+  );
+  const sourceHit = response.hits.find((hit) => hit.lane === "source" && hit.locator.startLine === 1);
+  assert.equal(sourceHit?.nodeId, selectedNode, JSON.stringify(response.hits));
+  store.close();
+});
+
+test("source occurrence hydration batches metadata and symbol reads per scope", () => {
+  const { store, repoId, snapshot } = setup();
+  const branchId = store.registerBranch({ repoId, name: "main", status: "live" });
+  store.db.prepare("UPDATE branches SET current_snapshot_id=?,last_indexed_commit=? WHERE id=?")
+    .run(snapshot.id, "main-commit", branchId);
+  const nodeId = store.upsertNode({ nodeType: "symbol", identityKey: "fixture::EngineNeedle", repoId, title: "EngineNeedle" });
+  store.upsertSymbolVersion({ nodeId, branchId, commitSha: "main-commit", filePath: "src/engine.ts", lang: "typescript", kind: "function", startLine: 1, endLine: 2, contentHash: "main", status: "fresh" });
+  const prepare = store.db.prepare.bind(store.db);
+  let symbolHydrationReads = 0;
+  let coverageHydrationReads = 0;
+  store.db.prepare = (sql) => {
+    const normalized = String(sql).replace(/\s+/g, " ");
+    if (normalized.includes("SELECT sv.node_id AS nodeId") && normalized.includes("sv.start_line <= ?")) symbolHydrationReads += 1;
+    if (normalized.includes("SELECT coverage_json AS coverage FROM source_facts WHERE id=?")) coverageHydrationReads += 1;
+    return prepare(sql);
+  };
+  try {
+    const response = searchKnowledge(
+      { query: "EngineNeedle", mode: "exact", scope: { revisions: [{ repoId, snapshotId: snapshot.id }] }, page: { limit: 10 } },
+      { store, scopes: [{ repoId, snapshotId: snapshot.id }] },
+    );
+    assert.equal(response.hits.filter((hit) => hit.lane === "source").length, 2);
+    assert.ok(symbolHydrationReads <= 1, `expected one batched symbol read, got ${symbolHydrationReads}`);
+    assert.equal(coverageHydrationReads, 0, "source search rows already carry coverage metadata");
+  } finally {
+    store.db.prepare = prepare;
+    store.close();
+  }
+});
+
+test("immutable revision lexical visibility does not rehydrate each candidate", () => {
+  const { store, repoId, snapshot } = setup();
+  const facts = new FileFactStore(store);
+  const overlays = [];
+  for (let index = 0; index < 3; index += 1) {
+    const filePath = `src/lexical-${index}.ts`;
+    const identityKey = `${repoId}::${filePath}::LexicalEngineNeedle${index}`;
+    const nodeId = store.upsertNode({ nodeType: "symbol", identityKey, repoId, title: "LexicalEngineNeedle" });
+    store.indexSymbolText({ nodeId, name: "LexicalEngineNeedle" });
+    const fileFactId = facts.upsertFileFact({
+      repoId,
+      filePath,
+      contentHash: `lexical-${index}`,
+      language: "typescript",
+      parserVersion: "p",
+      exportsHash: `exports-${index}`,
+      symbols: [{ identityKey, title: "LexicalEngineNeedle", kind: "function", contentHash: `lexical-${index}` }],
+      imports: [],
+      unresolvedReferences: [],
+      endpoints: [],
+      logSites: [],
+    });
+    overlays.push({ op: "add", path: filePath, fileFactId });
+  }
+  facts.replaceOverlay(snapshot.id, overlays);
+  facts.materializeManifest(snapshot.id);
+  const branchId = store.registerBranch({ repoId, name: "lexical-main", status: "live" });
+  store.db.prepare("UPDATE branches SET current_snapshot_id=?,last_indexed_commit=? WHERE id=?")
+    .run(snapshot.id, "lexical-commit", branchId);
+  const prepare = store.db.prepare.bind(store.db);
+  let singletonSymbolHydrations = 0;
+  const revision = { repoId, branchId, branch: "lexical-main", commitSha: "lexical-commit", snapshotId: snapshot.id, trust: "exact_commit" };
+  const ftsHits = store.searchText("LexicalEngineNeedle", { limit: 10 }).filter((hit) => hit.nodeType === "symbol");
+  assert.equal(ftsHits.length, 3, "fixture FTS candidates");
+  assert.equal(openRevisionView(store, revision).symbolVersions(ftsHits.map((hit) => hit.nodeId)).length, 3, "fixture revision symbols");
+  store.db.prepare = (sql) => {
+    const normalized = String(sql).replace(/\s+/g, " ");
+    if (normalized.includes("FROM file_fact_symbols s") && normalized.includes("WHERE s.identity_key IN (?)")) singletonSymbolHydrations += 1;
+    return prepare(sql);
+  };
+  try {
+    const hits = searchLegacyRows(store, "LexicalEngineNeedle", {
+      repo: repoId,
+      limit: 10,
+      revision,
+    });
+    assert.equal(hits.filter((hit) => hit.nodeType === "symbol").length, 3);
+    assert.equal(singletonSymbolHydrations, 0, `expected no per-candidate revision hydration, got ${singletonSymbolHydrations}`);
+  } finally {
+    store.db.prepare = prepare;
+    store.close();
+  }
 });
 
 test("compact response and hydration keep prompt-like source as data without changing tool behavior", () => {
@@ -52,7 +213,7 @@ test("compact response and hydration keep prompt-like source as data without cha
   assert.deepEqual(compact.hits.map((hit) => [hit.hitId, hit.locator.filePath, hit.locator.startLine, hit.evidence[0]?.status]), full.hits.map((hit) => [hit.hitId, hit.locator.filePath, hit.locator.startLine, hit.evidence[0]?.status]));
   assert.equal(full.hits[0].untrustedContent, true);
   assert.match(full.hits[0].snippet ?? "", /ignore previous instructions/);
-  assert.match(full.hits[0].snippet ?? "", /ignore previous instructions/);
+  assert.match(compact.hits[0].snippet ?? "", /ignore previous instructions/);
   store.close();
 });
 
@@ -119,21 +280,314 @@ test("cursor is signed and page two does not repeat page one", async () => {
 
 test("semantic lane is optional, inferred, and never replaces deterministic truth", async () => {
   const { store, repoId, snapshot } = setup();
-  const provider = { id: "test", modelId: "test-v1", modelHash: "hash", dimensions: 2, maxTokens: 1000,
+  const raw = "conceptual question\n";
+  const blob = (store.db.prepare("SELECT id FROM source_blobs LIMIT 1").get() ?? {}).id;
+  persistSemanticChunks(store, { text: raw, sourceBlobId: blob, repoId, snapshotId: snapshot.id, canonicalFilePath: "src/engine.ts", chunkerVersion: "semantic-chunker-v1" });
+  const space = embeddingSpaceIdentity({ providerId: "test", modelId: "test-v1", weightsDigest: "a".repeat(64), tokenizerDigest: "b".repeat(64), dimensions: 2, pooling: "mean", normalization: "none", chunkerVersion: "semantic-chunker-v1" });
+  const provider = { id: "test", modelId: "test-v1", modelHash: space.identityHash, dimensions: 2, maxTokens: 1000,
     async embed(texts) { return texts.map((_, index) => new Float32Array(index === 0 ? [1, 0] : [0.9, 0.1])); },
     async health() { return { ok: true }; } };
+  const storedSpace = createEmbeddingSpace(store, space);
+  const lifecycle = new EmbeddingLifecycle(store);
+  const generation = lifecycle.createGeneration({ spaceId: storedSpace.id, snapshotId: snapshot.id, scopeKey: `repo:${repoId}`, expectedChunks: 1 });
+  const chunk = store.db.prepare("SELECT id FROM semantic_chunks WHERE snapshot_id=? LIMIT 1").get(snapshot.id);
+  const job = lifecycle.createJob({ generationId: generation.id, chunkId: chunk.id });
+  const claimed = lifecycle.claimJobs({ ownerId: "semantic-lane-test", generationId: generation.id, limit: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString() });
+  assert.equal(claimed[0].id, job.id);
+  new VectorStore(store).ensureModel(provider);
+  new VectorStore(store).put(provider.modelHash, chunk.id, new Float32Array([1, 0]), { generationId: generation.id, spaceId: storedSpace.id });
+  lifecycle.completeClaimedJob(job.id, "semantic-lane-test");
+  lifecycle.activateGeneration(generation.id);
   const response = await searchKnowledgeAsync({ query: "conceptual question", mode: "auto", scope: { revisions: [{ repoId, snapshotId: snapshot.id }] }, options: { semantic: "blend" }, page: { limit: 5 } }, { store, scopes: [{ repoId, snapshotId: snapshot.id }], semanticProvider: provider });
-  assert.ok(response.diagnostics.searchedLanes.includes("semantic"));
-  assert.ok(response.hits.some((hit) => hit.lane === "semantic" && hit.evidence[0].status === "inference"));
+  assert.ok(response.diagnostics.searchedLanes.includes("vector"));
+  assert.equal(response.diagnostics.semantic.applied, true);
+  assert.equal(response.diagnostics.semantic.reason, null);
+  assert.deepEqual(response.diagnostics.semantic.activeGenerationIds, [generation.id]);
+  assert.ok(response.hits.some((hit) => hit.lane === "vector" && hit.evidence[0].status === "inference"));
+  assert.equal(response.returnedCount, response.hits.length);
+  assert.equal(response.evidence.returnedCount, response.hits.length);
+  assert.equal(response.diagnostics.queryStatus, "MATCH");
+  assert.equal(response.proofStatus, "candidate");
+  assert.equal(response.evidence.proofStatus, "candidate");
+  assert.ok(response.candidateCount >= response.hits.length);
+  assert.equal(response.diagnostics.candidateCount, response.candidateCount);
+  assert.equal(response.diagnostics.skippedLanes.some((lane) => lane.lane === "semantic"), false);
+  assert.equal(response.diagnostics.warnings.some((warning) => warning.code === "SEMANTIC_LANE_UNAVAILABLE"), false);
+  assert.equal(response.diagnostics.warnings.some((warning) => warning.code === "NO_MATCH"), false);
+  store.close();
+});
+
+test("semantic progress follows the active searchable generation while a replacement stages", () => {
+  const { store, repoId, snapshot } = setup();
+  const raw = Buffer.from("active semantic evidence\n", "utf8");
+  const hash = createHash("sha256").update(raw).digest("hex");
+  const source = new SourceStore(store);
+  const blob = source.putBlob({ contentHash: hash, rawBytes: raw, decodedContent: raw.toString("utf8"), encoding: "utf8" });
+  const chunk = persistSemanticChunks(store, {
+    text: raw.toString("utf8"),
+    sourceBlobId: blob,
+    repoId,
+    snapshotId: snapshot.id,
+    canonicalFilePath: "src/active-semantic.ts",
+    chunkerVersion: "semantic-chunker-v1",
+  })[0];
+  const scopeKey = "repo:" + repoId;
+  const space = embeddingSpaceIdentity({ providerId: "test", modelId: "progress-generation", weightsDigest: "a".repeat(64), tokenizerDigest: "b".repeat(64), dimensions: 2, pooling: "mean", normalization: "none", chunkerVersion: "semantic-chunker-v1" });
+  const storedSpace = createEmbeddingSpace(store, space);
+  const lifecycle = new EmbeddingLifecycle(store);
+  const active = lifecycle.createGeneration({ spaceId: storedSpace.id, snapshotId: snapshot.id, scopeKey, expectedChunks: 1 });
+  const activeJob = lifecycle.createJob({ generationId: active.id, chunkId: chunk.id });
+  const claimed = lifecycle.claimJobs({ generationId: active.id, ownerId: "progress-active", limit: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString() });
+  assert.equal(claimed[0].id, activeJob.id);
+  new VectorStore(store).ensureModel({ ...space, modelHash: space.identityHash });
+  new VectorStore(store).put(space.identityHash, chunk.id, new Float32Array([1, 0]), { generationId: active.id, spaceId: storedSpace.id });
+  lifecycle.completeClaimedJob(activeJob.id, "progress-active");
+  lifecycle.activateGeneration(active.id);
+
+  const staging = lifecycle.createGeneration({ spaceId: storedSpace.id, snapshotId: snapshot.id, scopeKey, expectedChunks: 2 });
+  lifecycle.createJob({ generationId: staging.id, chunkId: chunk.id });
+
+  const response = searchKnowledge({
+    query: "EngineNeedle",
+    mode: "exact",
+    scope: { revisions: [{ repoId, snapshotId: snapshot.id }] },
+    options: { semantic: "off" },
+    page: { limit: 5 },
+  }, { store, scopes: [{ repoId, snapshotId: snapshot.id }] });
+
+  assert.equal(response.diagnostics.semantic.expected, 1);
+  assert.equal(response.diagnostics.semantic.ready, 1);
+  assert.deepEqual(response.diagnostics.semantic.activeGenerationIds, [active.id]);
+  store.close();
+});
+
+test("vector-only matches replace deterministic no-match metadata", async () => {
+  const { store, repoId, snapshot } = setup();
+  const semanticSources = new SourceStore(store);
+  const chunks = Array.from({ length: 7 }, (_, index) => {
+    const raw = Buffer.from(`conceptual article lookup ${index}`, "utf8");
+    const contentHash = createHash("sha256").update(raw).digest("hex");
+    const blob = semanticSources.putBlob({ contentHash, rawBytes: raw, decodedContent: raw.toString("utf8"), encoding: "utf8" });
+    return persistSemanticChunks(store, { text: raw.toString("utf8"), sourceBlobId: blob, repoId, snapshotId: snapshot.id, canonicalFilePath: `src/semantic-${index}.ts`, chunkerVersion: "semantic-chunker-v1" })[0];
+  });
+  const space = embeddingSpaceIdentity({ providerId: "test", modelId: "test-vector-only", weightsDigest: "e".repeat(64), tokenizerDigest: "f".repeat(64), dimensions: 2, pooling: "mean", normalization: "none", chunkerVersion: "semantic-chunker-v1" });
+  const provider = { id: "test", modelId: "test-vector-only", modelHash: space.identityHash, dimensions: 2, maxTokens: 1000,
+    async embed() { return [new Float32Array([1, 0])]; },
+    async health() { return { ok: true }; } };
+  const storedSpace = createEmbeddingSpace(store, space);
+  const lifecycle = new EmbeddingLifecycle(store);
+  const generation = lifecycle.createGeneration({ spaceId: storedSpace.id, snapshotId: snapshot.id, scopeKey: `repo:${repoId}`, expectedChunks: chunks.length });
+  new VectorStore(store).ensureModel(provider);
+  for (const [index, chunk] of chunks.entries()) {
+    const job = lifecycle.createJob({ generationId: generation.id, chunkId: chunk.id });
+    const claimed = lifecycle.claimJobs({ ownerId: `vector-only-test-${index}`, generationId: generation.id, limit: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString() });
+    assert.equal(claimed[0].id, job.id);
+    new VectorStore(store).put(provider.modelHash, chunk.id, new Float32Array([1, index / 100]), { generationId: generation.id, spaceId: storedSpace.id });
+    lifecycle.completeClaimedJob(job.id, `vector-only-test-${index}`);
+  }
+  lifecycle.activateGeneration(generation.id);
+
+  const request = { query: "different words with no lexical match", mode: "semantic", scope: { revisions: [{ repoId, snapshotId: snapshot.id }] }, options: { semantic: "blend" }, page: { limit: 3 } };
+  let providerFactoryCalls = 0;
+  const response = await searchKnowledgeAsync(request, {
+    store,
+    scopes: [{ repoId, snapshotId: snapshot.id }],
+    semanticProviderFactory: async () => {
+      providerFactoryCalls += 1;
+      return provider;
+    },
+    cursorSecret: "semantic-pagination",
+  });
+
+  assert.equal(providerFactoryCalls, 1);
+  assert.equal(response.hits.length, 3);
+  assert.ok(response.hits.every((hit) => hit.lane === "vector"));
+  assert.equal(response.returnedCount, 3);
+  assert.equal(response.evidence.returnedCount, 3);
+  assert.equal(response.diagnostics.queryStatus, "MATCH");
+  assert.equal(response.proofStatus, "candidate");
+  assert.equal(response.evidence.proofStatus, "candidate");
+  assert.equal(response.diagnostics.warnings.some((warning) => warning.code === "NO_MATCH"), false);
+  assert.equal(response.diagnostics.suggestions.length, 0);
+  assert.equal(response.truncated, true);
+  assert.equal(response.diagnostics.truncated, true);
+  assert.equal(typeof response.page.nextCursor, "string");
+  assert.equal(response.cursor, response.page.nextCursor);
+
+  const second = await searchKnowledgeAsync({ ...request, page: { limit: 3, cursor: response.page.nextCursor } }, { store, scopes: [{ repoId, snapshotId: snapshot.id }], semanticProvider: provider, cursorSecret: "semantic-pagination" });
+  const third = await searchKnowledgeAsync({ ...request, page: { limit: 3, cursor: second.page.nextCursor } }, { store, scopes: [{ repoId, snapshotId: snapshot.id }], semanticProvider: provider, cursorSecret: "semantic-pagination" });
+  assert.equal(second.hits.length, 3);
+  assert.equal(third.hits.length, 1);
+  assert.equal(third.truncated, false);
+  assert.equal(third.page.nextCursor, undefined);
+  const allHitIds = [...response.hits, ...second.hits, ...third.hits].map((hit) => hit.hitId);
+  assert.equal(new Set(allHitIds).size, 7);
   store.close();
 });
 
 test("semantic off is deterministic and never invokes an embedding provider", async () => {
   const { store, repoId, snapshot } = setup();
+  const blob = (store.db.prepare("SELECT id FROM source_blobs LIMIT 1").get() ?? {}).id;
+  const chunk = persistSemanticChunks(store, {
+    text: "queued semantic evidence\n",
+    sourceBlobId: blob,
+    repoId,
+    snapshotId: snapshot.id,
+    canonicalFilePath: "src/queued-off.ts",
+    chunkerVersion: "semantic-chunker-v1",
+  })[0];
+  const space = embeddingSpaceIdentity({ providerId: "test", modelId: "queued-off-v1", weightsDigest: "e".repeat(64), tokenizerDigest: "f".repeat(64), dimensions: 2, pooling: "mean", normalization: "none", chunkerVersion: "semantic-chunker-v1" });
+  const storedSpace = createEmbeddingSpace(store, space);
+  const lifecycle = new EmbeddingLifecycle(store);
+  const generation = lifecycle.createGeneration({ spaceId: storedSpace.id, snapshotId: snapshot.id, scopeKey: `repo:${repoId}`, expectedChunks: 1 });
+  lifecycle.createJob({ generationId: generation.id, chunkId: chunk.id });
   const provider = { id: "must-not-run", modelId: "none", modelHash: "c".repeat(64), dimensions: 2, maxTokens: 100, async embed() { throw new Error("should not embed"); }, async health() { return { ok: false }; } };
-  const result = await searchKnowledgeAsync({ query: "EngineNeedle", mode: "exact", options: { semantic: "off" }, page: { limit: 5 } }, { store, scopes: [{ repoId, snapshotId: snapshot.id }], semanticProvider: provider });
+  const result = await searchKnowledgeAsync({ query: "EngineNeedle", mode: "exact", scope: { revisions: [{ repoId, snapshotId: snapshot.id }] }, options: { semantic: "off" }, page: { limit: 5 } }, { store, scopes: [{ repoId, snapshotId: snapshot.id }], semanticProvider: provider });
   assert.ok(result.hits.length > 0);
   assert.ok(!result.diagnostics.searchedLanes.includes("semantic"));
+  assert.equal(result.diagnostics.semantic.requested, false);
+  assert.equal(result.diagnostics.semantic.applied, false);
+  assert.equal(result.diagnostics.semantic.reason, "not_requested");
+  assert.equal(result.diagnostics.semantic.ready, 0);
+  assert.equal(result.diagnostics.semantic.expected, 1);
+  assert.deepEqual(result.diagnostics.semantic.activeGenerationIds, []);
+  store.close();
+});
+
+test("[semantic-no-active-overhead] semantic request before activation short-circuits provider work and preserves deterministic results", async () => {
+  const { store, repoId, snapshot } = setup();
+  const raw = "queued semantic evidence\n";
+  const blob = (store.db.prepare("SELECT id FROM source_blobs LIMIT 1").get() ?? {}).id;
+  const chunk = persistSemanticChunks(store, { text: raw, sourceBlobId: blob, repoId, snapshotId: snapshot.id, canonicalFilePath: "src/queued.ts", chunkerVersion: "semantic-chunker-v1" })[0];
+  const space = embeddingSpaceIdentity({ providerId: "test", modelId: "queued-v1", weightsDigest: "c".repeat(64), tokenizerDigest: "d".repeat(64), dimensions: 2, pooling: "mean", normalization: "none", chunkerVersion: "semantic-chunker-v1" });
+  let healthCalls = 0;
+  let embeddingCalls = 0;
+  const provider = {
+    id: "test",
+    modelId: "queued-v1",
+    modelHash: space.identityHash,
+    dimensions: 2,
+    maxTokens: 1000,
+    async embed() {
+      embeddingCalls += 1;
+      return [new Float32Array([1, 0])];
+    },
+    async health() {
+      healthCalls += 1;
+      return { ok: true };
+    },
+  };
+  const storedSpace = createEmbeddingSpace(store, space);
+  const lifecycle = new EmbeddingLifecycle(store);
+  const generation = lifecycle.createGeneration({ spaceId: storedSpace.id, snapshotId: snapshot.id, scopeKey: `repo:${repoId}`, expectedChunks: 1 });
+  lifecycle.createJob({ generationId: generation.id, chunkId: chunk.id });
+
+  let providerFactoryCalls = 0;
+  const response = await searchKnowledgeAsync({ query: "EngineNeedle", mode: "auto", scope: { revisions: [{ repoId, snapshotId: snapshot.id }] }, options: { semantic: "blend" }, page: { limit: 5 } }, {
+    store,
+    scopes: [{ repoId, snapshotId: snapshot.id }],
+    semanticProviderFactory: async () => {
+      providerFactoryCalls += 1;
+      return provider;
+    },
+  });
+  assert.equal(response.diagnostics.semantic.requested, true);
+  assert.equal(response.diagnostics.semantic.applied, false);
+  assert.equal(response.diagnostics.semantic.reason, "no_active_space");
+  assert.equal(response.diagnostics.semantic.ready, 0);
+  assert.equal(response.diagnostics.semantic.expected, 1);
+  assert.equal(response.diagnostics.semantic.lanesUsed.includes("vector"), false);
+  assert.ok(response.hits.length > 0, "deterministic Graph/Lexical result remains available");
+  assert.equal(providerFactoryCalls, 0, "no active generation must not construct a model provider");
+  assert.equal(healthCalls, 0, "no active generation must not initialize or health-check a model");
+  assert.equal(embeddingCalls, 0, "no active generation must not generate a query embedding");
+  store.close();
+});
+
+test("semantic fallback preserves the caller page limit and deterministic continuation", async () => {
+  const { store, repoId, snapshot } = setup();
+  const content = Array.from({ length: 24 }, (_, index) => `FallbackPageNeedle occurrence ${index}`).join("\n");
+  const raw = Buffer.from(`${content}\n`, "utf8");
+  const contentHash = createHash("sha256").update(raw).digest("hex");
+  const source = new SourceStore(store);
+  const blob = source.putBlob({
+    contentHash,
+    rawBytes: raw,
+    decodedContent: raw.toString("utf8"),
+    encoding: "utf8",
+  });
+  const fact = source.putSourceFact({
+    repoId,
+    filePath: "src/fallback-page.ts",
+    factFingerprint: contentHash,
+    contentHash,
+    sourceBlobId: blob,
+    coverage: { status: "admitted", reasonCode: "text_searchable", classification: "source" },
+  });
+  const snapshots = new SourceSnapshotStore(store);
+  snapshots.replaceOverlay(snapshot.id, [{ op: "add", path: "src/fallback-page.ts", sourceFactId: fact }]);
+  snapshots.materializeManifest(snapshot.id);
+  const provider = {
+    id: "test",
+    modelId: "fallback-page-v1",
+    modelHash: "f".repeat(64),
+    dimensions: 2,
+    maxTokens: 1000,
+    async embed() { return [new Float32Array([1, 0])]; },
+    async health() { return { ok: true }; },
+  };
+  const request = {
+    query: "FallbackPageNeedle",
+    mode: "exact",
+    scope: { revisions: [{ repoId, snapshotId: snapshot.id }] },
+    options: { semantic: "blend" },
+    page: { limit: 8 },
+  };
+
+  const first = await searchKnowledgeAsync(request, {
+    store,
+    scopes: [{ repoId, snapshotId: snapshot.id }],
+    semanticProvider: provider,
+    cursorSecret: "semantic-fallback-page",
+  });
+  assert.equal(first.diagnostics.semantic.reason, "no_active_space");
+  assert.equal(first.hits.length, 8);
+  assert.equal(first.returnedCount, 8);
+  assert.equal(typeof first.page.nextCursor, "string");
+
+  const second = await searchKnowledgeAsync({ ...request, page: { limit: 8, cursor: first.page.nextCursor } }, {
+    store,
+    scopes: [{ repoId, snapshotId: snapshot.id }],
+    semanticProvider: provider,
+    cursorSecret: "semantic-fallback-page",
+  });
+  assert.equal(second.diagnostics.semantic.reason, "no_active_space");
+  assert.equal(second.hits.length, 8);
+  assert.equal(second.returnedCount, 8);
+  assert.equal(first.hits.some((hit) => second.hits.some((candidate) => candidate.hitId === hit.hitId)), false);
+  store.close();
+});
+
+test("vector-only weak matches carry an explicit low-similarity warning", async () => {
+  const { store, repoId, snapshot } = setup();
+  const blob = (store.db.prepare("SELECT id FROM source_blobs LIMIT 1").get() ?? {}).id;
+  const chunk = persistSemanticChunks(store, { text: "unrelated vector candidate", sourceBlobId: blob, repoId, snapshotId: snapshot.id, canonicalFilePath: "src/weak.ts", chunkerVersion: "semantic-chunker-v1" })[0];
+  const space = embeddingSpaceIdentity({ providerId: "test", modelId: "weak-v1", weightsDigest: "1".repeat(64), tokenizerDigest: "2".repeat(64), dimensions: 2, pooling: "mean", normalization: "none", chunkerVersion: "semantic-chunker-v1" });
+  const provider = { id: "test", modelId: "weak-v1", modelHash: space.identityHash, dimensions: 2, maxTokens: 1000, async embed() { return [new Float32Array([1, 0])]; }, async health() { return { ok: true }; } };
+  const storedSpace = createEmbeddingSpace(store, space);
+  const lifecycle = new EmbeddingLifecycle(store);
+  const generation = lifecycle.createGeneration({ spaceId: storedSpace.id, snapshotId: snapshot.id, scopeKey: `repo:${repoId}`, expectedChunks: 1 });
+  const job = lifecycle.createJob({ generationId: generation.id, chunkId: chunk.id });
+  const claimed = lifecycle.claimJobs({ ownerId: "weak-vector-test", generationId: generation.id, limit: 1, leaseExpiresAt: new Date(Date.now() + 60_000).toISOString() });
+  assert.equal(claimed[0].id, job.id);
+  new VectorStore(store).ensureModel(provider);
+  new VectorStore(store).put(provider.modelHash, chunk.id, new Float32Array([0, 1]), { generationId: generation.id, spaceId: storedSpace.id });
+  lifecycle.completeClaimedJob(job.id, "weak-vector-test");
+  lifecycle.activateGeneration(generation.id);
+
+  const response = await searchKnowledgeAsync({ query: "zzqqxx nonexistent token", mode: "semantic", scope: { revisions: [{ repoId, snapshotId: snapshot.id }] }, options: { semantic: "blend" }, page: { limit: 3 } }, { store, scopes: [{ repoId, snapshotId: snapshot.id }], semanticProvider: provider });
+  assert.equal(response.diagnostics.queryStatus, "MATCH");
+  assert.ok(response.diagnostics.warnings.some((warning) => warning.code === "LOW_SIMILARITY"), JSON.stringify(response.diagnostics.warnings));
   store.close();
 });
 
@@ -161,8 +615,8 @@ test("no-match diagnostics provide bounded local spelling suggestions and typed 
   assert.ok(miss.diagnostics.suggestions.length <= 5);
 
   const missing = searchKnowledge({ query: "anything", mode: "exact", scope: { revisions: [{ repoId, snapshotId: "snapshot-missing" }] } }, { store, scopes: [{ repoId, snapshotId: snapshot.id }] });
-  assert.equal(missing.error?.code, "REPOSITORY_NOT_FOUND");
-  assert.ok(missing.diagnostics.warnings.some((warning) => warning.code === "SCOPE_EMPTY"));
+  assert.equal(missing.error?.code, "REVISION_NOT_FOUND");
+  assert.ok(missing.diagnostics.warnings.some((warning) => warning.code === "REVISION_NOT_FOUND"));
   store.close();
 });
 
@@ -171,9 +625,16 @@ test("empty results distinguish verified absence from incomplete coverage and pr
   store.db.prepare("INSERT INTO coverage_records(repo_id,file_path,git_state,coverage_status,reason_code,classification,byte_size,reason,updated_at) VALUES (?,?,?,?,?,?,?,?,?)").run(repoId, "src/failed.ts", "tracked", "failed", "parser_error", "source", 10, "parser failed", new Date().toISOString());
   const incomplete = searchKnowledge({ query: "DefinitelyMissing", mode: "exact", scope: { revisions: [{ repoId, snapshotId: snapshot.id }] } }, { store, scopes: [{ repoId, snapshotId: snapshot.id }] });
   assert.equal(incomplete.diagnostics.queryStatus, "NO_MATCH_INCOMPLETE");
-  assert.ok(incomplete.diagnostics.nextActions.some((action) => action.command === "penguin index <repo-path>"));
+  assert.ok(incomplete.diagnostics.nextActions.some((action) => action.command.startsWith("knowledge_coverage(")));
 
   store.db.prepare("DELETE FROM coverage_records WHERE repo_id=? AND coverage_status='failed'").run(repoId);
+  const unresolvedUnknown = searchKnowledge({ query: "DefinitelyMissing", mode: "exact", scope: { revisions: [{ repoId, snapshotId: snapshot.id }] } }, { store, scopes: [{ repoId, snapshotId: snapshot.id }] });
+  assert.equal(unresolvedUnknown.diagnostics.queryStatus, "NO_MATCH_INCOMPLETE");
+
+  const branchId = store.registerBranch({ repoId, name: "main", status: "live" });
+  store.db.prepare(`INSERT INTO unresolved_reference_coverage
+    (repo_id,branch_id,file_path,revision_id,resolved,total,updated_at)
+    VALUES (?,?,?,?,?,?,?)`).run(repoId, branchId, "src/engine.ts", snapshot.id, 0, 0, new Date().toISOString());
   const verified = searchKnowledge({ query: "DefinitelyMissing", mode: "exact", scope: { revisions: [{ repoId, snapshotId: snapshot.id }] } }, { store, scopes: [{ repoId, snapshotId: snapshot.id }] });
   assert.equal(verified.diagnostics.queryStatus, "NO_MATCH_VERIFIED");
   assert.deepEqual(verified.diagnostics.nextActions, []);

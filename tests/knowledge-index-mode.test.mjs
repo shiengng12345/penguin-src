@@ -1,6 +1,22 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { resolveIndexMode } from "../packages/knowledge-indexer/dist/index.js";
+import { INDEX_FORMAT_VERSION, SCHEMA_VERSION } from "../packages/knowledge-core/dist/index.js";
+
+test("semantic-only database schema migration does not force a parser graph rebuild", () => {
+  assert.equal(SCHEMA_VERSION, 18);
+  assert.equal(INDEX_FORMAT_VERSION, 17);
+  assert.equal(
+    resolveIndexMode(
+      "incremental",
+      { parser_version: "p1", resolver_version: "r1", indexed_schema_version: 17 },
+      "p1",
+      INDEX_FORMAT_VERSION,
+      "r1",
+    ),
+    "incremental",
+  );
+});
 
 test("schema bump forces rebuild even when parser version matches", () => {
   assert.equal(resolveIndexMode("incremental", { parser_version: "p1", indexed_schema_version: 13 }, "p1", 14), "rebuild");

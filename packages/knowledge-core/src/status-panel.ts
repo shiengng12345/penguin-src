@@ -1,24 +1,31 @@
 import type { KnowledgeStore } from "./store.js";
 import { SCHEMA_VERSION } from "./schema.js";
-import { defaultGitReader } from "./query-scope.js";
+import { readGitStateDefault, type GitStateReader } from "./query-scope.js";
 import { readStorageFileSizes } from "./storage-report.js";
+import { runtimeIndexCompatibility, type RuntimeIndexCompatibility } from "./runtime-compatibility.js";
 
 // The Wiki footer needs a single, never-throwing snapshot of "is what I'm
 // looking at trustworthy": which branch git has checked out, whether the
 // index is caught up with it, and how much of the repo the index actually
 // covers. This is read-only assembly over already-written tables (repos,
-// branches, coverage_records) plus one cached git read per repo -- no scope
+// branches, coverage_records) plus one live git read per repo -- no scope
 // resolution, no mutation, no capability escalation.
 
 export interface RepoStatusPanel {
   repoId: string;
   repoName: string;
   rootPath: string;
-  branchName: string | null; // checked-out git branch (cached reader), null if git unavailable
+  branchName: string | null; // checked-out git branch from this request, null if git unavailable
+  currentHead: string | null;
+  indexedCommit: string | null;
+  snapshotId: string | null;
+  revisionGeneration: number;
+  checkedAt: string;
   revisionAlignment: "aligned" | "behind" | "branch_not_indexed" | "git_unavailable";
   indexedBranch: string | null; // best indexed branch for that checkout (or live fallback)
   lastIndexedAt: string | null;
   staleReason: string | null; // branches.stale_reason passthrough
+  indexCompatibility: RuntimeIndexCompatibility | null;
   // GROUP BY coverage_status counts; null only when the repo has zero
   // coverage_records rows at all. A repo whose rows are all coverage_status
   // 'stale' still has non-empty coverage_records, so this comes back as
@@ -35,39 +42,44 @@ export interface StatusPanel {
   repos: RepoStatusPanel[];
 }
 
-// Reuse query-scope.ts's shared module-level cached reader rather than
-// spinning up a second cachedGitStateReader() instance here — otherwise the
-// same rootPath gets introspected twice per window (once per instance's TTL),
-// even though both readers would return the same answer.
-const gitReader = defaultGitReader;
-
 interface BranchRow {
+  id: string;
   name: string;
   lastIndexedCommit: string | null;
   lastIndexedAt: string | null;
   staleReason: string | null;
   status: string;
+  snapshotId: string | null;
 }
 
 const EMPTY_REPO_FIELDS = {
   branchName: null,
+  currentHead: null,
+  indexedCommit: null,
+  snapshotId: null,
+  revisionGeneration: 0,
+  checkedAt: "",
   revisionAlignment: "git_unavailable" as const,
   indexedBranch: null,
   lastIndexedAt: null,
   staleReason: null,
+  indexCompatibility: null,
   coverage: null,
 };
 
 function buildRepoStatusPanel(
   store: KnowledgeStore,
   repo: { id: string; name: string; rootPath: string },
+  revisionGeneration: number,
+  readGitState: GitStateReader,
 ): RepoStatusPanel {
+  const checkedAt = new Date().toISOString();
   try {
-    const gitState = gitReader(repo.rootPath);
+    const gitState = readGitState(repo.rootPath);
     const branchRows = store.db
       .prepare(
-        `SELECT name, last_indexed_commit AS lastIndexedCommit, last_indexed_at AS lastIndexedAt,
-                stale_reason AS staleReason, status
+        `SELECT id,name, last_indexed_commit AS lastIndexedCommit, last_indexed_at AS lastIndexedAt,
+                stale_reason AS staleReason, status, current_snapshot_id AS snapshotId
            FROM branches
           WHERE repo_id = ? AND status <> 'gone'
           ORDER BY name`,
@@ -99,7 +111,16 @@ function buildRepoStatusPanel(
     const fallback = matched ?? branchRows.find((row) => row.status === "live");
     const indexedBranch = fallback?.name ?? null;
     const lastIndexedAt = fallback?.lastIndexedAt ?? null;
-    const staleReason = fallback?.staleReason ?? null;
+    const indexCompatibility = fallback ? runtimeIndexCompatibility(store, fallback.id) : null;
+    // `index_status` is backed by the last persisted branch metadata while
+    // this panel also observes the live checkout. A repository can therefore
+    // move after indexing without a writer having populated stale_reason yet.
+    // Never emit an unexplained `behind`: MCP-only consumers need a concrete
+    // reason to distinguish live Git drift from contradictory index metadata.
+    const staleReason = indexCompatibility?.state === "schema_outdated"
+      ? "schema_outdated"
+      : fallback?.staleReason
+      ?? (revisionAlignment === "behind" ? "git_head_differs_from_indexed_commit" : null);
 
     const coverageRows = store.db
       .prepare(
@@ -122,10 +143,16 @@ function buildRepoStatusPanel(
       repoName: repo.name,
       rootPath: repo.rootPath,
       branchName,
+      currentHead: gitState?.headSha ?? null,
+      indexedCommit: fallback?.lastIndexedCommit ?? null,
+      snapshotId: fallback?.snapshotId ?? null,
+      revisionGeneration,
+      checkedAt,
       revisionAlignment,
       indexedBranch,
       lastIndexedAt,
       staleReason,
+      indexCompatibility,
       coverage,
     };
   } catch {
@@ -137,11 +164,20 @@ function buildRepoStatusPanel(
       repoName: repo.name,
       rootPath: repo.rootPath,
       ...EMPTY_REPO_FIELDS,
+      revisionGeneration,
+      checkedAt,
     };
   }
 }
 
-export function buildStatusPanel(store: KnowledgeStore): StatusPanel {
+export interface BuildStatusPanelOptions {
+  readGitState?: GitStateReader;
+}
+
+export function buildStatusPanel(
+  store: KnowledgeStore,
+  options: BuildStatusPanelOptions = {},
+): StatusPanel {
   const repos = store.db
     .prepare("SELECT id, name, root_path AS rootPath FROM repos ORDER BY name")
     .all() as Array<{ id: string; name: string; rootPath: string }>;
@@ -154,8 +190,16 @@ export function buildStatusPanel(store: KnowledgeStore): StatusPanel {
   } catch {
     // never let a stat() failure take down the footer
   }
+  const revisionGenerationRow = store.db.prepare("SELECT value FROM meta WHERE key='revision_generation'").get() as { value: string } | undefined;
+  const revisionGeneration = Number(revisionGenerationRow?.value ?? 0);
+  const readGitState = options.readGitState ?? readGitStateDefault;
   return {
     db: { connected: true, schemaVersion: SCHEMA_VERSION, sizeBytes, walBytes },
-    repos: repos.map((repo) => buildRepoStatusPanel(store, repo)),
+    repos: repos.map((repo) => buildRepoStatusPanel(
+      store,
+      repo,
+      Number.isSafeInteger(revisionGeneration) ? revisionGeneration : 0,
+      readGitState,
+    )),
   };
 }

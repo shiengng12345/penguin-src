@@ -18,6 +18,9 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { existsSync } from "node:fs";
+import { accessSync, constants as fsConstants } from "node:fs";
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
@@ -28,9 +31,12 @@ import {
   generationAction,
   generationMeta,
   generationNotice,
+  generationRoot,
   manifestPath,
 } from "./generation-watch.js";
-import { QueryWorkerPool } from "../../knowledge-cli/src/query-server.js";
+import { runtimeIdentity } from "../../knowledge-cli/src/runtime-identity.js";
+import { QueryWorkerPool, withBoundedQueryTimings } from "../../knowledge-cli/src/query-server.ts";
+import { hasTypedMcpToolError, mcpResultText } from "./result-text.js";
 import {
   callGrpcWeb,
   callGrpcNative,
@@ -89,9 +95,28 @@ const MCP_FAST_KNOWLEDGE_TOOLS = new Set([
   "index_status",
   "knowledge_status_panel",
   "status_panel",
+  "knowledge_semantic_status",
 ]);
 
 let mcpQueryPool: QueryWorkerPool | undefined;
+// Real FPMS-NT source search is intentionally bounded but can exceed 15s on
+// a cold, multi-gigabyte index. Keep a hard stop, with enough headroom that a
+// truthful partial result is not converted into a false transport failure.
+const DEFAULT_MCP_QUERY_TIMEOUT_MS = 30_000;
+const MCP_CURSOR_TTL_SECONDS = 15 * 60;
+const mcpSessionId = randomUUID();
+const mcpClientConnectedAt = new Date().toISOString();
+
+function stableMcpLauncherHealthy(): boolean {
+  const launcher = process.env.PENGUIN_MCP_LAUNCHER?.trim()
+    || join(homedir(), ".penguin", "bin", "penguin-mcp");
+  try {
+    accessSync(launcher, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
 function knowledgeDbPath(): string {
   return process.env.PENGUIN_KNOWLEDGE_DB ?? join(homedir(), ".penguin", "knowledge", "knowledge.db");
 }
@@ -103,7 +128,7 @@ function getMcpQueryPool(): QueryWorkerPool {
     workerUrl: new URL("./knowledge-worker.js", import.meta.url),
     size: Number(process.env.PENGUIN_MCP_QUERY_WORKERS ?? 2),
     maxQueue: Number(process.env.PENGUIN_MCP_QUERY_MAX_QUEUE ?? 16),
-    timeoutMs: Number(process.env.PENGUIN_MCP_QUERY_TIMEOUT_MS ?? 15_000),
+    timeoutMs: Number(process.env.PENGUIN_MCP_QUERY_TIMEOUT_MS ?? DEFAULT_MCP_QUERY_TIMEOUT_MS),
   });
   return mcpQueryPool;
 }
@@ -401,24 +426,13 @@ function packageNameFromSpec(spec: string): string | null {
 }
 
 function jsonResult(value: unknown, isError = false) {
-  const enriched = value && typeof value === "object" && !Array.isArray(value)
-    ? { ...(value as Record<string, unknown>), ...("hits" in (value as Record<string, unknown>) ? { stats: { rawBytesEstimate: Buffer.byteLength(JSON.stringify(value), "utf8"), sentBytes: Buffer.byteLength(JSON.stringify(value), "utf8"), compactRatio: 1, timingsMs: {} } } : {}) }
-    : value;
-  const searchSummary = enriched && typeof enriched === "object" && !Array.isArray(enriched) && Array.isArray((enriched as Record<string, unknown>).hits)
-    ? `${((enriched as Record<string, unknown>).hits as unknown[]).length} hits${((enriched as Record<string, unknown>).diagnostics as { searchedLanes?: string[] } | undefined)?.searchedLanes ? ` · lanes ${((enriched as Record<string, unknown>).diagnostics as { searchedLanes: string[] }).searchedLanes.join(",")}` : ""}`
-    : null;
-  const text = searchSummary ?? JSON.stringify(enriched, null, 2);
+  const timedValue = withBoundedQueryTimings(value);
+  const enriched = timedValue && typeof timedValue === "object" && !Array.isArray(timedValue)
+    ? { ...(timedValue as Record<string, unknown>), ...("hits" in (timedValue as Record<string, unknown>) ? { stats: { rawBytesEstimate: Buffer.byteLength(JSON.stringify(timedValue), "utf8"), sentBytesEstimate: Buffer.byteLength(JSON.stringify(timedValue), "utf8"), compactRatio: 1, timingsMs: ((timedValue as Record<string, unknown>).diagnostics as Record<string, unknown> | undefined)?.timingsMs ?? {} } } : {}) }
+    : timedValue;
+  const text = mcpResultText(enriched);
   const structuredContent = Array.isArray(enriched) ? { items: enriched } : (enriched && typeof enriched === "object" ? enriched : { result: enriched });
-  const hasTypedToolError = enriched !== null
-    && typeof enriched === "object"
-    && !Array.isArray(enriched)
-    && "error" in enriched
-    && enriched.error !== null
-    && typeof enriched.error === "object"
-    && !Array.isArray(enriched.error)
-    && typeof (enriched.error as Record<string, unknown>).code === "string"
-    && typeof (enriched.error as Record<string, unknown>).message === "string"
-    && typeof (enriched.error as Record<string, unknown>).retryable === "boolean";
+  const hasTypedToolError = hasTypedMcpToolError(enriched);
   // Update propagation (1.16.2): a long-lived stdio server keeps serving the
   // old build after an app update. `_meta` carries the machine-readable
   // signal on every call while outdated; the notice text is appended to
@@ -564,7 +578,7 @@ function searchAllMethods(
 }
 
 const server = new Server(
-  { name: "penguin-mcp", version: process.env.PENGUIN_BUILD_ID ?? "local" },
+  { name: "penguin-mcp", version: process.env.PENGUIN_BUILD_ID ?? `0.0.1+knowledge-${capabilityHash(CAPABILITIES).slice(0, 12)}` },
   {
     capabilities: { tools: {} },
     // MCP initialize has no portable custom metadata field. Keep the
@@ -575,7 +589,7 @@ const server = new Server(
     // free of knowledge-core/native deps so the release-bundled server
     // initializes without workspace node_modules — keep it in sync with
     // SCHEMA_VERSION in packages/knowledge-core/src/schema.ts by hand.
-    instructions: JSON.stringify({ contractVersion: "2", schemaVersion: 14, capabilityHash: capabilityHash(CAPABILITIES) }),
+    instructions: JSON.stringify({ contractVersion: "2", schemaVersion: 18, capabilityHash: capabilityHash(CAPABILITIES), modelHash: process.env.PENGUIN_MODEL_HASH ?? "unknown", sessionId: mcpSessionId, clientConnectedAt: mcpClientConnectedAt }),
   },
 );
 
@@ -590,6 +604,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       description:
         "Lightweight liveness check with runtime paths and bounded-query limits. This tool deliberately avoids package, environment, and database scans so it remains responsive while another query is slow.",
       inputSchema: { type: "object", properties: {} },
+      annotations: {
+        title: "Penguin MCP health",
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
     },
     {
       name: "search_methods",
@@ -863,35 +884,68 @@ server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
       // Lazy import keeps knowledge-core (native better-sqlite3) out of the
       // server's top-level load — only paid when a knowledge tool is called.
       const { runKnowledgeTool } = await import("./knowledge-tools.js");
-      return jsonResult(await runKnowledgeTool(name, a));
+      return jsonResult(await runKnowledgeTool(name, a, {
+        restartRequired: generationState.outdated,
+      }));
+    }
+    // Capability IDs are dotted contract identifiers, not MCP tool names.
+    // Detect this common discovery mistake explicitly so clients can retry
+    // with the advertised snake_case tool instead of receiving a vague
+    // "not implemented" response.
+    const dottedCapability = CAPABILITIES.find((capability) => capability.id === name);
+    if (dottedCapability) {
+      const didYouMean = dottedCapability.id.replaceAll(".", "_");
+      return jsonResult({
+        error: {
+          code: "UNKNOWN_TOOL",
+          message: `unknown MCP tool: ${name}`,
+          retryable: false,
+          details: { didYouMean },
+        },
+      }, true);
     }
     if (name === "mcp_health") {
+      const identity = runtimeIdentity({
+        runtimeRoot: generationRoot(),
+        runningBuildId: generationState.startupBuildId,
+        availableBuildId: generationState.currentBuildId,
+        outdated: generationState.outdated,
+      });
       return jsonResult({
+        ...identity,
         configPath: configPath(),
         penguinRoot: penguinRoot(),
-        nodeVersion: process.version,
-        platform: process.platform,
         cwd: process.cwd(),
         status: generationState.outdated ? "outdated" : "ok",
         // This handler is reachable only after the MCP client completed
         // initialize, so this is a local protocol gate — not proof that a
         // different client has loaded a newly-written config.
-        configured: null,
-        launcherHealthy: null,
+        // A health call is possible only after this process completed the
+        // client's initialize handshake, so the active session is configured.
+        configured: true,
+        launcherHealthy: stableMcpLauncherHealthy(),
         initializeHealthy: true,
+        sessionId: mcpSessionId,
+        clientConnectedAt: mcpClientConnectedAt,
+        serverTimeUtc: new Date().toISOString(),
+        cursorTtlSeconds: MCP_CURSOR_TTL_SECONDS,
         clientRestartRequired: generationState.outdated,
         runtimeOutdated: generationState.outdated,
         // Always present so a user (or agent) checking health sees whether
         // this process is still serving a superseded build.
         serverGeneration: {
-          runningBuildId: generationState.startupBuildId,
-          availableBuildId: generationState.currentBuildId,
-          outdated: generationState.outdated,
+          ...identity.generation,
           ...(generationState.outdated ? { action: generationNotice(generationState) } : {}),
+        },
+        contract: {
+          contractVersion: identity.contractVersion,
+          schemaVersion: identity.schemaVersion,
+          capabilityHash: identity.capabilityHash,
+          modelHash: identity.modelHash,
         },
         queryRuntime: {
           workers: Number(process.env.PENGUIN_MCP_QUERY_WORKERS ?? 2),
-          hardTimeoutMs: Number(process.env.PENGUIN_MCP_QUERY_TIMEOUT_MS ?? 15_000),
+          hardTimeoutMs: Number(process.env.PENGUIN_MCP_QUERY_TIMEOUT_MS ?? DEFAULT_MCP_QUERY_TIMEOUT_MS),
         },
       });
     }
@@ -1200,3 +1254,23 @@ export type { EnvironmentEntry };
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
+
+// MCP-only users may never open Tauri or run a CLI command after installation.
+// Wake is detached and best-effort so initialize/tools/list stay responsive;
+// the CLI supervisor performs the durable queue/lease checks and logs errors.
+if (existsSync(knowledgeDbPath())) {
+  const launcher = process.env.PENGUIN_CLI_LAUNCHER ?? join(homedir(), ".local", "bin", "penguin");
+  if (existsSync(launcher)) {
+    try {
+      const child = spawn(launcher, ["semantic", "wake", "--json"], {
+        detached: true,
+        stdio: "ignore",
+        env: process.env,
+      });
+      child.unref();
+    } catch {
+      // A failed wake is visible through knowledge_semantic_status; it must
+      // never break the MCP protocol handshake or non-semantic tools.
+    }
+  }
+}

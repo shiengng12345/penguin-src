@@ -24,7 +24,7 @@ test("WHY store transitions are audited", () => {
   db.close();
 });
 
-test("memory, ontology and onboarding are scoped and persisted", () => {
+test("[canonical-onboarding-tools] memory, ontology and onboarding use only callable canonical tool names", () => {
   const db = store();
   const memory = new MemoryStore(db);
   const item = memory.remember({ class: "decision", scope: { repoId: "r1" }, subject: "guard", body: "keep guard", source: [{ locator: "a.ts:1" }], confidence: 0.9, retention: "indefinite" });
@@ -34,10 +34,30 @@ test("memory, ontology and onboarding are scoped and persisted", () => {
   const terms = new OntologyStore(db);
   terms.upsert({ id: "term:cpf", canonicalName: "CPF", aliases: ["tax id"], scope: {}, type: "entity", definition: "synthetic identifier", evidence: [], status: "draft" });
   assert.equal(terms.list()[0].aliases[0], "tax id");
+  db.db.prepare("INSERT INTO repos(id,name,root_path,created_at) VALUES (?,?,?,?)")
+    .run("repo-1", "repo-one", "/tmp/repo-one", new Date().toISOString());
   assert.match(buildOnboarding(db), /系统边界/);
-  const onboarding = buildOnboardingDocument(db);
+  const onboarding = buildOnboardingDocument(db, "repo-1");
   assert.match(onboarding.markdown, /revision-hash=[a-f0-9]{64}/);
   assert.match(onboarding.markdown, /capability-hash=[a-f0-9]{64}/);
+  assert.match(onboarding.markdown, /index_status/);
+  assert.match(onboarding.markdown, /knowledge_coverage/);
+  assert.match(onboarding.markdown, /knowledge_search/);
+  assert.match(onboarding.markdown, /knowledge_explore/);
+  assert.match(onboarding.markdown, /knowledge_affected/);
+    assert.match(onboarding.markdown, /knowledge_semantic_status/);
+    assert.match(onboarding.markdown, /`knowledge_architecture\(/);
+    assert.match(onboarding.markdown, /`knowledge_get_node\(/);
+    assert.doesNotMatch(onboarding.markdown, /`get_architecture\(/);
+    assert.doesNotMatch(onboarding.markdown, /`get_node\(/);
+  assert.match(onboarding.markdown, /knowledge_semantic_status\(\{"scopeKey":"repo:repo-1"\}\)/);
+  assert.match(onboarding.markdown, /nextCursor/);
+  assert.match(onboarding.markdown, /nodeId/);
+  assert.match(onboarding.markdown, /"scope":\{"revisions":\[/);
+  assert.match(onboarding.markdown, /"options":\{"semantic":"off"/);
+  assert.match(onboarding.markdown, /"page":\{"limit":20,"cursor":"<nextCursor>"\}/);
+  assert.doesNotMatch(onboarding.markdown, /"contract_version"/);
+  assert.match(onboarding.markdown, /MCP-only/);
   assert.equal(onboarding.capabilityHash.length, 64);
   db.close();
 });

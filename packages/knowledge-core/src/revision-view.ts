@@ -4,9 +4,9 @@ import { FileFactStore } from "./file-fact-store.js";
 
 export interface RevisionFileRow { filePath: string; fileFactId: string; contentHash: string; language: string }
 export interface RevisionSymbolRow { nodeId: string; identityKey: string; title: string; kind: string; signature?: string; filePath: string; language: string; startLine?: number; endLine?: number; contentHash: string }
-export interface RevisionEdgeFilter { nodeIds?: string[]; edgeTypes?: string[]; direction?: "in" | "out" | "both"; limit?: number }
+export interface RevisionEdgeFilter { nodeIds?: string[]; edgeTypes?: string[]; direction?: "in" | "out" | "both"; limit?: number; includeGlobal?: boolean }
 export interface RevisionEdgeRow { id: string; srcIdentityKey: string; dstIdentityKey?: string; rawTarget?: string; edgeType: string; method: string; confidence: number; provenance: Record<string, unknown>; scope: "revision" | "global" | "legacy_global" }
-export interface RevisionView { readonly context: RevisionContext; listFiles(): RevisionFileRow[]; symbolVersions(nodeIds?: string[]): RevisionSymbolRow[]; hasNode(nodeId: string): boolean; edges(filter: RevisionEdgeFilter): RevisionEdgeRow[]; touch(): void }
+export interface RevisionView { readonly context: RevisionContext; listFiles(): RevisionFileRow[]; symbolVersions(nodeIds?: string[]): RevisionSymbolRow[]; symbolVersionsForFiles(filePaths: string[]): RevisionSymbolRow[]; hasNode(nodeId: string): boolean; edges(filter: RevisionEdgeFilter): RevisionEdgeRow[]; touch(): void }
 
 function placeholders(values: string[]): string { return values.length ? values.map(() => "?").join(",") : "NULL"; }
 
@@ -54,35 +54,70 @@ export function openRevisionView(store: KnowledgeStore, context: RevisionContext
       // node lookup, query the requested identities once and intersect their
       // file facts with that manifest. The old loop below issued one SQL query
       // per indexed file even when the caller requested a single node.
-      const files = manifest();
       if (nodeIds?.length) {
         const p = placeholders(nodeIds);
         const identities = store.db.prepare(
           `SELECT id, identity_key FROM nodes WHERE id IN (${p}) OR identity_key IN (${p})`,
         ).all(...nodeIds, ...nodeIds) as Array<{ id: string; identity_key: string }>;
         if (identities.length === 0) return [];
-        const fileByFact = new Map(files.map((file) => [file.fileFactId, file]));
         const identityKeys = identities.map((row) => row.identity_key);
         const rows = store.db.prepare(
-          `SELECT s.file_fact_id,s.identity_key,s.title,s.kind,s.signature,s.start_line,s.end_line,s.content_hash,n.id AS node_id
-             FROM file_fact_symbols s LEFT JOIN nodes n ON n.identity_key=s.identity_key
+          `SELECT s.file_fact_id,s.identity_key,s.title,s.kind,s.signature,s.start_line,s.end_line,
+                  s.content_hash,n.id AS node_id,e.file_path,ff.language
+             FROM file_fact_symbols s
+             JOIN effective_snapshot_files e
+               ON e.snapshot_id=? AND e.file_fact_id=s.file_fact_id
+             JOIN file_facts ff ON ff.id=s.file_fact_id
+             LEFT JOIN nodes n ON n.identity_key=s.identity_key
             WHERE s.identity_key IN (${placeholders(identityKeys)})
-            ORDER BY s.identity_key`,
-        ).all(...identityKeys) as Array<Record<string, unknown>>;
-        const out: RevisionSymbolRow[] = [];
-        for (const row of rows) {
-          const file = fileByFact.get(String(row.file_fact_id));
-          if (!file) continue;
-          out.push({ nodeId: String(row.node_id ?? row.identity_key), identityKey: String(row.identity_key), title: String(row.title), kind: String(row.kind), ...(row.signature ? { signature: String(row.signature) } : {}), filePath: file.filePath, language: file.language, ...(row.start_line == null ? {} : { startLine: Number(row.start_line) }), ...(row.end_line == null ? {} : { endLine: Number(row.end_line) }), contentHash: String(row.content_hash) });
-        }
-        return out;
+            ORDER BY s.identity_key,e.file_path`,
+        ).all(context.snapshotId, ...identityKeys) as Array<Record<string, unknown>>;
+        return rows.map((row) => ({
+          nodeId: String(row.node_id ?? row.identity_key),
+          identityKey: String(row.identity_key),
+          title: String(row.title),
+          kind: String(row.kind),
+          ...(row.signature ? { signature: String(row.signature) } : {}),
+          filePath: String(row.file_path),
+          language: String(row.language ?? ""),
+          ...(row.start_line == null ? {} : { startLine: Number(row.start_line) }),
+          ...(row.end_line == null ? {} : { endLine: Number(row.end_line) }),
+          contentHash: String(row.content_hash),
+        }));
       }
+      const files = manifest();
       const out: RevisionSymbolRow[] = [];
       for (const file of files) {
         const rows = store.db.prepare("SELECT s.identity_key,s.title,s.kind,s.signature,s.start_line,s.end_line,s.content_hash,n.id AS node_id FROM file_fact_symbols s LEFT JOIN nodes n ON n.identity_key=s.identity_key WHERE s.file_fact_id=? ORDER BY s.identity_key").all(file.fileFactId) as Array<Record<string, unknown>>;
         for (const row of rows) out.push({ nodeId: String(row.node_id ?? row.identity_key), identityKey: String(row.identity_key), title: String(row.title), kind: String(row.kind), ...(row.signature ? { signature: String(row.signature) } : {}), filePath: file.filePath, language: file.language, ...(row.start_line == null ? {} : { startLine: Number(row.start_line) }), ...(row.end_line == null ? {} : { endLine: Number(row.end_line) }), contentHash: String(row.content_hash) });
       }
       return out;
+    },
+    symbolVersionsForFiles: (filePaths) => {
+      if (filePaths.length === 0) return [];
+      if (legacy) {
+        const rows = store.db.prepare(
+          `SELECT sv.node_id,n.identity_key,n.title,sv.kind,sv.signature,sv.file_path,sv.lang,sv.start_line,sv.end_line,sv.content_hash
+             FROM symbol_versions sv JOIN nodes n ON n.id=sv.node_id
+            WHERE sv.branch_id=? AND sv.status='fresh' AND sv.file_path IN (${placeholders(filePaths)})
+            ORDER BY sv.file_path,n.identity_key`,
+        ).all(context.branchId, ...filePaths) as Array<Record<string, unknown>>;
+        return rows.map((row) => ({ nodeId: String(row.node_id), identityKey: String(row.identity_key), title: String(row.title), kind: String(row.kind), ...(row.signature ? { signature: String(row.signature) } : {}), filePath: String(row.file_path), language: String(row.lang ?? ""), ...(row.start_line == null ? {} : { startLine: Number(row.start_line) }), ...(row.end_line == null ? {} : { endLine: Number(row.end_line) }), contentHash: String(row.content_hash) }));
+      }
+      const selectedFiles = manifest().filter((file) => filePaths.includes(file.filePath));
+      if (selectedFiles.length === 0) return [];
+      const factIds = selectedFiles.map((file) => file.fileFactId);
+      const fileByFact = new Map(selectedFiles.map((file) => [file.fileFactId, file]));
+      const rows = store.db.prepare(
+        `SELECT s.file_fact_id,s.identity_key,s.title,s.kind,s.signature,s.start_line,s.end_line,s.content_hash,n.id AS node_id
+           FROM file_fact_symbols s LEFT JOIN nodes n ON n.identity_key=s.identity_key
+          WHERE s.file_fact_id IN (${placeholders(factIds)})
+          ORDER BY s.file_fact_id,s.identity_key`,
+      ).all(...factIds) as Array<Record<string, unknown>>;
+      return rows.map((row) => {
+        const file = fileByFact.get(String(row.file_fact_id))!;
+        return { nodeId: String(row.node_id ?? row.identity_key), identityKey: String(row.identity_key), title: String(row.title), kind: String(row.kind), ...(row.signature ? { signature: String(row.signature) } : {}), filePath: file.filePath, language: file.language, ...(row.start_line == null ? {} : { startLine: Number(row.start_line) }), ...(row.end_line == null ? {} : { endLine: Number(row.end_line) }), contentHash: String(row.content_hash) };
+      });
     },
     hasNode: (nodeId) => Boolean(store.db.prepare("SELECT 1 FROM nodes WHERE id=? OR identity_key=?").get(nodeId, nodeId)),
     edges: (filter) => {
@@ -128,7 +163,9 @@ export function openRevisionView(store: KnowledgeStore, context: RevisionContext
         globalClauses.push(`edge_type IN (${placeholders(filter.edgeTypes)})`);
         globalParams.push(...filter.edgeTypes);
       }
-      const global = store.db.prepare(`SELECT * FROM global_resolved_edges${globalClauses.length ? ` WHERE ${globalClauses.join(" AND ")}` : ""} ORDER BY edge_type,src_identity_key,dst_identity_key,id LIMIT ?`).all(...globalParams, limit) as Array<Record<string, unknown>>;
+      const global = filter.includeGlobal === false
+        ? []
+        : store.db.prepare(`SELECT * FROM global_resolved_edges${globalClauses.length ? ` WHERE ${globalClauses.join(" AND ")}` : ""} ORDER BY edge_type,src_identity_key,dst_identity_key,id LIMIT ?`).all(...globalParams, limit) as Array<Record<string, unknown>>;
       return [...rows.map((row) => ({ id: String(row.id), srcIdentityKey: String(row.src_identity_key), ...(row.dst_identity_key ? { dstIdentityKey: String(row.dst_identity_key) } : {}), ...(row.raw_target ? { rawTarget: String(row.raw_target) } : {}), edgeType: String(row.edge_type), method: String(row.method), confidence: Number(row.confidence), provenance: JSON.parse(String(row.provenance ?? "{}")), scope: "revision" as const })), ...global.map((row) => ({ id: String(row.id), srcIdentityKey: String(row.src_identity_key), ...(row.dst_identity_key ? { dstIdentityKey: String(row.dst_identity_key) } : {}), ...(row.raw_target ? { rawTarget: String(row.raw_target) } : {}), edgeType: String(row.edge_type), method: String(row.method), confidence: Number(row.confidence), provenance: JSON.parse(String(row.provenance ?? "{}")), scope: "global" as const }))].slice(0, limit);
     },
     touch: () => store.db.prepare("UPDATE revision_snapshots SET last_accessed_at=? WHERE id=?").run(new Date().toISOString(), context.snapshotId),

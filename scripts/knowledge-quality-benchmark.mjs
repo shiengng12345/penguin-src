@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { cpSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -94,6 +95,20 @@ export async function runKnowledgeQualityBenchmark() {
   const root = mkdtempSync(join(tmpdir(), "penguin-quality-fixture-"));
   const dbDir = mkdtempSync(join(tmpdir(), "penguin-quality-db-"));
   cpSync(fixture, root, { recursive: true });
+  // The benchmark exercises Git-backed snapshot truth as well as parser
+  // output.  Give the disposable fixture its own committed baseline so the
+  // benchmark never emits misleading "not a git repository" diagnostics or
+  // accidentally consults the caller's repository.
+  const gitEnv = {
+    ...process.env,
+    GIT_AUTHOR_NAME: "Penguin Quality Benchmark",
+    GIT_AUTHOR_EMAIL: "penguin-quality@example.invalid",
+    GIT_COMMITTER_NAME: "Penguin Quality Benchmark",
+    GIT_COMMITTER_EMAIL: "penguin-quality@example.invalid",
+  };
+  execFileSync("git", ["init", "-q", "-b", "main", root], { env: gitEnv });
+  execFileSync("git", ["-C", root, "add", "."], { env: gitEnv });
+  execFileSync("git", ["-C", root, "commit", "-q", "-m", "quality benchmark baseline"], { env: gitEnv });
   const store = KnowledgeStore.open({
     dbPath: join(dbDir, "knowledge.db"),
     ledgerPath: join(dbDir, "ledger.jsonl"),

@@ -85,11 +85,12 @@ test("release-bundled MCP server initializes without workspace node_modules", as
     name: "penguin-mcp",
     version: `0.0.1+knowledge-${capabilityHash(CAPABILITIES).slice(0, 12)}`,
   });
-  assert.deepEqual(JSON.parse(response.result.instructions), {
-    contractVersion: "2",
-    schemaVersion: 14,
-    capabilityHash: capabilityHash(CAPABILITIES),
-  });
+  const instructions = JSON.parse(response.result.instructions);
+  assert.equal(instructions.contractVersion, "2");
+  assert.equal(instructions.schemaVersion, 18);
+  assert.equal(instructions.capabilityHash, capabilityHash(CAPABILITIES));
+  assert.match(instructions.sessionId, /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+  assert.equal(Number.isNaN(Date.parse(instructions.clientConnectedAt)), false);
 });
 
 test("MCP release entry has no static workspace-only imports", async () => {
@@ -107,22 +108,26 @@ test("MCP release entry has no static workspace-only imports", async () => {
   );
 });
 
-test("Tauri release resources include the MCP ESM package marker", async () => {
+test("Tauri release resources include MCP code without duplicating its native runtime", async () => {
   const tauriConfig = JSON.parse(
     await readFile(new URL("../src-tauri/tauri.conf.json", import.meta.url), "utf8"),
   );
 
-  // The MCP ESM markers must ship; assert inclusion (not exact equality) so
-  // unrelated resources (e.g. the knowledge CLI bundle) don't break this.
+  // MCP code is merged under the CLI runtime during first-run activation, so
+  // the app must ship its dist tree but not a second Node + node_modules copy.
   for (const marker of [
     "../.penguin.config.json",
-    "../packages/mcp/package.json",
-    "../packages/mcp/dist/index.js",
-    "../packages/mcp/bundle/**/*",
+    "../packages/mcp/bundle/package.json",
+    "../packages/mcp/bundle/dist/**/*",
   ]) {
     assert.ok(
       tauriConfig.bundle.resources.includes(marker),
       `missing release resource: ${marker}`,
     );
   }
+  assert.equal(
+    tauriConfig.bundle.resources.includes("../packages/mcp/bundle/**/*"),
+    false,
+    "full MCP bundle duplicates the shared Node/native runtime",
+  );
 });

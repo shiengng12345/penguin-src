@@ -32,13 +32,17 @@ export async function extractFileFact(input: { repoId: string; rootPath: string;
 }
 export async function indexRevision(input: IndexRevisionInput): Promise<IndexRevisionReport> {
   const requestedBase = input.base?.branch ?? input.base?.commitSha;
-  const canonicalBranch = !requestedBase ? input.store.getDefaultBranch(input.repoId) : undefined;
+  let canonicalBranch = !requestedBase ? input.store.getDefaultBranch(input.repoId) : undefined;
+  if (canonicalBranch && input.store.repairOrphanBranchSnapshot(canonicalBranch.id)) {
+    canonicalBranch = input.store.getDefaultBranch(input.repoId) ?? undefined;
+  }
   const targetBranch = input.revision.branch ?? null;
   const explicitBase = requestedBase ?? (canonicalBranch && targetBranch && canonicalBranch.name !== targetBranch ? canonicalBranch.name : undefined);
   const topology = resolveRevisionTopology(input.rootPath, input.revision, { explicitBase, includeDirtyWorktree: input.revision.useWorktree === true });
   const key = `${input.repoId}:${topology.headSha}:${topology.treeHash}:${topology.worktreeFingerprint ?? "clean"}:${input.parserVersion}:${input.resolverVersion}`;
   return input.coordinator.runExclusive(key, async () => {
     const topologyStore = new GitTopologyStore(input.store);
+    if (input.publishBranchId) input.store.repairOrphanBranchSnapshot(input.publishBranchId);
     const prior = input.publishBranchId ? input.store.db.prepare("SELECT current_snapshot_id AS currentSnapshotId, last_indexed_commit AS lastIndexedCommit FROM branches WHERE id=?").get(input.publishBranchId) as { currentSnapshotId: string | null; lastIndexedCommit: string | null } | undefined : undefined;
     const mergeBaseSnapshot = topology.mergeBaseSha
       ? input.store.db.prepare("SELECT id FROM revision_snapshots WHERE repo_id=? AND commit_sha=? AND state='ready' ORDER BY created_at DESC LIMIT 1").get(input.repoId, topology.mergeBaseSha) as { id: string } | undefined

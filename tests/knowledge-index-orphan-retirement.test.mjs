@@ -38,6 +38,11 @@ const freshTitles = (store, like) => store.db
   .all(like)
   .map((row) => row.title);
 
+const coveragePaths = (store) => store.db
+  .prepare("SELECT file_path AS filePath FROM coverage_records ORDER BY file_path")
+  .all()
+  .map((row) => row.filePath);
+
 test("a file that becomes git-ignored loses its symbols on the next index", async () => {
   const { root, store } = repo();
   await indexRepo({ store, rootPath: root, mode: "rebuild" });
@@ -124,5 +129,28 @@ test("a deleted file is still retired", async () => {
   const report = await indexRepo({ store, rootPath: root, mode: "incremental" });
   assert.deepEqual(freshTitles(store, "src/generated.js"), []);
   assert.ok(report.deleted >= 1, `the deletion must be reported, got ${JSON.stringify(report.deleted)}`);
+  store.close();
+});
+
+test("an obsolete package-cache coverage row is removed from the current corpus", async () => {
+  const { root, store } = repo();
+  const first = await indexRepo({ store, rootPath: root, mode: "rebuild" });
+  store.db.prepare(`INSERT INTO coverage_records
+    (repo_id,file_path,git_state,coverage_status,reason_code,classification,byte_size,reason,parser_status,updated_at)
+    VALUES (?,?,?,?,?,?,?,?,?,?)`).run(
+      first.repoId,
+      ".pnpm-store/v3/files/aa/blob",
+      "untracked",
+      "admitted",
+      "text_searchable",
+      "source",
+      100,
+      "legacy cache row",
+      "unsupported",
+      new Date().toISOString(),
+    );
+  assert.equal(coveragePaths(store).includes(".pnpm-store/v3/files/aa/blob"), true);
+  await indexRepo({ store, rootPath: root, mode: "incremental" });
+  assert.equal(coveragePaths(store).includes(".pnpm-store/v3/files/aa/blob"), false);
   store.close();
 });

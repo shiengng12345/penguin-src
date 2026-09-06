@@ -32,6 +32,10 @@ const workerBuilds = [
     entry: join(repoRoot, "packages/knowledge-indexer/dist/parse-worker.js"),
     outfile: join(outdir, "parse-worker.js"),
   },
+  {
+    entry: join(repoRoot, "packages/knowledge-indexer/dist/lease-watchdog.js"),
+    outfile: join(outdir, "lease-watchdog.js"),
+  },
 ];
 
 mkdirSync(outdir, { recursive: true });
@@ -45,7 +49,7 @@ await build({
   target: "node18",
   // Native addon — resolved at runtime from the vendored node_modules that
   // ships next to this bundle. Everything else is inlined.
-  external: ["better-sqlite3"],
+  external: ["better-sqlite3", "onnxruntime-node"],
   // Always invoked as `node penguin.mjs` by the Tauri bridge, so no shebang
   // (a second shebang from the entry would be a syntax error anyway).
   // esbuild may emit `require`/`__dirname` for bundled CJS deps; ESM output
@@ -71,7 +75,7 @@ for (const { entry: workerEntry, outfile: workerOutfile } of workerBuilds) {
     platform: "node",
     format: "esm",
     target: "node18",
-    external: ["better-sqlite3"],
+    external: ["better-sqlite3", "onnxruntime-node"],
     banner: {
       js: [
         "import { createRequire as __pgvCreateRequire } from 'node:module';",

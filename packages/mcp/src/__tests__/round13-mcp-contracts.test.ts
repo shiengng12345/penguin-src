@@ -141,7 +141,9 @@ test("MCP capability negotiation records build, hash, and schema identity throug
   assert.equal(result.capabilityHash, capabilityHash(CAPABILITIES));
   assert.equal(typeof result.schemaVersion, "string");
   assert.equal(result.contractVersion, "2");
-  assert.equal(result.schemaVersion, "14");
+  assert.equal(result.schemaVersion, "18");
+  const compact = await runKnowledgeTool("knowledge_capabilities", { compact: true }, { store }) as Record<string, unknown>;
+  assert.equal(compact.modelHash, process.env.PENGUIN_MODEL_HASH ?? "unknown");
   store.close();
 });
 
@@ -156,6 +158,7 @@ test("MCP uses the shared envelope for unsupported contracts and scope errors", 
       requestedContract: "9",
       remediation: "upgrade Penguin or request contract 2",
     },
+    remediation: "upgrade Penguin or request contract 2",
   });
 
   const scope = await runKnowledgeTool("knowledge_context", { target: "round13McpTarget", repo, branch: "missing" }, { store }) as Record<string, any>;
@@ -176,7 +179,7 @@ test("MCP raw-string error paths return a non-empty shared envelope", async () =
   assert.equal(typeof watch.error.retryable, "boolean");
 
   const search = await runKnowledgeTool("knowledge_search", {}, { store }) as Record<string, any>;
-  assert.equal(search.error.code, "INTERNAL");
+  assert.equal(search.error.code, "MISSING_REQUIRED_ARGUMENT");
   assert.match(search.error.code, /^[A-Z][A-Z0-9_]+$/);
   assert.match(search.error.message, /non-empty query/i);
   assert.equal(typeof search.error.retryable, "boolean");
@@ -248,7 +251,11 @@ test("MCP invalid node is not a success-shaped empty context", async () => {
     code: "TARGET_NOT_FOUND",
     message: "target was not found: node:round13-missing-node",
     retryable: false,
-    details: { target: "node:round13-missing-node" },
+    details: {
+      target: "node:round13-missing-node",
+      remediation: "call knowledge_search to find a current stable nodeId",
+    },
+    remediation: "call knowledge_search to find a current stable nodeId",
   });
   store.close();
 });
@@ -281,13 +288,17 @@ test("MCP health keeps local initialize and client restart status separate", () 
 
 test("built MCP health reports local initialize and runtime generation separately", () => {
   const health = runBuiltMcpHealth();
-  assert.equal(health.configured, null);
-  assert.equal(health.launcherHealthy, null);
+  assert.equal(health.configured, true);
+  assert.equal(typeof health.launcherHealthy, "boolean");
   assert.equal(health.initializeHealthy, true);
   assert.equal(health.clientRestartRequired, false);
   assert.equal(health.runtimeOutdated, false);
   assert.equal(health.serverGeneration.outdated, false);
   assert.equal(health.serverGeneration.runningBuildId, health.serverGeneration.availableBuildId);
+  assert.match(health.sessionId, /^[0-9a-f-]{36}$/i);
+  assert.ok(Number.isFinite(Date.parse(health.clientConnectedAt)));
+  assert.ok(Number.isFinite(Date.parse(health.serverTimeUtc)));
+  assert.equal(health.cursorTtlSeconds, 900);
 });
 
 test("Settings keeps config, local checks, restart, and outdated state distinct", () => {

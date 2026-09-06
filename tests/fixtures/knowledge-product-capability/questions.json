@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "questions": [
+    { "id": "typescript-nestjs-flow", "query": "Trace a NestJS controller through injected service and repository with file-line evidence." },
+    { "id": "rust-trait-dispatch", "query": "Trace a Rust trait call through its concrete implementation without inventing dynamic dispatch." },
+    { "id": "grpc-endpoint", "query": "Resolve one gRPC Service.Method to declaration, handler and client occurrences." },
+    { "id": "rest-endpoint", "query": "Resolve one REST route to controller, service and persistence boundary." },
+    { "id": "config-runtime-flow", "query": "Trace Vault or environment configuration through typed config into runtime construction." },
+    { "id": "exact-occurrences", "query": "Enumerate every exact identifier occurrence using cursor continuation without duplicates." },
+    { "id": "natural-language-intent", "query": "Find the implementation of a business intent when the wording is absent from symbol names." },
+    { "id": "cross-service-flow", "query": "Trace a cross-service request and separate proven graph hops from unresolved boundaries." },
+    { "id": "working-tree-overlay", "query": "Explain how an uncommitted change alters callers and affected tests relative to HEAD." },
+    { "id": "same-name-repositories", "query": "Disambiguate repositories with the same display name using stable repo identity and canonical root." },
+    { "id": "negative-proof", "query": "Explain why an empty result is or is not proof of absence using freshness and coverage evidence." },
+    { "id": "semantic-hybrid", "query": "Compare deterministic and semantic retrieval, including model generation identity and lane evidence." }
+  ]
+}

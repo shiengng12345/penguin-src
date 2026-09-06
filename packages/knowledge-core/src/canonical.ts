@@ -20,3 +20,48 @@ export function canonicalJson(value: unknown): string {
 export function sha256Hex(input: string): string {
   return createHash("sha256").update(input, "utf8").digest("hex");
 }
+
+/**
+ * Hash the canonical JSON representation without materializing the complete
+ * document as one JavaScript string. Large corpus exports can exceed V8's
+ * maximum string length even though every individual row is small.
+ */
+export function sha256Canonical(value: unknown): string {
+  const hash = createHash("sha256");
+
+  const update = (part: string): void => {
+    hash.update(part, "utf8");
+  };
+
+  const visit = (current: unknown): void => {
+    if (current === null || typeof current !== "object") {
+      update(JSON.stringify(current));
+      return;
+    }
+    if (Array.isArray(current)) {
+      update("[");
+      current.forEach((entry, index) => {
+        if (index > 0) update(",");
+        visit(entry === undefined ? null : entry);
+      });
+      update("]");
+      return;
+    }
+
+    const record = current as Record<string, unknown>;
+    const keys = Object.keys(record)
+      .sort()
+      .filter((key) => record[key] !== undefined);
+    update("{");
+    keys.forEach((key, index) => {
+      if (index > 0) update(",");
+      update(JSON.stringify(key));
+      update(":");
+      visit(record[key]);
+    });
+    update("}");
+  };
+
+  visit(value);
+  return hash.digest("hex");
+}

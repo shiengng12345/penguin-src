@@ -15,6 +15,7 @@ import {
   buildFlow,
   indexStatus,
   graphQuery,
+  SCHEMA_VERSION,
 } from "../packages/knowledge-core/dist/index.js";
 
 // Seed a small but realistic graph:
@@ -82,6 +83,19 @@ test("graphNeighborhood: focus + 1-hop neighbours (both directions) + internal e
   // edges among the 3 included nodes: all 3 calls edges qualify
   assert.equal(g.edges.length, 3);
   assert.ok(g.edges.every((e) => e.edgeType === "calls"));
+  store.close();
+});
+
+test("graph views expose an evidence envelope on every returned edge", () => {
+  const { store, repoId, branchId, caller, login } = seed();
+  const local = graphNeighborhood(store, caller, { depth: 1 });
+  assert.ok(local.edges.length > 0);
+  assert.ok(local.edges.every((edge) => edge.graphEvidence?.evidenceState === "proven"));
+  assert.ok(local.edges.every((edge) => edge.graphEvidence?.scope === "revision"));
+
+  const repository = repoGraph(store, repoId, branchId, { limit: 10 });
+  assert.ok(repository.edges.length > 0);
+  assert.ok(repository.edges.every((edge) => edge.graphEvidence?.evidenceState === "proven"));
   store.close();
 });
 
@@ -202,7 +216,7 @@ test("context, flow, and index status expose one persisted trust envelope", () =
     worktreeFingerprint: "fingerprint-1",
     dirtyFiles: ["a.ts"],
     parserVersion: "parser-1",
-    schemaVersion: 6,
+    schemaVersion: SCHEMA_VERSION,
     staleReason: "worktree_dirty",
   });
 

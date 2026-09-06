@@ -1,17 +1,18 @@
 export const KNOWLEDGE_INDEXER_VERSION = "0.0.1";
-export { loadParser, loadLanguage } from "./parser.js";
+export { loadParser, loadLanguage, withParsedTree } from "./parser.js";
 export { langForExtension, LANGS, WASM_FILE, type Lang } from "./registry.js";
 export {
   extractSymbols,
   type ExtractedFile,
   type ExtractedSymbol,
   type ExtractedRef,
+  type ExtractedReceiverBinding,
   type ExtractedLogSite,
 } from "./extract.js";
 export { extractEndpoints, extractRoutes, type ExtractedEndpoint, type ExtractedRoute } from "./routes.js";
 export { extractGrpcClientCalls, grpcEndpointKey, type GrpcClientCall } from "./grpc-client.js";
 export { parseProtoEndpoints, collectProtoEndpoints, type ProtoEndpoint } from "./proto-parser.js";
-export { resolveRefs, type SymbolIndex, type ResolvedEdges } from "./resolve.js";
+export { resolveRefs, classifyUnresolvedReference, type SymbolIndex, type ResolvedEdges, type UnresolvedReferenceItem, type UnresolvedReferenceClassification } from "./resolve.js";
 export { detectRenames, type RenameAliasEvent } from "./rename.js";
 export { parseNote, indexNote, extractEntities, type ParsedNote } from "./notes.js";
 export { createNote, createIncident, appendNote, writeNoteBody, readNote, listNotes, reindexNotesDir, startNotesWatcher, noteSlug, type NoteType } from "./notes-fs.js";
@@ -20,9 +21,15 @@ export { computeEvidenceHashes, mergeEvidenceDocument, renderEvidenceMarkdown, u
 export { resolveNoteLinks, listDanglingNoteLinks, type DanglingNoteLink } from "./fusion.js";
 export { findUnlinkedMentions, acceptUnlinkedMention, type UnlinkedMention } from "./unlinked-mentions.js";
 export { readGitContext, type GitContext } from "./git.js";
+export {
+  collectIndependentCorpusOracle,
+  type IndependentCorpusOracle,
+  type IndependentEndpointRecord,
+} from "./corpus-oracle.js";
 export { catalogGitRefs, resolveDefaultBranch, resolveRevisionTopology, GitObjectReader, type GitRefEntry, type GitRefCatalogue, type DefaultBranchResolution, type ResolvedRevisionTopology, type GitTreeFile } from "./git-topology.js";
 export { resolutionContextFingerprint, dependentInvalidationClosure, type ResolutionContextInput } from "./resolution-context.js";
 export { RevisionIndexCoordinator, extractFileFact, indexRevision, type IndexRevisionInput, type IndexRevisionReport } from "./revision-indexer.js";
+export { prepareWorkingTreeOverlay, WorkingTreeOverlayError, type PrepareWorkingTreeOverlayInput } from "./working-tree-overlay.js";
 export { ensureBaseSnapshot, type BaseSnapshotMaterializer } from "./base-snapshot.js";
 export { walkRepoFiles, isLikelyMinified, type WalkedFile } from "./walk.js";
 export { discoverRepoFiles, discoverRepoCoverage } from "./walk.js";
@@ -44,10 +51,30 @@ export {
   KNOWLEDGE_PARSER_VERSION,
   KNOWLEDGE_RESOLVER_VERSION,
   type IndexReport,
+  type SemanticIndexReport,
+  type SemanticIndexOptions,
   type IndexProgressEvent,
   type IndexStageId,
 } from "./pipeline.js";
 export { startWatcher, type WatcherHandle, type WatcherStatus } from "./watcher.js";
+export {
+  discoverFullCorpusRepositories,
+  readFullCorpusJob,
+  requestFullCorpusCancel,
+  requestFullCorpusPause,
+  requestFullCorpusResume,
+  requestFullCorpusRetry,
+  retryFullCorpus,
+  runFullCorpus,
+  type FullCorpusJob,
+  type FullCorpusJobState,
+  type FullCorpusMode,
+  type FullCorpusPhase,
+  type FullCorpusRepoReceipt,
+  type FullCorpusRunOptions,
+  type FullCorpusRetryOptions,
+  type FullCorpusRunResult,
+} from "./full-corpus-runner.js";
 export { detectPackages, flyoverPackageNames, buildPackageRegistry, type PackageInfo, type PackageRegistry } from "./package-detect.js";
 export {
   readPackageDependencies,
@@ -59,6 +86,9 @@ export {
 } from "./package-dependencies.js";
 export { extractIdentifiers, extractIdentifiersFromSource, type IdentifierEntry } from "./identifiers.js";
 export { extractFieldAccesses, type FieldAccess, type FieldAccessKind } from "./field-access.js";
+export { extractNestJsFrameworkEdges, type FrameworkSymbol, type FrameworkSymbolTarget, type NestJsFrameworkEdgeInput } from "./framework-edges.js";
 export { extractChannelBindings, type ExtractedChannelBinding, type ChannelProtocol, type ChannelBindingStatus } from "./channels.js";
 export { deploymentBlastRadius, extractIacFacts, type DeploymentBlastRadiusResult, type IacFact, type IacKind } from "./iac.js";
 export { anonymousCallbackIdentity } from "./identity.js";
+export { backfillEmbeddings, activateEmbeddingGeneration, enqueueSemanticGeneration, drainSemanticQueue, garbageCollectEmbeddingVectors, type EmbeddingBackfillCheckpoint, type EmbeddingBackfillInput, type EmbeddingBackfillResult, type SemanticEnqueueResult, type SemanticDrainInput, type SemanticDrainResult } from "./embedding-indexer.js";
+export { recoverEmbeddingWorker } from "./embedding-worker.js";

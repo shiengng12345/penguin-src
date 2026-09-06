@@ -1,5 +1,9 @@
 import type Database from "better-sqlite3";
+import { execFileSync } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, linkSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { basename, dirname, join, resolve } from "node:path";
 
 // Lazy, `require()`-based load — deliberately NOT a static `import` of this
 // native module. A static ESM import of an external package is hoisted and
@@ -21,6 +25,15 @@ const EDGE_REPLACEMENT_INDEX_NAMES = [
   "idx_edges_parser_global_repo_file",
   "idx_symbol_versions_branch_file_status",
   "idx_nodes_log_site_repo_file",
+  "idx_nodes_identity",
+  "idx_nodes_identity_nocase",
+  "idx_resolved_edges_set_type_src",
+  "idx_resolved_edges_set_type_dst",
+  "idx_resolved_edges_src_type_set",
+  "idx_resolved_edges_dst_type_set",
+  "idx_revision_endpoint_occurrences_filter",
+  "idx_revision_endpoint_occurrences_page",
+  "idx_unresolved_reference_items_revision_reason",
 ] as const;
 
 // replaceFileEdges() deletes parser output by the exact JSON provenance
@@ -49,6 +62,67 @@ CREATE INDEX IF NOT EXISTS idx_symbol_versions_branch_file_status
 CREATE INDEX IF NOT EXISTS idx_nodes_log_site_repo_file
   ON nodes(repo_id, json_extract(meta, '$.filePath'))
   WHERE node_type = 'log_site';
+
+-- Symbol and endpoint identity resolution is a hot path for graph traversal.
+-- Keep both the normal and compatibility case-insensitive lookups indexed;
+-- a NOCASE predicate on an unindexed identity column turns every node hop into
+-- a full-table scan on a multi-repository database.
+CREATE INDEX IF NOT EXISTS idx_nodes_identity
+  ON nodes(identity_key);
+
+CREATE INDEX IF NOT EXISTS idx_nodes_identity_nocase
+  ON nodes(identity_key COLLATE NOCASE);
+
+-- Endpoint inventory traverses immutable publication edges in both
+-- directions. The old resolution_set-only index still scanned every edge in
+-- a large snapshot before applying edge type and endpoint identity.
+CREATE INDEX IF NOT EXISTS idx_resolved_edges_set_type_src
+  ON resolved_edges(resolution_set_id, edge_type, src_identity_key);
+
+CREATE INDEX IF NOT EXISTS idx_resolved_edges_set_type_dst
+  ON resolved_edges(resolution_set_id, edge_type, dst_identity_key);
+
+-- Scoped revision readers filter by one endpoint identity first, while the
+-- snapshot contributes thousands of resolution sets. The set-first indexes
+-- above are ideal for publication materialization, but make this read path
+-- fall back to a full resolved_edges scan on a large snapshot.
+CREATE INDEX IF NOT EXISTS idx_resolved_edges_src_type_set
+  ON resolved_edges(src_identity_key, edge_type, resolution_set_id);
+
+CREATE INDEX IF NOT EXISTS idx_resolved_edges_dst_type_set
+  ON resolved_edges(dst_identity_key, edge_type, resolution_set_id);
+
+CREATE INDEX IF NOT EXISTS idx_revision_endpoint_occurrences_filter
+  ON revision_endpoint_occurrences(snapshot_id, provenance_kind, protocol, endpoint_identity_key, file_path);
+
+CREATE INDEX IF NOT EXISTS idx_revision_endpoint_occurrences_page
+  ON revision_endpoint_occurrences(snapshot_id, endpoint_identity_key, endpoint_node_id);
+
+-- Endpoint publication receipts filter ambiguous references by repository,
+-- exact revision and reason. The older scope index has branch_id between
+-- repo_id and revision_id, so it cannot serve this read path.
+CREATE INDEX IF NOT EXISTS idx_unresolved_reference_items_revision_reason
+  ON unresolved_reference_items(repo_id, revision_id, reason_code, file_path, start_line, id);
+`;
+
+const SEMANTIC_REUSE_INDEX_NAMES = [
+  "idx_semantic_chunks_snapshot",
+  "idx_semantic_chunks_reuse",
+  "idx_semantic_embedding_refs_reuse",
+] as const;
+
+// Embedding backfill plans reuse in one snapshot-wide join. These indexes
+// keep that join proportional to the current snapshot instead of repeatedly
+// scanning every historical semantic chunk and generation.
+const SEMANTIC_REUSE_INDEX_DDL = `
+CREATE INDEX IF NOT EXISTS idx_semantic_chunks_snapshot
+  ON semantic_chunks(snapshot_id, id);
+
+CREATE INDEX IF NOT EXISTS idx_semantic_chunks_reuse
+  ON semantic_chunks(repo_id, canonical_file_path, content_hash, chunker_version, id);
+
+CREATE INDEX IF NOT EXISTS idx_semantic_embedding_refs_reuse
+  ON semantic_embedding_refs(model_hash, space_id, status, chunk_id, generation_id);
 `;
 
 export type SchemaMaintenanceEvent =
@@ -64,10 +138,33 @@ export type SchemaMaintenanceEvent =
       symbolRows?: number;
       identifierRows?: number;
       elapsedMs?: number;
+    }
+  | {
+      operation: "semantic-reuse-indexes";
+      phase: "start" | "complete";
+      indexes: readonly string[];
+      elapsedMs?: number;
+    }
+  | {
+      operation: "schema-migration-backup";
+      phase: "start" | "after-vacuum-before-identity" | "after-vacuum" | "before-publish" | "before-backup-retry" | "before-remove" | "after-backup-quarantine" | "before-orphan-attempt-quarantine" | "complete";
+      path: string;
+      fromVersion: number;
+      toVersion: number;
+      elapsedMs?: number;
     };
 
 export interface OpenDatabaseOptions {
   allowSchemaMutation?: boolean;
+  /**
+   * Open an existing current database for a guarded maintenance operation
+   * without normal write-path housekeeping. Reset/recovery must not turn a
+   * control-plane command into a multi-gigabyte startup scan.
+   */
+  skipMaintenance?: boolean;
+  /** Compatibility probe used by older bundled runtimes before any persistent
+   * SQLite PRAGMA or DDL. Production callers normally use SCHEMA_VERSION. */
+  supportedSchemaVersion?: number;
   onSchemaMaintenance?: (event: SchemaMaintenanceEvent) => void;
 }
 
@@ -78,6 +175,8 @@ CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+INSERT OR IGNORE INTO meta (key, value)
+VALUES ('endpoint_inventory_generation', '0');
 
 CREATE TABLE IF NOT EXISTS repos (
   id TEXT PRIMARY KEY,
@@ -195,6 +294,80 @@ CREATE TABLE IF NOT EXISTS node_aliases (
   created_at TEXT NOT NULL,
   UNIQUE (node_id, alias_key, alias_type)
 );
+
+-- Parser-derived aliases are rebuildable index data. They must not share the
+-- ledger-materialized node_aliases table, whose rows represent durable user/
+-- AI knowledge events rather than endpoint extraction facts.
+CREATE TABLE IF NOT EXISTS endpoint_aliases (
+  endpoint_id TEXT NOT NULL REFERENCES nodes(id),
+  alias_key TEXT NOT NULL,
+  alias_type TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (endpoint_id, alias_key)
+);
+CREATE INDEX IF NOT EXISTS idx_endpoint_aliases_lookup
+  ON endpoint_aliases(alias_key COLLATE NOCASE);
+
+CREATE TABLE IF NOT EXISTS endpoint_memberships (
+  endpoint_id TEXT NOT NULL REFERENCES nodes(id),
+  repo_id TEXT NOT NULL REFERENCES repos(id),
+  role TEXT NOT NULL CHECK (role IN ('provider','consumer','declaration')),
+  file_path TEXT NOT NULL,
+  locator_node_id TEXT REFERENCES nodes(id),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (endpoint_id, repo_id, role, file_path)
+);
+CREATE INDEX IF NOT EXISTS idx_endpoint_memberships_repo_role
+  ON endpoint_memberships(repo_id, role, endpoint_id);
+CREATE INDEX IF NOT EXISTS idx_endpoint_memberships_endpoint
+  ON endpoint_memberships(endpoint_id, repo_id, role);
+
+-- Repo-less endpoint inventory cursors need a truthful O(1) publication
+-- revision. These are required schema objects: a current-version database
+-- without them is unsafe for cursor reads until a writable open installs the
+-- additive metadata migration.
+CREATE TRIGGER IF NOT EXISTS trg_endpoint_inventory_nodes_insert
+AFTER INSERT ON nodes WHEN NEW.node_type = 'endpoint'
+BEGIN
+  UPDATE meta
+     SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+   WHERE key = 'endpoint_inventory_generation';
+END;
+CREATE TRIGGER IF NOT EXISTS trg_endpoint_inventory_nodes_update
+AFTER UPDATE ON nodes WHEN OLD.node_type = 'endpoint' OR NEW.node_type = 'endpoint'
+BEGIN
+  UPDATE meta
+     SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+   WHERE key = 'endpoint_inventory_generation';
+END;
+CREATE TRIGGER IF NOT EXISTS trg_endpoint_inventory_nodes_delete
+AFTER DELETE ON nodes WHEN OLD.node_type = 'endpoint'
+BEGIN
+  UPDATE meta
+     SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+   WHERE key = 'endpoint_inventory_generation';
+END;
+CREATE TRIGGER IF NOT EXISTS trg_endpoint_inventory_memberships_insert
+AFTER INSERT ON endpoint_memberships
+BEGIN
+  UPDATE meta
+     SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+   WHERE key = 'endpoint_inventory_generation';
+END;
+CREATE TRIGGER IF NOT EXISTS trg_endpoint_inventory_memberships_update
+AFTER UPDATE ON endpoint_memberships
+BEGIN
+  UPDATE meta
+     SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+   WHERE key = 'endpoint_inventory_generation';
+END;
+CREATE TRIGGER IF NOT EXISTS trg_endpoint_inventory_memberships_delete
+AFTER DELETE ON endpoint_memberships
+BEGIN
+  UPDATE meta
+     SET value = CAST(CAST(value AS INTEGER) + 1 AS TEXT)
+   WHERE key = 'endpoint_inventory_generation';
+END;
 
 CREATE TABLE IF NOT EXISTS symbol_versions (
   id TEXT PRIMARY KEY,
@@ -477,6 +650,8 @@ CREATE TABLE IF NOT EXISTS file_fact_symbols (
   content_hash TEXT NOT NULL,
   PRIMARY KEY (file_fact_id, identity_key)
 );
+CREATE INDEX IF NOT EXISTS idx_file_fact_symbols_identity
+  ON file_fact_symbols(identity_key, file_fact_id);
 CREATE TABLE IF NOT EXISTS snapshot_overlays (
   snapshot_id TEXT NOT NULL,
   file_path TEXT NOT NULL,
@@ -493,6 +668,8 @@ CREATE TABLE IF NOT EXISTS effective_snapshot_files (
   file_fact_id TEXT NOT NULL,
   PRIMARY KEY (snapshot_id, file_path)
 );
+CREATE INDEX IF NOT EXISTS idx_effective_snapshot_files_snapshot_fact
+  ON effective_snapshot_files(snapshot_id, file_fact_id);
 CREATE TABLE IF NOT EXISTS snapshot_rename_events (
   snapshot_id TEXT NOT NULL,
   from_path TEXT NOT NULL,
@@ -522,12 +699,44 @@ CREATE TABLE IF NOT EXISTS resolved_edges (
   provenance TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_resolved_edges_set ON resolved_edges(resolution_set_id);
+CREATE INDEX IF NOT EXISTS idx_resolved_edges_set_type_src
+  ON resolved_edges(resolution_set_id, edge_type, src_identity_key);
+CREATE INDEX IF NOT EXISTS idx_resolved_edges_set_type_dst
+  ON resolved_edges(resolution_set_id, edge_type, dst_identity_key);
 CREATE TABLE IF NOT EXISTS snapshot_resolution_refs (
   snapshot_id TEXT NOT NULL,
   file_path TEXT NOT NULL,
   resolution_set_id TEXT NOT NULL,
   PRIMARY KEY (snapshot_id, file_path)
 );
+CREATE TABLE IF NOT EXISTS revision_endpoint_publications (
+  snapshot_id TEXT PRIMARY KEY,
+  repo_id TEXT NOT NULL,
+  commit_sha TEXT NOT NULL,
+  occurrence_count INTEGER NOT NULL,
+  materialized_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS revision_endpoint_occurrences (
+  snapshot_id TEXT NOT NULL,
+  endpoint_node_id TEXT NOT NULL,
+  endpoint_identity_key TEXT NOT NULL,
+  protocol TEXT,
+  locator_node_id TEXT,
+  locator_identity_key TEXT NOT NULL DEFAULT '',
+  edge_type TEXT NOT NULL,
+  provenance_kind TEXT NOT NULL CHECK (provenance_kind IN ('definition','client','handler','test')),
+  file_path TEXT NOT NULL,
+  start_line INTEGER NOT NULL DEFAULT 0,
+  end_line INTEGER,
+  method TEXT NOT NULL,
+  confidence REAL NOT NULL,
+  provenance TEXT NOT NULL,
+  PRIMARY KEY (snapshot_id, endpoint_node_id, edge_type, provenance_kind, file_path, start_line, locator_identity_key)
+);
+CREATE INDEX IF NOT EXISTS idx_revision_endpoint_occurrences_filter
+  ON revision_endpoint_occurrences(snapshot_id, provenance_kind, protocol, endpoint_identity_key, file_path);
+CREATE INDEX IF NOT EXISTS idx_revision_endpoint_occurrences_page
+  ON revision_endpoint_occurrences(snapshot_id, endpoint_identity_key, endpoint_node_id);
 CREATE TABLE IF NOT EXISTS global_resolved_edges (
   id TEXT PRIMARY KEY,
   producer_key TEXT NOT NULL,
@@ -654,6 +863,25 @@ CREATE TABLE IF NOT EXISTS unresolved_reference_coverage (
 );
 CREATE INDEX IF NOT EXISTS idx_unresolved_reference_coverage_scope
   ON unresolved_reference_coverage(repo_id, branch_id, revision_id);
+-- Concrete revision-scoped unresolved references.  The aggregate coverage
+-- table above is intentionally retained for cheap health/status reads; this
+-- queue makes every unresolved/ambiguous/external reference actionable.
+CREATE TABLE IF NOT EXISTS unresolved_reference_items (
+  id TEXT PRIMARY KEY,
+  repo_id TEXT NOT NULL REFERENCES repos(id),
+  branch_id TEXT NOT NULL REFERENCES branches(id),
+  revision_id TEXT NOT NULL,
+  file_path TEXT NOT NULL,
+  start_line INTEGER NOT NULL,
+  source_node_id TEXT REFERENCES nodes(id),
+  raw_target TEXT NOT NULL,
+  reason_code TEXT NOT NULL,
+  classification TEXT NOT NULL DEFAULT 'missing_internal',
+  reason TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_unresolved_reference_items_scope
+  ON unresolved_reference_items(repo_id, branch_id, revision_id, file_path, start_line, id);
 CREATE TABLE IF NOT EXISTS markdown_sections (
   source_fact_id TEXT NOT NULL,
   heading_path TEXT NOT NULL,
@@ -807,6 +1035,11 @@ CREATE TABLE IF NOT EXISTS semantic_chunks (
   content_hash TEXT NOT NULL,
   source_blob_id INTEGER,
   node_id TEXT,
+  repo_id TEXT,
+  snapshot_id TEXT,
+  canonical_file_path TEXT,
+  identity_hash TEXT,
+  chunker_version TEXT,
   start_byte INTEGER,
   end_byte INTEGER,
   chunk_kind TEXT NOT NULL,
@@ -828,6 +1061,8 @@ CREATE TABLE IF NOT EXISTS semantic_embedding_refs (
   status TEXT NOT NULL,
   error TEXT,
   embedded_at TEXT,
+  generation_id TEXT,
+  space_id TEXT,
   PRIMARY KEY (model_hash, chunk_id)
 );
 CREATE TABLE IF NOT EXISTS semantic_vector_values (
@@ -835,9 +1070,75 @@ CREATE TABLE IF NOT EXISTS semantic_vector_values (
   model_hash TEXT NOT NULL,
   dimensions INTEGER NOT NULL,
   vector_json TEXT NOT NULL,
+  vector_table_name TEXT,
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_semantic_vector_values_model ON semantic_vector_values(model_hash);
+CREATE TABLE IF NOT EXISTS embedding_spaces (
+  id TEXT PRIMARY KEY,
+  identity_hash TEXT NOT NULL UNIQUE,
+  provider_id TEXT NOT NULL,
+  model_id TEXT NOT NULL,
+  weights_digest TEXT NOT NULL,
+  tokenizer_digest TEXT NOT NULL,
+  preprocessing_digest TEXT NOT NULL,
+  dimensions INTEGER NOT NULL,
+  pooling TEXT NOT NULL,
+  normalization TEXT NOT NULL,
+  chunker_version TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS embedding_generations (
+  id TEXT PRIMARY KEY,
+  space_id TEXT NOT NULL REFERENCES embedding_spaces(id),
+  snapshot_id TEXT NOT NULL,
+  scope_key TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('staging','active','retired','failed')),
+  expected_chunks INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  activated_at TEXT,
+  retired_at TEXT,
+  failure_reason TEXT,
+  UNIQUE (space_id, snapshot_id, scope_key)
+);
+CREATE INDEX IF NOT EXISTS idx_embedding_generations_scope_status
+  ON embedding_generations(scope_key, status, created_at);
+CREATE TABLE IF NOT EXISTS embedding_jobs (
+  id TEXT PRIMARY KEY,
+  generation_id TEXT NOT NULL REFERENCES embedding_generations(id),
+  chunk_id TEXT NOT NULL REFERENCES semantic_chunks(id),
+  status TEXT NOT NULL CHECK (status IN ('pending','running','ready','failed','deleting')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  lease_owner TEXT,
+  lease_expires_at TEXT,
+  next_attempt_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE (generation_id, chunk_id)
+);
+CREATE INDEX IF NOT EXISTS idx_embedding_jobs_generation_status
+  ON embedding_jobs(generation_id, status, chunk_id);
+CREATE TABLE IF NOT EXISTS semantic_worker_leases (
+  lock_name TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL,
+  owner_pid INTEGER NOT NULL,
+  build_id TEXT NOT NULL,
+  heartbeat_at TEXT NOT NULL,
+  lease_expires_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS semantic_controls (
+  scope_key TEXT PRIMARY KEY,
+  pause_requested INTEGER NOT NULL DEFAULT 0 CHECK (pause_requested IN (0,1)),
+  cancelled_generation_id TEXT,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS semantic_active_spaces (
+  scope_key TEXT PRIMARY KEY,
+  generation_id TEXT NOT NULL REFERENCES embedding_generations(id),
+  previous_generation_id TEXT REFERENCES embedding_generations(id),
+  activated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS reflection_suggestions (
   id TEXT PRIMARY KEY,
   status TEXT NOT NULL,
@@ -905,7 +1206,1188 @@ CREATE INDEX IF NOT EXISTS idx_effective_snapshot_sources_fact ON effective_snap
 CREATE VIRTUAL TABLE IF NOT EXISTS source_path_fts USING fts5(file_path, source_fact_id UNINDEXED, tokenize='unicode61');
 `;
 
-export const SCHEMA_VERSION = 14;
+export const SCHEMA_VERSION = 18;
+
+/** Version of parser-derived graph/snapshot data. Additive operational tables
+ * and worker metadata must not make every repository parse from scratch. */
+export const INDEX_FORMAT_VERSION = 17;
+
+export function schemaMigrationBackupPath(path: string, fromVersion: number, toVersion: number): string {
+  return `${path}.schema-v${fromVersion}-to-v${toVersion}.bak`;
+}
+
+/** Shared downgrade guard. Every compiled runtime calls this before DDL, so a
+ * runtime whose supported version is older than the database fails without
+ * attempting to interpret or mutate newer job semantics. */
+export function assertSchemaVersionSupported(storedVersion: number, supportedVersion = SCHEMA_VERSION): void {
+  if (storedVersion <= supportedVersion) return;
+  throw Object.assign(
+    new Error(
+      `knowledge.db schema_version ${storedVersion} is newer than this build supports (${supportedVersion}); ` +
+        "upgrade Penguin before opening it.",
+    ),
+    { code: "SCHEMA_VERSION_MISMATCH", storedVersion, supportedVersion },
+  );
+}
+
+function validateSchemaMigrationBackup(path: string, expectedVersion: number): void {
+  const backup = new (loadDatabaseCtor())(path, { readonly: true, fileMustExist: true });
+  try {
+    const version = Number((backup.prepare("SELECT value FROM meta WHERE key='schema_version'").get() as { value?: string } | undefined)?.value ?? NaN);
+    const integrity = backup.pragma("quick_check", { simple: true });
+    if (version !== expectedVersion || integrity !== "ok") {
+      throw new Error(`expected schema ${expectedVersion}, found ${version}; quick_check=${String(integrity)}`);
+    }
+  } finally {
+    backup.close();
+  }
+}
+
+type SchemaBackupIdentity = {
+  path: string;
+  schemaVersion: number;
+  logicalDigest: string;
+  files: Array<{
+    suffix: string;
+    size: number;
+    mtimeMs: number;
+    device: number;
+    ino: number;
+    birthtimeMs: number;
+  }>;
+};
+
+type SchemaBackupManifest = {
+  format: 2 | 3;
+  attemptId?: string;
+  publisherPid?: number;
+  publisherProcessStartToken?: unknown;
+  fromVersion: number;
+  toVersion: number;
+  source: SchemaBackupIdentity;
+  backup: SchemaBackupIdentity;
+  createdAt: string;
+};
+
+type SchemaMigrationBackup = {
+  path: string;
+  manifestPath: string;
+  attemptId: string;
+  createdByThisAttempt: boolean;
+  sourceIdentity: SchemaBackupIdentity;
+  sourceDataVersion: number;
+};
+
+type SchemaBackupCleanupClaim = {
+  format: 1 | 2;
+  ownerPid: number;
+  ownerProcessStartToken?: unknown;
+  ownerToken: string;
+  attemptId: string;
+  manifestDigest: string;
+};
+
+type SchemaBackupAttemptOwner = {
+  format: 1 | 2 | 3;
+  ownerPid: number;
+  ownerProcessStartToken?: unknown;
+  attemptId: string;
+  sourcePath: string;
+  fromVersion: number;
+  toVersion: number;
+  sourceIdentity: SchemaBackupIdentity;
+  createdAt: string;
+  backupIdentity?: SchemaBackupIdentity;
+  manifestIdentity?: {
+    path: string;
+    size: number;
+    mtimeMs: number;
+    dev: number;
+    ino: number;
+    birthtimeMs: number;
+    sha256: string;
+  };
+};
+
+function schemaBackupManifestPath(path: string): string {
+  return `${path}.manifest.json`;
+}
+
+function schemaBackupCleanupClaimPath(manifestPath: string): string {
+  return `${manifestPath}.cleanup-claim.json`;
+}
+
+function databaseLogicalDigest(db: Database.Database): string {
+  const schema = db.prepare(
+    `SELECT type,name,tbl_name,COALESCE(sql,'') AS sql
+       FROM sqlite_master
+      WHERE name NOT LIKE 'sqlite_%'
+      ORDER BY type,name`,
+  ).all();
+  const tables = new Set(
+    (schema as Array<{ type: string; name: string }>).filter((row) => row.type === "table").map((row) => row.name),
+  );
+  const meta = tables.has("meta")
+    ? db.prepare("SELECT key,value FROM meta ORDER BY key").all()
+    : [];
+  const repos = tables.has("repos")
+    ? db.prepare("SELECT id,name,root_path,remote_url,created_at FROM repos ORDER BY id").all()
+    : [];
+  const semanticTables = [
+    "embedding_generations",
+    "embedding_jobs",
+    "semantic_chunks",
+    "semantic_embedding_refs",
+    "semantic_vector_values",
+    "semantic_active_spaces",
+    "knowledge_audit_events",
+  ];
+  const semanticCounts = semanticTables
+    .filter((table) => tables.has(table))
+    .map((table) => ({
+      table,
+      count: Number((db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count),
+    }));
+  return createHash("sha256")
+    .update(JSON.stringify({ schema, meta, repos, semanticCounts }))
+    .digest("hex");
+}
+
+function databaseIdentity(db: Database.Database, path: string, schemaVersion: number): SchemaBackupIdentity {
+  const files = ["", "-wal"]
+    .filter((suffix) => existsSync(`${path}${suffix}`))
+    .map((suffix) => {
+      const stat = statSync(`${path}${suffix}`);
+      return {
+        suffix,
+        size: stat.size,
+        mtimeMs: stat.mtimeMs,
+        device: stat.dev,
+        ino: stat.ino,
+        birthtimeMs: stat.birthtimeMs,
+      };
+    });
+  return {
+    path: resolve(path),
+    schemaVersion,
+    logicalDigest: databaseLogicalDigest(db),
+    files,
+  };
+}
+
+function backupSourceMismatch(message: string): Error {
+  return Object.assign(new Error(`SCHEMA_BACKUP_SOURCE_MISMATCH: ${message}`), {
+    code: "SCHEMA_BACKUP_SOURCE_MISMATCH",
+  });
+}
+
+function identitiesEqual(left: SchemaBackupIdentity, right: SchemaBackupIdentity): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function fileStatsMatch(
+  left: { size: number; mtimeMs: number; dev: number; ino: number; birthtimeMs: number },
+  right: { size: number; mtimeMs: number; dev: number; ino: number; birthtimeMs: number },
+): boolean {
+  return left.size === right.size
+    && left.mtimeMs === right.mtimeMs
+    && left.dev === right.dev
+    && left.ino === right.ino
+    && left.birthtimeMs === right.birthtimeMs;
+}
+
+function restoreQuarantinedPath(quarantinePath: string, fixedPath: string): void {
+  try {
+    // Hard-link restore is atomic and no-clobber. If another path appeared, it
+    // wins and the quarantined file remains preserved for manual inspection.
+    linkSync(quarantinePath, fixedPath);
+  } catch (error) {
+    if ((error as { code?: string }).code === "EEXIST") {
+      throw backupSourceMismatch(`cannot restore replaced artifact; preserved at ${quarantinePath}`);
+    }
+    throw error;
+  }
+  rmSync(quarantinePath);
+}
+
+function quarantineOwnedPath(
+  fixedPath: string,
+  quarantinePath: string,
+  validate: (path: string) => void,
+): void {
+  if (existsSync(quarantinePath)) {
+    throw backupSourceMismatch(`attempt quarantine already exists: ${quarantinePath}`);
+  }
+  renameSync(fixedPath, quarantinePath);
+  try {
+    validate(quarantinePath);
+  } catch (error) {
+    restoreQuarantinedPath(quarantinePath, fixedPath);
+    throw error;
+  }
+}
+
+function sourceFileProvenanceUsable(identity: SchemaBackupIdentity): boolean {
+  const mainFiles = Array.isArray(identity.files) ? identity.files.filter((file) => file.suffix === "") : [];
+  if (mainFiles.length !== 1 || resolve(identity.path) !== identity.path) return false;
+  const [file] = mainFiles;
+  return Number.isSafeInteger(file.device)
+    && file.device >= 0
+    && Number.isSafeInteger(file.ino)
+    && file.ino > 0
+    && Number.isFinite(file.birthtimeMs)
+    && file.birthtimeMs > 0;
+}
+
+/** Mutable size/mtime/logical digest identify one snapshot. Device, inode, and
+ * birth time identify the source database file across ordinary SQLite commits.
+ * Only that stable provenance permits replacing an existing stale backup. */
+function sourceFileProvenanceMatches(left: SchemaBackupIdentity, right: SchemaBackupIdentity): boolean {
+  const leftFile = Array.isArray(left.files) ? left.files.find((file) => file.suffix === "") : undefined;
+  const rightFile = Array.isArray(right.files) ? right.files.find((file) => file.suffix === "") : undefined;
+  return sourceFileProvenanceUsable(left)
+    && sourceFileProvenanceUsable(right)
+    && left.path === right.path
+    && left.schemaVersion === right.schemaVersion
+    && leftFile !== undefined
+    && rightFile !== undefined
+    && leftFile.device === rightFile.device
+    && leftFile.ino === rightFile.ino
+    && leftFile.birthtimeMs === rightFile.birthtimeMs;
+}
+
+function manifestAttemptId(manifest: SchemaBackupManifest, rawManifest: string): string {
+  if (manifest.format === 3 && typeof manifest.attemptId === "string" && manifest.attemptId.length > 0) {
+    return manifest.attemptId;
+  }
+  // Format-2 manifests predate explicit attempt ownership. Their immutable
+  // serialized bytes still provide a stable CAS token for safe cleanup.
+  return createHash("sha256").update(rawManifest).digest("hex");
+}
+
+type ProcessOwnerState = "alive" | "dead" | "unknown";
+
+function processLiveness(pid: number): ProcessOwnerState {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return "unknown";
+  try {
+    process.kill(pid, 0);
+    return "alive";
+  } catch (error) {
+    const code = (error as { code?: string }).code;
+    if (code === "EPERM") return "alive";
+    if (code === "ESRCH") return "dead";
+    return "unknown";
+  }
+}
+
+function processExists(pid: number): boolean {
+  return processLiveness(pid) === "alive";
+}
+
+type DarwinProcessStartIdentity = {
+  format: 1;
+  startedAt: string;
+  elapsedSeconds: number;
+  observedAtMs: number;
+  commandSha256: string;
+};
+
+function parsePsElapsedSeconds(value: string): number | null {
+  const match = /^(?:(\d+)-)?(?:(\d+):)?(\d+):(\d+)$/.exec(value.trim());
+  if (!match) return null;
+  const days = Number(match[1] ?? 0);
+  const hours = Number(match[2] ?? 0);
+  const minutes = Number(match[3]);
+  const seconds = Number(match[4]);
+  if (![days, hours, minutes, seconds].every(Number.isSafeInteger) || hours > 23 || minutes > 59 || seconds > 59) {
+    return null;
+  }
+  return (((days * 24) + hours) * 60 + minutes) * 60 + seconds;
+}
+
+function readDarwinProcessStartIdentity(pid: number): DarwinProcessStartIdentity | null {
+  try {
+    const ps = (field: string): string => execFileSync(
+      "/bin/ps",
+      ["-o", `${field}=`, "-p", String(pid)],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+    // Read lstart on both sides of the other observations. If the PID is
+    // recycled between ps calls, the sample is ambiguous and must not prove
+    // ownership.
+    const startedAtBefore = ps("lstart");
+    const elapsedSeconds = parsePsElapsedSeconds(ps("etime"));
+    const command = ps("command");
+    const startedAtAfter = ps("lstart");
+    if (!startedAtBefore || startedAtBefore !== startedAtAfter || elapsedSeconds === null || !command) return null;
+    return {
+      format: 1,
+      startedAt: startedAtBefore,
+      elapsedSeconds,
+      observedAtMs: Date.now(),
+      commandSha256: createHash("sha256").update(command).digest("hex"),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function encodeDarwinProcessStartIdentity(identity: DarwinProcessStartIdentity): string {
+  return `darwin-v2:${Buffer.from(JSON.stringify(identity)).toString("base64url")}`;
+}
+
+function decodeDarwinProcessStartIdentity(token: unknown): DarwinProcessStartIdentity | null {
+  if (typeof token !== "string" || !token.startsWith("darwin-v2:")) return null;
+  try {
+    const identity = JSON.parse(Buffer.from(token.slice("darwin-v2:".length), "base64url").toString("utf8")) as DarwinProcessStartIdentity;
+    if (
+      identity.format !== 1 ||
+      typeof identity.startedAt !== "string" ||
+      identity.startedAt.length === 0 ||
+      !Number.isSafeInteger(identity.elapsedSeconds) ||
+      identity.elapsedSeconds < 0 ||
+      !Number.isSafeInteger(identity.observedAtMs) ||
+      identity.observedAtMs <= 0 ||
+      !/^[0-9a-f]{64}$/.test(identity.commandSha256)
+    ) return null;
+    return identity;
+  } catch {
+    return null;
+  }
+}
+
+function persistedProcessStartTokenIsComparable(
+  token: unknown,
+  platform = process.platform,
+): token is string {
+  if (typeof token !== "string" || token.length === 0) return false;
+  if (platform === "darwin") {
+    if (token.startsWith("darwin-v2:")) {
+      const identity = decodeDarwinProcessStartIdentity(token);
+      return identity !== null
+        && Number.isFinite(Date.parse(identity.startedAt))
+        && identity.observedAtMs <= Date.now();
+    }
+    if (!token.startsWith("darwin:")) return false;
+    const startedAt = token.slice("darwin:".length);
+    return startedAt.length > 0 && Number.isFinite(Date.parse(startedAt));
+  }
+  if (platform === "linux") {
+    return /^linux:[^:]+:[1-9][0-9]*$/.test(token);
+  }
+  if (platform === "win32") {
+    return /^win32:[1-9][0-9]*$/.test(token);
+  }
+  const prefix = `${platform}:`;
+  if (!token.startsWith(prefix)) return false;
+  const startedAt = token.slice(prefix.length);
+  return startedAt.length > 0 && Number.isFinite(Date.parse(startedAt));
+}
+
+function darwinProcessIdentityMatches(pid: number, expectedToken: unknown): boolean | null {
+  if (!persistedProcessStartTokenIsComparable(expectedToken, "darwin")) return null;
+  const actual = readDarwinProcessStartIdentity(pid);
+  if (!actual) return null;
+  if (expectedToken.startsWith("darwin:") && !expectedToken.startsWith("darwin-v2:")) {
+    const expectedStartedAt = expectedToken.slice("darwin:".length);
+    if (!expectedStartedAt || !Number.isFinite(Date.parse(expectedStartedAt))) return null;
+    return expectedStartedAt === actual.startedAt;
+  }
+  const expected = decodeDarwinProcessStartIdentity(expectedToken);
+  if (!expected) return null;
+  if (expected.startedAt !== actual.startedAt || expected.commandSha256 !== actual.commandSha256) return false;
+  const expectedElapsedNow = expected.elapsedSeconds + ((actual.observedAtMs - expected.observedAtMs) / 1_000);
+  // BSD ps reports etime in whole seconds. A two-second bound covers sampling
+  // phase and scheduling jitter while elapsed progression distinguishes a PID
+  // recycled inside lstart's one-second timestamp granularity.
+  return Math.abs(actual.elapsedSeconds - expectedElapsedNow) <= 2;
+}
+
+function processStartTokensMatch(left: unknown, right: unknown): boolean {
+  if (!persistedProcessStartTokenIsComparable(left) || !persistedProcessStartTokenIsComparable(right)) {
+    return false;
+  }
+  if (left === right) return true;
+  const leftDarwin = decodeDarwinProcessStartIdentity(left);
+  const rightDarwin = decodeDarwinProcessStartIdentity(right);
+  if (!leftDarwin || !rightDarwin) return false;
+  if (leftDarwin.startedAt !== rightDarwin.startedAt || leftDarwin.commandSha256 !== rightDarwin.commandSha256) {
+    return false;
+  }
+  const expectedRightElapsed = leftDarwin.elapsedSeconds + ((rightDarwin.observedAtMs - leftDarwin.observedAtMs) / 1_000);
+  return Math.abs(rightDarwin.elapsedSeconds - expectedRightElapsed) <= 2;
+}
+
+function processStartToken(pid: number): string | null {
+  if (!processExists(pid)) return null;
+  try {
+    if (process.platform === "linux") {
+      const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+      const commandEnd = stat.lastIndexOf(")");
+      if (commandEnd < 0) return null;
+      const fieldsAfterCommand = stat.slice(commandEnd + 2).trim().split(/\s+/);
+      const startTicks = fieldsAfterCommand[19];
+      if (!startTicks) return null;
+      const bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+      return `linux:${bootId}:${startTicks}`;
+    }
+    if (process.platform === "win32") {
+      const ticks = execFileSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().Ticks`,
+        ],
+        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+      ).trim();
+      return ticks ? `win32:${ticks}` : null;
+    }
+    if (process.platform === "darwin") {
+      const identity = readDarwinProcessStartIdentity(pid);
+      return identity ? encodeDarwinProcessStartIdentity(identity) : null;
+    }
+    const startedAt = execFileSync(
+      "/bin/ps",
+      ["-o", "lstart=", "-p", String(pid)],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+    return startedAt ? `${process.platform}:${startedAt}` : null;
+  } catch {
+    return null;
+  }
+}
+
+function currentProcessStartToken(): string {
+  const token = processStartToken(process.pid);
+  if (!token) throw backupSourceMismatch("current process start identity is unavailable");
+  return token;
+}
+
+function processOwnerState(pid: number, expectedStartToken?: unknown): ProcessOwnerState {
+  if (expectedStartToken !== undefined && !persistedProcessStartTokenIsComparable(expectedStartToken)) {
+    return "unknown";
+  }
+  const liveness = processLiveness(pid);
+  if (liveness !== "alive") return liveness;
+  // Legacy owners did not persist a non-reusable identity. Preserve their
+  // fail-closed behavior while new owners can distinguish a reused PID.
+  if (expectedStartToken === undefined) return "alive";
+  if (process.platform === "darwin") {
+    const matches = darwinProcessIdentityMatches(pid, expectedStartToken);
+    return matches === null ? "unknown" : matches ? "alive" : "dead";
+  }
+  const actualStartToken = processStartToken(pid);
+  if (actualStartToken === null || !persistedProcessStartTokenIsComparable(actualStartToken)) return "unknown";
+  return actualStartToken === expectedStartToken ? "alive" : "dead";
+}
+
+function acquireSchemaBackupCleanupClaim(
+  manifestPath: string,
+  attemptId: string,
+  rawManifest: string,
+): { path: string; raw: string; ownerToken: string } {
+  const claimPath = schemaBackupCleanupClaimPath(manifestPath);
+  const manifestDigest = createHash("sha256").update(rawManifest).digest("hex");
+  for (let claimAttempt = 0; claimAttempt < 2; claimAttempt += 1) {
+    const claim: SchemaBackupCleanupClaim = {
+      format: 2,
+      ownerPid: process.pid,
+      ownerProcessStartToken: currentProcessStartToken(),
+      ownerToken: randomUUID(),
+      attemptId,
+      manifestDigest,
+    };
+    const raw = `${JSON.stringify(claim, null, 2)}\n`;
+    try {
+      writeFileSync(claimPath, raw, { flag: "wx" });
+      return { path: claimPath, raw, ownerToken: claim.ownerToken };
+    } catch (error) {
+      if ((error as { code?: string }).code !== "EEXIST") throw error;
+      let existingRaw: string;
+      let existing: SchemaBackupCleanupClaim;
+      try {
+        existingRaw = readFileSync(claimPath, "utf8");
+        existing = JSON.parse(existingRaw) as SchemaBackupCleanupClaim;
+      } catch {
+        throw backupSourceMismatch("existing backup cleanup claim is unreadable");
+      }
+      if (
+        (existing.format !== 1 && existing.format !== 2) ||
+        (existing.format === 2 && existing.ownerProcessStartToken === undefined) ||
+        processOwnerState(existing.ownerPid, existing.ownerProcessStartToken) !== "dead"
+      ) throw migrationSourceChanged();
+      // Reap only the exact dead-owner claim we inspected. A concurrently
+      // replaced claim belongs to another attempt and must remain untouched.
+      const reapPath = `${claimPath}.reap-${randomUUID()}`;
+      quarantineOwnedPath(claimPath, reapPath, (path) => {
+        if (readFileSync(path, "utf8") !== existingRaw) throw migrationSourceChanged();
+      });
+      rmSync(reapPath);
+    }
+  }
+  throw migrationSourceChanged();
+}
+
+function releaseSchemaBackupCleanupClaim(claim: { path: string; raw: string; ownerToken: string }): void {
+  if (!existsSync(claim.path)) return;
+  const releasePath = `${claim.path}.release-${claim.ownerToken}`;
+  quarantineOwnedPath(claim.path, releasePath, (path) => {
+    if (readFileSync(path, "utf8") !== claim.raw) {
+      throw backupSourceMismatch("cleanup claim ownership changed before release");
+    }
+  });
+  rmSync(releasePath);
+}
+
+function databaseDataVersion(db: Database.Database): number {
+  return Number(db.pragma("data_version", { simple: true }));
+}
+
+function migrationSourceChanged(): Error {
+  return Object.assign(
+    new Error("SCHEMA_MIGRATION_SOURCE_CHANGED: source changed between backup and migration locking"),
+    { code: "SCHEMA_MIGRATION_SOURCE_CHANGED" },
+  );
+}
+
+function schemaBackupAttemptPaths(backupPath: string, manifestPath: string, attemptId: string): {
+  backup: string;
+  manifest: string;
+  owner: string;
+} {
+  return {
+    backup: `${backupPath}.attempt-${attemptId}.tmp`,
+    manifest: `${manifestPath}.attempt-${attemptId}.tmp`,
+    owner: `${backupPath}.attempt-${attemptId}.owner.json`,
+  };
+}
+
+function attemptManifestIdentity(path: string): NonNullable<SchemaBackupAttemptOwner["manifestIdentity"]> {
+  const stat = statSync(path);
+  return {
+    path: resolve(path),
+    size: stat.size,
+    mtimeMs: stat.mtimeMs,
+    dev: stat.dev,
+    ino: stat.ino,
+    birthtimeMs: stat.birthtimeMs,
+    sha256: createHash("sha256").update(readFileSync(path)).digest("hex"),
+  };
+}
+
+function attemptManifestIdentityMatches(
+  expected: NonNullable<SchemaBackupAttemptOwner["manifestIdentity"]>,
+  path: string,
+): boolean {
+  const actual = attemptManifestIdentity(path);
+  return actual.path === resolve(path)
+    && expected.size === actual.size
+    && expected.mtimeMs === actual.mtimeMs
+    && expected.dev === actual.dev
+    && expected.ino === actual.ino
+    && expected.birthtimeMs === actual.birthtimeMs
+    && expected.sha256 === actual.sha256;
+}
+
+function persistAttemptOwner(path: string, owner: SchemaBackupAttemptOwner): string {
+  const raw = `${JSON.stringify(owner, null, 2)}\n`;
+  const updatePath = `${path}.update-${randomUUID()}`;
+  writeFileSync(updatePath, raw, { flag: "wx" });
+  renameSync(updatePath, path);
+  return raw;
+}
+
+function removeOwnedPublishedLink(fixedPath: string, ownedPath: string, ownerToken: string): void {
+  const ownedStat = statSync(ownedPath);
+  const quarantinePath = `${fixedPath}.rollback-${ownerToken}`;
+  quarantineOwnedPath(fixedPath, quarantinePath, (path) => {
+    if (!fileStatsMatch(statSync(path), ownedStat)) {
+      throw backupSourceMismatch("published path no longer belongs to the current backup attempt");
+    }
+  });
+  rmSync(quarantinePath);
+}
+
+const SCHEMA_BACKUP_ATTEMPT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function recoverInterruptedSchemaBackupCleanup(
+  sourcePath: string,
+  backupPath: string,
+  manifestPath: string,
+  fromVersion: number,
+  toVersion: number,
+): void {
+  const claimPath = schemaBackupCleanupClaimPath(manifestPath);
+  if (!existsSync(claimPath)) return;
+  let rawClaim: string;
+  let claim: SchemaBackupCleanupClaim;
+  try {
+    rawClaim = readFileSync(claimPath, "utf8");
+    claim = JSON.parse(rawClaim) as SchemaBackupCleanupClaim;
+  } catch {
+    throw backupSourceMismatch("interrupted cleanup claim is unreadable");
+  }
+  if (
+    (claim.format !== 1 && claim.format !== 2) ||
+    !Number.isSafeInteger(claim.ownerPid) ||
+    claim.ownerPid <= 0 ||
+    (claim.format === 2 && claim.ownerProcessStartToken === undefined) ||
+    !SCHEMA_BACKUP_ATTEMPT_ID.test(claim.ownerToken) ||
+    typeof claim.attemptId !== "string" ||
+    claim.attemptId.length === 0 ||
+    !/^[0-9a-f]{64}$/i.test(claim.manifestDigest)
+  ) {
+    throw backupSourceMismatch("interrupted cleanup claim has invalid ownership metadata");
+  }
+  if (processOwnerState(claim.ownerPid, claim.ownerProcessStartToken) !== "dead") throw migrationSourceChanged();
+
+  const backupQuarantinePath = `${backupPath}.cleanup-${claim.ownerToken}`;
+  const manifestQuarantinePath = `${manifestPath}.cleanup-${claim.ownerToken}`;
+  const fixedBackupExists = existsSync(backupPath);
+  const fixedManifestExists = existsSync(manifestPath);
+  const backupQuarantineExists = existsSync(backupQuarantinePath);
+  const manifestQuarantineExists = existsSync(manifestQuarantinePath);
+  if ((fixedBackupExists && backupQuarantineExists) || (fixedManifestExists && manifestQuarantineExists)) {
+    throw backupSourceMismatch("interrupted cleanup has conflicting fixed and quarantined artifacts");
+  }
+
+  const manifestCandidate = manifestQuarantineExists
+    ? manifestQuarantinePath
+    : fixedManifestExists
+      ? manifestPath
+      : undefined;
+  let rawManifest: string | undefined;
+  let manifest: SchemaBackupManifest | undefined;
+  if (manifestCandidate) {
+    try {
+      rawManifest = readFileSync(manifestCandidate, "utf8");
+      manifest = JSON.parse(rawManifest) as SchemaBackupManifest;
+    } catch {
+      throw backupSourceMismatch("interrupted cleanup manifest is unreadable");
+    }
+    if (
+      createHash("sha256").update(rawManifest).digest("hex") !== claim.manifestDigest ||
+      manifestAttemptId(manifest, rawManifest) !== claim.attemptId ||
+      manifest.fromVersion !== fromVersion ||
+      manifest.toVersion !== toVersion ||
+      manifest.source?.path !== resolve(sourcePath)
+    ) {
+      throw backupSourceMismatch("interrupted cleanup manifest does not match its ownership claim");
+    }
+  }
+
+  if (backupQuarantineExists) {
+    if (!manifest) throw backupSourceMismatch("quarantined backup has no ownership-proven manifest");
+    validateSchemaMigrationBackup(backupQuarantinePath, fromVersion);
+    const quarantinedBackup = new (loadDatabaseCtor())(backupQuarantinePath, { readonly: true, fileMustExist: true });
+    try {
+      const identity = databaseIdentity(quarantinedBackup, backupQuarantinePath, fromVersion);
+      if (!identitiesEqual({ ...identity, path: resolve(backupPath) }, manifest.backup)) {
+        throw backupSourceMismatch("cleanup quarantine does not belong to the claimed backup attempt");
+      }
+    } finally {
+      quarantinedBackup.close();
+    }
+  }
+
+  if (backupQuarantineExists && fixedManifestExists && !manifestQuarantineExists) {
+    restoreQuarantinedPath(backupQuarantinePath, backupPath);
+  } else if (backupQuarantineExists && manifestQuarantineExists && !fixedBackupExists && !fixedManifestExists) {
+    restoreQuarantinedPath(manifestQuarantinePath, manifestPath);
+    restoreQuarantinedPath(backupQuarantinePath, backupPath);
+  } else if (!backupQuarantineExists && manifestQuarantineExists && !fixedBackupExists && !fixedManifestExists) {
+    if (!rawManifest || createHash("sha256").update(rawManifest).digest("hex") !== claim.manifestDigest) {
+      throw backupSourceMismatch("cleanup manifest quarantine lost ownership proof");
+    }
+    rmSync(manifestQuarantinePath);
+  } else if (
+    backupQuarantineExists ||
+    manifestQuarantineExists ||
+    fixedBackupExists !== fixedManifestExists
+  ) {
+    throw backupSourceMismatch("interrupted cleanup artifacts are incomplete or ambiguous");
+  }
+
+  releaseSchemaBackupCleanupClaim({ path: claimPath, raw: rawClaim, ownerToken: claim.ownerToken });
+}
+
+function scavengeDeadSchemaBackupAttempts(
+  sourcePath: string,
+  backupPath: string,
+  manifestPath: string,
+  fromVersion: number,
+  toVersion: number,
+  currentSourceIdentity: SchemaBackupIdentity,
+): void {
+  const directory = dirname(backupPath);
+  const ownerPrefix = `${basename(backupPath)}.attempt-`;
+  const ownerSuffix = ".owner.json";
+  for (const name of readdirSync(directory)) {
+    if (!name.startsWith(ownerPrefix) || !name.endsWith(ownerSuffix)) continue;
+    const attemptId = name.slice(ownerPrefix.length, -ownerSuffix.length);
+    if (!SCHEMA_BACKUP_ATTEMPT_ID.test(attemptId)) continue;
+    const ownerPath = join(directory, name);
+    let rawOwner: string;
+    let owner: SchemaBackupAttemptOwner;
+    try {
+      rawOwner = readFileSync(ownerPath, "utf8");
+      owner = JSON.parse(rawOwner) as SchemaBackupAttemptOwner;
+    } catch {
+      throw backupSourceMismatch(`dead attempt owner metadata is unreadable: ${ownerPath}`);
+    }
+    const createdAt = Date.parse(owner.createdAt);
+    if (
+      (owner.format !== 1 && owner.format !== 2 && owner.format !== 3) ||
+      owner.attemptId !== attemptId ||
+      !Number.isSafeInteger(owner.ownerPid) ||
+      owner.ownerPid <= 0 ||
+      (owner.format === 3 && owner.ownerProcessStartToken === undefined) ||
+      owner.sourcePath !== resolve(sourcePath) ||
+      owner.fromVersion !== fromVersion ||
+      owner.toVersion !== toVersion ||
+      !Number.isFinite(createdAt) ||
+      createdAt > Date.now() + 60_000 ||
+      !sourceFileProvenanceMatches(owner.sourceIdentity, currentSourceIdentity)
+    ) {
+      throw backupSourceMismatch(`attempt owner metadata does not match this migration: ${ownerPath}`);
+    }
+    const ownerState = processOwnerState(owner.ownerPid, owner.ownerProcessStartToken);
+    if (ownerState === "alive") continue;
+    if (ownerState === "unknown") throw migrationSourceChanged();
+    const attemptPaths = schemaBackupAttemptPaths(backupPath, manifestPath, attemptId);
+    const provenBackupIdentity = owner.backupIdentity;
+    if (!provenBackupIdentity) {
+      // There is no durable physical identity for anything at the candidate
+      // paths. Never inspect, adopt, move, or delete those files: a different
+      // process may have replaced them with byte-distinct data that happens to
+      // share our deliberately bounded logical digest. Retire only the exact
+      // dead-owner sidecar; the preserved UUID-scoped candidate cannot collide
+      // with the independent retry that follows.
+      const ownerQuarantinePath = `${ownerPath}.scavenge-${randomUUID()}`;
+      quarantineOwnedPath(ownerPath, ownerQuarantinePath, (path) => {
+        if (readFileSync(path, "utf8") !== rawOwner) {
+          throw backupSourceMismatch(`attempt owner sidecar changed during cleanup: ${ownerPath}`);
+        }
+      });
+      rmSync(ownerQuarantinePath);
+      continue;
+    }
+    for (const artifactPath of [attemptPaths.backup, attemptPaths.manifest]) {
+      if (!existsSync(artifactPath)) continue;
+      const quarantinePath = `${artifactPath}.scavenge-${randomUUID()}`;
+      quarantineOwnedPath(artifactPath, quarantinePath, (path) => {
+        if (artifactPath === attemptPaths.backup) {
+          validateSchemaMigrationBackup(path, fromVersion);
+          const backup = new (loadDatabaseCtor())(path, { readonly: true, fileMustExist: true });
+          try {
+            const actual = databaseIdentity(backup, path, fromVersion);
+            const normalizedActual = { ...actual, path: resolve(artifactPath) };
+            if (
+              provenBackupIdentity.path !== resolve(artifactPath) ||
+              !identitiesEqual(normalizedActual, provenBackupIdentity)
+            ) {
+              throw backupSourceMismatch(`attempt backup identity changed before cleanup: ${artifactPath}`);
+            }
+          } finally {
+            backup.close();
+          }
+        } else {
+          if (
+            !owner.manifestIdentity ||
+            owner.manifestIdentity.path !== resolve(artifactPath) ||
+            !attemptManifestIdentityMatches(owner.manifestIdentity, path)
+          ) {
+            throw backupSourceMismatch(`attempt manifest identity changed before cleanup: ${artifactPath}`);
+          }
+        }
+      });
+      rmSync(quarantinePath);
+    }
+    const ownerQuarantinePath = `${ownerPath}.scavenge-${randomUUID()}`;
+    quarantineOwnedPath(ownerPath, ownerQuarantinePath, (path) => {
+      if (readFileSync(path, "utf8") !== rawOwner) {
+        throw backupSourceMismatch(`attempt owner sidecar changed during cleanup: ${ownerPath}`);
+      }
+    });
+    rmSync(ownerQuarantinePath);
+  }
+}
+
+function recoverOrphanedAttemptManifest(
+  sourcePath: string,
+  backupPath: string,
+  manifestPath: string,
+  fromVersion: number,
+  toVersion: number,
+  onSchemaMaintenance?: (event: SchemaMaintenanceEvent) => void,
+): void {
+  if (existsSync(backupPath) || !existsSync(manifestPath)) return;
+  let rawManifest: string;
+  let manifest: SchemaBackupManifest;
+  try {
+    rawManifest = readFileSync(manifestPath, "utf8");
+    manifest = JSON.parse(rawManifest) as SchemaBackupManifest;
+  } catch {
+    throw backupSourceMismatch("orphan provenance manifest is unreadable");
+  }
+  if (
+    manifest.format !== 3 ||
+    typeof manifest.attemptId !== "string" ||
+    manifest.attemptId.length === 0 ||
+    !Number.isSafeInteger(manifest.publisherPid) ||
+    manifest.publisherPid == null ||
+    manifest.publisherPid <= 0 ||
+    manifest.fromVersion !== fromVersion ||
+    manifest.toVersion !== toVersion ||
+    manifest.source?.path !== resolve(sourcePath)
+  ) {
+    throw backupSourceMismatch("orphan provenance manifest has no verifiable publication owner");
+  }
+  const publisherState: ProcessOwnerState = manifest.publisherProcessStartToken === undefined
+    ? "unknown"
+    : processOwnerState(manifest.publisherPid, manifest.publisherProcessStartToken);
+  if (publisherState !== "dead") throw migrationSourceChanged();
+  const attemptPaths = schemaBackupAttemptPaths(backupPath, manifestPath, manifest.attemptId);
+  if (!existsSync(attemptPaths.manifest) || !existsSync(attemptPaths.owner)) {
+    throw backupSourceMismatch("orphan provenance manifest has no complete attempt ownership proof");
+  }
+  let owner: SchemaBackupAttemptOwner;
+  try {
+    owner = JSON.parse(readFileSync(attemptPaths.owner, "utf8")) as SchemaBackupAttemptOwner;
+  } catch {
+    throw backupSourceMismatch("orphan provenance manifest owner sidecar is unreadable");
+  }
+  if (
+    owner.format !== 3 ||
+    owner.attemptId !== manifest.attemptId ||
+    owner.ownerPid !== manifest.publisherPid ||
+    (manifest.publisherProcessStartToken !== undefined &&
+      !processStartTokensMatch(owner.ownerProcessStartToken, manifest.publisherProcessStartToken)) ||
+    owner.sourcePath !== resolve(sourcePath) ||
+    owner.fromVersion !== fromVersion ||
+    owner.toVersion !== toVersion ||
+    !owner.manifestIdentity ||
+    owner.manifestIdentity.path !== resolve(attemptPaths.manifest) ||
+    !attemptManifestIdentityMatches(owner.manifestIdentity, attemptPaths.manifest)
+  ) {
+    throw backupSourceMismatch("orphan provenance manifest does not match its persisted attempt owner identity");
+  }
+  const ownedStat = statSync(attemptPaths.manifest);
+  if (!fileStatsMatch(statSync(manifestPath), ownedStat) || readFileSync(attemptPaths.manifest, "utf8") !== rawManifest) {
+    throw backupSourceMismatch("orphan provenance manifest is not owned by its recorded publication attempt");
+  }
+  removeOwnedPublishedLink(manifestPath, attemptPaths.manifest, manifest.attemptId);
+  onSchemaMaintenance?.({
+    operation: "schema-migration-backup",
+    phase: "before-orphan-attempt-quarantine",
+    path: attemptPaths.manifest,
+    fromVersion,
+    toVersion,
+  });
+  const attemptQuarantinePath = `${attemptPaths.manifest}.orphan-${randomUUID()}`;
+  quarantineOwnedPath(attemptPaths.manifest, attemptQuarantinePath, (path) => {
+    if (
+      !owner.manifestIdentity ||
+      owner.manifestIdentity.path !== resolve(attemptPaths.manifest) ||
+      !attemptManifestIdentityMatches(owner.manifestIdentity, path)
+    ) {
+      throw backupSourceMismatch("orphan attempt manifest changed before quarantine");
+    }
+  });
+  rmSync(attemptQuarantinePath);
+}
+
+/** Create one retained pre-migration image with SQLite's own snapshot engine.
+ * VACUUM INTO sees one transactionally consistent database including committed
+ * WAL frames, even while an older reader keeps an earlier WAL snapshot open. */
+function ensureSchemaMigrationBackup(
+  db: Database.Database,
+  path: string,
+  fromVersion: number,
+  toVersion: number,
+  onSchemaMaintenance?: (event: SchemaMaintenanceEvent) => void,
+): SchemaMigrationBackup {
+  const backupPath = schemaMigrationBackupPath(path, fromVersion, toVersion);
+  const manifestPath = schemaBackupManifestPath(backupPath);
+  const sourceDataVersion = databaseDataVersion(db);
+  const sourceIdentity = databaseIdentity(db, path, fromVersion);
+  if (!sourceFileProvenanceUsable(sourceIdentity)) {
+    throw backupSourceMismatch("source database file identity is unavailable or unsafe for migration backup provenance");
+  }
+  let backupStartedAt: number | undefined;
+  const notifyBackupStart = () => {
+    if (backupStartedAt !== undefined) return;
+    backupStartedAt = Date.now();
+    onSchemaMaintenance?.({ operation: "schema-migration-backup", phase: "start", path: backupPath, fromVersion, toVersion });
+  };
+  recoverInterruptedSchemaBackupCleanup(path, backupPath, manifestPath, fromVersion, toVersion);
+  recoverOrphanedAttemptManifest(path, backupPath, manifestPath, fromVersion, toVersion, onSchemaMaintenance);
+  scavengeDeadSchemaBackupAttempts(path, backupPath, manifestPath, fromVersion, toVersion, sourceIdentity);
+  if (existsSync(backupPath)) {
+    if (!existsSync(manifestPath)) {
+      throw backupSourceMismatch(`existing backup ${backupPath} has no provenance manifest`);
+    }
+    let manifest: SchemaBackupManifest;
+    let rawManifest: string;
+    try {
+      rawManifest = readFileSync(manifestPath, "utf8");
+      manifest = JSON.parse(rawManifest) as SchemaBackupManifest;
+    } catch (error) {
+      throw backupSourceMismatch(`cannot read provenance manifest: ${String((error as Error).message ?? error)}`);
+    }
+    if (
+      (manifest.format !== 2 && manifest.format !== 3) ||
+      (manifest.format === 3 && (typeof manifest.attemptId !== "string" || manifest.attemptId.length === 0)) ||
+      manifest.fromVersion !== fromVersion ||
+      manifest.toVersion !== toVersion ||
+      !manifest.source ||
+      !manifest.backup ||
+      !sourceFileProvenanceUsable(manifest.source)
+    ) {
+      throw backupSourceMismatch("existing backup does not belong to the current pre-migration database image");
+    }
+    const attemptId = manifestAttemptId(manifest, rawManifest);
+    validateSchemaMigrationBackup(backupPath, fromVersion);
+    const backup = new (loadDatabaseCtor())(backupPath, { readonly: true, fileMustExist: true });
+    let backupIdentity: SchemaBackupIdentity;
+    try {
+      backupIdentity = databaseIdentity(backup, backupPath, fromVersion);
+      if (!identitiesEqual(manifest.backup, backupIdentity)) {
+        throw backupSourceMismatch("existing backup changed after it was created");
+      }
+      // A legitimate post-publication source commit changes only the current
+      // source snapshot. The published source digest must still be corroborated
+      // by the independently re-read backup, otherwise the manifest was edited.
+      if (manifest.source.logicalDigest !== backupIdentity.logicalDigest) {
+        throw backupSourceMismatch("source logical identity is not corroborated by the retained backup");
+      }
+    } finally {
+      backup.close();
+    }
+    if (identitiesEqual(manifest.source, sourceIdentity)) {
+      return { path: backupPath, manifestPath, attemptId, createdByThisAttempt: false, sourceIdentity, sourceDataVersion };
+    }
+    if (!sourceFileProvenanceMatches(manifest.source, sourceIdentity)) {
+      throw backupSourceMismatch("existing backup does not belong to the current pre-migration database image");
+    }
+    // The source is the same physical database and the retained backup proves
+    // the manifest's old logical digest, so this is a post-backup commit rather
+    // than manifest tampering. Notify before the final check so deterministic
+    // tests (and real races) cannot hide a path replacement in the gap.
+    notifyBackupStart();
+    const claim = acquireSchemaBackupCleanupClaim(manifestPath, attemptId, rawManifest);
+    try {
+      if (!existsSync(backupPath) || !existsSync(manifestPath)) throw migrationSourceChanged();
+      if (readFileSync(manifestPath, "utf8") !== rawManifest) {
+        throw backupSourceMismatch("provenance manifest changed immediately before stale-backup cleanup");
+      }
+      const currentSourceIdentity = databaseIdentity(db, path, fromVersion);
+      if (
+        !sourceFileProvenanceUsable(currentSourceIdentity) ||
+        !sourceFileProvenanceMatches(manifest.source, currentSourceIdentity) ||
+        identitiesEqual(manifest.source, currentSourceIdentity)
+      ) {
+        throw backupSourceMismatch("source identity changed immediately before stale-backup cleanup");
+      }
+      validateSchemaMigrationBackup(backupPath, fromVersion);
+      const currentBackup = new (loadDatabaseCtor())(backupPath, { readonly: true, fileMustExist: true });
+      try {
+        const currentBackupIdentity = databaseIdentity(currentBackup, backupPath, fromVersion);
+        if (
+          !identitiesEqual(manifest.backup, currentBackupIdentity) ||
+          manifest.source.logicalDigest !== currentBackupIdentity.logicalDigest
+        ) {
+          throw backupSourceMismatch("backup identity changed immediately before stale-backup cleanup");
+        }
+      } finally {
+        currentBackup.close();
+      }
+      const expectedBackupFile = manifest.backup.files.find((file) => file.suffix === "");
+      const finalBackupStat = statSync(backupPath);
+      if (
+        expectedBackupFile === undefined ||
+        finalBackupStat.size !== expectedBackupFile.size ||
+        finalBackupStat.mtimeMs !== expectedBackupFile.mtimeMs ||
+        finalBackupStat.dev !== expectedBackupFile.device ||
+        finalBackupStat.ino !== expectedBackupFile.ino ||
+        finalBackupStat.birthtimeMs !== expectedBackupFile.birthtimeMs ||
+        readFileSync(manifestPath, "utf8") !== rawManifest ||
+        readFileSync(claim.path, "utf8") !== claim.raw
+      ) {
+        throw backupSourceMismatch("backup ownership changed immediately before stale-backup deletion");
+      }
+      onSchemaMaintenance?.({ operation: "schema-migration-backup", phase: "before-remove", path: backupPath, fromVersion, toVersion });
+      // Never unlink a shared fixed path. Atomically move each candidate into
+      // this claim's unique namespace, validate again after the move, and only
+      // then unlink the attempt-owned quarantine path. A replacement that wins
+      // after the final stat is moved, detected, restored with no-clobber link,
+      // and preserved.
+      const backupQuarantinePath = `${backupPath}.cleanup-${claim.ownerToken}`;
+      const manifestQuarantinePath = `${manifestPath}.cleanup-${claim.ownerToken}`;
+      quarantineOwnedPath(backupPath, backupQuarantinePath, (quarantinePath) => {
+        validateSchemaMigrationBackup(quarantinePath, fromVersion);
+        const quarantinedBackup = new (loadDatabaseCtor())(quarantinePath, { readonly: true, fileMustExist: true });
+        try {
+          const quarantinedIdentity = databaseIdentity(quarantinedBackup, quarantinePath, fromVersion);
+          if (!identitiesEqual({ ...quarantinedIdentity, path: resolve(backupPath) }, manifest.backup)) {
+            throw backupSourceMismatch("backup path was replaced after its final identity check");
+          }
+        } finally {
+          quarantinedBackup.close();
+        }
+      });
+      onSchemaMaintenance?.({ operation: "schema-migration-backup", phase: "after-backup-quarantine", path: backupPath, fromVersion, toVersion });
+      try {
+        quarantineOwnedPath(manifestPath, manifestQuarantinePath, (quarantinePath) => {
+          if (readFileSync(quarantinePath, "utf8") !== rawManifest) {
+            throw backupSourceMismatch("provenance manifest changed before quarantine");
+          }
+        });
+      } catch (error) {
+        restoreQuarantinedPath(backupQuarantinePath, backupPath);
+        throw error;
+      }
+      rmSync(backupQuarantinePath);
+      rmSync(manifestQuarantinePath);
+    } finally {
+      releaseSchemaBackupCleanupClaim(claim);
+    }
+  }
+
+  const attemptId = randomUUID();
+  const attemptPaths = schemaBackupAttemptPaths(backupPath, manifestPath, attemptId);
+  const tempPath = attemptPaths.backup;
+  const manifestTempPath = attemptPaths.manifest;
+  let manifestLinked = false;
+  let backupLinked = false;
+  let attemptOwner: SchemaBackupAttemptOwner = {
+    format: 3,
+    ownerPid: process.pid,
+    ownerProcessStartToken: currentProcessStartToken(),
+    attemptId,
+    sourcePath: resolve(path),
+    fromVersion,
+    toVersion,
+    sourceIdentity,
+    createdAt: new Date().toISOString(),
+  };
+  writeFileSync(attemptPaths.owner, `${JSON.stringify(attemptOwner, null, 2)}\n`, { flag: "wx" });
+  notifyBackupStart();
+  let attemptBackupIdentity: SchemaBackupIdentity | null = null;
+  try {
+    db.prepare("VACUUM INTO ?").run(tempPath);
+    onSchemaMaintenance?.({ operation: "schema-migration-backup", phase: "after-vacuum-before-identity", path: backupPath, fromVersion, toVersion });
+    validateSchemaMigrationBackup(tempPath, fromVersion);
+    const attemptBackup = new (loadDatabaseCtor())(tempPath, { readonly: true, fileMustExist: true });
+    try {
+      attemptBackupIdentity = databaseIdentity(attemptBackup, tempPath, fromVersion);
+      if (attemptBackupIdentity.logicalDigest !== sourceIdentity.logicalDigest) {
+        throw backupSourceMismatch("SQLite snapshot does not match the source logical identity");
+      }
+    } finally {
+      attemptBackup.close();
+    }
+    attemptOwner = { ...attemptOwner, backupIdentity: attemptBackupIdentity };
+    persistAttemptOwner(attemptPaths.owner, attemptOwner);
+    onSchemaMaintenance?.({ operation: "schema-migration-backup", phase: "after-vacuum", path: backupPath, fromVersion, toVersion });
+  } catch (error) {
+    rmSync(tempPath, { force: true });
+    rmSync(attemptPaths.owner, { force: true });
+    throw error;
+  }
+
+  try {
+    validateSchemaMigrationBackup(tempPath, fromVersion);
+    const backup = new (loadDatabaseCtor())(tempPath, { readonly: true, fileMustExist: true });
+    let backupIdentity: SchemaBackupIdentity;
+    try {
+      backupIdentity = databaseIdentity(backup, tempPath, fromVersion);
+      if (!attemptBackupIdentity || !identitiesEqual(backupIdentity, attemptBackupIdentity)) {
+        throw backupSourceMismatch("attempt backup changed after its ownership identity was recorded");
+      }
+    } finally {
+      backup.close();
+    }
+    if (databaseDataVersion(db) !== sourceDataVersion) throw migrationSourceChanged();
+    backupIdentity = {
+      ...backupIdentity,
+      path: resolve(backupPath),
+    };
+    const manifest: SchemaBackupManifest = {
+      format: 3,
+      attemptId,
+      publisherPid: process.pid,
+      publisherProcessStartToken: currentProcessStartToken(),
+      fromVersion,
+      toVersion,
+      source: sourceIdentity,
+      backup: backupIdentity,
+      createdAt: new Date().toISOString(),
+    };
+    writeFileSync(manifestTempPath, `${JSON.stringify(manifest, null, 2)}\n`, { flag: "wx" });
+    attemptOwner = { ...attemptOwner, manifestIdentity: attemptManifestIdentity(manifestTempPath) };
+    persistAttemptOwner(attemptPaths.owner, attemptOwner);
+    onSchemaMaintenance?.({ operation: "schema-migration-backup", phase: "before-publish", path: backupPath, fromVersion, toVersion });
+    // The preflight check is intentionally repeated after the callback and
+    // immediately before publication. Hard links publish complete files with
+    // atomic no-clobber semantics; rename() is forbidden here because POSIX
+    // rename silently overwrites a concurrent winner or unrelated artifact.
+    if (existsSync(backupPath)) {
+      if (!existsSync(manifestPath)) {
+        throw backupSourceMismatch(`backup path appeared without provenance before publication: ${backupPath}`);
+      }
+      throw migrationSourceChanged();
+    }
+    if (existsSync(manifestPath)) throw migrationSourceChanged();
+    try {
+      linkSync(manifestTempPath, manifestPath);
+      manifestLinked = true;
+    } catch (error) {
+      if ((error as { code?: string }).code === "EEXIST") throw migrationSourceChanged();
+      throw error;
+    }
+    try {
+      linkSync(tempPath, backupPath);
+      backupLinked = true;
+    } catch (error) {
+      if ((error as { code?: string }).code === "EEXIST") {
+        removeOwnedPublishedLink(manifestPath, manifestTempPath, attemptId);
+        manifestLinked = false;
+        throw backupSourceMismatch(`backup path was claimed by another file during publication: ${backupPath}`);
+      }
+      throw error;
+    }
+    rmSync(manifestTempPath);
+    rmSync(tempPath);
+    rmSync(attemptPaths.owner);
+  } catch (error) {
+    if (manifestLinked && !backupLinked && existsSync(manifestTempPath)) {
+      removeOwnedPublishedLink(manifestPath, manifestTempPath, attemptId);
+      manifestLinked = false;
+    }
+    // Fixed paths are never removed here. Only this attempt's UUID-scoped
+    // files can be cleaned without risking a concurrent winner/unrelated file.
+    rmSync(tempPath, { force: true });
+    rmSync(manifestTempPath, { force: true });
+    rmSync(attemptPaths.owner, { force: true });
+    if (
+      (error as { code?: string }).code === "SCHEMA_BACKUP_SOURCE_MISMATCH" ||
+      (error as { code?: string }).code === "SCHEMA_MIGRATION_SOURCE_CHANGED"
+    ) throw error;
+    throw Object.assign(new Error(`SCHEMA_BACKUP_INVALID: ${String((error as Error).message ?? error)}`), { code: "SCHEMA_BACKUP_INVALID" });
+  }
+  onSchemaMaintenance?.({
+    operation: "schema-migration-backup",
+    phase: "complete",
+    path: backupPath,
+    fromVersion,
+    toVersion,
+    elapsedMs: Date.now() - (backupStartedAt ?? Date.now()),
+  });
+  return { path: backupPath, manifestPath, attemptId, createdByThisAttempt: true, sourceIdentity, sourceDataVersion };
+}
 
 /** Canonical schema history consumed by generated operator documentation. */
 export const SCHEMA_MIGRATIONS = [
@@ -914,7 +2396,35 @@ export const SCHEMA_MIGRATIONS = [
   { version: 12, name: "semantic-and-memory", summary: "memory, ontology, semantic chunks, embeddings and reflection records" },
   { version: 13, name: "trust-and-external-sources", summary: "validated findings, audit events, external sources and revision-safe evidence" },
   { version: 14, name: "coverage-layers-and-edge-boundaries", summary: "coverage_layers table; edges.evidence_id + edges.boundary; forced rebuild on schema bump" },
+  { version: 15, name: "canonical-endpoints-and-membership", summary: "parser-derived endpoint aliases and explicit provider/consumer/declaration repository membership" },
+  { version: 16, name: "concrete-coverage-debt", summary: "revision-scoped unresolved reference work queue alongside aggregate coverage" },
+  { version: 17, name: "semantic-identities-and-lifecycle", summary: "provenance-complete chunk identities and atomic embedding space/generation/job lifecycle" },
+  { version: 18, name: "semantic-background-worker", summary: "durable semantic worker leases, pause controls, and retry scheduling without changing parser-derived graph format" },
 ] as const;
+
+/**
+ * Return the durable identity of one knowledge database, creating it exactly
+ * once for writable opens. The identity lives in `meta` instead of being
+ * derived from a path or inode so backups and restores can prove which
+ * logical store they came from.
+ */
+export function ensureDatabaseInstanceId(db: Database.Database): string {
+  const existing = db
+    .prepare("SELECT value FROM meta WHERE key='database_instance_id'")
+    .get() as { value?: string } | undefined;
+  if (typeof existing?.value === "string" && existing.value.length > 0) return existing.value;
+  const generated = `db_${randomUUID()}`;
+  db.prepare(
+    "INSERT OR IGNORE INTO meta (key, value) VALUES ('database_instance_id', ?)",
+  ).run(generated);
+  const persisted = db
+    .prepare("SELECT value FROM meta WHERE key='database_instance_id'")
+    .get() as { value?: string } | undefined;
+  if (typeof persisted?.value !== "string" || persisted.value.length === 0) {
+    throw new Error("DATABASE_INSTANCE_ID_UNAVAILABLE");
+  }
+  return persisted.value;
+}
 
 // Idempotent additive migrations for schemas that predate SCHEMA_VERSION.
 // Each step guards on actual schema state (column presence) rather than the
@@ -947,6 +2457,81 @@ function migrate(db: Database.Database, _from: number): void {
     ["unresolved_references", "INTEGER NOT NULL DEFAULT 0"],
   ] as const) {
     if (!coverageCols.includes(column)) db.exec(`ALTER TABLE coverage_records ADD COLUMN ${column} ${definition}`);
+  }
+  const unresolvedItemCols = (db.prepare("PRAGMA table_info(unresolved_reference_items)").all() as { name: string }[]).map((c) => c.name);
+  if (unresolvedItemCols.length > 0 && !unresolvedItemCols.includes("classification")) {
+    db.exec("ALTER TABLE unresolved_reference_items ADD COLUMN classification TEXT NOT NULL DEFAULT 'missing_internal'");
+  }
+  const semanticChunkCols = (db.prepare("PRAGMA table_info(semantic_chunks)").all() as { name: string }[]).map((c) => c.name);
+  for (const [column, definition] of [
+    ["repo_id", "TEXT"],
+    ["snapshot_id", "TEXT"],
+    ["canonical_file_path", "TEXT"],
+    ["identity_hash", "TEXT"],
+    ["chunker_version", "TEXT"],
+  ] as const) {
+    if (semanticChunkCols.length > 0 && !semanticChunkCols.includes(column)) db.exec(`ALTER TABLE semantic_chunks ADD COLUMN ${column} ${definition}`);
+  }
+  const semanticRefCols = (db.prepare("PRAGMA table_info(semantic_embedding_refs)").all() as { name: string }[]).map((c) => c.name);
+  for (const [column, definition] of [["generation_id", "TEXT"], ["space_id", "TEXT"]] as const) {
+    if (semanticRefCols.length > 0 && !semanticRefCols.includes(column)) db.exec(`ALTER TABLE semantic_embedding_refs ADD COLUMN ${column} ${definition}`);
+  }
+  // Vector rows may now live in a generation-partitioned vec0 table. Keep the
+  // physical table name beside the JSON sidecar so delete/GC can remove the
+  // correct partition after the relational reference is gone. This is an
+  // additive migration: old null values are the legacy model-global table.
+  const semanticVectorValueCols = (db.prepare("PRAGMA table_info(semantic_vector_values)").all() as { name: string }[]).map((c) => c.name);
+  if (semanticVectorValueCols.length > 0 && !semanticVectorValueCols.includes("vector_table_name")) {
+    db.exec("ALTER TABLE semantic_vector_values ADD COLUMN vector_table_name TEXT");
+  }
+  // This index cannot live in the base DDL: on a v15/v16 database the table
+  // already exists without generation_id, so CREATE TABLE IF NOT EXISTS is a
+  // no-op and CREATE INDEX would run before the additive columns above.
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_semantic_embedding_refs_generation
+    ON semantic_embedding_refs(generation_id, status, chunk_id)`);
+  const embeddingSpaceCols = (db.prepare("PRAGMA table_info(embedding_spaces)").all() as { name: string }[]).map((c) => c.name);
+  if (embeddingSpaceCols.length > 0 && !embeddingSpaceCols.includes("preprocessing_digest")) {
+    db.exec("ALTER TABLE embedding_spaces ADD COLUMN preprocessing_digest TEXT");
+    db.prepare("UPDATE embedding_spaces SET preprocessing_digest=? WHERE preprocessing_digest IS NULL")
+      .run("0".repeat(64));
+  }
+  const embeddingJobCols = (db.prepare("PRAGMA table_info(embedding_jobs)").all() as { name: string }[]).map((c) => c.name);
+  for (const [column, definition] of [
+    ["lease_owner", "TEXT"],
+    ["lease_expires_at", "TEXT"],
+    ["next_attempt_at", "TEXT"],
+  ] as const) {
+    if (embeddingJobCols.length > 0 && !embeddingJobCols.includes(column)) {
+      db.exec(`ALTER TABLE embedding_jobs ADD COLUMN ${column} ${definition}`);
+    }
+  }
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_embedding_jobs_claim
+    ON embedding_jobs(status, next_attempt_at, lease_expires_at, generation_id, chunk_id)`);
+  // Existing semantic rows were created with content-only chunk IDs and model
+  // hashes. They are retained for rollback/inspection, but are explicitly
+  // quarantined so a v17 reader can never mistake them for an active generation.
+  const legacySemanticCount = (db.prepare(`
+    SELECT COUNT(*) AS n
+    FROM semantic_chunks
+    WHERE repo_id IS NULL
+       OR snapshot_id IS NULL
+       OR canonical_file_path IS NULL
+       OR identity_hash IS NULL
+       OR chunker_version IS NULL
+  `).get() as { n: number } | undefined)?.n ?? 0;
+  const legacyRefCount = (db.prepare("SELECT COUNT(*) AS n FROM semantic_embedding_refs WHERE generation_id IS NULL").get() as { n: number } | undefined)?.n ?? 0;
+  if (legacySemanticCount > 0 || legacyRefCount > 0) {
+    db.prepare(`
+      INSERT OR IGNORE INTO embedding_spaces
+        (id,identity_hash,provider_id,model_id,weights_digest,tokenizer_digest,preprocessing_digest,dimensions,pooling,normalization,chunker_version,created_at)
+      VALUES ('space_legacy_v16','legacy-v16-semantic-space','legacy','legacy','legacy','legacy','0000000000000000000000000000000000000000000000000000000000000000',0,'unknown','unknown','legacy',?)
+    `).run(new Date().toISOString());
+    db.prepare(`
+      INSERT OR IGNORE INTO embedding_generations
+        (id,space_id,snapshot_id,scope_key,status,expected_chunks,created_at,failure_reason)
+      VALUES ('generation_legacy_v16','space_legacy_v16','legacy-v16','legacy','retired',?,?,?)
+    `).run(legacySemanticCount, new Date().toISOString(), "legacy semantic rows are not activation-eligible");
+    db.prepare("UPDATE semantic_embedding_refs SET status='legacy', error=COALESCE(error,'legacy generation is not queryable') WHERE generation_id IS NULL").run();
   }
   const edgeCols = (db.prepare("PRAGMA table_info(edges)").all() as { name: string }[]).map(
     (c) => c.name,
@@ -1183,6 +2768,7 @@ function isSchemaCurrent(
   if (!DDL_OBJECT_NAMES.every((name) =>
     have.has(name) || (options?.allowMissingMaintenanceObjects && OPTIONAL_MAINTENANCE_OBJECT_NAMES.has(name))
   )) return false;
+  if (!db.prepare("SELECT 1 FROM meta WHERE key='endpoint_inventory_generation'").get()) return false;
   const edgeCols = (db.prepare("PRAGMA table_info(edges)").all() as { name: string }[]).map(
     (c) => c.name,
   );
@@ -1222,6 +2808,17 @@ function isSchemaCurrent(
   if (!evidenceCols.includes("query_hash")) return false;
   const coverageCols = (db.prepare("PRAGMA table_info(coverage_records)").all() as { name: string }[]).map((c) => c.name);
   if (!["parser_status", "parser_language", "parser_version", "parser_error"].every((column) => coverageCols.includes(column))) return false;
+  const unresolvedItemCols = (db.prepare("PRAGMA table_info(unresolved_reference_items)").all() as { name: string }[]).map((c) => c.name);
+  if (!unresolvedItemCols.includes("classification")) return false;
+  const semanticChunkCols = (db.prepare("PRAGMA table_info(semantic_chunks)").all() as { name: string }[]).map((c) => c.name);
+  if (!["repo_id", "snapshot_id", "canonical_file_path", "identity_hash", "chunker_version"].every((column) => semanticChunkCols.includes(column))) return false;
+  const semanticRefCols = (db.prepare("PRAGMA table_info(semantic_embedding_refs)").all() as { name: string }[]).map((c) => c.name);
+  if (!["generation_id", "space_id"].every((column) => semanticRefCols.includes(column))) return false;
+  const semanticVectorValueCols = (db.prepare("PRAGMA table_info(semantic_vector_values)").all() as { name: string }[]).map((c) => c.name);
+  if (!semanticVectorValueCols.includes("vector_table_name")) return false;
+  const embeddingJobCols = (db.prepare("PRAGMA table_info(embedding_jobs)").all() as { name: string }[]).map((c) => c.name);
+  if (!["lease_owner", "lease_expires_at", "next_attempt_at"].every((column) => embeddingJobCols.includes(column))) return false;
+  if (!have.has("idx_embedding_jobs_claim")) return false;
   const savedQueryCols = (db.prepare("PRAGMA table_info(saved_queries)").all() as { name: string }[]).map((c) => c.name);
   if (!savedQueryCols.includes("contract_version")) return false;
   // A NOT NULL raw_bytes is the old shape that stored every source file twice.
@@ -1269,43 +2866,65 @@ function installEdgeReplacementIndexes(
   });
 }
 
+function missingSemanticReuseIndexes(db: Database.Database): string[] {
+  const have = new Set(
+    (db.prepare("SELECT name FROM sqlite_master WHERE type='index'").all() as Array<{ name: string }>).map((row) => row.name),
+  );
+  return SEMANTIC_REUSE_INDEX_NAMES.filter((name) => !have.has(name));
+}
+
+function installSemanticReuseIndexes(
+  db: Database.Database,
+  missingIndexes: readonly string[],
+  onSchemaMaintenance?: (event: SchemaMaintenanceEvent) => void,
+): void {
+  if (missingIndexes.length === 0) return;
+  const indexes = [...missingIndexes];
+  const startedAt = Date.now();
+  onSchemaMaintenance?.({ operation: "semantic-reuse-indexes", phase: "start", indexes });
+  db.transaction(() => db.exec(SEMANTIC_REUSE_INDEX_DDL))();
+  onSchemaMaintenance?.({
+    operation: "semantic-reuse-indexes",
+    phase: "complete",
+    indexes,
+    elapsedMs: Date.now() - startedAt,
+  });
+}
+
+/** Recreate the current schema after a guarded structural reset. This is kept
+ * separate from openDatabase so reset can drop only rebuildable tables inside
+ * its own transaction without reopening the database or running startup
+ * maintenance. */
+export function recreateCurrentSchemaObjects(db: Database.Database): void {
+  db.exec(DDL);
+  // These two indexes are additive migration objects: their columns were
+  // introduced after the base DDL was originally published, so restoring the
+  // DDL alone is not enough for a read-only current-schema probe.
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_semantic_embedding_refs_generation
+    ON semantic_embedding_refs(generation_id, status, chunk_id);
+    CREATE INDEX IF NOT EXISTS idx_embedding_jobs_claim
+    ON embedding_jobs(status, next_attempt_at, lease_expires_at, generation_id, chunk_id);`);
+  db.exec(EDGE_REPLACEMENT_INDEX_DDL);
+  db.exec(SEMANTIC_REUSE_INDEX_DDL);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_semantic_embedding_refs_vec_rowid
+    ON semantic_embedding_refs(vec_rowid, chunk_id);`);
+  ensureDatabaseInstanceId(db);
+}
+
+/** Index used only by guarded full-reset shared-vector checks. Keep it out of
+ * the mandatory schema-version gate so an older resident database remains
+ * readable; reset creates it transactionally before its first use. */
+export function ensureResetPerformanceObjects(db: Database.Database): void {
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_semantic_embedding_refs_vec_rowid
+    ON semantic_embedding_refs(vec_rowid, chunk_id);`);
+}
+
 export function openDatabase(
   path: string,
   options?: OpenDatabaseOptions,
 ): Database.Database {
   const db = new (loadDatabaseCtor())(path);
-  db.pragma("journal_mode = WAL");
   db.pragma("busy_timeout = 5000");
-  // synchronous=NORMAL, not the SQLite default FULL. Under WAL, FULL fsyncs on
-  // every commit, and indexing commits several times PER FILE — measured at
-  // 38.9s of pure transaction overhead on a 1116-file repo. NORMAL syncs at
-  // checkpoint instead, which under WAL cannot corrupt the database: the only
-  // exposure is losing the last commits to an OS crash or power loss, and this
-  // is a rebuildable index (penguin index restores it). OFF would remove even
-  // that guarantee and is never used.
-  db.pragma("synchronous = NORMAL");
-  // WAL hygiene: long-lived readers (MCP workers, watcher, desktop) starve
-  // checkpoints, and without a size limit the WAL once grew to 16GB against a
-  // 6GB main DB. The limit auto-truncates at checkpoint time; the passive
-  // checkpoint folds whatever the last writer left behind — best-effort, a
-  // busy moment just means the next open gets it.
-  db.pragma("journal_size_limit = 268435456"); // 256MB
-  try {
-    db.pragma("wal_checkpoint(PASSIVE)");
-  } catch {
-    // read-only filesystems / concurrent writers — never block an open on this
-  }
-  // Drop the superseded single-column edge indexes on existing DBs (new DBs
-  // never create them). Prefix rule: the composite (src|dst, edge_type,
-  // status) indexes serve bare src=?/dst=? searches, so this is a pure
-  // 220MB overlap removal — safe to run on every open, no version gate.
-  if (options?.allowSchemaMutation !== false) {
-    try {
-      db.exec("DROP INDEX IF EXISTS idx_edges_src; DROP INDEX IF EXISTS idx_edges_dst;");
-    } catch {
-      // read-only opens (MCP workers) skip this; the desktop/CLI owner drops it
-    }
-  }
   // 有意不开 foreign_keys：删库后 Ledger 先重放（§2.1 三源重建），
   // 此时被引用的 nodes 尚未由上层索引器重建——引用完整性由
   // 「账本 + 全量重建流程」保证，不靠 SQLite 外键（D4）。
@@ -1330,95 +2949,260 @@ export function openDatabase(
       )
     : SCHEMA_VERSION;
 
-  const currentSchema = preexisting && storedVersion === SCHEMA_VERSION && isSchemaCurrent(db);
-  const readableSchema = currentSchema || (
-    preexisting &&
-    storedVersion === SCHEMA_VERSION &&
-    isSchemaCurrent(db, { allowMissingMaintenanceObjects: true })
-  );
-
-  // Fail loud on a DB written by a newer build — operating on it with an older
-  // schema would silently drop/misread columns (§9 绝不静默降级).
-  if (storedVersion > SCHEMA_VERSION) {
+  const supportedSchemaVersion = options?.supportedSchemaVersion ?? SCHEMA_VERSION;
+  try {
+    assertSchemaVersionSupported(storedVersion, supportedSchemaVersion);
+  } catch (error) {
     db.close();
-    throw new Error(
-      `knowledge.db schema_version ${storedVersion} is newer than this build ` +
-        `supports (${SCHEMA_VERSION}); upgrade Penguin before opening it.`,
+    throw error;
+  }
+
+  if (options?.skipMaintenance) {
+    if (!preexisting || storedVersion !== SCHEMA_VERSION) {
+      db.close();
+      throw Object.assign(
+        new Error(
+          `guarded maintenance requires an existing current knowledge schema (stored=${storedVersion}, supported=${SCHEMA_VERSION})`,
+        ),
+        { code: "RESET_DATABASE_SCHEMA_UNSUPPORTED", storedVersion, supportedVersion: SCHEMA_VERSION },
+      );
+    }
+    return db;
+  }
+
+  // Read-only opens and incompatible runtimes stop here, before journal_mode,
+  // checkpoint, DDL, index maintenance, or any other persistent database write.
+  if (options?.allowSchemaMutation === false) {
+    const currentSchema = preexisting && storedVersion === SCHEMA_VERSION && isSchemaCurrent(db);
+    const readableSchema = currentSchema || (
+      preexisting &&
+      storedVersion === SCHEMA_VERSION &&
+      isSchemaCurrent(db, { allowMissingMaintenanceObjects: true })
+    );
+    if (readableSchema) return db;
+    db.close();
+    throw Object.assign(
+      new Error(
+        `knowledge database schema is outdated (stored=${storedVersion}, supported=${SCHEMA_VERSION}); ` +
+          "the owner must call knowledge_index (or another write capability) to upgrade",
+      ),
+      { code: "SCHEMA_OUTDATED" },
     );
   }
+
+  // v15 changes the meaning of persisted endpoint rows, not just their table
+  // shape. Migrating an already-indexed DB in place would leave its old
+  // unqualified/package-qualified twins traversable beside new memberships.
+  // Empty databases can still take the additive migration path below; a real
+  // index must be rebuilt into a fresh generation so readers never mix both
+  // identity families.
+  if (preexisting && storedVersion < 15) {
+    const tables = new Set(
+      (db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Array<{ name: string }>).map((row) => row.name),
+    );
+    const indexedNodes = tables.has("nodes")
+      ? (db.prepare(
+          `SELECT 1 FROM nodes
+            WHERE node_type IN ('endpoint','symbol','file','service','route','log_site','field','topic','websocket_event')
+            LIMIT 1`,
+        ).get() != null)
+      : false;
+    const derivedIndexTables = [
+      "symbol_versions",
+      "files_index",
+      "edges",
+      "parser_edge_sets",
+      "revision_snapshots",
+      "file_facts",
+      "source_facts",
+      "resolution_sets",
+      "coverage_records",
+      "coverage_layers",
+      "unresolved_reference_coverage",
+      "unresolved_reference_items",
+      "external_calls",
+      "pending_frontend_edges",
+    ];
+    const indexedRows = derivedIndexTables.some((table) =>
+      tables.has(table) && db.prepare(`SELECT 1 FROM ${table} LIMIT 1`).get() != null,
+    );
+    if (indexedNodes || indexedRows) {
+      db.close();
+      throw Object.assign(
+        new Error(
+          `REINDEX_REQUIRED: knowledge endpoint index schema ${storedVersion} cannot be mixed with canonical endpoint schema ${SCHEMA_VERSION}; build a fresh index generation`,
+        ),
+        { code: "REINDEX_REQUIRED", storedVersion, supportedVersion: SCHEMA_VERSION },
+      );
+    }
+  }
+
+  const configureWritablePragmas = () => {
+    db.pragma("journal_mode = WAL");
+    // synchronous=NORMAL avoids an fsync per indexing commit. This is a
+    // rebuildable index, while WAL still preserves database consistency.
+    db.pragma("synchronous = NORMAL");
+    db.pragma("journal_size_limit = 268435456"); // 256MB
+    try {
+      db.pragma("wal_checkpoint(PASSIVE)");
+    } catch {
+      // concurrent readers may defer the checkpoint until the next writer
+    }
+  };
+
+  const currentSchema = preexisting && storedVersion === SCHEMA_VERSION && isSchemaCurrent(db);
 
   // Steady state (schema already current): return WITHOUT a single write once
   // the optional performance indexes are installed. Read-only callers may use
   // a current DB while those indexes are still missing; the next write command
   // performs the one-time optimization instead of breaking status/search.
   if (currentSchema) {
+    configureWritablePragmas();
+    db.exec("DROP INDEX IF EXISTS idx_edges_src; DROP INDEX IF EXISTS idx_edges_dst;");
     const currentCoverageColumns = new Set((db.prepare("PRAGMA table_info(coverage_records)").all() as { name: string }[]).map((column) => column.name));
-    if (!currentCoverageColumns.has("unresolved_references") && options?.allowSchemaMutation !== false) {
+    if (!currentCoverageColumns.has("unresolved_references")) {
       db.exec("ALTER TABLE coverage_records ADD COLUMN unresolved_references INTEGER NOT NULL DEFAULT 0");
     }
     const missingIndexes = missingEdgeReplacementIndexes(db);
-    if (missingIndexes.length > 0 && options?.allowSchemaMutation !== false) {
+    if (missingIndexes.length > 0) {
       installEdgeReplacementIndexes(db, missingIndexes, options?.onSchemaMaintenance);
+    }
+    const missingSemanticIndexes = missingSemanticReuseIndexes(db);
+    if (missingSemanticIndexes.length > 0) {
+      installSemanticReuseIndexes(db, missingSemanticIndexes, options?.onSchemaMaintenance);
     }
     // Retired tables are EXTRA objects, so isSchemaCurrent stays true and
     // migrate() never runs for this DB — the cleanup must happen here on the
     // write path, same contract as the performance indexes above.
-    if (options?.allowSchemaMutation !== false) dropRetiredTables(db);
+    dropRetiredTables(db);
+    ensureDatabaseInstanceId(db);
     return db;
   }
 
-  if (readableSchema && options?.allowSchemaMutation === false) return db;
-
-  // Read-only callers (CLI read verbs) must never take the write lock or run
-  // DDL/migrations against a stale DB — fail loud instead (Task 4, §9 绝不静默降级).
-  if (options?.allowSchemaMutation === false) {
-    db.close();
-    throw Object.assign(
-      new Error(
-        `knowledge database schema is outdated (stored=${storedVersion}, supported=${SCHEMA_VERSION}); ` +
-          "run `penguin index` (or any write command) to upgrade",
-      ),
-      { code: "SCHEMA_OUTDATED" },
-    );
-  }
-
   const ftsMapStartedAt = needsFtsRowMapBackfill ? Date.now() : null;
-  if (ftsMapStartedAt != null) {
-    options?.onSchemaMaintenance?.({ operation: "fts-row-maps", phase: "start" });
-  }
+  // DDL, additive migration, backfills, indexes, and the version advance are
+  // one atomic unit. If a process or callback fails anywhere, SQLite rolls the
+  // schema back to the exact image represented by the retained backup, so the
+  // next launch can safely and idempotently retry.
+  const runMigrationAttempt = (backup?: SchemaMigrationBackup, attemptFromVersion = storedVersion): void => {
+    const migration = db.transaction(() => {
+      // BEGIN IMMEDIATE has already excluded every other writer. Validate the
+      // snapshot under that lock, so a commit after VACUUM INTO forces a fresh
+      // backup instead of falling through to migration with a stale preimage.
+      if (
+        backup &&
+        (
+          databaseDataVersion(db) !== backup.sourceDataVersion ||
+          !identitiesEqual(databaseIdentity(db, path, attemptFromVersion), backup.sourceIdentity)
+        )
+      ) {
+        throw migrationSourceChanged();
+      }
 
-  db.exec(DDL);
+      if (ftsMapStartedAt != null) {
+        options?.onSchemaMaintenance?.({ operation: "fts-row-maps", phase: "start" });
+      }
 
-  migrate(db, storedVersion);
-  const ftsRows = backfillFtsRowMaps(db);
-  if (ftsMapStartedAt != null) {
-    options?.onSchemaMaintenance?.({
-      operation: "fts-row-maps",
-      phase: "complete",
-      ...ftsRows,
-      elapsedMs: Date.now() - ftsMapStartedAt,
+      // These legacy indexes belong to the pre-migration image. Dropping them in
+      // this transaction ensures a failed migration can retry against the exact
+      // source identity recorded by the retained backup.
+      db.exec("DROP INDEX IF EXISTS idx_edges_src; DROP INDEX IF EXISTS idx_edges_dst;");
+      db.exec(DDL);
+      ensureDatabaseInstanceId(db);
+
+      migrate(db, attemptFromVersion);
+      const ftsRows = backfillFtsRowMaps(db);
+      if (ftsMapStartedAt != null) {
+        options?.onSchemaMaintenance?.({
+          operation: "fts-row-maps",
+          phase: "complete",
+          ...ftsRows,
+          elapsedMs: Date.now() - ftsMapStartedAt,
+        });
+      }
+
+      // Performance-only migration: no SCHEMA_VERSION bump, because changing the
+      // indexed schema version would incorrectly force every branch to rebuild.
+      installEdgeReplacementIndexes(
+        db,
+        missingEdgeReplacementIndexes(db),
+        preexisting ? options?.onSchemaMaintenance : undefined,
+      );
+      installSemanticReuseIndexes(
+        db,
+        missingSemanticReuseIndexes(db),
+        preexisting ? options?.onSchemaMaintenance : undefined,
+      );
+
+      // Advance only as the final statement in the same migration transaction.
+      db.prepare(
+        "INSERT INTO meta (key, value) VALUES ('schema_version', ?) " +
+          "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      ).run(String(SCHEMA_VERSION));
+      db.prepare(
+        "INSERT OR IGNORE INTO ledger_state (id, materialized_seq) VALUES ('main', 0)",
+      ).run();
     });
+    migration.immediate();
+  };
+
+  if (preexisting && storedVersion < SCHEMA_VERSION) {
+    const maxBackupAttempts = 3;
+    for (let attempt = 1; attempt <= maxBackupAttempts; attempt += 1) {
+      const attemptFromVersion = Number(
+        (db.prepare("SELECT value FROM meta WHERE key='schema_version'").get() as { value?: string } | undefined)?.value ?? 0,
+      );
+      assertSchemaVersionSupported(attemptFromVersion, supportedSchemaVersion);
+      if (attemptFromVersion === SCHEMA_VERSION) {
+        if (isSchemaCurrent(db)) {
+          // A concurrent publisher completed before this retry observed the
+          // source. Never create or validate a backup labelled with the stale
+          // version captured when this connection first opened.
+          break;
+        }
+        // Preserve the existing repair behavior for a current-version file
+        // whose additive schema objects are incomplete, without fabricating a
+        // current-to-current retained migration backup.
+        runMigrationAttempt(undefined, attemptFromVersion);
+        break;
+      }
+      try {
+        const backup = ensureSchemaMigrationBackup(
+          db,
+          path,
+          attemptFromVersion,
+          SCHEMA_VERSION,
+          options?.onSchemaMaintenance,
+        );
+        runMigrationAttempt(backup, attemptFromVersion);
+        break;
+      } catch (error) {
+        if ((error as { code?: string }).code !== "SCHEMA_MIGRATION_SOURCE_CHANGED") throw error;
+        if (attempt === maxBackupAttempts) {
+          const finalObservedVersion = Number(
+            (db.prepare("SELECT value FROM meta WHERE key='schema_version'").get() as { value?: string } | undefined)?.value ?? 0,
+          );
+          assertSchemaVersionSupported(finalObservedVersion, supportedSchemaVersion);
+          if (finalObservedVersion === SCHEMA_VERSION && isSchemaCurrent(db)) break;
+          throw Object.assign(
+            new Error("SCHEMA_BACKUP_BUSY: source kept changing before migration could acquire its write lock"),
+            { code: "SCHEMA_BACKUP_BUSY" },
+          );
+        }
+        options?.onSchemaMaintenance?.({
+          operation: "schema-migration-backup",
+          phase: "before-backup-retry",
+          path: schemaMigrationBackupPath(path, attemptFromVersion, SCHEMA_VERSION),
+          fromVersion: attemptFromVersion,
+          toVersion: SCHEMA_VERSION,
+        });
+      }
+    }
+  } else {
+    runMigrationAttempt();
   }
-
-  // Performance-only migration: no SCHEMA_VERSION bump, because changing the
-  // indexed schema version would incorrectly force every branch to rebuild.
-  // Existing large DBs get a visible callback; fresh empty DBs create the same
-  // indexes silently as part of initialization.
-  installEdgeReplacementIndexes(
-    db,
-    missingEdgeReplacementIndexes(db),
-    preexisting ? options?.onSchemaMaintenance : undefined,
-  );
-
-  // Upsert (NOT INSERT OR IGNORE): after a successful migration the stored
-  // version must actually advance to the code's version, so future opens gate
-  // correctly instead of the number lying forever.
-  db.prepare(
-    "INSERT INTO meta (key, value) VALUES ('schema_version', ?) " +
-      "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-  ).run(String(SCHEMA_VERSION));
-  db.prepare(
-    "INSERT OR IGNORE INTO ledger_state (id, materialized_seq) VALUES ('main', 0)",
-  ).run();
+  // Persistent journal changes happen only after the migration transaction
+  // commits successfully; a failed attempt leaves the source image untouched.
+  configureWritablePragmas();
   return db;
 }

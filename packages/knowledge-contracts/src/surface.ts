@@ -6,8 +6,10 @@ import {
 } from "./capabilities.js";
 import { validateSearchResponse } from "./response.js";
 import { canonicalInputSchema, type KnowledgeInputSchema } from "./input-schemas.js";
+import { validateSemanticControlResult, validateSemanticStatusResponse } from "./semantic.js";
 
 export type RegistrationStatus = "implemented" | "not_implemented";
+export type InvocationMode = "direct" | "router";
 
 /**
  * Capability coverage is intentionally explicit.  A registration can only be
@@ -18,10 +20,11 @@ export const CLI_IMPLEMENTED_CAPABILITIES = new Set<string>([
   "knowledge.repository.register", "knowledge.search", "knowledge.get_hit", "knowledge.coverage", "knowledge.capabilities",
   "knowledge.index", "knowledge.rebuild", "knowledge.snapshot.materialize", "knowledge.watch", "knowledge.repository.remove",
   "knowledge.branch.pin", "knowledge.index_status", "knowledge.status_panel", "knowledge.set_master_branch", "knowledge.snapshot.list", "knowledge.get_node",
+  "knowledge.semantic_status", "knowledge.semantic_control",
   "knowledge.callers", "knowledge.callees", "knowledge.impact", "knowledge.context", "knowledge.explore", "knowledge.locate",
   "knowledge.explain", "knowledge.flow", "knowledge.affected", "knowledge.path", "knowledge.architecture", "knowledge.service_graph",
   "knowledge.local_graph", "knowledge.repository_graph", "knowledge.communities", "knowledge.timeline", "knowledge.recent",
-  "knowledge.compare_branches", "knowledge.files", "knowledge.file_symbols", "knowledge.dead_code", "knowledge.response_sample.capture",
+  "knowledge.compare_branches", "knowledge.files", "knowledge.file_symbols", "knowledge.endpoints", "knowledge.dead_code", "knowledge.response_sample.capture",
   "knowledge.response_sample.list", "knowledge.incident.create", "knowledge.note.create", "knowledge.note.append", "knowledge.note.list",
   "knowledge.note.reindex", "knowledge.note.write", "knowledge.tag.list", "knowledge.link.create", "knowledge.suggestion.list",
   "knowledge.suggestion.accept", "knowledge.suggestion.reject", "knowledge.evidence.target.list", "knowledge.evidence.status.set",
@@ -39,7 +42,9 @@ export const CLI_IMPLEMENTED_CAPABILITIES = new Set<string>([
 ]);
 
 export const MCP_IMPLEMENTED_CAPABILITIES = new Set<string>([
+  "knowledge.endpoints",
   "knowledge.search", "knowledge.get_hit", "knowledge.coverage", "knowledge.capabilities", "knowledge.get_node", "knowledge.context",
+  "knowledge.semantic_status", "knowledge.semantic_control",
   "knowledge.explore", "knowledge.compare_branches", "knowledge.index_status", "knowledge.status_panel", "knowledge.set_master_branch", "knowledge.suggestion.list",
   "knowledge.suggestion.accept", "knowledge.suggestion.reject", "knowledge.architecture", "knowledge.communities", "knowledge.dead_code",
   "knowledge.graph.query", "knowledge.package_dependencies", "knowledge.dependency_path", "knowledge.analyze_repository",
@@ -89,6 +94,7 @@ export const CAPABILITY_ALIASES = Object.freeze({
   api_doc_list: "knowledge.api_doc.list",
   api_doc_show: "knowledge.api_doc.show",
   api_doc_diff: "knowledge.api_doc.diff",
+  compare_branches: "knowledge.compare_branches",
   api_doc_bind: "knowledge.api_doc.bind",
   api_doc_unbind: "knowledge.api_doc.unbind",
 } as const);
@@ -105,10 +111,20 @@ export interface SurfaceContext {
 export interface SurfaceRegistration {
   capabilityId: string;
   status: RegistrationStatus;
+  /** MCP clients need a concrete wire name, even when the implementation
+   * internally reuses a legacy handler. */
+  advertisedTool?: string;
+  /** Canonical wire name for this capability on this surface. */
+  wireName: string;
+  /** Non-canonical aliases that resolve to this capability. */
+  aliases: string[];
+  invocationMode?: InvocationMode;
   invoke(input: unknown, context: SurfaceContext): Promise<unknown>;
   inputSchemaId: string;
   inputSchema: KnowledgeInputSchema;
   outputSchemaId: string;
+  /** Whether this capability mutates state. */
+  mutating: boolean;
   validateOutput(output: unknown): unknown;
 }
 
@@ -143,6 +159,8 @@ const OUTPUT_VALIDATORS = new Map<string, OutputValidator>(
   CAPABILITIES.map((capability) => [capability.id, validateJsonOutput]),
 );
 OUTPUT_VALIDATORS.set("knowledge.search", validateSearchResponse);
+OUTPUT_VALIDATORS.set("knowledge.semantic_status", validateSemanticStatusResponse);
+OUTPUT_VALIDATORS.set("knowledge.semantic_control", validateSemanticControlResult);
 
 export function validateCapabilityOutput(capabilityId: string, output: unknown): unknown {
   const validator = OUTPUT_VALIDATORS.get(canonicalCapabilityId(capabilityId));
@@ -154,10 +172,24 @@ export function hasCapabilityOutputValidator(capabilityId: string): boolean {
   return OUTPUT_VALIDATORS.has(canonicalCapabilityId(capabilityId));
 }
 
-function registration(capability: CapabilityDefinition, implemented: boolean): SurfaceRegistration {
+function registration(capability: CapabilityDefinition, implemented: boolean, surface: Surface): SurfaceRegistration {
+  const wireName = surface === "mcp" ? capability.id.replaceAll(".", "_") : capability.id;
+  const aliases = Object.entries(CAPABILITY_ALIASES)
+    .filter(([_, canonicalId]) => canonicalId === capability.id)
+    .map(([alias]) => alias);
+
   return {
     capabilityId: capability.id,
     status: implemented ? "implemented" : "not_implemented",
+    wireName,
+    aliases,
+    mutating: capability.mutating,
+    ...(surface === "mcp"
+      ? {
+          advertisedTool: wireName,
+          invocationMode: "direct" as const,
+        }
+      : {}),
     inputSchemaId: capability.inputSchemaId,
     inputSchema: canonicalInputSchema(capability.id),
     outputSchemaId: capability.outputSchemaId,
@@ -186,7 +218,7 @@ export function createSurfaceRegistrations(
   const implemented = surface === "cli" ? CLI_IMPLEMENTED_CAPABILITIES : surface === "mcp" ? MCP_IMPLEMENTED_CAPABILITIES : new Set<string>();
   return manifest
     .filter((capability) => capability.requiredOn.includes(surface))
-    .map((capability) => registration(capability, implemented.has(capability.id)));
+    .map((capability) => registration(capability, implemented.has(capability.id), surface));
 }
 
 export const listCliRegistrations = (): readonly SurfaceRegistration[] => createSurfaceRegistrations("cli");

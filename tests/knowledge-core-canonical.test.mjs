@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { canonicalJson, sha256Hex } from "../packages/knowledge-core/dist/index.js";
+import { canonicalJson, sha256Canonical, sha256Hex } from "../packages/knowledge-core/dist/index.js";
 
 test("canonicalJson sorts object keys recursively", () => {
   const a = canonicalJson({ b: 1, a: { d: 2, c: [3, { z: 1, y: 2 }] } });
@@ -24,4 +24,12 @@ test("sha256Hex is stable", () => {
     sha256Hex("abc"),
     "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
   );
+});
+
+test("sha256Canonical matches the canonical JSON digest without one aggregate string", () => {
+  const value = {
+    z: Array.from({ length: 10_000 }, (_, index) => ({ index, optional: index % 2 ? undefined : null })),
+    a: { unicode: "中文", values: [undefined, true, 1.5, "text"] },
+  };
+  assert.equal(sha256Canonical(value), sha256Hex(canonicalJson(value)));
 });

@@ -8,7 +8,10 @@ import { test } from "node:test";
 test("canary audit stops on first failed root and reports deterministic recall evidence", () => {
   const dir = mkdtempSync(join(tmpdir(), "pk-canary-"));
   mkdirSync(join(dir, "src"));
-  const lines = Array.from({ length: 120 }, (_, i) => `export const CanaryNeedle${i} = ${i};`).join("\n");
+  // Keep the successful canary above SQLite's fixed schema footprint so its
+  // storage-amplification assertion measures indexed content, not a 4 KiB toy.
+  const padding = "x".repeat(1_024);
+  const lines = Array.from({ length: 120 }, (_, i) => `export const CanaryNeedle${i} = ${i}; // ${padding}`).join("\n");
   writeFileSync(join(dir, "src", "canary.ts"), lines);
   const out = execFileSync(process.execPath, ["scripts/knowledge-canary-audit.mjs", `--root=${dir}`, "--limit=100", "--min-needles=90"], { encoding: "utf8" });
   const report = JSON.parse(out);

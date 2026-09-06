@@ -72,6 +72,62 @@ test("truncation names the specific relation, not a bare boolean", () => {
   store.close();
 });
 
+test("context relation pages are deterministic and do not overlap", () => {
+  const { store } = storeWithCallers(12);
+  const first = buildContextPack(store, "target", { limit: 5, offset: 0 });
+  const second = buildContextPack(store, "target", { limit: 5, offset: 5 });
+  const third = buildContextPack(store, "target", { limit: 5, offset: 10 });
+
+  assert.equal(first.callers.length, 5);
+  assert.equal(second.callers.length, 5);
+  assert.equal(third.callers.length, 2);
+  assert.ok(first.truncated.includes("callers"));
+  assert.ok(second.truncated.includes("callers"));
+  assert.equal(third.truncated.includes("callers"), false);
+  const ids = [...first.callers, ...second.callers, ...third.callers].map((item) => item.nodeId);
+  assert.equal(new Set(ids).size, 12, "continued pages must not repeat a caller");
+  store.close();
+});
+
+test("[context-continuation-dedup] context limit is global across relation families and continuation never repeats metadata relations", () => {
+  const { store } = storeWithCallers(2);
+  const repoId = "repo_trunc";
+  const branchId = "branch_trunc";
+  const focus = store.db.prepare("SELECT id FROM nodes WHERE identity_key=?").get(`${repoId}::target`).id;
+  const targetFile = store.upsertNode({ nodeType: "file", identityKey: `${repoId}::file::target`, repoId, title: "target.ts", meta: {} });
+  const importer = store.upsertNode({ nodeType: "file", identityKey: `${repoId}::file::importer`, repoId, title: "importer.ts", meta: {} });
+  const usedType = store.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::used-type`, repoId, title: "UsedType", meta: {} });
+  const secondUsedType = store.upsertNode({ nodeType: "symbol", identityKey: `${repoId}::second-used-type`, repoId, title: "SecondUsedType", meta: {} });
+  store.db.prepare(`INSERT INTO symbol_versions
+    (node_id,branch_id,commit_sha,file_path,lang,kind,content_hash,status,start_line)
+    VALUES (?,?,?,?,?,?,?,?,?)`).run(usedType, branchId, "c0", "src/type.ts", "ts", "type", "ht", "fresh", 1);
+  store.db.prepare(`INSERT INTO symbol_versions
+    (node_id,branch_id,commit_sha,file_path,lang,kind,content_hash,status,start_line)
+    VALUES (?,?,?,?,?,?,?,?,?)`).run(secondUsedType, branchId, "c0", "src/second-type.ts", "ts", "type", "ht2", "fresh", 1);
+  const edge = store.db.prepare(`INSERT INTO edges
+    (id,src,dst,edge_type,branch_id,origin,method,confidence,provenance,status)
+    VALUES (?,?,?,?,?,'parser','EXTRACTED',1,'{}','active')`);
+  edge.run("defines-target", targetFile, focus, "defines", branchId);
+  edge.run("imports-target", importer, targetFile, "imports", branchId);
+  edge.run("uses-target", focus, usedType, "references", branchId);
+  edge.run("uses-second-target", focus, secondUsedType, "references", branchId);
+
+  const pages = [0, 2, 4].map((offset) => buildContextPack(store, "target", { limit: 2, offset }));
+  const relationKeys = (pack) => [
+    ...pack.callers.map((item) => `callers:${item.nodeId}`),
+    ...pack.usesTypes.map((item) => `usesTypes:${item.nodeId}`),
+    ...pack.importers.map((item) => `importers:${item.nodeId}`),
+  ];
+  assert.deepEqual(pages.map((page) => page.returnedCount), [2, 2, 1]);
+  assert.deepEqual(pages.map((page) => relationKeys(page).length), [2, 2, 1]);
+  const all = pages.flatMap(relationKeys);
+  assert.equal(new Set(all).size, 5, JSON.stringify(all));
+  assert.ok(pages[0].truncated.length > 0);
+  assert.ok(pages[1].truncated.length > 0);
+  assert.deepEqual(pages[2].truncated, []);
+  store.close();
+});
+
 test("explore carries the truncation state too", () => {
   // Explore is the tool agents actually call — the contract has to survive the
   // hop from ContextPack.

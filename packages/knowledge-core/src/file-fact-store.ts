@@ -135,6 +135,16 @@ export class FileFactStore {
   }
 
   effectiveManifest(snapshotId: string): Map<string, string> {
+    // Published snapshots may retire their construction overlays after the
+    // effective manifest has been materialized. Treat that table as the fast,
+    // authoritative read path when populated; otherwise a healthy 3k-file
+    // snapshot is indistinguishable from an empty one to every revision query.
+    const materialized = this.store.db.prepare(
+      "SELECT file_path,file_fact_id FROM effective_snapshot_files WHERE snapshot_id=? ORDER BY file_path",
+    ).all(snapshotId) as Array<{ file_path: string; file_fact_id: string }>;
+    if (materialized.length > 0) {
+      return new Map(materialized.map((row) => [row.file_path, row.file_fact_id] as const));
+    }
     const result = new Map<string, string>();
     const visiting = new Set<string>();
     const visit = (id: string): void => {

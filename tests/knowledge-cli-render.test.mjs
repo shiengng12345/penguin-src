@@ -114,6 +114,23 @@ test("finalize group: shows the running sub-step, then one done line with summed
   assert.match(text, /✔ Finalize graph\s+2 removed · 132 commits\s+0\.1s/, `done line in: ${text}`);
 });
 
+test("semantic backfill renders exact ready and total progress after graph finalization", () => {
+  const state = initialRenderState("FPMS-NT", "rebuild", T0);
+  drive(state, [
+    { phase: "stage", stage: "semantic", state: "start" },
+    { phase: "embedding", ready: 960, total: 3200, failed: 0, generationId: "generation-1" },
+  ]);
+  let text = renderRegionLines(state, 100, false, T0 + 5000).join("\n");
+  assert.match(text, /Semantic vectors.*30%.*960\/3200/, `semantic progress shown in: ${text}`);
+
+  drive(state, [
+    { phase: "embedding", ready: 3200, total: 3200, failed: 0, generationId: "generation-1" },
+    { phase: "stage", stage: "semantic", state: "done", detail: "3200 chunks active", elapsedMs: 12_000 },
+  ]);
+  text = renderRegionLines(state, 100, false, T0 + 13_000).join("\n");
+  assert.match(text, /✔ Semantic vectors\s+3200 chunks active\s+12\.0s/);
+});
+
 test("ETA appears once enough files are done", () => {
   const state = initialRenderState("r", "incremental", T0);
   drive(state, [
@@ -169,6 +186,20 @@ test("summary is a vertical stat card; zero-count lines are omitted", () => {
   const fresh = summaryLines({ ...report, parsed: 0, deleted: 0, skipped: 596, errors: 0 }, state, 300, false).join("\n");
   assert.match(fresh, /Already fresh · 596 files checked in 0\.3s/);
   assert.ok(!/Try/.test(fresh), "no-op run stays one quiet line");
+});
+
+test("summary truthfully reports queued semantic work and actionable worker start failure", () => {
+  const state = initialRenderState("FPMS", "incremental", T0);
+  const report = {
+    repoId: "r", branchId: "b", branchName: "main", commit: "c",
+    scanned: 1, parsed: 1, skipped: 0, deleted: 0, errors: 0, renamed: 0, commits: 0, tags: 0,
+    semantic: { status: "queued", generationId: "generation-1", chunks: 42, reason: null },
+    semanticWorker: { status: "start_failed", pid: null, reason: "SEMANTIC_WORKER_LAUNCHER_NOT_FOUND", logPath: "/tmp/semantic.log" },
+  };
+  const text = summaryLines(report, state, 1000, false).join("\n");
+  assert.match(text, /Semantic queued.*42 chunks/);
+  assert.match(text, /Worker start failed.*SEMANTIC_WORKER_LAUNCHER_NOT_FOUND/);
+  assert.match(text, /Reinstall or repair Penguin.*semantic wake/);
 });
 
 test("writer prints discoveries into scrollback and redraws the region beneath", () => {

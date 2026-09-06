@@ -9,5 +9,25 @@ export function deriveCoverage(input: { endpointKey: string; schemaGaps: Evidenc
   return { level, analyzedRequestPartitions: input.requestAnalysis.classes.length, unresolvedRequestConstraints: input.requestAnalysis.unresolvedConstraintIds.length, discoveredStaticExits: input.responseAnalysis.discoveredProducerIds.length, resolvedStaticExits: input.responseAnalysis.resolvedProducerIds.length, unresolvedDynamicProducers: input.responseAnalysis.unresolvedProducerIds.length, groupedDynamicProducers: dynamic, testCoveredClasses: input.testCoveredClassIds.length, runtimeObservedClasses: input.runtimeObservedClassIds.length, runtimeEvidenceState: input.runtimeEvidenceState, blockers: dedupeGaps(blockers) };
 }
 function dedupeGaps(gaps: EvidenceGap[]): EvidenceGap[] { return [...new Map(gaps.map((gap) => [`${gap.code}:${gap.endpointKey ?? ""}:${gap.fieldPath ?? ""}:${gap.producerId ?? ""}:${gap.revisionId ?? ""}`, gap])).values()]; }
-export function aggregateDocumentCoverage(endpoints: EndpointDoc[]): CoverageSummary { const blockers = endpoints.flatMap((endpoint) => endpoint.coverage.blockers); const levels = endpoints.map((endpoint) => endpoint.coverage.level); const level = levels.includes("partial") ? "partial" : levels.includes("observed") ? "observed" : levels.includes("bounded") ? "bounded" : "exhaustive"; return { level, analyzedRequestPartitions: endpoints.reduce((n, endpoint) => n + endpoint.coverage.analyzedRequestPartitions, 0), unresolvedRequestConstraints: endpoints.reduce((n, endpoint) => n + endpoint.coverage.unresolvedRequestConstraints, 0), discoveredStaticExits: endpoints.reduce((n, endpoint) => n + endpoint.coverage.discoveredStaticExits, 0), resolvedStaticExits: endpoints.reduce((n, endpoint) => n + endpoint.coverage.resolvedStaticExits, 0), unresolvedDynamicProducers: endpoints.reduce((n, endpoint) => n + endpoint.coverage.unresolvedDynamicProducers, 0), groupedDynamicProducers: endpoints.reduce((n, endpoint) => n + endpoint.coverage.groupedDynamicProducers, 0), testCoveredClasses: endpoints.reduce((n, endpoint) => n + endpoint.coverage.testCoveredClasses, 0), runtimeObservedClasses: endpoints.reduce((n, endpoint) => n + endpoint.coverage.runtimeObservedClasses, 0), runtimeEvidenceState: endpoints.some((endpoint) => endpoint.coverage.runtimeEvidenceState === "partial") ? "partial" : endpoints.some((endpoint) => endpoint.coverage.runtimeEvidenceState === "available") ? "available" : "not_requested", blockers } };
+export function aggregateDocumentCoverage(endpoints: EndpointDoc[]): CoverageSummary {
+  if (endpoints.length === 0) {
+    return {
+      level: "partial",
+      analyzedRequestPartitions: 0,
+      unresolvedRequestConstraints: 0,
+      discoveredStaticExits: 0,
+      resolvedStaticExits: 0,
+      unresolvedDynamicProducers: 0,
+      groupedDynamicProducers: 0,
+      testCoveredClasses: 0,
+      runtimeObservedClasses: 0,
+      runtimeEvidenceState: "unavailable",
+      blockers: [{ gapId: "gap_document_evidence_empty", code: "document_evidence_empty", message: "No endpoint evidence was collected, so document coverage is not proven.", evidenceIds: [] }],
+    };
+  }
+  const blockers = endpoints.flatMap((endpoint) => endpoint.coverage.blockers);
+  const levels = endpoints.map((endpoint) => endpoint.coverage.level);
+  const level = levels.includes("partial") ? "partial" : levels.includes("observed") ? "observed" : levels.includes("bounded") ? "bounded" : "exhaustive";
+  return { level, analyzedRequestPartitions: endpoints.reduce((n, endpoint) => n + endpoint.coverage.analyzedRequestPartitions, 0), unresolvedRequestConstraints: endpoints.reduce((n, endpoint) => n + endpoint.coverage.unresolvedRequestConstraints, 0), discoveredStaticExits: endpoints.reduce((n, endpoint) => n + endpoint.coverage.discoveredStaticExits, 0), resolvedStaticExits: endpoints.reduce((n, endpoint) => n + endpoint.coverage.resolvedStaticExits, 0), unresolvedDynamicProducers: endpoints.reduce((n, endpoint) => n + endpoint.coverage.unresolvedDynamicProducers, 0), groupedDynamicProducers: endpoints.reduce((n, endpoint) => n + endpoint.coverage.groupedDynamicProducers, 0), testCoveredClasses: endpoints.reduce((n, endpoint) => n + endpoint.coverage.testCoveredClasses, 0), runtimeObservedClasses: endpoints.reduce((n, endpoint) => n + endpoint.coverage.runtimeObservedClasses, 0), runtimeEvidenceState: endpoints.some((endpoint) => endpoint.coverage.runtimeEvidenceState === "partial") ? "partial" : endpoints.some((endpoint) => endpoint.coverage.runtimeEvidenceState === "available") ? "available" : "not_requested", blockers };
+}
 export function coverageHeadings(summary: CoverageSummary): { request: "All Valid/Invalid Request Classes" | "Known Request Scenarios"; response: "All Possible Responses" | "Known Response Matrix" } { const all = summary.level === "exhaustive" || summary.level === "bounded"; return { request: all ? "All Valid/Invalid Request Classes" : "Known Request Scenarios", response: all ? "All Possible Responses" : "Known Response Matrix" }; }

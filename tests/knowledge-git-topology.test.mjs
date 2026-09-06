@@ -44,3 +44,40 @@ test("two branches can share one ready snapshot and failed publication keeps the
   assert.equal(store.db.prepare("SELECT current_snapshot_id FROM branches WHERE id=?").get(featureId).current_snapshot_id, snapshot.id);
   store.close();
 });
+
+test("retrying a failed snapshot rebinds its base to the current resolution", () => {
+  const { store, topology, repoId } = fixture();
+  const base = topology.createBuildingSnapshot({
+    snapshotKey: "old-base",
+    repoId,
+    commitSha: "base",
+    parserVersion: "parser-1",
+    resolverVersion: "resolver-1",
+    schemaVersion: 7,
+  });
+  topology.markSnapshotReady(base.id);
+  const failed = topology.createBuildingSnapshot({
+    snapshotKey: "retry-me",
+    repoId,
+    commitSha: "head",
+    parserVersion: "parser-1",
+    resolverVersion: "resolver-1",
+    schemaVersion: 7,
+    baseSnapshotId: base.id,
+  });
+  topology.markSnapshotFailed(failed.id, "old base disappeared");
+
+  const retry = topology.createOrGetBuildingSnapshot({
+    snapshotKey: "retry-me",
+    repoId,
+    commitSha: "head",
+    parserVersion: "parser-1",
+    resolverVersion: "resolver-1",
+    schemaVersion: 7,
+  });
+  assert.equal(retry.created, false);
+  assert.equal(retry.snapshot.id, failed.id);
+  assert.equal(retry.snapshot.state, "failed");
+  assert.equal(retry.snapshot.baseSnapshotId, undefined);
+  store.close();
+});

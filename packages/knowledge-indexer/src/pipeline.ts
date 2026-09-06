@@ -2,12 +2,13 @@ import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { basename, dirname, extname, relative, resolve as pathResolve } from "node:path";
 import { performance } from "node:perf_hooks";
-import { SCHEMA_VERSION, GitTopologyStore, FileFactStore, ResolutionStore, SourceStore, SourceSnapshotStore, resolveBranchBase, type KnowledgeStore, type ParsedFileFact, type ParsedEdge, type SnapshotOverlayEntry, type SourceSnapshotOverlayEntry } from "@penguin/knowledge-core";
+import { INDEX_FORMAT_VERSION, SCHEMA_VERSION, SEMANTIC_CHUNKER_VERSION, GitTopologyStore, FileFactStore, ResolutionStore, SourceStore, SourceSnapshotStore, affectedByFiles, createEmbeddingSpace, replaceSemanticSnapshotChunks, resolveBranchBase, type EmbeddingProvider, type EmbeddingSpaceIdentity, type KnowledgeStore, type ParsedFileFact, type ParsedEdge, type SnapshotOverlayEntry, type SourceSnapshotOverlayEntry } from "@penguin/knowledge-core";
+import type { EndpointPublicationReceipt } from "@penguin/knowledge-contracts";
 import { extractSymbols, EXTRACT_MAX_BYTES, type ExtractedFile, type ExtractedSymbol } from "./extract.js";
 import { ParsePool } from "./parse-pool.js";
+import { grpcEndpointKey } from "./grpc-client.js";
 import { extractFieldAccesses } from "./field-access.js";
 import { extractIacFacts } from "./iac.js";
-import { grpcEndpointKey } from "./grpc-client.js";
 import { allForwardingMethods, extractFunctionNameCalls } from "./frontend-grpc-client.js";
 import { verifiedConnectRpcGetters, extractConnectRpcCalls } from "./connect-rpc-client.js";
 import { withParsedTree } from "./parser.js";
@@ -25,6 +26,20 @@ import { summarizeCoverage, type CoverageSummary, type CoverageWarning } from ".
 import { ingestSourceFile } from "./source-ingest.js";
 import { hashFileStream } from "./encoding.js";
 import { anonymousCallbackIdentity } from "./identity.js";
+import { extractNestJsFrameworkEdges } from "./framework-edges.js";
+import { enqueueSemanticGeneration } from "./embedding-indexer.js";
+
+export interface RevisionTruth {
+  repoId: string;
+  branchId: string;
+  snapshotId: string;
+  indexedCommit: string;
+  currentHead: string | null;
+  worktreeDirty: boolean | null;
+  alignment: "aligned" | "head_advanced" | "dirty" | "unknown";
+  checkedAt: string;
+  revisionGeneration: number;
+}
 
 export interface IndexReport {
   repoId: string;
@@ -40,6 +55,8 @@ export interface IndexReport {
   parserVersion: string;
   schemaVersion: number;
   staleReason: "worktree_dirty" | "git_status_unavailable" | null;
+  revisionTruth: RevisionTruth | null;
+  endpointPublication: EndpointPublicationReceipt;
   coverageGaps: string[];
   coverage: CoverageSummary;
   coverageWarnings: CoverageWarning[];
@@ -52,6 +69,7 @@ export interface IndexReport {
    * separately from errors so an intentional exclusion never reads as breakage,
    * and separately from skipped so it stays visible rather than vanishing. */
   excluded: number;
+  semantic: SemanticIndexReport;
   renamed: number;
   commits: number; // git commit nodes captured
   tags: number; // git tag nodes captured
@@ -76,6 +94,24 @@ export interface IndexReport {
     checkpointWarning: string | null;
     checkpoint: { busy: number; log: number; checkpointed: number };
   };
+}
+
+export interface SemanticIndexReport {
+  requested: boolean;
+  status: "disabled" | "queued" | "active";
+  files: number;
+  chunks: number;
+  generationId: string | null;
+  reason: string | null;
+}
+
+export interface SemanticIndexOptions {
+  /** Persist revision-scoped chunks even when no model is installed. */
+  enabled?: boolean;
+  provider?: EmbeddingProvider;
+  space?: EmbeddingSpaceIdentity;
+  batchSize?: number;
+  chunkerVersion?: string;
 }
 
 export interface ParseTimingBreakdown {
@@ -143,12 +179,260 @@ function addParseDuration(
   if (timings) timings[key] += performance.now() - startedAt;
 }
 
+// v10: TS extraction gained constructor calls and nested qualified type refs,
+// which are required to retain response-construction evidence.
 // v7: TSX extraction gained jsx-component / jsx-callback dynamic-dispatch
 // refs (renders / invokes_dynamic edges). Bumping forces existing indexes to
 // reprocess on their next index run — without it, checkpoint-skipped files
 // silently lack the new edges forever.
-export const KNOWLEDGE_PARSER_VERSION = "tree-sitter-wasm-v8-wrapper-allowlist";
-export const KNOWLEDGE_RESOLVER_VERSION = "resolver-v8-test-path-conventions";
+export const KNOWLEDGE_PARSER_VERSION = "tree-sitter-wasm-v10-qualified-construction";
+export const KNOWLEDGE_RESOLVER_VERSION = "resolver-v11-receiver-aware-dispatch";
+
+function protoPackageName(source: string): string | null {
+  const withoutComments = source
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/\/\/.*$/gm, "");
+  return withoutComments.match(/\bpackage\s+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\s*;/)?.[1] ?? null;
+}
+
+function insertEndpointAmbiguityExternalCall(input: {
+  store: KnowledgeStore;
+  repoId: string;
+  branchId: string;
+  filePath: string;
+  srcNodeId: string;
+  callee: string;
+  receiver: string;
+  specifier: string;
+  reason: string;
+  line: number;
+}): void {
+  const exists = input.store.db.prepare(
+    `SELECT 1 FROM external_calls
+      WHERE repo_id=? AND branch_id=? AND file_path=? AND src_node_id=?
+        AND callee=? AND receiver=? AND specifier=? AND reason=? AND line=?
+      LIMIT 1`,
+  ).get(
+    input.repoId, input.branchId, input.filePath, input.srcNodeId,
+    input.callee, input.receiver, input.specifier, input.reason, input.line,
+  );
+  if (exists) return;
+  input.store.db.prepare(
+    `INSERT INTO external_calls
+       (repo_id,branch_id,file_path,src_node_id,callee,receiver,specifier,reason,line)
+     VALUES (?,?,?,?,?,?,?,?,?)`,
+  ).run(
+    input.repoId, input.branchId, input.filePath, input.srcNodeId,
+    input.callee, input.receiver, input.specifier, input.reason, input.line,
+  );
+}
+
+function upsertGrpcConsumerEndpointOrRecordAmbiguity(input: {
+  store: KnowledgeStore;
+  repoId: string;
+  branchId: string;
+  filePath: string;
+  srcNodeId: string;
+  packageName?: string;
+  service: string;
+  method: string;
+  line: number;
+}): string | null {
+  try {
+    return input.store.upsertGrpcEndpoint({
+      packageName: input.packageName,
+      service: input.service,
+      method: input.method,
+    });
+  } catch (error) {
+    if ((error as { code?: string })?.code !== "AMBIGUOUS_GRPC_ENDPOINT_IDENTITY") throw error;
+
+    // Ambiguity is an honest unresolved call, not a parser failure. Preserve
+    // exact call-site evidence while abstaining from both endpoint creation and
+    // edge insertion; a later package-qualified source can then resolve it.
+    insertEndpointAmbiguityExternalCall({
+      ...input,
+      callee: input.method,
+      receiver: input.service,
+      specifier: grpcEndpointKey(input.service, input.method, input.packageName ?? undefined),
+      reason: "ambiguous-grpc-endpoint",
+    });
+    input.store.db.prepare(
+      `UPDATE coverage_records
+          SET unresolved_references=unresolved_references+1, updated_at=?
+        WHERE repo_id=? AND file_path=?`,
+    ).run(new Date().toISOString(), input.repoId, input.filePath);
+    return null;
+  }
+}
+
+type EndpointPersistenceOutcome =
+  | { status: "persisted"; endpointId: string; discoveryKey: string }
+  | {
+      status: "excluded";
+      discoveryKey: string;
+      reasonCode: string;
+      candidateEndpointIds: string[];
+      filePath: string;
+      startLine: number;
+    };
+
+function upsertGrpcHandlerEndpointOrRecordAmbiguity(input: {
+  store: KnowledgeStore;
+  repoId: string;
+  branchId: string;
+  filePath: string;
+  revisionId: string;
+  startLine: number;
+  handlerNodeId: string;
+  packageName?: string;
+  service: string;
+  method: string;
+  title: string;
+  controllerName: string;
+}): EndpointPersistenceOutcome {
+  try {
+    const endpointId = input.store.upsertGrpcEndpoint({
+      packageName: input.packageName,
+      service: input.service,
+      method: input.method,
+      title: input.title,
+      meta: { controller: input.controllerName },
+    });
+    return { status: "persisted", endpointId, discoveryKey: input.store.getNode(endpointId)?.identity_key ?? grpcEndpointKey(input.service, input.method, input.packageName) };
+  } catch (error) {
+    if ((error as { code?: string })?.code !== "AMBIGUOUS_GRPC_ENDPOINT_IDENTITY") throw error;
+
+    // A real handler with an unqualified service name cannot be assigned to
+    // either of several package-qualified endpoints without guessing. Keep the
+    // implementation node and exact file evidence, but abstain from a handles
+    // edge until package provenance becomes available.
+    const discoveryKey = grpcEndpointKey(input.service, input.method, input.packageName);
+    const candidateEndpointIds = ((error as { candidates?: unknown }).candidates ?? []) as unknown[];
+    const candidates = candidateEndpointIds
+      .filter((value): value is string => typeof value === "string")
+      .sort();
+    insertEndpointAmbiguityExternalCall({
+      store: input.store,
+      repoId: input.repoId,
+      branchId: input.branchId,
+      filePath: input.filePath,
+      srcNodeId: input.handlerNodeId,
+      callee: input.method,
+      receiver: input.service,
+      specifier: discoveryKey,
+      reason: "ambiguous-grpc-handler",
+      line: input.startLine,
+    });
+    const unresolvedId = `unresolved_${sha256(JSON.stringify([
+      input.repoId, input.branchId, input.revisionId, input.filePath,
+      input.startLine, input.handlerNodeId, discoveryKey, "ambiguous-grpc-handler",
+    ]))}`;
+    input.store.db.prepare(
+      `INSERT OR REPLACE INTO unresolved_reference_items
+         (id,repo_id,branch_id,revision_id,file_path,start_line,source_node_id,raw_target,reason_code,reason,created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+    ).run(
+      unresolvedId,
+      input.repoId,
+      input.branchId,
+      input.revisionId,
+      input.filePath,
+      input.startLine,
+      input.handlerNodeId,
+      discoveryKey,
+      "ambiguous-grpc-handler",
+      JSON.stringify({ candidateEndpointIds: candidates }),
+      new Date().toISOString(),
+    );
+    input.store.db.prepare(
+      `UPDATE coverage_records
+          SET unresolved_references=unresolved_references+1, updated_at=?
+        WHERE repo_id=? AND file_path=?`,
+    ).run(new Date().toISOString(), input.repoId, input.filePath);
+    return {
+      status: "excluded",
+      discoveryKey,
+      reasonCode: "ambiguous-grpc-handler",
+      candidateEndpointIds: candidates,
+      filePath: input.filePath,
+      startLine: input.startLine,
+    };
+  }
+}
+
+function upsertGrpcDeclarationEndpointOrRecordAmbiguity(input: {
+  store: KnowledgeStore;
+  repoId: string;
+  branchId: string;
+  revisionId: string;
+  filePath: string;
+  startLine: number;
+  serviceNodeId: string;
+  packageName?: string | null;
+  service: string;
+  method: string;
+  title: string;
+}): string | null {
+  try {
+    return input.store.upsertGrpcEndpoint({
+      packageName: input.packageName,
+      service: input.service,
+      method: input.method,
+      title: input.title,
+      meta: { source: input.filePath },
+    });
+  } catch (error) {
+    if ((error as { code?: string })?.code !== "AMBIGUOUS_GRPC_ENDPOINT_IDENTITY") throw error;
+
+    // A package-less or template declaration may match several qualified
+    // endpoints. Preserve the declaration as unresolved evidence and abstain
+    // from choosing a package or creating a misleading declares edge.
+    const candidateEndpointIds = (((error as { candidates?: unknown }).candidates ?? []) as unknown[])
+      .filter((value): value is string => typeof value === "string")
+      .sort();
+    const discoveryKey = grpcEndpointKey(input.service, input.method, input.packageName ?? undefined);
+    insertEndpointAmbiguityExternalCall({
+      store: input.store,
+      repoId: input.repoId,
+      branchId: input.branchId,
+      filePath: input.filePath,
+      srcNodeId: input.serviceNodeId,
+      callee: input.method,
+      receiver: input.service,
+      specifier: discoveryKey,
+      reason: "ambiguous-grpc-declaration",
+      line: input.startLine,
+    });
+    const unresolvedId = `unresolved_${sha256(JSON.stringify([
+      input.repoId, input.branchId, input.revisionId, input.filePath,
+      input.startLine, input.serviceNodeId, discoveryKey, "ambiguous-grpc-declaration",
+    ]))}`;
+    input.store.db.prepare(
+      `INSERT OR REPLACE INTO unresolved_reference_items
+         (id,repo_id,branch_id,revision_id,file_path,start_line,source_node_id,raw_target,reason_code,reason,created_at)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+    ).run(
+      unresolvedId,
+      input.repoId,
+      input.branchId,
+      input.revisionId,
+      input.filePath,
+      input.startLine,
+      input.serviceNodeId,
+      discoveryKey,
+      "ambiguous-grpc-declaration",
+      JSON.stringify({ candidateEndpointIds }),
+      new Date().toISOString(),
+    );
+    input.store.db.prepare(
+      `UPDATE coverage_records
+          SET unresolved_references=unresolved_references+1, updated_at=?
+        WHERE repo_id=? AND file_path=?`,
+    ).run(new Date().toISOString(), input.repoId, input.filePath);
+    return null;
+  }
+}
 
 // In-process index task lock: one active task per repo+branch+checkout (§8.3).
 const activeLocks = new Set<string>();
@@ -248,6 +532,7 @@ function storeSymbolIndex(store: KnowledgeStore, repoId: string): SymbolIndex {
       const rows = store.db
         .prepare(
           `SELECT n.id AS id,
+                  json_extract(n.meta, '$.qualifiedName') AS qualifiedName,
                   (SELECT sv.file_path FROM symbol_versions sv
                      WHERE sv.node_id = n.id AND sv.status='fresh' LIMIT 1) AS filePath
            FROM nodes n
@@ -257,6 +542,7 @@ function storeSymbolIndex(store: KnowledgeStore, repoId: string): SymbolIndex {
         .all(repoId, bare) as Array<{
         id: string;
         filePath: string | null;
+        qualifiedName: string | null;
       }>;
       return rows;
     },
@@ -346,7 +632,7 @@ async function indexFileWithSource(
   renamed: number;
   // Endpoints this file defines (NestJS decorators) — surfaced so indexRepo
   // can emit discovery events without re-parsing.
-  endpoints: Array<{ key: string; protocol: string }>;
+  endpoints: Array<{ key: string; protocol: string; outcome: EndpointPersistenceOutcome }>;
   // Bare names that resolved to ZERO candidates (forward references) — the
   // caller retries this file in a second pass once the symbol table is full.
   retryNames: string[];
@@ -420,6 +706,7 @@ async function indexFileWithSource(
   addParseDuration(p.timings, "fileFactMs", timingStartedAt);
   // Hoisted out of the write-transaction closure below so the return can see it.
   let retryNames: string[] = [];
+  const endpointOutcomes: Array<{ key: string; protocol: string; outcome: EndpointPersistenceOutcome }> = [];
   let snapshotResolutionEdges: Array<{
     srcIdentityKey: string;
     dstIdentityKey?: string;
@@ -534,10 +821,18 @@ async function indexFileWithSource(
     //    file →defines→ symbol, and file →imports→ imported file.
     transactionStepStartedAt = performance.now();
     const symbolLookup = storeSymbolIndex(store, p.repoId);
+    const receiverBindings = (extracted.receiverBindings ?? []).map((binding) => {
+      const typeFilePath = binding.typeSpecifier
+        ? resolveRelativeImport(p.absPath, binding.typeSpecifier, p.rootPath)
+        : null;
+      return typeFilePath ? { ...binding, typeFilePath } : binding;
+    });
     const resolved = resolveRefs({
       refs: extracted.refs, fileSymbols: extracted.symbols,
       fileSymbolIds, lookup: symbolLookup,
       currentFile: p.relPath, importedFiles,
+      receiverBindings,
+      language: lang,
       // Type-only bindings bind no runtime value, so they can never be the
       // target of a call and are left out of the map entirely.
       importBindings: new Map(
@@ -546,15 +841,54 @@ async function indexFileWithSource(
           .map((binding) => [binding.localName, binding.specifier]),
       ),
     });
-    // Persist reference-resolution coverage alongside the file transaction so
-    // negative graph answers can distinguish "no edge" from "unresolved refs".
+    const revisionId = p.snapshotId ?? p.commit ?? `branch:${p.branchId}`;
+    // Replace the concrete queue in the same transaction as parser edges. A
+    // second pass can therefore remove a formerly unresolved item exactly
+    // when its new resolved edge is committed.
+    store.db.prepare(
+      "DELETE FROM unresolved_reference_items WHERE repo_id=? AND branch_id=? AND file_path=?",
+    ).run(p.repoId, p.branchId, p.relPath);
+    const insertUnresolved = store.db.prepare(`
+      INSERT INTO unresolved_reference_items
+        (id,repo_id,branch_id,revision_id,file_path,start_line,source_node_id,raw_target,reason_code,classification,reason,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+    `);
+    const insertedUnresolvedIds = new Set<string>();
+    for (const item of resolved.unresolvedItems) {
+      const id = `unresolved_${sha256(JSON.stringify([
+        p.repoId, p.branchId, revisionId, p.relPath, item.line,
+        item.sourceNodeId, item.rawTarget, item.reasonCode,
+      ]))}`;
+      // Parsers may surface the same unresolved call through more than one
+      // extraction lane. It is one actionable queue item, not two rows with
+      // the same identity; dedupe inside the file transaction.
+      if (insertedUnresolvedIds.has(id)) continue;
+      insertedUnresolvedIds.add(id);
+      insertUnresolved.run(
+        id,
+        p.repoId,
+        p.branchId,
+        revisionId,
+        p.relPath,
+        item.line,
+        item.sourceNodeId,
+        item.rawTarget,
+        item.reasonCode,
+        item.classification,
+        item.reason,
+        new Date().toISOString(),
+      );
+    }
+    const coverageUpdatedAt = new Date().toISOString();
+    // Persist only the deduplicated concrete queue count. Multiple extraction
+    // lanes can report the same unresolved reference; exposing their raw sum
+    // made aggregate coverage disagree with the paginated remediation queue.
     store.db.prepare(`
       INSERT INTO coverage_layers(repo_id, branch_id, layer, resolved, total, updated_at)
       VALUES (?, ?, 'references', ?, ?, ?)
       ON CONFLICT(repo_id, branch_id, layer) DO UPDATE SET
         resolved=excluded.resolved, total=excluded.total, updated_at=excluded.updated_at
-    `).run(p.repoId, p.branchId, resolved.edges.length, extracted.refs.length, new Date().toISOString());
-    const revisionId = p.snapshotId ?? p.commit ?? `branch:${p.branchId}`;
+    `).run(p.repoId, p.branchId, resolved.edges.length, resolved.edges.length + insertedUnresolvedIds.size, coverageUpdatedAt);
     store.db.prepare(`
       INSERT INTO unresolved_reference_coverage
         (repo_id, branch_id, file_path, revision_id, resolved, total, updated_at)
@@ -567,13 +901,13 @@ async function indexFileWithSource(
       p.relPath,
       revisionId,
       resolved.edges.length,
-      extracted.refs.length,
-      new Date().toISOString(),
+      resolved.edges.length + insertedUnresolvedIds.size,
+      coverageUpdatedAt,
     );
     const coverageColumns = new Set((store.db.prepare("PRAGMA table_info(coverage_records)").all() as Array<{ name: string }>).map((column) => column.name));
     if (coverageColumns.has("unresolved_references")) {
       store.db.prepare("UPDATE coverage_records SET unresolved_references=?, updated_at=? WHERE repo_id=? AND file_path=?")
-        .run(Math.max(0, extracted.refs.length - resolved.edges.length), new Date().toISOString(), p.repoId, p.relPath);
+        .run(insertedUnresolvedIds.size, new Date().toISOString(), p.repoId, p.relPath);
     }
     // Cap: a file with hundreds of external (node_modules/stdlib) misses would
     // otherwise carry a huge retry list for names that never resolve.
@@ -625,7 +959,7 @@ async function indexFileWithSource(
       const tested = new Map<string, { method: "EXTRACTED" | "INFERRED"; confidence?: number; callbackIdentity?: string }>();
       for (const edge of resolved.edges) {
         if (!edge.dst || localIds.has(edge.dst)) continue;
-        tested.set(edge.dst, { method: edge.method, confidence: edge.confidence });
+        tested.set(edge.dst, { method: edge.method === "INFERRED" ? "INFERRED" : "EXTRACTED", confidence: edge.confidence });
       }
       // Jest/Vitest callbacks are commonly anonymous, so their calls have no
       // enclosing symbol and cannot form normal calls edges. Import scoping is
@@ -664,33 +998,72 @@ async function indexFileWithSource(
       const handlerId = fileSymbolIds.get(ep.handlerQualifiedName);
       if (!handlerId) continue;
       const isGrpc = ep.protocol === "grpc" && ep.grpcService && ep.grpcMethod;
-      const identityKey = isGrpc
-        ? grpcEndpointKey(ep.grpcService!, ep.grpcMethod!) // global, cross-repo
-        : `${p.repoId}::endpoint::${ep.key}`;
-      const endpointId = store.upsertNode({
-        nodeType: "endpoint",
-        identityKey,
-        repoId: isGrpc ? null : p.repoId, // gRPC endpoints belong to no single repo
-        title: ep.key,
-        meta: { protocol: ep.protocol, service: ep.grpcService, method: ep.grpcMethod, controller: ep.controllerName, httpStatus: ep.httpStatus },
-      });
+      const outcome: EndpointPersistenceOutcome = isGrpc
+        ? upsertGrpcHandlerEndpointOrRecordAmbiguity({
+            store,
+            repoId: p.repoId,
+            branchId: p.branchId,
+            filePath: p.relPath,
+            revisionId,
+            startLine: ep.startLine,
+            handlerNodeId: handlerId,
+            packageName: ep.grpcPackageName,
+            service: ep.grpcService!,
+            method: ep.grpcMethod!,
+            title: ep.key,
+            controllerName: ep.controllerName,
+          })
+        : (() => {
+            const endpointId = store.upsertNode({
+              nodeType: "endpoint",
+              identityKey: `${p.repoId}::endpoint::${ep.key}`,
+              repoId: p.repoId,
+              title: ep.key,
+              meta: { protocol: ep.protocol, httpStatus: ep.httpStatus },
+            });
+            return { status: "persisted" as const, endpointId, discoveryKey: store.getNode(endpointId)?.identity_key ?? `${p.repoId}::endpoint::${ep.key}` };
+          })();
+      endpointOutcomes.push({ key: ep.key, protocol: ep.protocol, outcome });
+      if (outcome.status !== "persisted") continue;
+      const endpointId = outcome.endpointId;
       // gRPC endpoints are global (repo-less) → branch-less so cross-service
       // traversal survives branch-scoping. http/kafka stay repo/branch-scoped.
-      structural.push({ src: endpointId, dst: handlerId, edgeType: "handles", origin: "parser", method: "EXTRACTED", branchless: !!isGrpc });
+      structural.push({
+        src: endpointId,
+        dst: handlerId,
+        edgeType: "handles",
+        origin: "parser",
+        method: "EXTRACTED",
+        branchless: !!isGrpc,
+        provenance: { startLine: ep.startLine },
+      });
     }
     // consumer side: inter-service gRPC calls → 'invokes' to the SAME global
     // endpoint id → the cross-repo service-call graph.
     for (const gc of extracted.grpcClientCalls) {
       const src = gc.enclosingQualifiedName ? fileSymbolIds.get(gc.enclosingQualifiedName) : undefined;
       if (!src) continue;
-      const endpointId = store.upsertNode({
-        nodeType: "endpoint",
-        identityKey: grpcEndpointKey(gc.service, gc.method),
-        repoId: null,
-        title: `gRPC ${gc.service}.${gc.method}`,
-        meta: { protocol: "grpc", service: gc.service, method: gc.method },
+      const endpointId = upsertGrpcConsumerEndpointOrRecordAmbiguity({
+        store,
+        repoId: p.repoId,
+        branchId: p.branchId,
+        filePath: p.relPath,
+        srcNodeId: src,
+        packageName: gc.packageName,
+        service: gc.service,
+        method: gc.method,
+        line: gc.startLine,
       });
-      structural.push({ src, dst: endpointId, edgeType: "invokes", origin: "parser", method: "EXTRACTED", branchless: true });
+      if (!endpointId) continue;
+      structural.push({
+        src,
+        dst: endpointId,
+        edgeType: "invokes",
+        origin: "parser",
+        method: "EXTRACTED",
+        branchless: true,
+        provenance: { startLine: gc.startLine },
+      });
     }
     // FPMS-style JS gRPC client calls (serviceRegistry + grpcClientCall pattern).
     // Detected via regex on the source for non-NestJS, bare grpc-js patterns.
@@ -709,14 +1082,26 @@ async function indexFileWithSource(
         });
         const src = matching ? fileSymbolIds.get(matching.qualifiedName) : undefined;
         if (!src) continue;
-        const endpointId = store.upsertNode({
-          nodeType: "endpoint",
-          identityKey: grpcEndpointKey(jc.service, jc.method),
-          repoId: null,
-          title: `gRPC ${jc.service}.${jc.method}`,
-          meta: { protocol: "grpc", service: jc.service, method: jc.method },
+        const endpointId = upsertGrpcConsumerEndpointOrRecordAmbiguity({
+          store,
+          repoId: p.repoId,
+          branchId: p.branchId,
+          filePath: p.relPath,
+          srcNodeId: src,
+          service: jc.service,
+          method: jc.method,
+          line: jc.startLine,
         });
-        structural.push({ src, dst: endpointId, edgeType: "invokes", origin: "parser", method: "EXTRACTED", branchless: true });
+        if (!endpointId) continue;
+        structural.push({
+          src,
+          dst: endpointId,
+          edgeType: "invokes",
+          origin: "parser",
+          method: "EXTRACTED",
+          branchless: true,
+          provenance: { startLine: jc.startLine },
+        });
       }
     }
     // Protocol/channel bindings are explicit graph facts. Literal names are
@@ -773,6 +1158,23 @@ async function indexFileWithSource(
         meta: { filePath: p.relPath, object: access.object, field: access.field, startLine: access.startLine },
       });
       structural.push({ src, dst: fieldId, edgeType: access.kind, origin: "parser", method: access.method, confidence: access.method === "EXTRACTED" ? 1 : 0.45 });
+    }
+    // NestJS constructor injection and module provider registration are
+    // source-grounded framework boundaries, not direct call expressions.
+    // Persist them in the same per-file parser edge set so rebuild, branch,
+    // snapshot, and atomic replacement semantics remain identical to calls.
+    if (lang === "ts" || lang === "tsx") {
+      structural.push(...extractNestJsFrameworkEdges({
+        filePath: p.relPath,
+        source: p.source,
+        symbols: extracted.symbols,
+        symbolIds: fileSymbolIds,
+        resolveSymbol: (name) => {
+          const candidates = symbolLookup.bareNameCandidates(name);
+          if (candidates.length !== 1) return null;
+          return { nodeId: candidates[0].id, filePath: candidates[0].filePath };
+        },
+      }));
     }
     addParseDuration(p.timings, "graphWritesMs", transactionStepStartedAt);
     transactionStepStartedAt = performance.now();
@@ -878,7 +1280,7 @@ async function indexFileWithSource(
   return {
     error: null,
     renamed,
-    endpoints: extracted.endpoints.map((e) => ({ key: e.key, protocol: e.protocol })),
+    endpoints: endpointOutcomes,
     retryNames,
     fileFactId,
     extracted,
@@ -886,7 +1288,7 @@ async function indexFileWithSource(
 }
 
 // Pipeline stages indexRepo runs through, in order. UIs render this list.
-export type IndexStageId = "scan" | "parse" | "deletes" | "proto" | "link" | "packages" | "git";
+export type IndexStageId = "scan" | "parse" | "deletes" | "proto" | "link" | "packages" | "git" | "semantic";
 
 // Progress events: the legacy per-file "scan"/"index" shapes are kept verbatim
 // (existing CLI bar + Tauri Wiki bar parse them), PLUS typed pipeline events —
@@ -896,6 +1298,7 @@ export type IndexProgressEvent =
   | { phase: "scan"; done: number; total: number; file: string; langs?: Record<string, number> }
   | { phase: "index"; done: number; total: number; file: string; lang?: string }
   | { phase: "stage"; stage: IndexStageId; state: "start" | "done"; detail?: string; elapsedMs?: number }
+  | { phase: "embedding"; ready: number; total: number; failed: number; generationId: string }
   | { phase: "metric"; symbols: number; edges: number; endpoints: number }
   | { phase: "discovery"; kind: "endpoint" | "service" | "link"; title: string; file?: string };
 
@@ -929,7 +1332,15 @@ export async function indexRepo(input: {
   store: KnowledgeStore;
   rootPath: string;
   mode: "incremental" | "rebuild";
+  semantic?: SemanticIndexOptions;
   onProgress?: (p: IndexProgressEvent) => void;
+  /** Narrow crash-boundary injection used by the child-process recovery test. */
+  testHooks?: {
+    afterSemanticEnqueue?: (context: { branchId: string; generationId: string }) => void;
+    beforeSnapshotPublish?: (context: { branchId: string; snapshotId: string }) => void;
+    beforeStage?: (context: { stage: IndexStageId }) => void;
+    beforeMaintenance?: (context: { phase: "before_semantic_checkpoint" | "final_checkpoint" }) => void;
+  };
 }): Promise<IndexReport> {
   const runStartedAt = Date.now();
   const { store, rootPath, mode } = input;
@@ -947,23 +1358,37 @@ export async function indexRepo(input: {
   // Register WITHOUT claiming "live": a branch earns live status only when its
   // index SUCCEEDS (validation V1 — a failed run must not look trustworthy).
   // Existing branches keep their current status during the run.
-  const prior = store.getBranch(repoId, git.branch);
+  let prior = store.getBranch(repoId, git.branch);
+  if (prior && store.repairOrphanBranchSnapshot(prior.id)) prior = store.getBranch(repoId, git.branch);
   const effectiveMode = resolveIndexMode(mode, prior ?? undefined, KNOWLEDGE_PARSER_VERSION, SCHEMA_VERSION, KNOWLEDGE_RESOLVER_VERSION);
   const branchId = store.registerBranch({
-    repoId, name: git.branch, headCommit: git.commit, checkoutPath: git.checkoutPath,
+    repoId, name: git.branch, headCommit: prior?.head_commit ?? git.commit, checkoutPath: git.checkoutPath,
     status: (prior?.status as "live" | "snapshot" | "gone" | undefined) ?? "snapshot",
   });
 
   const lockKey = `${repoId}:${branchId}:${git.checkoutPath}`;
   const lock = IndexTaskLock.tryAcquire(lockKey);
   if (!lock) {
-    throw new Error(`index task already running for ${git.branch}`);
+    throw Object.assign(new Error(`index task already running for ${git.branch}`), {
+      code: "INDEX_WRITER_BUSY",
+      retryable: true,
+      details: { scope: "process", branchId, branchName: git.branch },
+    });
   }
   // Cross-process guard (app calls spawn a fresh CLI process each time, so the
   // in-process lock above cannot see them): a DB marker removeBranch checks.
-  store.acquireIndexMarker(branchId);
+  try {
+    store.acquireIndexMarker(branchId);
+  } catch (error) {
+    // The marker can lose a cross-process race after the in-process lock has
+    // already been acquired. Release that local lock before propagating the
+    // typed busy error, otherwise a later retry in this process is wedged.
+    lock.release();
+    throw error;
+  }
   const topology = new GitTopologyStore(store);
-  const canonical = store.getDefaultBranch(repoId);
+  let canonical = store.getDefaultBranch(repoId);
+  if (canonical && store.repairOrphanBranchSnapshot(canonical.id)) canonical = store.getDefaultBranch(repoId);
   const baseResolution = resolveBranchBase({
     repoId,
     targetBranch: git.isGit && !["(detached)", "(workdir)"].includes(git.branch) ? git.branch : null,
@@ -981,7 +1406,7 @@ export async function indexRepo(input: {
     ? (git.commit ?? git.worktreeFingerprint)
     : `${git.commit ?? "worktree"}:${git.worktreeFingerprint}`;
   const snapshot = topology.createBuildingSnapshot({
-    snapshotKey: `${repoId}:${snapshotRevisionKey}:${KNOWLEDGE_PARSER_VERSION}:${KNOWLEDGE_RESOLVER_VERSION}:${SCHEMA_VERSION}`,
+    snapshotKey: `${repoId}:${snapshotRevisionKey}:${KNOWLEDGE_PARSER_VERSION}:${KNOWLEDGE_RESOLVER_VERSION}:${INDEX_FORMAT_VERSION}`,
     repoId,
     ...(git.commit ? { commitSha: git.commit } : {}),
     worktreeFingerprint: git.worktreeFingerprint,
@@ -1012,10 +1437,13 @@ export async function indexRepo(input: {
       : git.worktreeState === "unknown"
         ? "git_status_unavailable"
         : null,
+    revisionTruth: null,
+    endpointPublication: { discovered: 0, persisted: 0, queryable: 0, excluded: [], totalIsExact: true },
     coverageGaps: git.worktreeState === "unknown" ? ["git_status_unavailable"] : [],
     coverage: { discovered: 0, admitted: 0, excluded: 0, failed: 0, stale: 0, byReason: {} },
     coverageWarnings: [],
     scanned: 0, parsed: 0, skipped: 0, deleted: 0, errors: 0, excluded: 0, renamed: 0,
+    semantic: { requested: Boolean(input.semantic && input.semantic.enabled !== false), status: "disabled", files: 0, chunks: 0, generationId: null, reason: input.semantic && input.semantic.enabled !== false ? "EMBEDDING_SPACE_UNAVAILABLE" : null },
     commits: 0, tags: 0,
     timings: { totalMs: 0, stages: {}, parse: emptyParseTimings() },
     maintenance: {
@@ -1046,6 +1474,7 @@ export async function indexRepo(input: {
   const stageStart = (s: IndexStageId) => {
     stageT0.set(s, Date.now());
     emit?.({ phase: "stage", stage: s, state: "start" });
+    input.testHooks?.beforeStage?.({ stage: s });
   };
   const stageDone = (s: IndexStageId, detail?: string) => {
     const elapsedMs = Date.now() - (stageT0.get(s) ?? Date.now());
@@ -1055,8 +1484,6 @@ export async function indexRepo(input: {
       elapsedMs,
     });
   };
-  // Endpoints surfaced this run (per-file NestJS + proto pass) for the metric line.
-  let endpointsFound = 0;
   const emitMetric = () => {
     if (!emit) return;
     const symbols = (store.db
@@ -1065,7 +1492,71 @@ export async function indexRepo(input: {
     const edges = (store.db
       .prepare("SELECT COUNT(*) AS c FROM edges WHERE branch_id=? AND status='active'")
       .get(branchId) as { c: number }).c;
-    emit({ phase: "metric", symbols, edges, endpoints: endpointsFound });
+    const endpoints = (store.db
+      .prepare("SELECT COUNT(DISTINCT endpoint_id) AS c FROM endpoint_memberships WHERE repo_id=?")
+      .get(repoId) as { c: number }).c;
+    emit({ phase: "metric", symbols, edges, endpoints });
+  };
+
+  // Semantic indexing deliberately runs only after the graph snapshot is
+  // published. A large local embedding backfill can take minutes; keeping it
+  // inside a rebuild transaction made the graph unavailable, grew one giant
+  // WAL, and discarded all completed vectors on interruption.
+  const runSemanticIndex = (): void => {
+    const semanticOptions = input.semantic;
+    if (!semanticOptions || semanticOptions.enabled === false) return;
+    try {
+      const chunkerVersion = semanticOptions.chunkerVersion
+        ?? semanticOptions.space?.chunkerVersion
+        ?? SEMANTIC_CHUNKER_VERSION;
+      const sources = store.db.prepare(`
+        SELECT e.file_path AS canonicalFilePath,
+               COALESCE(e.source_blob_id,f.source_blob_id) AS sourceBlobId,
+               b.decoded_content AS text
+          FROM effective_snapshot_sources e
+          JOIN source_facts f ON f.id=e.source_fact_id
+          JOIN source_blobs b ON b.id=COALESCE(e.source_blob_id,f.source_blob_id)
+         WHERE e.snapshot_id=? AND f.repo_id=?
+         ORDER BY e.file_path
+      `).all(snapshot.id, repoId) as Array<{ canonicalFilePath: string; sourceBlobId: number; text: string }>;
+      const existing = store.db.prepare(`
+        SELECT COUNT(*) AS total,
+               COALESCE(SUM(chunker_version=?),0) AS matching
+          FROM semantic_chunks WHERE snapshot_id=?
+      `).get(chunkerVersion, snapshot.id) as { total: number; matching: number };
+      const chunkResult = existing.total > 0 && existing.matching === existing.total
+        ? { files: Number((store.db.prepare("SELECT COUNT(DISTINCT canonical_file_path) AS n FROM semantic_chunks WHERE snapshot_id=?").get(snapshot.id) as { n: number }).n), chunks: existing.total }
+        : replaceSemanticSnapshotChunks(store, {
+            repoId,
+            snapshotId: snapshot.id,
+            sources,
+            chunkerVersion,
+          });
+      report.semantic = { requested: true, status: "disabled", files: chunkResult.files, chunks: chunkResult.chunks, generationId: null, reason: "EMBEDDING_SPACE_UNAVAILABLE" };
+      if (!semanticOptions.space) return;
+      if (chunkResult.chunks === 0) throw new Error("EMBEDDING_NO_CHUNKS");
+      const ids = (store.db.prepare("SELECT id FROM semantic_chunks WHERE snapshot_id=? ORDER BY id").all(snapshot.id) as Array<{ id: string }>).map((row) => row.id);
+      const enqueued = enqueueSemanticGeneration({
+        store,
+        repoId,
+        space: semanticOptions.space,
+        snapshotId: snapshot.id,
+        scopeKey: `repo:${repoId}`,
+        chunkIds: ids,
+      });
+      report.semantic = {
+        ...report.semantic,
+        status: enqueued.status,
+        generationId: enqueued.generationId,
+      };
+      input.testHooks?.afterSemanticEnqueue?.({ branchId, generationId: enqueued.generationId });
+    } catch (error) {
+      const reason = String((error as Error).message ?? error);
+      const staging = store.db.prepare("SELECT id FROM embedding_generations WHERE snapshot_id=? AND scope_key=? AND status='staging' ORDER BY created_at DESC LIMIT 1").get(snapshot.id, `repo:${repoId}`) as { id: string } | undefined;
+      // Preserve staging generations and their ready jobs. A later index run
+      // resumes them instead of throwing away minutes of local model work.
+      report.semantic = { ...report.semantic, status: "disabled", generationId: staging?.id ?? null, reason };
+    }
   };
 
   let rebuildTransactionOpen = false;
@@ -1076,6 +1567,40 @@ export async function indexRepo(input: {
   const previousMmapSize = Number(store.db.pragma("mmap_size", { simple: true }));
   const rebuildCacheSize = -262_144; // 256 MiB, expressed as KiB by SQLite.
   const rebuildMmapSize = 1_073_741_824; // 1 GiB of read-only mapped pages.
+  let sqliteTuningRestored = false;
+  const restoreSqliteTuning = () => {
+    if (sqliteTuningRestored) return;
+    store.db.pragma(`wal_autocheckpoint = ${previousWalAutoCheckpoint}`);
+    store.db.pragma(`cache_size = ${previousCacheSize}`);
+    store.db.pragma(`mmap_size = ${previousMmapSize}`);
+    sqliteTuningRestored = true;
+  };
+  const truncateWal = async (): Promise<void> => {
+    const maintenanceStartedAt = performance.now();
+    const previousBusyTimeout = Number(store.db.pragma("busy_timeout", { simple: true }));
+    let checkpoint = { busy: 0, log: 0, checkpointed: 0 };
+    try {
+      store.db.pragma("busy_timeout = 250");
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        report.maintenance.checkpointAttempts = attempt;
+        const rows = store.db.pragma("wal_checkpoint(TRUNCATE)") as Array<{
+          busy: number;
+          log: number;
+          checkpointed: number;
+        }>;
+        checkpoint = rows[0] ?? { busy: 0, log: 0, checkpointed: 0 };
+        if (checkpoint.busy === 0) break;
+        if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, attempt * 25));
+      }
+    } finally {
+      store.db.pragma(`busy_timeout = ${previousBusyTimeout}`);
+    }
+    report.maintenance.checkpointMs += performance.now() - maintenanceStartedAt;
+    report.maintenance.checkpoint = checkpoint;
+    report.maintenance.checkpointWarning = checkpoint.busy > 0
+      ? `WAL_CHECKPOINT_BUSY after ${report.maintenance.checkpointAttempts} attempts; ${checkpoint.log - checkpoint.checkpointed} WAL frame(s) remain`
+      : null;
+  };
   report.maintenance.walAutoCheckpointPages = previousWalAutoCheckpoint;
   report.maintenance.sqliteTuning = {
     previousCacheSize,
@@ -1102,6 +1627,20 @@ export async function indexRepo(input: {
     // Collect the file list first so progress has a total for a % bar.
     stageStart("scan");
     const discovery = discoverRepoCoverage(scanRoot);
+    // coverage_records is the current repository corpus, not an append-only
+    // history table. Paths that disappear from discovery (deleted, newly
+    // ignored, or newly classified as package-manager cache) must leave the
+    // aggregate immediately; otherwise every later search reports stale file
+    // totals and a rebuild can appear to have indexed files it deliberately
+    // removed. Revision history remains in immutable snapshot/source tables.
+    const currentCoveragePaths = new Set(discovery.files.map((file) => file.relativePath));
+    const obsoleteCoveragePaths = (store.db.prepare(
+      "SELECT file_path AS filePath FROM coverage_records WHERE repo_id=?",
+    ).all(repoId) as Array<{ filePath: string }>)
+      .map((row) => row.filePath)
+      .filter((filePath) => !currentCoveragePaths.has(filePath));
+    const deleteCoverage = store.db.prepare("DELETE FROM coverage_records WHERE repo_id=? AND file_path=?");
+    for (const filePath of obsoleteCoveragePaths) deleteCoverage.run(repoId, filePath);
     const coverageUpsert = store.db.prepare(`INSERT INTO coverage_records(repo_id,file_path,git_state,coverage_status,reason_code,classification,byte_size,reason,parser_status,parser_language,parser_version,parser_error,updated_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(repo_id,file_path) DO UPDATE SET git_state=excluded.git_state,coverage_status=excluded.coverage_status,reason_code=excluded.reason_code,classification=excluded.classification,byte_size=excluded.byte_size,reason=excluded.reason,parser_status=excluded.parser_status,parser_language=excluded.parser_language,parser_version=excluded.parser_version,parser_error=excluded.parser_error,updated_at=excluded.updated_at`);
     for (const file of discovery.files) {
@@ -1128,6 +1667,20 @@ export async function indexRepo(input: {
     // Per-language totals so UIs can render one bar per language ("other" =
     // walked but non-source: json/md/config — still checkpointed, so counted).
     const langOf = (relPath: string) => langForExtension(relPath) ?? "other";
+    const updateSkippedCoverage = store.db.prepare(
+      "UPDATE coverage_records SET parser_status=?,parser_language=?,parser_version=?,parser_error=NULL,updated_at=? WHERE repo_id=? AND file_path=?",
+    );
+    const markSkippedCoverage = (relPath: string): void => {
+      const parserLanguage = langForExtension(relPath);
+      updateSkippedCoverage.run(
+        parserLanguage ? "parsed" : "unsupported",
+        parserLanguage,
+        parserLanguage ? KNOWLEDGE_PARSER_VERSION : null,
+        new Date().toISOString(),
+        repoId,
+        relPath,
+      );
+    };
     const langTotals: Record<string, number> = {};
     for (const f of files) langTotals[langOf(f.relPath)] = (langTotals[langOf(f.relPath)] ?? 0) + 1;
     input.onProgress?.({ phase: "scan", done: 0, total: files.length, file: "", langs: langTotals });
@@ -1254,7 +1807,7 @@ export async function indexRepo(input: {
           "SELECT id FROM file_facts WHERE repo_id=? AND file_path=? AND content_hash=? AND language=? AND parser_version=? LIMIT 1",
         ).get(repoId, file.relPath, prev.content_hash, langOf(file.relPath), KNOWLEDGE_PARSER_VERSION) as { id: string } | undefined;
         if (fact) targetManifest.set(file.relPath, fact.id);
-        store.db.prepare("UPDATE coverage_records SET parser_status='parsed',parser_language=?,parser_version=?,parser_error=NULL,updated_at=? WHERE repo_id=? AND file_path=?").run(langOf(file.relPath), KNOWLEDGE_PARSER_VERSION, new Date().toISOString(), repoId, file.relPath);
+        markSkippedCoverage(file.relPath);
         report.skipped += 1;
         continue;
       }
@@ -1275,7 +1828,7 @@ export async function indexRepo(input: {
           mtimeMs: file.mtimeMs, sizeBytes: file.sizeBytes, contentHash,
           status: prev.status as "indexed" | "deleted" | "error" | "skipped",
         });
-        store.db.prepare("UPDATE coverage_records SET parser_status='parsed',parser_language=?,parser_version=?,parser_error=NULL,updated_at=? WHERE repo_id=? AND file_path=?").run(langOf(file.relPath), KNOWLEDGE_PARSER_VERSION, new Date().toISOString(), repoId, file.relPath);
+        markSkippedCoverage(file.relPath);
         report.skipped += 1;
         continue;
       }
@@ -1313,8 +1866,7 @@ export async function indexRepo(input: {
         retryByFile.set(file.relPath, { file, names: r.retryNames, extracted: r.extracted });
       }
       if (r.fileFactId) targetManifest.set(file.relPath, r.fileFactId);
-      for (const ep of r.endpoints) {
-        endpointsFound += 1;
+      for (const ep of r.endpoints.filter((endpoint) => endpoint.outcome.status === "persisted")) {
         emit?.({ phase: "discovery", kind: "endpoint", title: ep.key, file: file.relPath });
       }
       if (done % metricEvery === 0) {
@@ -1438,6 +1990,7 @@ export async function indexRepo(input: {
     // service graph for repos that have proto definitions (e.g. flyover proto monorepo,
     // FPMS's @snsoft/*-grpc packages in node_modules).
     const protoModules = new Set<string>();
+    let protoManifestChanged = false;
     for (const admittedFile of files) {
       if (!admittedFile.relPath.endsWith(".proto")) continue;
       const file = { relPath: admittedFile.relPath, absPath: admittedFile.absPath };
@@ -1447,10 +2000,35 @@ export async function indexRepo(input: {
       } catch { continue; }
       const eps = parseProtoEndpoints(protoSource, file.relPath);
       if (eps.length === 0) continue;
+      const packageName = protoPackageName(protoSource);
+      let protoFileFactId = targetManifest.get(file.relPath);
+      if (!protoFileFactId) {
+        const contentHash = sha256(protoSource);
+        protoFileFactId = factStore.upsertFileFact({
+          repoId,
+          filePath: file.relPath,
+          contentHash,
+          language: "proto",
+          parserVersion: KNOWLEDGE_PARSER_VERSION,
+          exportsHash: sha256(JSON.stringify(eps.map((ep) => [packageName, ep.service, ep.method]))),
+          symbols: [],
+          imports: [],
+          unresolvedReferences: [],
+          endpoints: eps.map((ep) => ({
+            endpointKey: grpcEndpointKey(ep.service, ep.method, packageName ?? undefined),
+            protocol: "grpc",
+            service: ep.service,
+            method: ep.method,
+          })),
+          logSites: [],
+        });
+        targetManifest.set(file.relPath, protoFileFactId);
+        protoManifestChanged = true;
+      }
 
       for (const ep of eps) protoModules.add(ep.module);
 
-      const tx = store.db.transaction(() => {
+      const tx = store.db.transaction((): ParsedEdge[] => {
         const svcId = store.upsertNode({
           nodeType: "service",
           identityKey: `grpc-module::${repoId}::${eps[0].module}`,
@@ -1461,30 +2039,147 @@ export async function indexRepo(input: {
 
         const edges: ParsedEdge[] = [];
         for (const ep of eps) {
-          const endpointId = store.upsertNode({
-            nodeType: "endpoint",
-            identityKey: grpcEndpointKey(ep.service, ep.method),
-            repoId: null,
-            title: `${ep.service}.${ep.method}`,
-            meta: { protocol: "grpc", service: ep.service, method: ep.method, source: ep.filePath },
+          const endpointId = upsertGrpcDeclarationEndpointOrRecordAmbiguity({
+            store,
+            repoId,
+            branchId,
+            revisionId: snapshot.id,
+            filePath: file.relPath,
+            startLine: ep.startLine,
+            serviceNodeId: svcId,
+            packageName,
+            service: ep.service,
+            method: ep.method,
+            title: `gRPC ${packageName ? `${packageName}.` : ""}${ep.service}.${ep.method}`,
           });
+          if (!endpointId) continue;
           edges.push({
             src: endpointId, dst: svcId,
-            edgeType: "handles", origin: "parser", method: "EXTRACTED", branchless: true,
+            edgeType: "declares", origin: "parser", method: "EXTRACTED", branchless: true,
+            provenance: { filePath: file.relPath, startLine: ep.startLine },
           });
         }
         store.replaceFileEdges({
           repoId, branchId, filePath: file.relPath, edges,
         });
+        return edges;
       });
-      tx();
-      endpointsFound += eps.length;
+      const declarationEdges = tx();
+      if (!snapshotAlreadyReady) {
+        const fileFactId = protoFileFactId;
+        if (fileFactId) {
+          const existingRows = store.db.prepare(
+            `SELECT r.src_identity_key AS srcIdentityKey,
+                    r.dst_identity_key AS dstIdentityKey,
+                    r.raw_target AS rawTarget,
+                    r.edge_type AS edgeType,
+                    r.method,
+                    r.confidence,
+                    r.provenance
+               FROM snapshot_resolution_refs ref
+               JOIN resolved_edges r ON r.resolution_set_id=ref.resolution_set_id
+              WHERE ref.snapshot_id=? AND ref.file_path=?
+              ORDER BY r.edge_type,r.src_identity_key,r.dst_identity_key,r.id`,
+          ).all(snapshot.id, file.relPath) as Array<{
+            srcIdentityKey: string;
+            dstIdentityKey: string | null;
+            rawTarget: string | null;
+            edgeType: string;
+            method: string;
+            confidence: number;
+            provenance: string;
+          }>;
+          const resolvedEdges = [
+            ...existingRows.map((edge) => ({
+              srcIdentityKey: edge.srcIdentityKey,
+              ...(edge.dstIdentityKey ? { dstIdentityKey: edge.dstIdentityKey } : {}),
+              ...(edge.rawTarget ? { rawTarget: edge.rawTarget } : {}),
+              edgeType: edge.edgeType,
+              method: edge.method,
+              confidence: edge.confidence,
+              provenance: JSON.parse(edge.provenance || "{}") as Record<string, unknown>,
+            })),
+            ...declarationEdges.flatMap((edge) => {
+              const srcIdentityKey = store.getNode(edge.src)?.identity_key;
+              const dstIdentityKey = edge.dst ? store.getNode(edge.dst)?.identity_key : null;
+              if (!srcIdentityKey || !dstIdentityKey) return [];
+              return [{
+                srcIdentityKey,
+                dstIdentityKey,
+                edgeType: edge.edgeType,
+                method: edge.method,
+                confidence: edge.confidence ?? 1,
+                provenance: { ...edge.provenance, filePath: file.relPath },
+              }];
+            }),
+          ];
+          const contextFingerprint = createHash("sha256")
+            .update(JSON.stringify({ fileFactId, resolverVersion: KNOWLEDGE_RESOLVER_VERSION, edges: resolvedEdges }))
+            .digest("hex");
+          const resolutions = new ResolutionStore(store);
+          const set = resolutions.replaceResolutionSet({
+            fileFactId,
+            contextFingerprint,
+            resolverVersion: KNOWLEDGE_RESOLVER_VERSION,
+            edges: resolvedEdges,
+          });
+          resolutions.attachSnapshotResolution({
+            snapshotId: snapshot.id,
+            filePath: file.relPath,
+            resolutionSetId: set.id,
+          });
+        }
+      }
       emit?.({
         phase: "discovery", kind: "service",
         title: `gRPC ${eps[0].module} (${eps.length} rpc${eps.length === 1 ? "" : "s"})`,
         file: file.relPath,
       });
     }
+    if (!snapshotAlreadyReady && protoManifestChanged) {
+      const updatedOverlayEntries: SnapshotOverlayEntry[] = [];
+      for (const [path, fileFactId] of targetManifest) {
+        const baseFactId = baseManifest.get(path);
+        if (!baseFactId) updatedOverlayEntries.push({ op: "add", path, fileFactId });
+        else if (baseFactId !== fileFactId) updatedOverlayEntries.push({ op: "modify", path, fileFactId });
+      }
+      for (const path of baseManifest.keys()) {
+        if (!targetManifest.has(path)) updatedOverlayEntries.push({ op: "delete", path, fileFactId: null });
+      }
+      factStore.replaceOverlay(snapshot.id, updatedOverlayEntries);
+      factStore.materializeManifest(snapshot.id);
+      factStore.assertManifestMatches(snapshot.id, targetManifest);
+    }
+    // Recompute rather than increment endpoint ambiguity debt. The parser and
+    // proto lanes can run in different orders on a fresh versus already-ready
+    // snapshot; coverage must describe the final evidence, not write order.
+    store.db.prepare(`
+      UPDATE coverage_records AS coverage
+         SET unresolved_references =
+           COALESCE((
+             SELECT urc.total - urc.resolved
+               FROM unresolved_reference_coverage urc
+              WHERE urc.repo_id=coverage.repo_id
+                AND urc.branch_id=?
+                AND urc.file_path=coverage.file_path
+                AND urc.revision_id=?
+           ), 0) + COALESCE((
+             SELECT COUNT(*) FROM (
+               SELECT DISTINCT reason,line,specifier,receiver,callee
+                 FROM external_calls calls
+                WHERE calls.repo_id=coverage.repo_id
+                  AND calls.branch_id=?
+                  AND calls.file_path=coverage.file_path
+                  AND calls.reason IN (
+                    'ambiguous-grpc-endpoint',
+                    'ambiguous-grpc-handler',
+                    'ambiguous-grpc-declaration'
+                  )
+             )
+           ), 0),
+             updated_at=?
+       WHERE coverage.repo_id=?`,
+    ).run(branchId, snapshot.id, branchId, new Date().toISOString(), repoId);
     stageDone("proto");
     stageStart("link");
 
@@ -1731,19 +2426,82 @@ export async function indexRepo(input: {
     stageDone("git", gitGraph.commits > 0 ? `${gitGraph.commits} commits` : undefined);
     emitMetric();
 
-    store.recordBranchIndexed({
+    // Reconcile every file in the published revision, including unchanged
+    // files skipped by an incremental run. Older builds counted duplicate
+    // parser-lane misses in the aggregate table; a no-change index must still
+    // repair that historical drift without forcing a full rebuild.
+    const referenceCoverageUpdatedAt = new Date().toISOString();
+    store.db.transaction(() => {
+      store.db.prepare(`
+        UPDATE unresolved_reference_coverage AS coverage
+        SET total = resolved + (
+              SELECT COUNT(*)
+              FROM unresolved_reference_items AS item
+              WHERE item.repo_id=coverage.repo_id
+                AND item.branch_id=coverage.branch_id
+                AND item.revision_id=coverage.revision_id
+                AND item.file_path=coverage.file_path
+            ),
+            updated_at=?
+        WHERE coverage.repo_id=? AND coverage.branch_id=? AND coverage.revision_id=?
+      `).run(referenceCoverageUpdatedAt, repoId, branchId, snapshot.id);
+      const aggregate = store.db.prepare(`
+        SELECT COALESCE(SUM(resolved),0) AS resolved, COALESCE(SUM(total),0) AS total
+        FROM unresolved_reference_coverage
+        WHERE repo_id=? AND branch_id=? AND revision_id=?
+      `).get(repoId, branchId, snapshot.id) as { resolved: number; total: number };
+      store.db.prepare(`
+        INSERT INTO coverage_layers(repo_id, branch_id, layer, resolved, total, updated_at)
+        VALUES (?, ?, 'references', ?, ?, ?)
+        ON CONFLICT(repo_id, branch_id, layer) DO UPDATE SET
+          resolved=excluded.resolved, total=excluded.total, updated_at=excluded.updated_at
+      `).run(repoId, branchId, aggregate.resolved, aggregate.total, referenceCoverageUpdatedAt);
+    })();
+
+    // Derive the public receipt from the still-building immutable snapshot.
+    // If receipt construction fails, publication never flips the revision to
+    // ready, so readers cannot observe a half-published endpoint inventory.
+    const publicationRevision = {
+      repoId,
+      branch: git.branch,
       branchId,
-      commit: report.indexedCommit,
+      commitSha: report.indexedCommit ?? git.commit ?? "(worktree)",
+      snapshotId: snapshot.id,
+      worktreeFingerprint: report.worktreeFingerprint,
+      trust: report.worktreeState === "clean" && Boolean(git.commit)
+        ? "exact_commit" as const
+        : "exact_worktree" as const,
+    };
+    affectedByFiles.materializeEndpointOccurrences(store, {
+      snapshotId: snapshot.id,
+      repoId,
+      commitSha: publicationRevision.commitSha,
+    });
+    const endpointPage = affectedByFiles.endpointInventoryPage(store, {
+      repoId,
+      scope: {
+        repoId,
+        branchId,
+        revisionId: snapshot.id,
+        revision: publicationRevision,
+      },
+      limit: 500,
+    });
+    report.endpointPublication = endpointPage.publication;
+    input.testHooks?.beforeSnapshotPublish?.({ branchId, snapshotId: snapshot.id });
+    report.revisionTruth = topology.publishIndexedSnapshot({
+      branchId,
+      snapshotId: snapshot.id,
+      headCommit: git.commit,
+      indexedCommit: report.indexedCommit,
       worktreeState: report.worktreeState,
       worktreeFingerprint: report.worktreeFingerprint,
       dirtyFiles: report.dirtyFiles,
       parserVersion: report.parserVersion,
       resolverVersion: KNOWLEDGE_RESOLVER_VERSION,
-      schemaVersion: report.schemaVersion,
+      schemaVersion: SCHEMA_VERSION,
       staleReason: report.staleReason,
     });
-    if (!snapshotAlreadyReady) topology.markSnapshotReady(snapshot.id);
-    topology.publishSnapshot({ branchId, snapshotId: snapshot.id, headCommit: git.commit });
     snapshotPublished = true;
     // Success: NOW the branch is trustworthy — promote it to live and flip the
     // previously-indexed branch of THIS checkout to snapshot (design review
@@ -1761,6 +2519,22 @@ export async function indexRepo(input: {
     if (rebuildTransactionOpen) {
       store.db.exec("COMMIT");
       rebuildTransactionOpen = false;
+    }
+    // Graph publication is a complete durability boundary. Restore normal WAL
+    // behavior and fold the graph transaction before the optional local model
+    // starts; a multi-hour semantic backfill must never retain the rebuild WAL.
+    restoreSqliteTuning();
+    if (input.semantic && input.semantic.enabled !== false) {
+      input.testHooks?.beforeMaintenance?.({ phase: "before_semantic_checkpoint" });
+      await truncateWal();
+      stageStart("semantic");
+      runSemanticIndex();
+      stageDone(
+        "semantic",
+        report.semantic.status === "active"
+          ? `${report.semantic.chunks} chunks active`
+          : `${report.semantic.chunks} chunks · ${report.semantic.status}`,
+      );
     }
     const rebuildHotIndexes = [
       "idx_edges_parser_branch_file",
@@ -1790,35 +2564,8 @@ export async function indexRepo(input: {
     maintenanceStartedAt = performance.now();
     store.db.pragma("optimize");
     report.maintenance.optimizeMs = performance.now() - maintenanceStartedAt;
-    maintenanceStartedAt = performance.now();
-    const previousBusyTimeout = Number(store.db.pragma("busy_timeout", { simple: true }));
-    let checkpoint = { busy: 0, log: 0, checkpointed: 0 };
-    try {
-      // A long-lived MCP reader can prevent TRUNCATE. Bound each wait so index
-      // completion never stalls for the normal 5s busy timeout three times,
-      // but retry transient readers before returning an observable warning.
-      store.db.pragma("busy_timeout = 250");
-      for (let attempt = 1; attempt <= 3; attempt += 1) {
-        report.maintenance.checkpointAttempts = attempt;
-        const rows = store.db.pragma("wal_checkpoint(TRUNCATE)") as Array<{
-          busy: number;
-          log: number;
-          checkpointed: number;
-        }>;
-        checkpoint = rows[0] ?? { busy: 0, log: 0, checkpointed: 0 };
-        if (checkpoint.busy === 0) break;
-        if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, attempt * 25));
-      }
-    } finally {
-      store.db.pragma(`busy_timeout = ${previousBusyTimeout}`);
-    }
-    report.maintenance.checkpointMs = performance.now() - maintenanceStartedAt;
-    report.maintenance.checkpoint = checkpoint;
-    if (checkpoint.busy > 0) {
-      report.maintenance.checkpointWarning =
-        `WAL_CHECKPOINT_BUSY after ${report.maintenance.checkpointAttempts} attempts; ` +
-        `${checkpoint.log - checkpoint.checkpointed} WAL frame(s) remain`;
-    }
+    input.testHooks?.beforeMaintenance?.({ phase: "final_checkpoint" });
+    await truncateWal();
     report.timings.totalMs = Date.now() - runStartedAt;
     return report;
   } catch (error) {
@@ -1831,9 +2578,7 @@ export async function indexRepo(input: {
     }
     throw error;
   } finally {
-    store.db.pragma(`wal_autocheckpoint = ${previousWalAutoCheckpoint}`);
-    store.db.pragma(`cache_size = ${previousCacheSize}`);
-    store.db.pragma(`mmap_size = ${previousMmapSize}`);
+    restoreSqliteTuning();
     store.releaseIndexMarker(branchId);
     lock.release();
   }

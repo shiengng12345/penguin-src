@@ -220,6 +220,13 @@ pub fn run() {
                 app.set_menu(menu)?;
             }
             packages::start_package_watcher(app.handle().clone());
+            // Install one verified, immutable CLI+MCP generation before the
+            // background warmup and launcher migration can resolve it.
+            knowledge::sync_knowledge_runtime_on_startup(app.handle().clone());
+            // Semantic generations are durable SQLite work. Wake the
+            // short-lived worker after runtime activation, but never hold up
+            // window creation while embeddings are generated.
+            knowledge::wake_semantic_worker_on_startup(app.handle().clone());
             // Warm the knowledge CLI (node resolution + cold-start + DB) in the
             // background so first entry into the Wiki isn't slow (perf).
             knowledge::prewarm(app.handle().clone());
@@ -246,7 +253,13 @@ pub fn run() {
             knowledge::knowledge_query_once,
             knowledge::knowledge_query_canonical,
             knowledge::knowledge_query_cancel,
+            knowledge::knowledge_semantic_status,
+            knowledge::knowledge_semantic_control,
             knowledge::knowledge_reindex,
+            knowledge::knowledge_corpus_start,
+            knowledge::knowledge_corpus_status,
+            knowledge::knowledge_corpus_control,
+            knowledge::knowledge_corpus_reconcile,
             knowledge::knowledge_db_status,
             knowledge::knowledge_cli_status,
             knowledge::knowledge_cli_setup,
@@ -254,6 +267,9 @@ pub fn run() {
             knowledge::knowledge_agent_hook_setup,
             knowledge::knowledge_watch_toggle,
             knowledge::knowledge_watch_status,
+            knowledge::knowledge_runtime_sync,
+            knowledge::knowledge_runtime_health,
+            knowledge::knowledge_runtime_restart_required,
             packages::ensure_packages_dir,
             packages::get_packages_dir,
             packages::list_installed_packages,

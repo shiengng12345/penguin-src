@@ -1,12 +1,36 @@
 import { readFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import type { KnowledgeStore } from "./store.js";
-import type { RevisionContext } from "./revision.js";
+import { resolveRevisionContext, type RevisionContext } from "./revision.js";
 import { legacyRevisionScope } from "./revision-scope.js";
-import { openRevisionView } from "./revision-view.js";
+import { openRevisionView, type RevisionEdgeRow, type RevisionSymbolRow } from "./revision-view.js";
+import { assertTargetInScope, resolveTarget } from "./target-resolution.js";
+import { HmacOperationCursorCodec, resolveLocalCursorSecret } from "./search-cursor.js";
+import {
+  KnowledgeContractError,
+  classifyEndpointProvenanceKind,
+  compareEndpointOccurrences,
+  type EndpointOccurrence,
+  type EndpointProvenanceKind,
+  type EndpointPublicationReceipt,
+} from "@penguin/knowledge-contracts";
+import {
+  graphEdgeEvidence,
+  isExecutionEdge,
+  isReferenceEdge,
+  unresolvedGraphEdgeEvidence,
+} from "./graph-evidence.js";
+import type { GraphEdgeEvidenceEnvelope } from "@penguin/knowledge-contracts";
+import { SCHEMA_VERSION } from "./schema.js";
+import { readGitStateDefault, type GitState } from "./query-scope.js";
+import { assertRuntimeIndexCompatible, runtimeIndexCompatibility, type RuntimeIndexCompatibility } from "./runtime-compatibility.js";
 
 export type EvidenceCompleteness = "complete" | "lower_bound" | "partial" | "unknown";
 export type EvidenceProofStatus = "proven" | "not_proven" | "candidate" | "unresolved";
+
+const FRAMEWORK_EDGE_TYPES = ["injects", "provides", "implements", "dispatches_to"] as const;
+const IMPACT_EDGE_TYPES = ["calls", ...FRAMEWORK_EDGE_TYPES] as const;
+const DEPENDENCY_EDGE_TYPES = ["calls", "references", ...FRAMEWORK_EDGE_TYPES] as const;
 
 export interface EvidenceEnvelope {
   scope: Record<string, unknown> | null;
@@ -18,19 +42,21 @@ export interface EvidenceEnvelope {
     dirtyFileCount: number | null;
   };
   coverage: {
-    discovered: number;
-    admitted: number;
-    excluded: number;
-    failed: number;
-    stale: number;
-    unresolvedReferences: number;
+    status: "complete" | "partial" | "unknown";
+    discovered: number | null;
+    admitted: number | null;
+    excluded: number | null;
+    failed: number | null;
+    stale: number | null;
+    unresolvedReferences: number | null;
   };
   completeness: EvidenceCompleteness;
   proofStatus: EvidenceProofStatus;
-  candidateCount: number;
+  candidateCount: number | null;
   returnedCount: number;
   truncated: boolean;
   cursor: string | null;
+  gaps: string[];
 }
 
 export interface UnresolvedReferenceCoverageRow {
@@ -80,15 +106,73 @@ function coverageForEvidence(store: KnowledgeStore, repoId?: string, branchId?: 
   const row = (repoId
     ? store.db.prepare("SELECT COUNT(*) AS discovered, COALESCE(SUM(coverage_status='admitted'),0) AS admitted, COALESCE(SUM(coverage_status<>'admitted'),0) AS excluded, COALESCE(SUM(coverage_status='failed'),0) AS failed, COALESCE(SUM(coverage_status='stale'),0) AS stale FROM coverage_records WHERE repo_id=?").get(repoId)
     : store.db.prepare("SELECT COUNT(*) AS discovered, COALESCE(SUM(coverage_status='admitted'),0) AS admitted, COALESCE(SUM(coverage_status<>'admitted'),0) AS excluded, COALESCE(SUM(coverage_status='failed'),0) AS failed, COALESCE(SUM(coverage_status='stale'),0) AS stale FROM coverage_records").get()) as { discovered: number; admitted: number; excluded: number; failed: number; stale: number };
-  const unresolved = readUnresolvedReferenceCoverage(store, { repoId, branchId, revisionId })
-    .reduce((sum, item) => sum + Math.max(0, Number(item.unresolved) || 0), 0);
-  return {
-    discovered: Number(row?.discovered ?? 0),
-    admitted: Number(row?.admitted ?? 0),
-    excluded: Number(row?.excluded ?? 0),
-    failed: Number(row?.failed ?? 0),
-    stale: Number(row?.stale ?? 0),
+  const unresolvedRows = readUnresolvedReferenceCoverage(store, { repoId, branchId, revisionId });
+  let unresolved: number | null = null;
+  const hasCoverageRows = Number(row?.discovered ?? 0) > 0;
+  try {
+    const unresolvedWhere: string[] = [];
+    const unresolvedParams: string[] = [];
+    if (repoId !== undefined) { unresolvedWhere.push("repo_id=?"); unresolvedParams.push(repoId); }
+    if (branchId !== undefined) { unresolvedWhere.push("branch_id=?"); unresolvedParams.push(branchId); }
+    if (revisionId !== undefined) { unresolvedWhere.push("revision_id=?"); unresolvedParams.push(revisionId); }
+    const concrete = store.db.prepare(
+      `SELECT COUNT(*) AS count FROM unresolved_reference_items${unresolvedWhere.length ? ` WHERE ${unresolvedWhere.join(" AND ")}` : ""}`,
+    ).get(...unresolvedParams) as { count: number };
+    // The concrete work queue is deduplicated and therefore authoritative.
+    // Keep unknown coverage as null, but do not let aggregate extraction-lane
+    // duplicates inflate a known repository's public evidence count.
+    // A zero-sized concrete queue only proves "zero unresolved" when the
+    // revision also has an explicit reference-coverage record. Source-file
+    // coverage alone cannot turn an unknown reference pass into a verified
+    // negative result.
+    if (concrete.count > 0) {
+      unresolved = Number(concrete.count);
+    } else if (repoId && branchId) {
+      const layer = store.db.prepare(
+        "SELECT total - resolved AS n FROM coverage_layers WHERE repo_id=? AND branch_id=? AND layer='references'",
+      ).get(repoId, branchId) as { n: number } | undefined;
+      if (layer) unresolved = Math.max(0, Number(layer.n) || 0);
+      else if (unresolvedRows.length > 0) {
+        // Compatibility for indexes written before the current coverage layer.
+        unresolved = unresolvedRows.reduce((sum, item) => sum + Math.max(0, Number(item.unresolved) || 0), 0);
+      }
+    } else if (unresolvedRows.length > 0) {
+      unresolved = unresolvedRows.reduce((sum, item) => sum + Math.max(0, Number(item.unresolved) || 0), 0);
+    }
+  } catch {
+    unresolved = null;
+  }
+  if (unresolved === null) {
+    if (unresolvedRows.length > 0) {
+      unresolved = unresolvedRows.reduce((sum, item) => sum + Math.max(0, Number(item.unresolved) || 0), 0);
+    } else if (repoId && branchId) {
+      try {
+        const layer = store.db.prepare(
+          "SELECT total - resolved AS n FROM coverage_layers WHERE repo_id=? AND branch_id=? AND layer='references'",
+        ).get(repoId, branchId) as { n: number } | undefined;
+        if (layer) unresolved = Math.max(0, Number(layer.n) || 0);
+      } catch {
+        unresolved = null;
+      }
+    }
+  }
+  const coverage = {
+    discovered: hasCoverageRows ? Number(row.discovered) : null,
+    admitted: hasCoverageRows ? Number(row.admitted) : null,
+    excluded: hasCoverageRows ? Number(row.excluded) : null,
+    failed: hasCoverageRows ? Number(row.failed) : null,
+    stale: hasCoverageRows ? Number(row.stale) : null,
     unresolvedReferences: unresolved,
+  };
+  const hasGap = !hasCoverageRows
+    || (coverage.excluded ?? 0) > 0
+    || (coverage.failed ?? 0) > 0
+    || (coverage.stale ?? 0) > 0
+    || coverage.unresolvedReferences === null
+    || coverage.unresolvedReferences > 0;
+  return {
+    status: !hasCoverageRows ? "unknown" : hasGap ? "partial" : "complete",
+    ...coverage,
   };
 }
 
@@ -101,7 +185,7 @@ export function buildEvidenceEnvelope(
     scope?: Record<string, unknown> | null;
     completeness: EvidenceCompleteness;
     proofStatus: EvidenceProofStatus;
-    candidateCount: number;
+    candidateCount: number | null;
     returnedCount: number;
     truncated?: boolean;
     cursor?: string | null;
@@ -115,7 +199,13 @@ export function buildEvidenceEnvelope(
     scope: options.scope ?? (options.repoId || branchId ? { ...(options.repoId ? { repoId: options.repoId } : {}), ...(branchId ? { branchId } : {}) } : null),
     revision: options.revision ?? null,
     freshness: trust ? {
-      status: trust.stale ? "stale" : trust.worktreeState === "dirty" ? "dirty" : trust.worktreeState === "unknown" ? "unknown" : "fresh",
+      status: trust.stale || trust.alignment === "head_advanced"
+        ? "stale"
+        : trust.alignment === "dirty"
+          ? "dirty"
+          : trust.alignment === "aligned"
+            ? "fresh"
+            : "unknown",
       indexedCommit: trust.indexedCommit,
       headCommit: trust.headCommit,
       dirtyFileCount: trust.dirtyFiles.length,
@@ -123,10 +213,101 @@ export function buildEvidenceEnvelope(
     coverage,
     completeness: options.completeness,
     proofStatus: options.proofStatus,
-    candidateCount: Math.max(0, options.candidateCount),
+    candidateCount: options.candidateCount == null ? null : Math.max(0, options.candidateCount),
     returnedCount: Math.max(0, options.returnedCount),
     truncated: options.truncated === true,
     cursor: options.cursor ?? null,
+    gaps: [...new Set([
+      ...(coverage.status === "unknown" ? ["coverage_records_empty"] : []),
+      ...(coverage.unresolvedReferences === null ? ["unresolved_reference_coverage_unavailable"] : []),
+      ...(trust ? [] : ["revision_provenance_unavailable"]),
+      ...(options.coverageGaps ?? []),
+    ])],
+  };
+}
+
+export interface KnowledgeListEnvelopeOptions {
+  repoId?: string;
+  branchId?: string;
+  revision?: RevisionContext;
+  scope?: Record<string, unknown> | null;
+  candidateCount?: number | null;
+  remainingCount?: number | null;
+  totalIsExact?: boolean;
+  truncated?: boolean;
+  nextCursor?: string | null;
+  completeness?: EvidenceCompleteness;
+  proofStatus?: EvidenceProofStatus;
+  gaps?: string[];
+}
+
+function listRevision(store: KnowledgeStore, repoId?: string, branchId?: string): RevisionContext | undefined {
+  if (!repoId) return undefined;
+  const branch = (branchId
+    ? store.db.prepare("SELECT id,name FROM branches WHERE id=? AND repo_id=? AND status<>'gone'").get(branchId, repoId)
+    : store.db.prepare("SELECT id,name FROM branches WHERE repo_id=? AND status='live' ORDER BY last_indexed_at DESC,id LIMIT 1").get(repoId)) as { id: string; name: string } | undefined;
+  if (!branch) return undefined;
+  const resolved = resolveRevisionContext(store, { repoId, branch: branch.name });
+  return resolved.status === "resolved" ? resolved.context : undefined;
+}
+
+/** Build one additive, backwards-compatible list contract for CLI and MCP. */
+export function buildKnowledgeListEnvelope<T>(
+  store: KnowledgeStore,
+  items: T[],
+  options: KnowledgeListEnvelopeOptions = {},
+): {
+  items: T[];
+  scope: Record<string, unknown> | null;
+  revision: RevisionContext | null;
+  freshness: EvidenceEnvelope["freshness"];
+  coverage: EvidenceEnvelope["coverage"];
+  completeness: EvidenceCompleteness;
+  proofStatus: EvidenceProofStatus;
+  candidateCount: number | null;
+  returnedCount: number;
+  remainingCount: number | null;
+  totalIsExact: boolean;
+  truncated: boolean;
+  nextCursor: string | null;
+  gaps: string[];
+  evidence: EvidenceEnvelope;
+} {
+  const revision = options.revision ?? listRevision(store, options.repoId, options.branchId);
+  const candidateCount = options.candidateCount === undefined ? items.length : options.candidateCount;
+  const totalIsExact = options.totalIsExact ?? candidateCount !== null;
+  const completeness = options.completeness
+    ?? (items.length > 0 ? "lower_bound" : totalIsExact ? "partial" : "unknown");
+  const proofStatus = options.proofStatus ?? (items.length > 0 ? "candidate" : "not_proven");
+  const evidence = buildEvidenceEnvelope(store, {
+    repoId: options.repoId,
+    branchId: options.branchId,
+    revision,
+    scope: options.scope,
+    completeness,
+    proofStatus,
+    candidateCount,
+    returnedCount: items.length,
+    truncated: options.truncated,
+    cursor: options.nextCursor,
+    coverageGaps: options.gaps,
+  });
+  return {
+    items,
+    scope: evidence.scope,
+    revision: evidence.revision,
+    freshness: evidence.freshness,
+    coverage: evidence.coverage,
+    completeness,
+    proofStatus,
+    candidateCount,
+    returnedCount: items.length,
+    remainingCount: options.remainingCount ?? (candidateCount == null ? null : Math.max(0, candidateCount - items.length)),
+    totalIsExact,
+    truncated: options.truncated === true,
+    nextCursor: options.nextCursor ?? null,
+    gaps: evidence.gaps,
+    evidence,
   };
 }
 
@@ -147,6 +328,7 @@ function publicEvidenceFields(
   options: Parameters<typeof buildEvidenceEnvelope>[1],
 ): Record<string, unknown> {
   const evidence = buildEvidenceEnvelope(store, options);
+  const existing = result as Record<string, unknown>;
   return {
     ...result,
     evidence,
@@ -154,9 +336,15 @@ function publicEvidenceFields(
     revision: evidence.revision,
     freshness: evidence.freshness,
     coverage: evidence.coverage,
+    // Context/Explore already expose a richer `{status,note}` completeness
+    // object. Keep that public contract and place the normalized scalar in the
+    // nested evidence envelope; list/search surfaces without a richer field
+    // receive the scalar at the root.
+    completeness: existing.completeness ?? evidence.completeness,
     proofStatus: evidence.proofStatus,
     candidateCount: evidence.candidateCount,
     returnedCount: evidence.returnedCount,
+    truncated: existing.truncated ?? evidence.truncated,
     cursor: evidence.cursor,
   };
 }
@@ -198,14 +386,48 @@ function snapshotNodeIds(store: KnowledgeStore, revision?: RevisionContext): Set
   return new Set(openRevisionView(store, revision).symbolVersions().map((row) => row.nodeId));
 }
 
-function snapshotEdgePairs(store: KnowledgeStore, revision: RevisionContext): Array<{ src: string; dst: string | null; edgeType: string }> {
-  const view = openRevisionView(store, revision);
+interface SnapshotEdgePair {
+  src: string;
+  dst: string | null;
+  edgeType: string;
+  method: string | null;
+  confidence: number | null;
+  provenance: Record<string, unknown> | null;
+  scope: "revision" | "global" | "legacy_global" | null;
+}
+
+function resolveIdentityNodeIds(store: KnowledgeStore, identityKeys: string[]): Map<string, string> {
   const ids = new Map<string, string>();
-  for (const row of view.symbolVersions()) ids.set(row.identityKey, row.nodeId);
-  return view.edges({ limit: 10000 }).map((edge) => ({
+  const unique = [...new Set(identityKeys.filter(Boolean))];
+  // Stay well below SQLite's variable ceiling and perform a bounded number of
+  // bulk lookups. The previous per-edge findNodeIdByIdentity loop turned a
+  // 10k-edge service graph into tens of thousands of synchronous queries.
+  for (let offset = 0; offset < unique.length; offset += 2_000) {
+    const chunk = unique.slice(offset, offset + 2_000);
+    const rows = store.db.prepare(
+      `SELECT id,identity_key AS identityKey FROM nodes WHERE identity_key IN (${chunk.map(() => "?").join(",")})`,
+    ).all(...chunk) as Array<{ id: string; identityKey: string }>;
+    for (const row of rows) ids.set(row.identityKey, row.id);
+  }
+  return ids;
+}
+
+function snapshotEdgePairs(
+  store: KnowledgeStore,
+  revision: RevisionContext,
+  options: { edgeTypes?: string[]; limit?: number } = {},
+): SnapshotEdgePair[] {
+  const view = openRevisionView(store, revision);
+  const edges = view.edges({ edgeTypes: options.edgeTypes, limit: options.limit ?? 10_000 });
+  const ids = resolveIdentityNodeIds(store, edges.flatMap((edge) => [edge.srcIdentityKey, edge.dstIdentityKey ?? ""]));
+  return edges.map((edge) => ({
     src: ids.get(edge.srcIdentityKey) ?? store.findNodeIdByIdentity(edge.srcIdentityKey) ?? edge.srcIdentityKey,
     dst: edge.dstIdentityKey ? (ids.get(edge.dstIdentityKey) ?? store.findNodeIdByIdentity(edge.dstIdentityKey) ?? edge.dstIdentityKey) : null,
     edgeType: edge.edgeType,
+    method: edge.method ?? null,
+    confidence: Number.isFinite(edge.confidence) ? edge.confidence : null,
+    provenance: edge.provenance ?? null,
+    scope: edge.scope ?? null,
   }));
 }
 
@@ -214,29 +436,44 @@ function snapshotEdgePairsForNodes(
   revision: RevisionContext,
   nodeIds: string[],
   options: { edgeTypes?: string[]; direction?: "in" | "out" | "both"; limit?: number },
-): Array<{ src: string; dst: string | null; edgeType: string }> {
+): SnapshotEdgePair[] {
   if (nodeIds.length === 0) return [];
   const edges = openRevisionView(store, revision).edges({
     nodeIds,
     edgeTypes: options.edgeTypes,
     direction: options.direction,
     limit: options.limit,
+    includeGlobal: false,
   });
   const identityKeys = [...new Set(edges.flatMap((edge) => [edge.srcIdentityKey, edge.dstIdentityKey].filter((key): key is string => Boolean(key))))];
   if (identityKeys.length === 0) return [];
-  const rows = store.db.prepare(
-    `SELECT id, identity_key AS identityKey FROM nodes WHERE identity_key IN (${identityKeys.map(() => "?").join(",")})`,
-  ).all(...identityKeys) as Array<{ id: string; identityKey: string }>;
-  const ids = new Map(rows.map((row) => [row.identityKey, row.id]));
+  const ids = resolveIdentityNodeIds(store, identityKeys);
   return edges.map((edge) => ({
     src: ids.get(edge.srcIdentityKey) ?? edge.srcIdentityKey,
     dst: edge.dstIdentityKey ? (ids.get(edge.dstIdentityKey) ?? edge.dstIdentityKey) : null,
     edgeType: edge.edgeType,
+    method: edge.method ?? null,
+    confidence: Number.isFinite(edge.confidence) ? edge.confidence : null,
+    provenance: edge.provenance ?? null,
+    scope: edge.scope ?? null,
   }));
 }
 
 function revisionBranchId(options?: { revision?: RevisionContext; branchId?: string }): string | undefined {
   return options?.revision?.branchId ?? options?.branchId;
+}
+
+function isCurrentRevisionSnapshot(store: KnowledgeStore, revision: RevisionContext, filePaths?: string[]): boolean {
+  if (!revision.branchId || revision.snapshotId.startsWith("legacy:")) return false;
+  const branch = store.db.prepare(
+    "SELECT current_snapshot_id AS snapshotId FROM branches WHERE id=? AND repo_id=?",
+  ).get(revision.branchId, revision.repoId) as { snapshotId: string | null } | undefined;
+  if (branch?.snapshotId !== revision.snapshotId) return false;
+  if (!filePaths?.length) return true;
+  return Boolean(store.db.prepare(
+    `SELECT 1 FROM symbol_versions
+      WHERE branch_id=? AND status='fresh' AND file_path IN (${filePaths.map(() => "?").join(",")}) LIMIT 1`,
+  ).get(revision.branchId, ...filePaths));
 }
 
 function nodeVisibleInRevision(store: KnowledgeStore, nodeId: string, revision?: RevisionContext): boolean {
@@ -503,14 +740,20 @@ export function searchLegacyRows(
   const otherTypes = requestedTypes?.filter((t) => t !== "field");
   // type: ["field"] alone means "fields only" — skip the symbol/note query.
   const skipSymbolSearch = wantsFields && otherTypes?.length === 0;
+  const repoScope: Set<string> | null = filters?.workspace
+    ? new Set(store.workspaceRepoIds(filters.workspace))
+    : filters?.repo
+      ? new Set(store.resolveRepoIds(filters.repo))
+      : null;
 
   let hits: SearchResultRow[] = skipSymbolSearch
     ? []
     : store.searchText(query, {
         types: otherTypes?.length ? otherTypes : undefined,
         includeSensitive: filters?.includeSensitive,
-      limit: filters?.limit,
-    });
+        limit: filters?.limit,
+        repoIds: repoScope ? [...repoScope] : undefined,
+      });
 
   if (filters?.revision?.snapshotId && !filters.revision.snapshotId.startsWith("legacy:")) {
     const revision = filters.revision;
@@ -542,12 +785,15 @@ export function searchLegacyRows(
     }
   }
 
-  if (filters?.revision) {
+  // Immutable snapshot candidates were already intersected with the COW
+  // revision view above. Re-checking each candidate here reopened that view,
+  // rebuilt the full manifest, and issued one symbol query per hit. On the
+  // 20-repository corpus that duplicate visibility pass cost ~14 seconds.
+  // Legacy branch searches have no snapshot intersection and still need this
+  // compatibility visibility filter.
+  if (filters?.revision?.snapshotId.startsWith("legacy:")) {
     const revision = filters.revision;
-    const emptySnapshot = revision.branchId && !revision.snapshotId.startsWith("legacy:")
-      && Number((store.db.prepare("SELECT COUNT(*) AS n FROM effective_snapshot_files WHERE snapshot_id=?").get(revision.snapshotId) as { n: number } | undefined)?.n ?? 0) === 0;
-    const visibilityRevision = emptySnapshot ? { ...revision, snapshotId: `legacy:${revision.branchId}` } : revision;
-    hits = hits.filter((hit) => !hit.nodeId || nodeVisibleInRevision(store, hit.nodeId, visibilityRevision));
+    hits = hits.filter((hit) => !hit.nodeId || nodeVisibleInRevision(store, hit.nodeId, revision));
   }
 
   // Endpoints/services/entities are graph nodes rather than source symbols, so
@@ -577,11 +823,6 @@ export function searchLegacyRows(
   }
 
   // Scope by repo, or by all repos in a workspace (§8.1 workspace filter).
-  const repoScope: Set<string> | null = filters?.workspace
-    ? new Set(store.workspaceRepoIds(filters.workspace))
-    : filters?.repo
-      ? new Set(store.resolveRepoIds(filters.repo))
-      : null;
   if (repoScope) {
     hits = hits.filter((h) => {
       const n = store.getNode(h.nodeId!);
@@ -741,7 +982,117 @@ export interface GraphResult {
   evidence?: EvidenceEnvelope;
 }
 
-function nodeBrief(store: KnowledgeStore, id: string): ContextBrief {
+export interface SourceReference {
+  repoId: string;
+  branchId: string | null;
+  revisionId: string | null;
+  filePath?: string;
+  startLine?: number;
+  endLine?: number;
+}
+
+type TargetScopeOptions = { repoId?: string; revision?: RevisionContext; branchId?: string };
+
+function sourceBranchForRepo(
+  store: KnowledgeStore,
+  repoId: string,
+  preferredBranchId?: string,
+): Pick<SourceReference, "repoId" | "branchId" | "revisionId"> {
+  const branch = store.db.prepare(
+    `SELECT id AS branchId,
+            COALESCE(current_snapshot_id, last_indexed_commit, head_commit) AS revisionId
+       FROM branches
+      WHERE repo_id=? AND status <> 'gone'
+      ORDER BY CASE WHEN id=? THEN 0 ELSE 1 END, default_branch DESC, last_indexed_at DESC, id
+      LIMIT 1`,
+  ).get(repoId, preferredBranchId ?? "") as { branchId: string; revisionId: string | null } | undefined;
+  return { repoId, branchId: branch?.branchId ?? null, revisionId: branch?.revisionId ?? null };
+}
+
+/**
+ * Source provenance always follows the node's own repository/branch. The
+ * requested revision is preferred only when it belongs to that source repo;
+ * a foreign flow step must never inherit the caller's revision identifier.
+ */
+export function sourceContextForNode(
+  store: KnowledgeStore,
+  id: string,
+  scope?: TargetScopeOptions,
+): SourceReference | null {
+  const node = store.getNode(id);
+  if (!node) return null;
+  const requestedRepoId = scope?.repoId ?? scope?.revision?.repoId;
+  const preferredBranchId = requestedRepoId === node.repo_id
+    ? scope?.revision?.branchId ?? scope?.branchId
+    : undefined;
+  if (node.repo_id) {
+    const version = store.db.prepare(
+      `SELECT b.repo_id AS repoId, b.id AS branchId,
+              COALESCE(b.current_snapshot_id, b.last_indexed_commit, b.head_commit) AS revisionId,
+              sv.file_path AS filePath, sv.start_line AS startLine, sv.end_line AS endLine
+         FROM symbol_versions sv JOIN branches b ON b.id=sv.branch_id
+        WHERE sv.node_id=? AND sv.status='fresh' AND b.status <> 'gone'
+        ORDER BY CASE WHEN b.id=? THEN 0 ELSE 1 END, b.default_branch DESC, b.last_indexed_at DESC, sv.start_line, sv.id
+        LIMIT 1`,
+    ).get(id, preferredBranchId ?? "") as {
+      repoId: string; branchId: string; revisionId: string | null;
+      filePath: string | null; startLine: number | null; endLine: number | null;
+    } | undefined;
+    if (version) {
+      return {
+        repoId: version.repoId,
+        branchId: version.branchId,
+        revisionId: requestedRepoId === version.repoId
+          && scope?.revision?.branchId === version.branchId
+          && !scope.revision.snapshotId.startsWith("legacy:")
+          ? scope.revision.snapshotId
+          : version.revisionId,
+        ...(version.filePath ? { filePath: version.filePath } : {}),
+        ...(version.startLine != null ? { startLine: version.startLine } : {}),
+        ...(version.endLine != null ? { endLine: version.endLine } : {}),
+      };
+    }
+    return sourceBranchForRepo(store, node.repo_id, preferredBranchId);
+  }
+  if (node.node_type !== "endpoint") return null;
+  const memberships = store.listEndpointMemberships(id);
+  const membership = memberships.find((item) => item.repoId === requestedRepoId) ?? memberships[0];
+  if (!membership) return null;
+  const locatorScope = membership.repoId === requestedRepoId
+    ? { repoId: membership.repoId, revision: scope?.revision, branchId: scope?.branchId }
+    : { repoId: membership.repoId };
+  const locator = membership.locatorNodeId
+    ? sourceContextForNode(store, membership.locatorNodeId, locatorScope)
+    : null;
+  if (locator) return { ...locator, ...(membership.filePath ? { filePath: membership.filePath } : {}) };
+  return {
+    ...sourceBranchForRepo(
+      store,
+      membership.repoId,
+      membership.repoId === requestedRepoId ? scope?.revision?.branchId ?? scope?.branchId : undefined,
+    ),
+    ...(membership.filePath ? { filePath: membership.filePath } : {}),
+  };
+}
+
+function assertResolvedNodeInScope(
+  store: KnowledgeStore,
+  nodeId: string,
+  scope?: TargetScopeOptions,
+): void {
+  const node = store.getNode(nodeId);
+  if (!node) return;
+  assertTargetInScope(store, {
+    nodeId,
+    nodeType: node.node_type as "symbol" | "endpoint" | "service" | "file" | "note",
+    repoId: node.repo_id ?? null,
+  }, {
+    repoId: scope?.repoId,
+    revision: scope?.revision,
+  });
+}
+
+function nodeBrief(store: KnowledgeStore, id: string, scope?: TargetScopeOptions): ContextBrief {
   const n = store.getNode(id);
   // Coordinates travel WITH the relation. A callers list of bare names forces a
   // second lookup per entry just to open the file, and an agent that skips
@@ -753,13 +1104,15 @@ function nodeBrief(store: KnowledgeStore, id: string): ContextBrief {
         ORDER BY start_line LIMIT 1`,
     )
     .get(id) as { filePath: string | null; startLine: number | null; endLine: number | null } | undefined;
+  const source = sourceContextForNode(store, id, scope);
   return {
     nodeId: id,
     title: n?.title ?? id,
     nodeType: n?.node_type ?? "unknown",
-    ...(at?.filePath ? { filePath: at.filePath } : {}),
-    ...(at?.startLine != null ? { startLine: at.startLine } : {}),
-    ...(at?.endLine != null ? { endLine: at.endLine } : {}),
+    ...(source?.filePath ?? at?.filePath ? { filePath: source?.filePath ?? at?.filePath! } : {}),
+    ...(source?.startLine ?? at?.startLine != null ? { startLine: source?.startLine ?? at?.startLine! } : {}),
+    ...(source?.endLine ?? at?.endLine != null ? { endLine: source?.endLine ?? at?.endLine! } : {}),
+    ...(source ? { source } : {}),
   };
 }
 
@@ -788,9 +1141,16 @@ export interface TrustEnvelope {
   worktreeFingerprint: string | null;
   dirtyFiles: string[];
   parserVersion: string | null;
-  schemaVersion: number | null;
+  /** Current storage/API schema understood by the answering runtime. */
+  schemaVersion: number;
+  /** Parser-derived format recorded when this branch was indexed. */
+  indexedSchemaVersion: number | null;
+  indexCompatibility: RuntimeIndexCompatibility;
   stale: boolean;
   staleReason: string | null;
+  alignment: "aligned" | "head_advanced" | "dirty" | "unknown";
+  checkedAt: string;
+  revisionGeneration: number;
   coverageGaps: string[];
   snapshotId?: string | null;
   baseCommit?: string | null;
@@ -799,6 +1159,38 @@ export interface TrustEnvelope {
   changedFiles?: number;
   reusePercent?: number | null;
   deploymentTargets?: string[];
+}
+
+function durableRevisionGeneration(store: KnowledgeStore): number {
+  const row = store.db.prepare("SELECT value FROM meta WHERE key='revision_generation'").get() as { value: string } | undefined;
+  const value = Number(row?.value ?? 0);
+  return Number.isSafeInteger(value) && value >= 0 ? value : 0;
+}
+
+function liveRevisionTruth(input: {
+  branchName: string;
+  storedHead: string | null;
+  indexedCommit: string | null;
+  storedWorktreeState: TrustEnvelope["worktreeState"];
+  gitState: GitState | null;
+}): {
+  headCommit: string | null;
+  worktreeState: TrustEnvelope["worktreeState"];
+  alignment: TrustEnvelope["alignment"];
+} {
+  const observesCheckout = input.gitState?.branch === input.branchName;
+  const headCommit = observesCheckout ? input.gitState?.headSha ?? null : input.storedHead;
+  const worktreeState = observesCheckout
+    ? input.gitState?.dirty ? "dirty" : "clean"
+    : input.storedWorktreeState;
+  const alignment: TrustEnvelope["alignment"] = !observesCheckout || headCommit == null || input.indexedCommit == null
+    ? "unknown"
+    : input.gitState?.dirty
+      ? "dirty"
+      : headCommit === input.indexedCommit
+        ? "aligned"
+        : "head_advanced";
+  return { headCommit, worktreeState, alignment };
 }
 
 // Read the trust facts persisted by the successful indexing transaction. All
@@ -810,7 +1202,7 @@ export function trustEnvelopeForBranch(
 ): TrustEnvelope | null {
   if (!branchId) return null;
   const row = store.db.prepare(
-    `SELECT r.id AS repoId, r.name AS repoName,
+    `SELECT r.id AS repoId, r.name AS repoName, r.root_path AS rootPath,
             b.id AS branchId, b.name AS branchName,
             b.head_commit AS headCommit,
             b.last_indexed_commit AS indexedCommit,
@@ -819,18 +1211,29 @@ export function trustEnvelopeForBranch(
             b.indexed_worktree_fingerprint AS worktreeFingerprint,
             b.indexed_dirty_files AS dirtyFiles,
             b.parser_version AS parserVersion,
-            b.indexed_schema_version AS schemaVersion,
+            b.indexed_schema_version AS indexedSchemaVersion,
             b.stale_reason AS staleReason
        FROM branches b JOIN repos r ON r.id=b.repo_id
       WHERE b.id=?`,
   ).get(branchId) as {
-    repoId: string; repoName: string; branchId: string; branchName: string;
+    repoId: string; repoName: string; rootPath: string; branchId: string; branchName: string;
     headCommit: string | null; indexedCommit: string | null; indexedAt: string | null;
     worktreeState: TrustEnvelope["worktreeState"]; worktreeFingerprint: string | null;
-    dirtyFiles: string; parserVersion: string | null; schemaVersion: number | null;
+    dirtyFiles: string; parserVersion: string | null; indexedSchemaVersion: number | null;
     staleReason: string | null;
   } | undefined;
   if (!row) return null;
+  // Trust is a persisted index observation. Keep this stable across Context,
+  // Flow, status and MCP calls instead of manufacturing a different timestamp
+  // for every read of the same indexed branch.
+  const checkedAt = row.indexedAt ?? "unknown";
+  const live = liveRevisionTruth({
+    branchName: row.branchName,
+    storedHead: row.headCommit,
+    indexedCommit: row.indexedCommit,
+    storedWorktreeState: row.worktreeState,
+    gitState: readGitStateDefault(row.rootPath),
+  });
   let dirtyFiles: string[] = [];
   try {
     const parsed = JSON.parse(row.dirtyFiles);
@@ -839,6 +1242,8 @@ export function trustEnvelopeForBranch(
     dirtyFiles = [];
   }
   const coverageGaps = row.worktreeState === "unknown" ? ["git_status_unavailable"] : [];
+  const indexCompatibility = runtimeIndexCompatibility(store, branchId);
+  if (indexCompatibility.state === "schema_outdated") coverageGaps.push("schema_outdated");
   const snapshot = store.db.prepare(
     `SELECT s.id AS snapshotId, s.base_snapshot_id AS baseSnapshotId, s.merge_base_sha AS mergeBaseCommit,
             s.state AS cacheState,
@@ -854,8 +1259,16 @@ export function trustEnvelopeForBranch(
     : [];
   return {
     ...row,
+    headCommit: live.headCommit,
+    worktreeState: live.worktreeState,
+    schemaVersion: SCHEMA_VERSION,
+    indexCompatibility,
     dirtyFiles,
-    stale: row.staleReason != null,
+    stale: row.staleReason != null || live.alignment === "head_advanced" || indexCompatibility.state === "schema_outdated",
+    staleReason: indexCompatibility.state === "schema_outdated" ? "schema_outdated" : row.staleReason,
+    alignment: live.alignment,
+    checkedAt,
+    revisionGeneration: durableRevisionGeneration(store),
     ...(snapshot ? { snapshotId: snapshot.snapshotId, baseCommit, mergeBaseCommit: snapshot.mergeBaseCommit, cacheState: snapshot.cacheState, changedFiles: snapshot.changedFiles, reusePercent: snapshot.totalFiles ? Math.max(0, 100 - (snapshot.changedFiles / snapshot.totalFiles * 100)) : 100, deploymentTargets } : { cacheState: "legacy" as const }),
     coverageGaps,
   };
@@ -869,23 +1282,23 @@ function trustEnvelopesForBranches(store: KnowledgeStore, branchIds: string[]): 
   if (branchIds.length === 0) return out;
   const marks = branchIds.map(() => "?").join(",");
   type BranchTrustRow = {
-    repoId: string; repoName: string; branchId: string; branchName: string;
+    repoId: string; repoName: string; rootPath: string; branchId: string; branchName: string;
     headCommit: string | null; indexedCommit: string | null; indexedAt: string | null;
     worktreeState: TrustEnvelope["worktreeState"]; worktreeFingerprint: string | null;
-    dirtyFiles: string; parserVersion: string | null; schemaVersion: number | null; staleReason: string | null;
+    dirtyFiles: string; parserVersion: string | null; indexedSchemaVersion: number | null; staleReason: string | null;
   };
   type SnapshotTrustRow = {
     branchId: string; snapshotId: string; baseSnapshotId: string | null; mergeBaseCommit: string | null;
     cacheState: "ready" | "cold"; changedFiles: number; totalFiles: number; baseCommit: string | null;
   };
   const branches = store.db.prepare(
-    `SELECT r.id AS repoId, r.name AS repoName,
+    `SELECT r.id AS repoId, r.name AS repoName, r.root_path AS rootPath,
             b.id AS branchId, b.name AS branchName, b.head_commit AS headCommit,
             b.last_indexed_commit AS indexedCommit, b.last_indexed_at AS indexedAt,
             b.indexed_worktree_state AS worktreeState,
             b.indexed_worktree_fingerprint AS worktreeFingerprint,
             b.indexed_dirty_files AS dirtyFiles, b.parser_version AS parserVersion,
-            b.indexed_schema_version AS schemaVersion, b.stale_reason AS staleReason
+            b.indexed_schema_version AS indexedSchemaVersion, b.stale_reason AS staleReason
        FROM branches b JOIN repos r ON r.id=b.repo_id
       WHERE b.id IN (${marks})`,
   ).all(...branchIds) as BranchTrustRow[];
@@ -900,6 +1313,8 @@ function trustEnvelopesForBranches(store: KnowledgeStore, branchIds: string[]): 
       WHERE b.id IN (${marks})`,
   ).all(...branchIds) as SnapshotTrustRow[];
   const snapshotByBranch = new Map(snapshots.map((row) => [row.branchId, row]));
+  const gitByRoot = new Map<string, GitState | null>();
+  const revisionGeneration = durableRevisionGeneration(store);
   const snapshotIds = snapshots.map((row) => row.snapshotId);
   const deploymentBySnapshot = new Map<string, string[]>();
   if (snapshotIds.length > 0) {
@@ -922,11 +1337,31 @@ function trustEnvelopesForBranches(store: KnowledgeStore, branchIds: string[]): 
       dirtyFiles = Array.isArray(parsed) ? parsed.filter((file): file is string => typeof file === "string") : [];
     } catch { /* malformed legacy metadata is treated as empty */ }
     const snapshot = snapshotByBranch.get(row.branchId);
-    const coverageGaps = row.worktreeState === "unknown" ? ["git_status_unavailable"] : [];
+    if (!gitByRoot.has(row.rootPath)) gitByRoot.set(row.rootPath, readGitStateDefault(row.rootPath));
+    const live = liveRevisionTruth({
+      branchName: row.branchName,
+      storedHead: row.headCommit,
+      indexedCommit: row.indexedCommit,
+      storedWorktreeState: row.worktreeState,
+      gitState: gitByRoot.get(row.rootPath) ?? null,
+    });
+    const coverageGaps = live.worktreeState === "unknown" ? ["git_status_unavailable"] : [];
+    const indexCompatibility = runtimeIndexCompatibility(store, row.branchId);
+    if (indexCompatibility.state === "schema_outdated") coverageGaps.push("schema_outdated");
     out.set(row.branchId, {
       ...row,
+      headCommit: live.headCommit,
+      worktreeState: live.worktreeState,
+      schemaVersion: SCHEMA_VERSION,
+      indexCompatibility,
       dirtyFiles,
-      stale: row.staleReason != null,
+      stale: row.staleReason != null || live.alignment === "head_advanced" || indexCompatibility.state === "schema_outdated",
+      staleReason: indexCompatibility.state === "schema_outdated" ? "schema_outdated" : row.staleReason,
+      alignment: live.alignment,
+      // Match trustEnvelopeForBranch: the timestamp belongs to the persisted
+      // index observation, not to this particular read request.
+      checkedAt: row.indexedAt ?? "unknown",
+      revisionGeneration,
       ...(snapshot ? {
         snapshotId: snapshot.snapshotId,
         baseCommit: snapshot.baseCommit,
@@ -1003,7 +1438,7 @@ export interface QueryDiagnostics {
   evidence: {
     incomingByType: Record<string, number>;
     outgoingByType: Record<string, number>;
-    unresolvedReferenceCount: number;
+    unresolvedReferenceCount: number | null;
   };
   candidateCount: number;
   totalIsExact: boolean;
@@ -1097,13 +1532,11 @@ function buildQueryDiagnostics(
       }
     : null;
   const coverageGaps = new Set(trust?.coverageGaps ?? []);
-  const coverageColumns = new Set((store.db.prepare("PRAGMA table_info(coverage_records)").all() as Array<{ name: string }>).map((column) => column.name));
   const unresolvedReferenceCount = resolvedNodeId && branchId
-    ? coverageColumns.has("unresolved_references")
-      ? Number((store.db.prepare("SELECT COALESCE(SUM(unresolved_references), 0) AS n FROM coverage_records WHERE repo_id=?").get(node?.repo_id) as { n: number } | undefined)?.n ?? 0)
-      : Number((store.db.prepare("SELECT COALESCE(total - resolved, 0) AS n FROM coverage_layers WHERE repo_id=? AND branch_id=? AND layer='references'").get(node?.repo_id, branchId) as { n: number } | undefined)?.n ?? 0)
-    : 0;
+    ? coverageForEvidence(store, node?.repo_id ?? undefined, branchId).unresolvedReferences
+    : null;
   if (!resolvedNodeId || !branchId) coverageGaps.add("unresolved_reference_scope_unavailable");
+  else if (unresolvedReferenceCount === null) coverageGaps.add("unresolved_reference_coverage_unavailable");
   else if (unresolvedReferenceCount > 0) coverageGaps.add("unresolved_references_present");
   for (const gap of options?.coverageGaps ?? []) coverageGaps.add(gap);
   const totalIsExact = options?.limit === undefined ? false : resultCount < options.limit;
@@ -1143,7 +1576,17 @@ export function exploreGraph(
   store: KnowledgeStore,
   mode: GraphMode,
   nodeOrKey: string,
-  options?: { depth?: number; limit?: number; to?: string; branchId?: string; repoId?: string; revision?: RevisionContext },
+  options?: {
+    depth?: number;
+    limit?: number;
+    to?: string;
+    branchId?: string;
+    repoId?: string;
+    revision?: RevisionContext;
+    /** Internal callers can defer the expensive public evidence assembly. */
+    includeDiagnostics?: boolean;
+    includeEvidence?: boolean;
+  },
 ): GraphResult {
   const limit = options?.limit ?? 100;
 
@@ -1165,7 +1608,25 @@ export function exploreGraph(
     return { mode, nodes: [], events: rows, revision: options?.revision } as GraphResult;
   }
 
-  const nodeId = resolveNodeId(store, nodeOrKey, options?.repoId);
+  const pathScope = {
+    repoId: options?.repoId ?? options?.revision?.repoId,
+    branchId: options?.branchId,
+    revision: options?.revision,
+  };
+  const pathTargets = mode === "path"
+    ? {
+        from: resolveTarget(store, nodeOrKey, pathScope),
+        to: options?.to ? resolveTarget(store, options.to, pathScope) : null,
+      }
+    : null;
+  if (pathTargets) {
+    // Resolve and assert both endpoints before either revision-view or graph
+    // traversal. This makes an out-of-scope destination a canonical error.
+    assertTargetInScope(store, pathTargets.from, pathScope);
+    if (pathTargets.to) assertTargetInScope(store, pathTargets.to, pathScope);
+  }
+  const scopedNodeId = pathTargets?.from.nodeId ?? resolveNodeId(store, nodeOrKey, options?.repoId);
+  const nodeId = scopedNodeId ?? (options?.repoId ? resolveNodeId(store, nodeOrKey) : null);
   if (!nodeId) {
     return {
       mode,
@@ -1175,6 +1636,7 @@ export function exploreGraph(
       }),
     };
   }
+  assertResolvedNodeInScope(store, nodeId, options);
   // Set below (after the branch-scope fallback below fires) so the closure
   // sees the up-to-date value at call time — the revision-scoped early
   // returns above call graphResult() before this fires (never a fallback,
@@ -1210,26 +1672,33 @@ export function exploreGraph(
     totalIsExact: nodes.length < limit,
     completeness: nodes.length >= limit ? "partial" : "lower_bound",
     coverageGaps: nodes.length >= limit ? ["result_limit_reached"] : ["unresolved_reference_counts_not_persisted"],
-    diagnostics: buildQueryDiagnostics(store, nodeOrKey, nodeId, nodes.length, {
-      branchId: options?.branchId,
-      limit,
-      completeness: nodes.length >= limit ? "partial" : "lower_bound",
-      coverageGaps: nodes.length >= limit ? ["result_limit_reached"] : [],
+    ...(options?.includeDiagnostics === false ? {} : {
+      diagnostics: buildQueryDiagnostics(store, nodeOrKey, nodeId, nodes.length, {
+        branchId: options?.branchId,
+        limit,
+        completeness: nodes.length >= limit ? "partial" : "lower_bound",
+        coverageGaps: nodes.length >= limit ? ["result_limit_reached"] : [],
+      }),
     }),
     revision: options?.revision,
       ...(scopeFallback ? { scopeFallback } : {}),
     } as GraphResult;
-    result.evidence = buildEvidenceEnvelope(store, {
-      repoId: options?.repoId ?? (nodeId ? store.getNode(nodeId)?.repo_id ?? undefined : undefined),
-      branchId: options?.branchId,
-      revision: options?.revision,
-      completeness: nodes.length >= limit ? "partial" : nodes.length > 0 ? "lower_bound" : nodeId ? "partial" : "unknown",
-      proofStatus: nodes.length > 0 ? "proven" : "not_proven",
-      candidateCount: nodes.length,
-      returnedCount: nodes.length,
-      truncated: nodes.length >= limit,
-      cursor: null,
-    });
+    if (options?.includeEvidence !== false) {
+      result.evidence = buildEvidenceEnvelope(store, {
+        repoId: options?.repoId ?? (nodeId ? store.getNode(nodeId)?.repo_id ?? undefined : undefined),
+        branchId: options?.branchId,
+        revision: options?.revision,
+        completeness: nodes.length >= limit ? "partial" : nodes.length > 0 ? "lower_bound" : nodeId ? "partial" : "unknown",
+        // A non-empty traversal is only candidate/lower-bound evidence. It is
+        // not a proof of relation completeness, especially when the traversal
+        // is capped or parser coverage is incomplete.
+        proofStatus: "not_proven",
+        candidateCount: nodes.length,
+        returnedCount: nodes.length,
+        truncated: nodes.length >= limit,
+        cursor: null,
+      });
+    }
     return result;
   };
 
@@ -1238,29 +1707,64 @@ export function exploreGraph(
   // Parser confidence is explicit: EXTRACTED/ASSERTED edges are verified for
   // deterministic impact; INFERRED edges remain candidate evidence and are
   // never silently promoted into a hard blast-radius answer.
-  const ACTIVE = "status='active' AND method IN ('EXTRACTED','ASSERTED')";
+  // Framework methods are source-grounded parser output, but they are not
+  // direct call expressions. They participate in impact/caller traversal with
+  // their original method preserved in evidence responses.
+  const ACTIVE = "status='active' AND method IN ('EXTRACTED','ASSERTED','DI_MODULE_PROVIDER','INTERFACE_IMPLEMENTATION','RUNTIME_OBSERVED')";
   if (options?.revision?.snapshotId && !options.revision.snapshotId.startsWith("legacy:")) {
     const targetKey = store.getNode(nodeId)?.identity_key ?? nodeOrKey;
     const view = openRevisionView(store, options.revision);
-    const all = view.edges({ limit: 10000 });
+    // A revision can contain millions of immutable edges. Reading the first
+    // 10,000 rows and filtering them in memory made a node-targeted affected
+    // query scan the whole snapshot (and, depending on SQLite's sort plan,
+    // take tens of seconds). Keep the same revision/global visibility rules,
+    // but push the node frontier into RevisionView so its identity-first
+    // indexes can answer only the requested relationships.
+    const readEdges = (nodeKeys: string[], direction: "in" | "out" | "both", edgeTypes?: string[]) =>
+      view.edges({
+        nodeIds: nodeKeys,
+        direction,
+        ...(edgeTypes ? { edgeTypes } : {}),
+        limit: Math.max(10_000, limit * 10),
+      });
     const nodeFor = (key?: string) => key ? store.findNodeIdByIdentity(key) : null;
-    const incoming = (key: string, type?: string) => all.filter((edge) => edge.dstIdentityKey === key && (!type || edge.edgeType === type)).map((edge) => edge.srcIdentityKey);
-    const outgoing = (key: string, type?: string) => all.filter((edge) => edge.srcIdentityKey === key && (!type || edge.edgeType === type)).map((edge) => edge.dstIdentityKey).filter((key): key is string => Boolean(key));
-    if (mode === "who_calls") return graphResult([...new Set(incoming(targetKey, "calls"))].map(nodeFor).filter((id): id is string => Boolean(id)).slice(0, limit).map((id) => nodeBrief(store, id)));
-    if (mode === "calls_of") return graphResult([...new Set(outgoing(targetKey, "calls"))].map(nodeFor).filter((id): id is string => Boolean(id)).slice(0, limit).map((id) => nodeBrief(store, id)));
+    const incoming = (key: string, type?: string) => readEdges([key], "in", type ? [type] : undefined)
+      .filter((edge) => edge.dstIdentityKey === key)
+      .map((edge) => edge.srcIdentityKey);
+    const outgoing = (key: string, type?: string) => readEdges([key], "out", type ? [type] : undefined)
+      .filter((edge) => edge.srcIdentityKey === key)
+      .map((edge) => edge.dstIdentityKey)
+      .filter((key): key is string => Boolean(key));
+    if (mode === "who_calls") return graphResult([...new Set(IMPACT_EDGE_TYPES.flatMap((type) => incoming(targetKey, type)))].map(nodeFor).filter((id): id is string => Boolean(id)).slice(0, limit).map((id) => nodeBrief(store, id)));
+    if (mode === "calls_of") return graphResult([...new Set(IMPACT_EDGE_TYPES.flatMap((type) => outgoing(targetKey, type)))].map(nodeFor).filter((id): id is string => Boolean(id)).slice(0, limit).map((id) => nodeBrief(store, id)));
     if (mode === "backlinks") return graphResult([...new Set(incoming(targetKey))].map(nodeFor).filter((id): id is string => Boolean(id)).slice(0, limit).map((id) => nodeBrief(store, id)));
     if (mode === "who_injects") {
       const classes = new Set<string>();
       for (const key of incoming(targetKey, "references")) if (key.endsWith(".constructor")) { const id = nodeFor(key.slice(0, -".constructor".length)); if (id) classes.add(id); }
+      for (const key of incoming(targetKey, "injects")) { const id = nodeFor(key); if (id) classes.add(id); }
       return graphResult([...classes].slice(0, limit).map((id) => nodeBrief(store, id)));
     }
     if (mode === "impact") {
       const seen = new Set<string>([targetKey]); let frontier = [targetKey];
-      for (let depth = 0; depth < (options.depth ?? 3); depth++) { const next: string[] = []; for (const key of frontier) for (const child of incoming(key, "calls")) if (!seen.has(child)) { seen.add(child); next.push(child); } frontier = next; }
+      for (let depth = 0; depth < (options.depth ?? 3); depth++) {
+        const next: string[] = [];
+        const frontierSet = new Set(frontier);
+        const edges = readEdges(frontier, "in", [...IMPACT_EDGE_TYPES]);
+        for (const edge of edges) {
+          if (!edge.dstIdentityKey || !frontierSet.has(edge.dstIdentityKey)) continue;
+          const child = edge.srcIdentityKey;
+          if (seen.has(child)) continue;
+          seen.add(child);
+          next.push(child);
+          if (seen.size >= limit) break;
+        }
+        frontier = next;
+        if (seen.size >= limit) break;
+      }
       return graphResult([...seen].filter((key) => key !== targetKey).map(nodeFor).filter((id): id is string => Boolean(id)).slice(0, limit).map((id) => nodeBrief(store, id)));
     }
     if (mode === "path") {
-      const toId = options.to ? resolveNodeId(store, options.to) : null;
+      const toId = pathTargets?.to?.nodeId ?? null;
       const toKey = toId ? store.getNode(toId)?.identity_key : null;
       if (!toKey) return graphResult([]);
       const prev = new Map<string, string>(); const queue = [targetKey]; const seen = new Set(queue);
@@ -1284,7 +1788,7 @@ export function exploreGraph(
   const P = (nid: string) => (branchId ? [nid, branchId, limit] : [nid, limit]);
   const Pd = (nid: string) => (branchId ? [nid, branchId] : [nid]); // no LIMIT (impact/path)
   if (mode === "who_calls") {
-    const rows = store.db.prepare(`SELECT DISTINCT src FROM edges WHERE dst=? AND edge_type='calls' AND ${ACTIVE}${bx} LIMIT ?`).all(...P(nodeId)) as { src: string }[];
+    const rows = store.db.prepare(`SELECT DISTINCT src FROM edges WHERE dst=? AND edge_type IN (${IMPACT_EDGE_TYPES.map(() => "?").join(",")}) AND ${ACTIVE}${bx} LIMIT ?`).all(nodeId, ...IMPACT_EDGE_TYPES, ...(branchId ? [branchId, limit] : [limit])) as { src: string }[];
     return graphResult(rows.map((r) => nodeBrief(store, r.src)));
   }
   // NestJS-style constructor-injection dependents. A constructor parameter's
@@ -1310,10 +1814,14 @@ export function exploreGraph(
       const classId = store.findNodeIdByIdentity(classKey);
       if (classId) classIds.add(classId);
     }
+    const direct = store.db
+      .prepare(`SELECT DISTINCT src FROM edges WHERE dst=? AND edge_type='injects' AND ${ACTIVE}${bx}`)
+      .all(...Pd(nodeId)) as { src: string }[];
+    for (const row of direct) classIds.add(row.src);
     return graphResult([...classIds].slice(0, limit).map((id) => nodeBrief(store, id)));
   }
   if (mode === "calls_of") {
-    const rows = store.db.prepare(`SELECT DISTINCT dst FROM edges WHERE src=? AND edge_type='calls' AND dst IS NOT NULL AND ${ACTIVE}${bx} LIMIT ?`).all(...P(nodeId)) as { dst: string }[];
+    const rows = store.db.prepare(`SELECT DISTINCT dst FROM edges WHERE src=? AND edge_type IN (${IMPACT_EDGE_TYPES.map(() => "?").join(",")}) AND dst IS NOT NULL AND ${ACTIVE}${bx} LIMIT ?`).all(nodeId, ...IMPACT_EDGE_TYPES, ...(branchId ? [branchId, limit] : [limit])) as { dst: string }[];
     return graphResult(rows.map((r) => nodeBrief(store, r.dst)));
   }
   if (mode === "backlinks") {
@@ -1328,7 +1836,7 @@ export function exploreGraph(
     for (let d = 0; d < depth && frontier.length; d++) {
       const next: string[] = [];
       for (const id of frontier) {
-        const callers = store.db.prepare(`SELECT DISTINCT src FROM edges WHERE dst=? AND edge_type='calls' AND ${ACTIVE}${bx}`).all(...Pd(id)) as { src: string }[];
+        const callers = store.db.prepare(`SELECT DISTINCT src FROM edges WHERE dst=? AND edge_type IN (${IMPACT_EDGE_TYPES.map(() => "?").join(",")}) AND ${ACTIVE}${bx}`).all(id, ...IMPACT_EDGE_TYPES, ...(branchId ? [branchId] : [])) as { src: string }[];
         for (const c of callers) if (!seen.has(c.src)) { seen.add(c.src); next.push(c.src); }
       }
       frontier = next;
@@ -1337,7 +1845,7 @@ export function exploreGraph(
     return graphResult([...seen].slice(0, limit).map((id) => nodeBrief(store, id)));
   }
   if (mode === "path") {
-    const to = options?.to ? resolveNodeId(store, options.to) : null;
+    const to = pathTargets?.to?.nodeId ?? null;
     if (!to) return graphResult([]);
     // BFS over active edges src→dst
     const prev = new Map<string, string>();
@@ -1463,7 +1971,30 @@ export function listIndexedFiles(
     : revisionBranchId(branchIdOrOptions);
   if (!branchId) return [];
   if (typeof branchIdOrOptions !== "string" && branchIdOrOptions.revision && !branchIdOrOptions.revision.snapshotId.startsWith("legacy:")) {
-    return openRevisionView(store, branchIdOrOptions.revision).listFiles().map((row) => ({ filePath: row.filePath, lang: row.language || null, status: "indexed", sizeBytes: null, indexedAt: null, error: null }));
+    const snapshotId = branchIdOrOptions.revision.snapshotId;
+    const graphFiles = openRevisionView(store, branchIdOrOptions.revision).listFiles();
+    const graphByPath = new Map(graphFiles.map((row) => [row.filePath, row]));
+    const admittedSourcePaths = new Set((store.db.prepare(`
+      SELECT e.file_path AS filePath
+        FROM effective_snapshot_sources e
+        JOIN source_facts sf ON sf.id=e.source_fact_id
+       WHERE e.snapshot_id=?
+         AND json_extract(sf.coverage_json, '$.status')='admitted'
+       ORDER BY e.file_path
+    `).all(snapshotId) as Array<{ filePath: string }>).map((row) => row.filePath));
+    const paths = [...new Set([...admittedSourcePaths, ...graphByPath.keys()])].sort((a, b) => a.localeCompare(b));
+    return paths.map((filePath) => {
+      const graph = graphByPath.get(filePath);
+      const admitted = admittedSourcePaths.has(filePath);
+      return {
+        filePath,
+        lang: graph?.language || null,
+        status: graph && admitted ? "indexed" : graph ? "graph_only" : "source_only",
+        sizeBytes: null,
+        indexedAt: null,
+        error: null,
+      };
+    });
   }
   return store.db
     .prepare(
@@ -1519,7 +2050,17 @@ export interface GraphView {
      * repo view sorts on. Present on repoGraph results; absent elsewhere. */
     degree?: number;
   }>;
-  edges: Array<{ src: string; dst: string; edgeType: string; sourceType?: string | null }>;
+  edges: Array<{
+    src: string;
+    dst: string;
+    edgeType: string;
+    sourceType?: string | null;
+    revisionId?: string | null;
+    graphEvidence?: GraphEdgeEvidenceEnvelope;
+  }>;
+  revision?: RevisionContext | null;
+  scope?: { repoId: string | null; branchId: string | null; revisionId: string | null };
+  evidence?: EvidenceEnvelope;
 }
 
 // Local graph: a focus node + its neighbourhood within `depth` hops (both
@@ -1655,17 +2196,63 @@ function collectGraph(
   ids: string[],
   branchId?: string,
   edgeLimit = 1000,
-  providedEdges?: Array<{ src: string; dst: string | null; edgeType: string }>,
+  providedEdges?: Array<{
+    src: string;
+    dst: string | null;
+    edgeType: string;
+    origin?: string | null;
+    method?: string | null;
+    confidence?: number | null;
+    provenance?: unknown;
+    evidenceId?: string | null;
+    scope?: string | null;
+    branchId?: string | null;
+  }>,
 ): { nodes: GraphView["nodes"]; edges: GraphView["edges"] } {
   const nodes = ids.map((id) => nodeBrief(store, id));
   const ph = ids.map(() => "?").join(",");
   const branchClause = branchId ? "AND branch_id=?" : "";
   const params = branchId ? [branchId, ...ids, ...ids, edgeLimit] : [...ids, ...ids, edgeLimit];
-  const edges = providedEdges
-    ? providedEdges.filter((edge) => edge.dst && ids.includes(edge.src) && ids.includes(edge.dst)).slice(0, edgeLimit).map((edge) => ({ src: edge.src, dst: edge.dst!, edgeType: edge.edgeType, sourceType: null }))
-    : store.db
+  type StoredGraphEdge = {
+    src: string;
+    dst: string;
+    edgeType: string;
+    sourceType?: string | null;
+    origin?: string | null;
+    method?: string | null;
+    confidence?: number | null;
+    provenance?: unknown;
+    evidenceId?: string | null;
+    branchId?: string | null;
+  };
+  const materializeEdge = (edge: StoredGraphEdge): GraphView["edges"][number] => ({
+    src: edge.src,
+    dst: edge.dst,
+    edgeType: edge.edgeType,
+    sourceType: edge.sourceType ?? null,
+    graphEvidence: graphEdgeEvidence({
+      edgeType: edge.edgeType,
+      origin: edge.origin,
+      method: edge.method,
+      confidence: edge.confidence,
+      provenance: edge.provenance,
+      evidenceId: edge.evidenceId,
+      branchId: edge.branchId,
+      scope: edge.branchId ? "revision" : undefined,
+    }),
+  });
+  const edges: GraphView["edges"] = providedEdges
+    ? providedEdges.filter((edge) => edge.dst && ids.includes(edge.src) && ids.includes(edge.dst)).slice(0, edgeLimit).map((edge) => materializeEdge({
+      ...edge,
+      dst: edge.dst!,
+      sourceType: null,
+    }))
+    : (store.db
     .prepare(
-      `SELECT src, dst, edge_type AS edgeType, source_type AS sourceType FROM edges
+      `SELECT src, dst, edge_type AS edgeType, source_type AS sourceType,
+              origin, method, confidence, provenance, evidence_id AS evidenceId,
+              branch_id AS branchId
+         FROM edges
        WHERE status='active' AND dst IS NOT NULL ${branchClause}
          AND src IN (${ph}) AND dst IN (${ph})
        ORDER BY CASE edge_type
@@ -1673,7 +2260,7 @@ function collectGraph(
          WHEN 'references' THEN 3 WHEN 'tests' THEN 4 WHEN 'imports' THEN 5 ELSE 6 END
        LIMIT ?`,
     )
-    .all(...params) as GraphView["edges"];
+    .all(...params) as StoredGraphEdge[]).map(materializeEdge);
   // Backfill false isolates: the priority order above decides which edge TYPES
   // survive the cap, but within the losing rank the cut is arbitrary — a node
   // can lose every one of its edges and render as if it had no relationships
@@ -1689,7 +2276,10 @@ function collectGraph(
   if (isolated.length > 0) {
     const seen = new Set(edges.map((e) => `${e.src}\0${e.dst}\0${e.edgeType}`));
     const perNode = store.db.prepare(
-      `SELECT src, dst, edge_type AS edgeType, source_type AS sourceType FROM edges
+      `SELECT src, dst, edge_type AS edgeType, source_type AS sourceType,
+              origin, method, confidence, provenance, evidence_id AS evidenceId,
+              branch_id AS branchId
+         FROM edges
        WHERE status='active' AND dst IS NOT NULL ${branchClause}
          AND (src = ? OR dst = ?) AND src IN (${ph}) AND dst IN (${ph})
        ORDER BY CASE edge_type
@@ -1699,11 +2289,11 @@ function collectGraph(
     );
     for (const id of isolated) {
       const extraParams = branchId ? [branchId, id, id, ...ids, ...ids] : [id, id, ...ids, ...ids];
-      for (const e of perNode.all(...extraParams) as GraphView["edges"]) {
+      for (const e of perNode.all(...extraParams) as StoredGraphEdge[]) {
         const key = `${e.src}\0${e.dst}\0${e.edgeType}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        edges.push(e);
+        edges.push(materializeEdge(e));
       }
     }
   }
@@ -1758,13 +2348,13 @@ export function compactIndexStatus(store: KnowledgeStore): CompactIndexStatus {
       .get(repo.repoId) as { count: number };
     const freshness: CompactRepoStatus["freshness"] = trust === null
       ? "unknown"
-      : trust.stale
+      : trust.stale || trust.alignment === "head_advanced"
         ? "stale"
-        : trust.worktreeState === "dirty"
+        : trust.alignment === "dirty"
           ? "dirty"
-          : trust.worktreeState === "unknown"
-            ? "unknown"
-            : "fresh";
+          : trust.alignment === "aligned"
+            ? "fresh"
+            : "unknown";
     return {
       repo: repo.name,
       liveBranch: live?.name ?? null,
@@ -1799,10 +2389,20 @@ export interface ContextBrief {
   nodeId: string;
   title: string;
   nodeType: string;
+  /** Relation-family occurrence identity, stable across context pages. */
+  relationType?: string;
+  /** Distinguishes the same node when it appears through different relations. */
+  relationItemId?: string;
   /** Repo-relative path of the symbol's fresh definition, when it has one. */
   filePath?: string;
   startLine?: number;
   endLine?: number;
+  /** Source ownership is emitted with relation items for cross-repo safety. */
+  source?: SourceReference;
+  /** True when this relation crosses from the focused source repository. */
+  boundary?: boolean;
+  /** Evidence carried by the edge that exposed this relation. */
+  evidenceState?: EvidenceProofStatus;
 }
 
 export interface ExternalCallGroup {
@@ -1841,6 +2441,10 @@ export interface ContextPack {
   envs: string[]; // env vars the focus reads
   notes: ContextBrief[]; // notes linked to the focus
   importers: ContextBrief[]; // files importing the focus's file
+  /** Direct endpoint edges, normalized by the same reader used by flow/inventory. */
+  firstHopRelations: EndpointRelation[];
+  /** Compatibility grouping for endpoint provider implementations. */
+  handles: EndpointRelation[];
   signals: string[]; // risk/attention heuristics
   // Calls that provably leave the repo, so no in-repo edge can exist. Recorded
   // rather than dropped: a caller once got a tidy 10-item callee list for a
@@ -1891,14 +2495,1200 @@ export interface ContextPack {
   coverage?: EvidenceEnvelope["coverage"];
   proofStatus?: EvidenceProofStatus;
   candidateCount?: number;
+  totalIsExact?: boolean;
   returnedCount?: number;
   cursor?: string | null;
 }
 
-function briefsFrom(store: KnowledgeStore, rows: Array<{ id: string }>): ContextBrief[] {
+function contextPayloadCount(result: ContextPack): number {
+  // `handles` is a compatibility subset of firstHopRelations and is omitted
+  // here to avoid double-counting the same endpoint edge.
+  const relationLists: Array<readonly unknown[]> = [
+    result.callers, result.calls, result.renderedBy, result.renders,
+    result.invokedDynamicallyBy, result.invokesDynamic, result.remoteCalls,
+    result.invokedBy, result.referencedBy, result.usesTypes, result.routes,
+    result.tests, result.errors, result.envs, result.notes, result.importers,
+    result.firstHopRelations, result.externalCalls,
+  ];
+  return relationLists.reduce((total, items) => total + items.length, 0);
+}
+
+const CONTEXT_PAGE_RELATIONS = [
+  "callers", "calls", "renderedBy", "renders", "invokedDynamicallyBy",
+  "invokesDynamic", "remoteCalls", "invokedBy", "referencedBy", "usesTypes",
+  "routes", "tests", "errors", "envs", "notes", "importers",
+  "firstHopRelations", "externalCalls",
+] as const satisfies readonly (keyof ContextPack)[];
+
+/** Apply one global window across every context relation family. A cursor is
+ * an offset in this fixed family order; it must never mean "offset N inside
+ * every family", which repeats small families forever and can return
+ * relationCount * limit items from a page that advertised only limit. */
+function paginateContextPackRelations(result: ContextPack, offset: number, limit: number): ContextPack {
+  const entries = CONTEXT_PAGE_RELATIONS.flatMap((relation) =>
+    (result[relation] as readonly unknown[]).map((item) => ({ relation, item })),
+  );
+  const selected = entries.slice(offset, offset + limit);
+  const paged = {
+    ...result,
+    callers: [], calls: [], renderedBy: [], renders: [], invokedDynamicallyBy: [],
+    invokesDynamic: [], remoteCalls: [], invokedBy: [], referencedBy: [], usesTypes: [],
+    routes: [], tests: [], errors: [], envs: [], notes: [], importers: [],
+    firstHopRelations: [], handles: [], externalCalls: [],
+  } as ContextPack;
+  for (const { relation, item } of selected) {
+    const identified = item && typeof item === "object" && "nodeId" in item
+      ? {
+          ...item,
+          relationType: relation,
+          relationItemId: [
+            relation,
+            "edgeType" in item ? String(item.edgeType ?? "") : "",
+            String(item.nodeId),
+            "filePath" in item ? String(item.filePath ?? "") : "",
+            "startLine" in item ? String(item.startLine ?? "") : "",
+            "endLine" in item ? String(item.endLine ?? "") : "",
+          ].join("|"),
+        }
+      : item;
+    (paged[relation] as unknown[]).push(identified);
+  }
+  paged.handles = paged.firstHopRelations.filter((relation) => relation.edgeType === "handles");
+  const moreEntries = entries.slice(offset + limit);
+  const moreRelations = new Set<string>([
+    ...result.truncated,
+    ...moreEntries.map(({ relation }) => relation),
+  ]);
+  paged.truncated = [...moreRelations].sort();
+  paged.returnedCount = selected.length;
+  paged.totalIsExact = result.truncated.length === 0;
+  paged.candidateCount = paged.totalIsExact
+    ? entries.length
+    : Math.max(entries.length, offset + selected.length + (paged.truncated.length > 0 ? 1 : 0));
+  return paged;
+}
+
+function briefsFrom(
+  store: KnowledgeStore,
+  rows: Array<{ id: string }>,
+  scope?: TargetScopeOptions,
+  parentSource?: SourceReference | null,
+): ContextBrief[] {
   // Pass the brief through whole — dropping to the three name fields here is
   // what made every relation list coordinate-free.
-  return rows.map((r) => nodeBrief(store, r.id));
+  return rows.map((r) => {
+    const brief = nodeBrief(store, r.id, scope);
+    return parentSource?.repoId && brief.source?.repoId && parentSource.repoId !== brief.source.repoId
+      ? { ...brief, boundary: true }
+      : brief;
+  });
+}
+
+export interface EndpointInventoryItem {
+  nodeId: string;
+  title: string;
+  identityKey: string;
+  protocol: string | null;
+  source: SourceReference | null;
+  handlers: ContextBrief[];
+  firstHopRelations: EndpointRelation[];
+  handlerStatus: "handled" | "proto_only" | "incomplete";
+  memberships: Array<{ repoId: string; role: "provider" | "consumer" | "declaration"; filePath: string; locatorNodeId: string | null }>;
+  occurrences: EndpointOccurrence[];
+}
+
+export interface EndpointRelation extends ContextBrief {
+  edgeType: string;
+  evidenceState: EvidenceProofStatus;
+  edgeEvidence: {
+    origin: string | null;
+    method: string | null;
+    confidence: number | null;
+    provenance: Record<string, unknown> | null;
+    scope: "revision" | "global" | "legacy_global" | null;
+  };
+  graphEvidence?: GraphEdgeEvidenceEnvelope;
+}
+
+export interface EndpointInventoryScope {
+  repoId: string | null;
+  branchId: string | null;
+  revisionId: string | null;
+  revision: RevisionContext | null;
+}
+
+export interface EndpointInventoryPage {
+  items: EndpointInventoryItem[];
+  scope: EndpointInventoryScope;
+  candidateCount: number;
+  remainingCount: number;
+  totalIsExact: true;
+  truncated: boolean;
+  nextCursor: string | null;
+  publication: EndpointPublicationReceipt;
+}
+
+export interface EndpointRelationView {
+  endpoint: {
+    nodeId: string;
+    title: string;
+    identityKey: string;
+    protocol: string | null;
+    source: SourceReference | null;
+  };
+  memberships: Array<{ repoId: string; role: "provider" | "consumer" | "declaration"; filePath: string; locatorNodeId: string | null }>;
+  handlers: EndpointRelation[];
+  handlerStatus: "handled" | "proto_only" | "incomplete";
+  relations: EndpointRelation[];
+}
+
+const ENDPOINT_FIRST_HOP_EDGE_TYPES = ["calls", "renders", "invokes_dynamic", "invokes", "references", "reads", "writes", "throws", "uses", "handles"];
+const ENDPOINT_INVENTORY_ORDERING = "identityKey,nodeId";
+const ENDPOINT_INVENTORY_CURSOR_CODEC = new HmacOperationCursorCodec(resolveLocalCursorSecret());
+
+interface EndpointRawRelation {
+  nodeId: string;
+  edgeType: string;
+  origin: string | null;
+  method: string | null;
+  confidence: number | null;
+  provenance: string | Record<string, unknown> | null;
+  scope: "revision" | "global" | "legacy_global" | null;
+}
+
+/** One branch/revision decision shared by endpoint provenance, inventory and cursors. */
+export function resolveEndpointInventoryScope(
+  store: KnowledgeStore,
+  options: TargetScopeOptions = {},
+): EndpointInventoryScope {
+  const repoId = options.repoId ?? options.revision?.repoId ?? null;
+  if (!repoId) return { repoId: null, branchId: null, revisionId: null, revision: null };
+  if (options.revision) {
+    return {
+      repoId,
+      branchId: options.revision.branchId ?? options.branchId ?? null,
+      revisionId: options.revision.snapshotId.startsWith("legacy:") ? options.revision.commitSha : options.revision.snapshotId,
+      revision: options.revision,
+    };
+  }
+  const row = store.db.prepare(
+    `SELECT id AS branchId, name, head_commit AS headCommit,
+            last_indexed_commit AS lastIndexedCommit,
+            current_snapshot_id AS currentSnapshotId, status
+       FROM branches
+      WHERE repo_id=? AND status <> 'gone'
+        ${options.branchId ? "AND id=?" : ""}
+      ORDER BY CASE WHEN status='live' THEN 0 ELSE 1 END,
+               default_branch DESC, last_indexed_at DESC, id
+      LIMIT 1`,
+  ).get(...(options.branchId ? [repoId, options.branchId] : [repoId])) as {
+    branchId: string; name: string; headCommit: string | null; lastIndexedCommit: string | null;
+    currentSnapshotId: string | null; status: string;
+  } | undefined;
+  if (!row) return { repoId, branchId: null, revisionId: null, revision: null };
+  const resolution = resolveRevisionContext(store, {
+    repoId,
+    ...(row.currentSnapshotId ? { snapshotId: row.currentSnapshotId } : { branch: row.branchId }),
+  });
+  const revision = resolution.status === "resolved"
+    ? resolution.context
+    : {
+        repoId,
+        branch: row.name,
+        branchId: row.branchId,
+        commitSha: row.lastIndexedCommit ?? row.headCommit ?? "(worktree)",
+        snapshotId: `legacy:${row.branchId}`,
+        trust: row.status === "live" ? "fallback_live" as const : "trust_unavailable" as const,
+      };
+  return {
+    repoId,
+    branchId: row.branchId,
+    revisionId: revision.snapshotId.startsWith("legacy:") ? revision.commitSha : revision.snapshotId,
+    revision,
+  };
+}
+
+function endpointRelationEvidenceState(edge: {
+  edgeType?: string | null;
+  method: string | null;
+  origin: string | null;
+  provenance: Record<string, unknown> | null;
+}): EvidenceProofStatus {
+  const evidence = graphEdgeEvidence(edge);
+  return evidence.evidenceState === "proven"
+    ? "proven"
+    : evidence.evidenceState === "candidate" || evidence.evidenceState === "inferred"
+      ? "candidate"
+      : "not_proven";
+}
+
+/**
+ * Canonical endpoint first-hop view. Context, flow and inventory deliberately
+ * consume this one reader so branch filtering, provenance and edge evidence
+ * cannot drift between public surfaces.
+ */
+function readEndpointRelationsWithRaw(
+  store: KnowledgeStore,
+  endpointId: string,
+  options: TargetScopeOptions = {},
+  prefetchedRawRelations?: EndpointRawRelation[],
+): EndpointRelationView | null {
+  const endpoint = store.getNode(endpointId);
+  if (!endpoint || endpoint.node_type !== "endpoint") return null;
+  const allMemberships = store.listEndpointMemberships(endpointId);
+  // An omitted repository means a genuinely global inventory read. Picking a
+  // membership here would silently discard the same endpoint's other owners.
+  const selectedRepoId = options.repoId ?? options.revision?.repoId ?? undefined;
+  const selectedScope = resolveEndpointInventoryScope(store, { ...options, repoId: selectedRepoId });
+  const memberships = selectedScope.repoId
+    ? allMemberships.filter((membership) => membership.repoId === selectedScope.repoId)
+    : allMemberships;
+  const effectiveScope: TargetScopeOptions = {
+    ...(selectedScope.repoId ? { repoId: selectedScope.repoId } : {}),
+    ...(selectedScope.branchId ? { branchId: selectedScope.branchId } : {}),
+    ...(selectedScope.revision ? { revision: selectedScope.revision } : {}),
+  };
+  // A global endpoint shared by multiple repositories has no single truthful
+  // root provenance. Relations below still resolve against their own nodes.
+  const source = selectedScope.repoId || endpoint.repo_id
+    ? sourceContextForNode(store, endpointId, effectiveScope)
+    : null;
+  const membershipRepoIds = new Set(memberships.map((membership) => membership.repoId));
+  const branchId = selectedScope.branchId ?? source?.branchId ?? undefined;
+  const snapshotRevision = selectedScope.revision && !selectedScope.revision.snapshotId.startsWith("legacy:")
+    ? selectedScope.revision
+    : null;
+  const rawRelations = prefetchedRawRelations ?? (snapshotRevision
+    ? snapshotEdgePairsForNodes(store, snapshotRevision, [endpointId], {
+        edgeTypes: ENDPOINT_FIRST_HOP_EDGE_TYPES,
+        direction: "out",
+        limit: 10_000,
+      }).filter((edge) => edge.src === endpointId && edge.dst).map((edge) => ({
+        nodeId: edge.dst!, edgeType: edge.edgeType, origin: null, method: edge.method,
+        confidence: edge.confidence, provenance: edge.provenance, scope: edge.scope,
+      }))
+    : store.db.prepare(
+        `SELECT DISTINCT dst AS nodeId, edge_type AS edgeType, origin, method, confidence, provenance,
+                CASE WHEN branch_id IS NULL THEN 'legacy_global' ELSE 'revision' END AS scope
+           FROM edges
+          WHERE src=? AND dst IS NOT NULL AND status='active'
+            AND edge_type IN (${ENDPOINT_FIRST_HOP_EDGE_TYPES.map(() => "?").join(",")})
+            ${branchId ? "AND (branch_id=? OR branch_id IS NULL)" : ""}
+          ORDER BY edge_type, dst`,
+      ).all(...(branchId
+        ? [endpointId, ...ENDPOINT_FIRST_HOP_EDGE_TYPES, branchId]
+        : [endpointId, ...ENDPOINT_FIRST_HOP_EDGE_TYPES])) as Array<{
+          nodeId: string; edgeType: string; origin: string | null; method: string | null; confidence: number | null;
+          provenance: string | Record<string, unknown> | null; scope: "revision" | "legacy_global" | null;
+        }>);
+  const unscopedRelations = rawRelations.flatMap((edge): EndpointRelation[] => {
+    if (!store.getNode(edge.nodeId)) return [];
+    const brief = nodeBrief(store, edge.nodeId, effectiveScope);
+    const boundary = brief.source?.repoId && (source?.repoId
+      ? source.repoId !== brief.source.repoId
+      : membershipRepoIds.size > 0 && !membershipRepoIds.has(brief.source.repoId));
+    let provenance: Record<string, unknown> | null = null;
+    if (typeof edge.provenance === "string") {
+      try { provenance = JSON.parse(edge.provenance) as Record<string, unknown>; } catch { provenance = null; }
+    } else provenance = edge.provenance;
+    const graphEvidence = graphEdgeEvidence({ edgeType: edge.edgeType, method: edge.method, origin: edge.origin, confidence: edge.confidence, provenance, scope: edge.scope });
+    const evidenceState = endpointRelationEvidenceState({ edgeType: edge.edgeType, method: edge.method, origin: edge.origin, provenance });
+    return [{
+      ...brief,
+      edgeType: edge.edgeType,
+      evidenceState,
+      edgeEvidence: { origin: edge.origin, method: edge.method, confidence: edge.confidence, provenance, scope: edge.scope },
+      graphEvidence,
+      ...(boundary ? { boundary: true } : {}),
+    }];
+  });
+  const providerLocators = new Set(
+    memberships.filter((membership) => membership.role === "provider" && membership.locatorNodeId)
+      .map((membership) => membership.locatorNodeId!),
+  );
+  const relations = unscopedRelations.filter((relation) => {
+    if (relation.edgeType !== "handles" || !selectedScope.repoId) return true;
+    if (snapshotRevision) return relation.source?.repoId === selectedScope.repoId;
+    if (providerLocators.has(relation.nodeId)) return relation.source?.repoId === selectedScope.repoId;
+    return endpoint.repo_id === selectedScope.repoId && relation.source?.repoId === selectedScope.repoId;
+  });
+  const handlers = relations.filter((relation) => relation.edgeType === "handles");
+  let protocol: string | null = null;
+  try { protocol = (JSON.parse(endpoint.meta || "{}") as { protocol?: string }).protocol ?? null; } catch { protocol = null; }
+  return {
+    endpoint: { nodeId: endpoint.id, title: endpoint.title, identityKey: endpoint.identity_key, protocol, source },
+    memberships,
+    handlers,
+    handlerStatus: store.endpointHandlerStatus(endpointId, selectedScope.repoId ?? undefined),
+    relations,
+  };
+}
+
+export function readEndpointRelations(
+  store: KnowledgeStore,
+  endpointId: string,
+  options: TargetScopeOptions = {},
+): EndpointRelationView | null {
+  return readEndpointRelationsWithRaw(store, endpointId, options);
+}
+
+/** Revision fingerprint used by endpoint cursors. */
+export function endpointInventoryRevision(store: KnowledgeStore, repoId?: string, _protocol?: string): string | null {
+  return store.db.transaction(() => {
+    const scope = resolveEndpointInventoryScope(store, { repoId });
+    if (scope.branchId) return `${scope.branchId}@${scope.revisionId ?? "unknown"}`;
+    return scope.repoId ? null : globalEndpointInventoryRevision(store);
+  })();
+}
+
+interface EndpointInventoryRow {
+  nodeId: string;
+  title: string;
+  identityKey: string;
+  protocol: string | null;
+  occurrences?: EndpointOccurrence[];
+}
+
+class EndpointInventoryPageError extends Error {
+  constructor(readonly code: "INVALID_ARGUMENT", message: string) {
+    super(message);
+    this.name = "EndpointInventoryPageError";
+  }
+}
+
+function endpointInventoryFilter(repoId: string | undefined, options: EndpointInventoryPageOptions): { where: string[]; params: string[] } {
+  const params: string[] = [];
+  const where = ["n.node_type='endpoint'"];
+  if (repoId) {
+    // Repo-owned legacy endpoints have explicit ownership on the node itself.
+    // Global endpoints never inherit scope from NULL: they require a persisted
+    // endpoint_memberships row for the requested repository.
+    where.push("(n.repo_id=? OR EXISTS (SELECT 1 FROM endpoint_memberships em WHERE em.endpoint_id=n.id AND em.repo_id=?))");
+    params.push(repoId, repoId);
+  } else {
+    where.push("(n.repo_id IS NOT NULL OR EXISTS (SELECT 1 FROM endpoint_memberships any_em WHERE any_em.endpoint_id=n.id))");
+  }
+  if (options.protocol) {
+    where.push("json_extract(n.meta, '$.protocol')=?");
+    params.push(options.protocol);
+  }
+  if (options.service) {
+    where.push("(LOWER(n.identity_key) LIKE LOWER(?) OR LOWER(n.identity_key) LIKE LOWER(?))");
+    params.push(`grpc::${options.service}.%`, `grpc::%.${options.service}.%`);
+  }
+  if (options.method) {
+    where.push("LOWER(n.identity_key) LIKE LOWER(?)");
+    params.push(`%.${options.method}`);
+  }
+  if (options.path) {
+    const path = options.path.replace(/^\.\//u, "").replace(/\/$/u, "");
+    where.push("EXISTS (SELECT 1 FROM endpoint_memberships path_em WHERE path_em.endpoint_id=n.id AND (path_em.file_path=? OR path_em.file_path LIKE ?))");
+    params.push(path, `${path}/%`);
+  }
+  const requestedKind = options.handledOnly === true ? "handler" : options.provenanceKind;
+  if (requestedKind) {
+    const normalizedPath = "REPLACE(LOWER(kind_em.file_path), CHAR(92), '/')";
+    const isTestPath = `(${normalizedPath} GLOB 'test/*' OR ${normalizedPath} GLOB 'tests/*' OR ${normalizedPath} GLOB '*/test/*' OR ${normalizedPath} GLOB '*/tests/*' OR ${normalizedPath} GLOB '__tests__/*' OR ${normalizedPath} GLOB '*/__tests__/*' OR ${normalizedPath} GLOB 'fixture/*' OR ${normalizedPath} GLOB 'fixtures/*' OR ${normalizedPath} GLOB '*/fixture/*' OR ${normalizedPath} GLOB '*/fixtures/*' OR ${normalizedPath} GLOB 'mock/*' OR ${normalizedPath} GLOB 'mocks/*' OR ${normalizedPath} GLOB '*/mock/*' OR ${normalizedPath} GLOB '*/mocks/*' OR ${normalizedPath} GLOB '*.spec.*' OR ${normalizedPath} GLOB '*.test.*')`;
+    const role = requestedKind === "handler"
+      ? "provider"
+      : requestedKind === "definition"
+        ? "declaration"
+        : requestedKind === "client"
+          ? "consumer"
+          : null;
+    const kindPredicate = requestedKind === "test"
+      ? isTestPath
+      : `kind_em.role=? AND NOT ${isTestPath}`;
+    where.push(`EXISTS (
+      SELECT 1 FROM endpoint_memberships kind_em
+       WHERE kind_em.endpoint_id=n.id
+         ${repoId ? "AND kind_em.repo_id=?" : ""}
+         AND ${kindPredicate}
+    )`);
+    if (repoId) params.push(repoId);
+    if (role) params.push(role);
+  }
+  return { where, params };
+}
+
+function globalEndpointInventoryRevision(store: KnowledgeStore): string {
+  const row = store.db.prepare(
+    "SELECT value FROM meta WHERE key=?",
+  ).get("endpoint_inventory_generation") as { value: string } | undefined;
+  if (!row) {
+    throw Object.assign(
+      new Error("knowledge database schema is missing endpoint inventory generation metadata; the owner must call knowledge_index to upgrade"),
+      { code: "SCHEMA_OUTDATED" },
+    );
+  }
+  return `global-endpoints:${row.value}`;
+}
+
+function hydrateEndpointInventoryRows(
+  store: KnowledgeStore,
+  rows: EndpointInventoryRow[],
+  scope: EndpointInventoryScope,
+): EndpointInventoryItem[] {
+  // A scoped page has one branch/revision, so read all first-hop edges once.
+  // The previous per-endpoint reader re-expanded the same snapshot resolution
+  // set for every row (500 rows x thousands of refs on a real repository).
+  // Keep the unscoped path conservative because repo-owned endpoints can each
+  // select a different source branch there.
+  const rawRelationsByEndpoint = scope.branchId
+    ? endpointRawRelationsForPage(store, rows.map((row) => row.nodeId), scope)
+    : null;
+  const result = rows.map((row) => {
+    const view = readEndpointRelationsWithRaw(store, row.nodeId, {
+      ...(scope.repoId ? { repoId: scope.repoId } : {}),
+      ...(scope.branchId ? { branchId: scope.branchId } : {}),
+      ...(scope.revision ? { revision: scope.revision } : {}),
+    }, rawRelationsByEndpoint?.get(row.nodeId))!;
+    const occurrences = row.occurrences ?? endpointMembershipOccurrences(store, row.nodeId, scope);
+    const hasHandler = occurrences.some((occurrence) => occurrence.provenanceKind === "handler");
+    const hasDefinition = occurrences.some((occurrence) => occurrence.provenanceKind === "definition");
+    return {
+      ...row,
+      source: view.endpoint.source,
+      handlers: view.handlers,
+      firstHopRelations: view.relations,
+      handlerStatus: hasHandler ? "handled" as const : hasDefinition ? "proto_only" as const : "incomplete" as const,
+      memberships: view.memberships,
+      occurrences,
+    };
+  });
+  return result;
+}
+
+function endpointMembershipOccurrences(
+  store: KnowledgeStore,
+  endpointId: string,
+  scope: EndpointInventoryScope,
+): EndpointOccurrence[] {
+  const memberships = store.listEndpointMemberships(endpointId, scope.repoId ?? undefined);
+  const commit = scope.revision?.commitSha ?? scope.revisionId ?? "unknown";
+  const snapshot = scope.revision?.snapshotId ?? scope.revisionId ?? "unknown";
+  const occurrences = memberships.map((membership): EndpointOccurrence => {
+    const edgeType = membership.role === "provider"
+      ? "handles" as const
+      : membership.role === "declaration"
+        ? "declares" as const
+        : "invokes" as const;
+    const source = membership.locatorNodeId
+      ? sourceContextForNode(store, membership.locatorNodeId, {
+          ...(scope.repoId ? { repoId: scope.repoId } : {}),
+          ...(scope.branchId ? { branchId: scope.branchId } : {}),
+          ...(scope.revision ? { revision: scope.revision } : {}),
+        })
+      : null;
+    return {
+      provenanceKind: classifyEndpointProvenanceKind({ edgeType, filePath: membership.filePath }),
+      repoId: membership.repoId,
+      commit,
+      snapshot,
+      file: membership.filePath,
+      line: source?.startLine ?? 0,
+      ...(source?.endLine != null ? { endLine: source.endLine } : {}),
+      ...(membership.locatorNodeId ? { locatorNodeId: membership.locatorNodeId } : {}),
+    };
+  });
+  return dedupeEndpointOccurrences(occurrences);
+}
+
+function dedupeEndpointOccurrences(occurrences: EndpointOccurrence[]): EndpointOccurrence[] {
+  const unique = new Map<string, EndpointOccurrence>();
+  for (const occurrence of occurrences) {
+    const key = [
+      occurrence.provenanceKind,
+      occurrence.repoId,
+      occurrence.commit,
+      occurrence.snapshot,
+      occurrence.file,
+      occurrence.line,
+      occurrence.locatorNodeId ?? "",
+    ].join("\u0000");
+    unique.set(key, occurrence);
+  }
+  return [...unique.values()].sort(compareEndpointOccurrences);
+}
+
+function endpointRawRelationsForPage(
+  store: KnowledgeStore,
+  endpointIds: string[],
+  scope: EndpointInventoryScope,
+): Map<string, EndpointRawRelation[]> {
+  const grouped = new Map<string, EndpointRawRelation[]>();
+  for (const endpointId of endpointIds) grouped.set(endpointId, []);
+  if (endpointIds.length === 0 || !scope.branchId) return grouped;
+
+  const snapshotRevision = scope.revision && !scope.revision.snapshotId.startsWith("legacy:")
+    ? scope.revision
+    : null;
+  const rows: Array<EndpointRawRelation & { endpointId: string }> = snapshotRevision
+    ? snapshotEdgePairsForNodes(store, snapshotRevision, endpointIds, {
+        edgeTypes: ENDPOINT_FIRST_HOP_EDGE_TYPES,
+        direction: "out",
+        // Preserve the old per-endpoint 10k ceiling while avoiding N identical
+        // snapshot-resolution scans. Real endpoint first hops are far smaller.
+        limit: Math.max(10_000, endpointIds.length * 10_000),
+      }).filter((edge) => edge.dst).map((edge) => ({
+        endpointId: edge.src,
+        nodeId: edge.dst!,
+        edgeType: edge.edgeType,
+        origin: null,
+        method: edge.method,
+        confidence: edge.confidence,
+        provenance: edge.provenance,
+        scope: edge.scope,
+      }))
+    : store.db.prepare(
+        `SELECT src AS endpointId, dst AS nodeId, edge_type AS edgeType,
+                origin, method, confidence, provenance,
+                CASE WHEN branch_id IS NULL THEN 'legacy_global' ELSE 'revision' END AS scope
+           FROM edges
+          WHERE src IN (${endpointIds.map(() => "?").join(",")})
+            AND dst IS NOT NULL AND status='active'
+            AND edge_type IN (${ENDPOINT_FIRST_HOP_EDGE_TYPES.map(() => "?").join(",")})
+            AND (branch_id=? OR branch_id IS NULL)
+          ORDER BY src, edge_type, dst`,
+    ).all(...endpointIds, ...ENDPOINT_FIRST_HOP_EDGE_TYPES, scope.branchId) as Array<EndpointRawRelation & { endpointId: string }>;
+
+  for (const row of rows) grouped.get(row.endpointId)?.push({
+    nodeId: row.nodeId,
+    edgeType: row.edgeType,
+    origin: row.origin,
+    method: row.method,
+    confidence: row.confidence,
+    provenance: row.provenance,
+    scope: row.scope,
+  });
+  return grouped;
+}
+
+export interface EndpointInventoryPageOptions {
+  repoId?: string;
+  protocol?: string;
+  service?: string;
+  method?: string;
+  path?: string;
+  handledOnly?: boolean;
+  provenanceKind?: EndpointProvenanceKind;
+  scope?: EndpointInventoryScope;
+  limit?: number;
+  cursor?: string;
+}
+
+const ENDPOINT_PUBLICATION_EDGE_TYPES = ["handles", "declares", "invokes"];
+
+function endpointIdentityParts(identityKey: string): { service: string; method: string } | null {
+  if (!identityKey.startsWith("grpc::")) return null;
+  const body = identityKey.slice("grpc::".length);
+  const split = body.lastIndexOf(".");
+  if (split < 1) return null;
+  const servicePath = body.slice(0, split);
+  return { service: servicePath.slice(servicePath.lastIndexOf(".") + 1), method: body.slice(split + 1) };
+}
+
+function endpointFilterKey(options: EndpointInventoryPageOptions): string {
+  return JSON.stringify({
+    protocol: options.protocol ?? null,
+    service: options.service?.toLowerCase() ?? null,
+    method: options.method?.toLowerCase() ?? null,
+    path: options.path?.replace(/^\.\//u, "").replace(/\/$/u, "") ?? null,
+    handledOnly: options.handledOnly === true,
+    provenanceKind: options.provenanceKind ?? null,
+  });
+}
+
+function matchesEndpointFilter(input: {
+  identityKey: string;
+  protocol: string | null;
+  occurrences: EndpointOccurrence[];
+}, options: EndpointInventoryPageOptions): boolean {
+  if (options.protocol && input.protocol !== options.protocol) return false;
+  const parts = endpointIdentityParts(input.identityKey);
+  if (options.service && parts?.service.toLowerCase() !== options.service.toLowerCase()) return false;
+  if (options.method && parts?.method.toLowerCase() !== options.method.toLowerCase()) return false;
+  const requestedPath = options.path?.replace(/^\.\//u, "").replace(/\/$/u, "");
+  if (requestedPath && !input.occurrences.some((occurrence) => occurrence.file === requestedPath || occurrence.file.startsWith(`${requestedPath}/`))) return false;
+  const requestedKind = options.handledOnly === true ? "handler" : options.provenanceKind;
+  if (requestedKind && !input.occurrences.some((occurrence) => occurrence.provenanceKind === requestedKind)) return false;
+  return true;
+}
+
+function endpointOccurrenceForRevisionEdge(
+  store: KnowledgeStore,
+  scope: EndpointInventoryScope,
+  edge: RevisionEdgeRow,
+  locatorSources: ReadonlyMap<string, RevisionSymbolRow>,
+): EndpointOccurrence | null {
+  if (!scope.repoId || !scope.revision) return null;
+  const filePath = typeof edge.provenance.filePath === "string" ? edge.provenance.filePath : null;
+  if (!filePath) return null;
+  const locatorIdentityKey = edge.edgeType === "invokes" ? edge.srcIdentityKey : edge.dstIdentityKey;
+  const locatorNodeId = locatorIdentityKey ? store.findNodeIdByIdentity(locatorIdentityKey) : null;
+  const locatorSource = locatorIdentityKey ? locatorSources.get(locatorIdentityKey) : undefined;
+  const startLine = typeof edge.provenance.startLine === "number"
+    ? edge.provenance.startLine
+    : locatorSource?.startLine ?? 0;
+  const endLine = typeof edge.provenance.endLine === "number"
+    ? edge.provenance.endLine
+    : locatorSource?.endLine;
+  return {
+    provenanceKind: classifyEndpointProvenanceKind({
+      edgeType: edge.edgeType as "handles" | "declares" | "invokes",
+      filePath,
+    }),
+    repoId: scope.repoId,
+    commit: scope.revision.commitSha,
+    snapshot: scope.revision.snapshotId,
+    file: filePath,
+    line: startLine,
+    ...(endLine != null ? { endLine } : {}),
+    ...(locatorNodeId ? { locatorNodeId } : {}),
+  };
+}
+
+interface RevisionEndpointPageRows {
+  rows: EndpointInventoryRow[];
+  candidateCount: number;
+  eligibleCount: number;
+  hasNext: boolean;
+}
+
+const REVISION_ENDPOINT_CTE = `
+  WITH RECURSIVE snapshot_chain(snapshot_id,depth) AS (
+    SELECT ?,0
+    UNION ALL
+    SELECT rs.base_snapshot_id,snapshot_chain.depth+1
+      FROM snapshot_chain
+      JOIN revision_snapshots rs ON rs.id=snapshot_chain.snapshot_id
+     WHERE rs.base_snapshot_id IS NOT NULL
+  ),
+  effective_resolution_refs AS (
+    SELECT sr.resolution_set_id
+      FROM snapshot_chain chain
+      JOIN snapshot_resolution_refs sr ON sr.snapshot_id=chain.snapshot_id
+     WHERE NOT EXISTS (
+       SELECT 1
+         FROM snapshot_chain newer
+         JOIN snapshot_overlays overlay ON overlay.snapshot_id=newer.snapshot_id
+        WHERE newer.depth < chain.depth AND overlay.file_path=sr.file_path
+     )
+  ),
+  endpoint_publication AS (
+    SELECT edge.src_identity_key AS endpoint_identity,
+           edge.dst_identity_key AS locator_identity,
+           edge.edge_type AS edge_type,
+           edge.method AS method,
+           edge.confidence AS confidence,
+           edge.provenance AS provenance,
+           json_extract(edge.provenance, '$.filePath') AS file_path
+      FROM effective_resolution_refs refs
+      JOIN resolved_edges edge INDEXED BY idx_resolved_edges_set_type_src
+        ON edge.resolution_set_id=refs.resolution_set_id
+       AND edge.edge_type IN ('handles','declares')
+    UNION ALL
+    SELECT edge.dst_identity_key AS endpoint_identity,
+           edge.src_identity_key AS locator_identity,
+           edge.edge_type AS edge_type,
+           edge.method AS method,
+           edge.confidence AS confidence,
+           edge.provenance AS provenance,
+           json_extract(edge.provenance, '$.filePath') AS file_path
+      FROM effective_resolution_refs refs
+      JOIN resolved_edges edge INDEXED BY idx_resolved_edges_set_type_dst
+        ON edge.resolution_set_id=refs.resolution_set_id
+       AND edge.edge_type='invokes'
+  )`;
+
+export function materializeRevisionEndpointOccurrences(
+  store: KnowledgeStore,
+  input: { snapshotId: string; repoId: string; commitSha: string },
+): { occurrenceCount: number } {
+  return store.db.transaction(() => {
+    store.db.prepare("DELETE FROM revision_endpoint_occurrences WHERE snapshot_id=?").run(input.snapshotId);
+    store.db.prepare("DELETE FROM revision_endpoint_publications WHERE snapshot_id=?").run(input.snapshotId);
+    store.db.prepare(
+      `${REVISION_ENDPOINT_CTE}
+       INSERT OR IGNORE INTO revision_endpoint_occurrences(
+         snapshot_id,endpoint_node_id,endpoint_identity_key,protocol,
+         locator_node_id,locator_identity_key,edge_type,provenance_kind,
+         file_path,start_line,end_line,method,confidence,provenance
+       )
+       SELECT ?,endpoint.id,endpoint.identity_key,json_extract(endpoint.meta, '$.protocol'),
+              locator.id,COALESCE(publication.locator_identity,''),publication.edge_type,
+              CASE
+                WHEN LOWER(COALESCE(publication.file_path,'')) LIKE '%/__tests__/%'
+                  OR LOWER(COALESCE(publication.file_path,'')) LIKE '%/test/%'
+                  OR LOWER(COALESCE(publication.file_path,'')) LIKE '%/tests/%'
+                  OR LOWER(COALESCE(publication.file_path,'')) LIKE '%/fixture/%'
+                  OR LOWER(COALESCE(publication.file_path,'')) LIKE '%/fixtures/%'
+                  OR LOWER(COALESCE(publication.file_path,'')) LIKE '%/mock/%'
+                  OR LOWER(COALESCE(publication.file_path,'')) LIKE '%/mocks/%'
+                  OR LOWER(COALESCE(publication.file_path,'')) GLOB '*.spec.*'
+                  OR LOWER(COALESCE(publication.file_path,'')) GLOB '*.test.*' THEN 'test'
+                WHEN publication.edge_type='handles' THEN 'handler'
+                WHEN publication.edge_type='declares' THEN 'definition'
+                ELSE 'client'
+              END,
+              publication.file_path,
+              COALESCE(json_extract(publication.provenance, '$.startLine'),0),
+              json_extract(publication.provenance, '$.endLine'),
+              publication.method,publication.confidence,publication.provenance
+         FROM endpoint_publication publication
+         JOIN nodes endpoint ON endpoint.identity_key=publication.endpoint_identity AND endpoint.node_type='endpoint'
+         LEFT JOIN nodes locator ON locator.identity_key=publication.locator_identity
+        WHERE publication.file_path IS NOT NULL`,
+    ).run(input.snapshotId, input.snapshotId);
+    const occurrenceCount = Number((store.db.prepare(
+      "SELECT COUNT(*) AS n FROM revision_endpoint_occurrences WHERE snapshot_id=?",
+    ).get(input.snapshotId) as { n: number }).n);
+    store.db.prepare(
+      `INSERT INTO revision_endpoint_publications(snapshot_id,repo_id,commit_sha,occurrence_count,materialized_at)
+       VALUES (?,?,?,?,?)`,
+    ).run(input.snapshotId, input.repoId, input.commitSha, occurrenceCount, new Date().toISOString());
+    return { occurrenceCount };
+  })();
+}
+
+function projectedRevisionEndpointPageRows(
+  store: KnowledgeStore,
+  scope: EndpointInventoryScope,
+  options: EndpointInventoryPageOptions,
+  after: { identityKey: string; nodeId: string } | null,
+  limit: number,
+): RevisionEndpointPageRows | null {
+  const snapshotId = scope.revision?.snapshotId;
+  if (!snapshotId || snapshotId.startsWith("legacy:")) return null;
+  const publication = store.db.prepare(
+    "SELECT 1 FROM revision_endpoint_publications WHERE snapshot_id=?",
+  ).get(snapshotId);
+  if (!publication) return null;
+  const where = ["occurrence.snapshot_id=?"];
+  const params: string[] = [snapshotId];
+  if (options.protocol) { where.push("occurrence.protocol=?"); params.push(options.protocol); }
+  if (options.service) {
+    where.push("(LOWER(occurrence.endpoint_identity_key) LIKE LOWER(?) OR LOWER(occurrence.endpoint_identity_key) LIKE LOWER(?))");
+    params.push(`grpc::${options.service}.%`, `grpc::%.${options.service}.%`);
+  }
+  if (options.method) { where.push("LOWER(occurrence.endpoint_identity_key) LIKE LOWER(?)"); params.push(`%.${options.method}`); }
+  const requestedPath = options.path?.replace(/^\.\//u, "").replace(/\/$/u, "");
+  if (requestedPath) { where.push("(occurrence.file_path=? OR occurrence.file_path LIKE ?)"); params.push(requestedPath, `${requestedPath}/%`); }
+  const requestedKind = options.handledOnly === true ? "handler" : options.provenanceKind;
+  if (requestedKind) { where.push("occurrence.provenance_kind=?"); params.push(requestedKind); }
+  const grouped = `SELECT occurrence.endpoint_node_id AS nodeId,occurrence.endpoint_identity_key AS identityKey
+                     FROM revision_endpoint_occurrences occurrence
+                    WHERE ${where.join(" AND ")}
+                    GROUP BY occurrence.endpoint_node_id,occurrence.endpoint_identity_key`;
+  const countRow = (after
+    ? store.db.prepare(
+        `SELECT COUNT(*) AS candidateCount,
+                COALESCE(SUM(CASE WHEN identityKey>? OR (identityKey=? AND nodeId>?) THEN 1 ELSE 0 END),0) AS eligibleCount
+           FROM (${grouped})`,
+      ).get(after.identityKey, after.identityKey, after.nodeId, ...params)
+    : store.db.prepare(
+        `SELECT COUNT(*) AS candidateCount,COUNT(*) AS eligibleCount FROM (${grouped})`,
+      ).get(...params)) as { candidateCount: number; eligibleCount: number };
+  const candidateCount = Number(countRow.candidateCount ?? 0);
+  const pageWhere = [...where];
+  const pageParams = [...params];
+  if (after) {
+    pageWhere.push("(occurrence.endpoint_identity_key>? OR (occurrence.endpoint_identity_key=? AND occurrence.endpoint_node_id>?))");
+    pageParams.push(after.identityKey, after.identityKey, after.nodeId);
+  }
+  const candidates = store.db.prepare(
+    `SELECT occurrence.endpoint_node_id AS nodeId,n.title,
+            occurrence.endpoint_identity_key AS identityKey,occurrence.protocol
+       FROM revision_endpoint_occurrences occurrence
+       JOIN nodes n ON n.id=occurrence.endpoint_node_id
+      WHERE ${pageWhere.join(" AND ")}
+      GROUP BY occurrence.endpoint_node_id,n.title,occurrence.endpoint_identity_key,occurrence.protocol
+      ORDER BY occurrence.endpoint_identity_key,occurrence.endpoint_node_id
+      LIMIT ?`,
+  ).all(...pageParams, limit + 1) as EndpointInventoryRow[];
+  const pageCandidates = candidates.slice(0, limit);
+  const ids = pageCandidates.map((candidate) => candidate.nodeId);
+  const occurrences = ids.length === 0 ? [] : store.db.prepare(
+    `SELECT endpoint_node_id AS endpointNodeId,provenance_kind AS provenanceKind,
+            locator_node_id AS locatorNodeId,file_path AS file,start_line AS line,end_line AS endLine
+       FROM revision_endpoint_occurrences
+      WHERE snapshot_id=? AND endpoint_node_id IN (${ids.map(() => "?").join(",")})
+      ORDER BY endpoint_identity_key,provenance_kind,file_path,start_line,locator_identity_key`,
+  ).all(snapshotId, ...ids) as Array<{
+    endpointNodeId: string; provenanceKind: EndpointProvenanceKind; locatorNodeId: string | null;
+    file: string; line: number; endLine: number | null;
+  }>;
+  const byEndpoint = new Map<string, EndpointOccurrence[]>();
+  for (const occurrence of occurrences) {
+    const values = byEndpoint.get(occurrence.endpointNodeId) ?? [];
+    values.push({
+      provenanceKind: occurrence.provenanceKind,
+      repoId: scope.repoId!,
+      commit: scope.revision!.commitSha,
+      snapshot: snapshotId,
+      file: occurrence.file,
+      line: occurrence.line,
+      ...(occurrence.endLine == null ? {} : { endLine: occurrence.endLine }),
+      ...(occurrence.locatorNodeId ? { locatorNodeId: occurrence.locatorNodeId } : {}),
+    });
+    byEndpoint.set(occurrence.endpointNodeId, values);
+  }
+  return {
+    rows: pageCandidates.map((candidate) => ({ ...candidate, occurrences: dedupeEndpointOccurrences(byEndpoint.get(candidate.nodeId) ?? []) })),
+    candidateCount,
+    eligibleCount: Number(countRow.eligibleCount ?? 0),
+    hasNext: candidates.length > pageCandidates.length,
+  };
+}
+
+function revisionEndpointPageRows(
+  store: KnowledgeStore,
+  scope: EndpointInventoryScope,
+  options: EndpointInventoryPageOptions,
+  after: { identityKey: string; nodeId: string } | null,
+  limit: number,
+): RevisionEndpointPageRows | null {
+  if (!scope.revision || scope.revision.snapshotId.startsWith("legacy:")) return null;
+  const projected = projectedRevisionEndpointPageRows(store, scope, options, after, limit);
+  if (projected) return projected;
+  const occurrenceWhere = ["n.node_type='endpoint'"];
+  const occurrenceParams: string[] = [];
+  if (options.protocol) {
+    occurrenceWhere.push("json_extract(n.meta, '$.protocol')=?");
+    occurrenceParams.push(options.protocol);
+  }
+  if (options.service) {
+    occurrenceWhere.push("(LOWER(n.identity_key) LIKE LOWER(?) OR LOWER(n.identity_key) LIKE LOWER(?))");
+    occurrenceParams.push(`grpc::${options.service}.%`, `grpc::%.${options.service}.%`);
+  }
+  if (options.method) {
+    occurrenceWhere.push("LOWER(n.identity_key) LIKE LOWER(?)");
+    occurrenceParams.push(`%.${options.method}`);
+  }
+  const requestedPath = options.path?.replace(/^\.\//u, "").replace(/\/$/u, "");
+  if (requestedPath) {
+    occurrenceWhere.push("(publication.file_path=? OR publication.file_path LIKE ?)");
+    occurrenceParams.push(requestedPath, `${requestedPath}/%`);
+  }
+  const requestedKind = options.handledOnly === true ? "handler" : options.provenanceKind;
+  const testPath = `(LOWER(COALESCE(publication.file_path,'')) LIKE '%/__tests__/%'
+    OR LOWER(COALESCE(publication.file_path,'')) LIKE '%/test/%'
+    OR LOWER(COALESCE(publication.file_path,'')) LIKE '%/tests/%'
+    OR LOWER(COALESCE(publication.file_path,'')) LIKE '%/fixture/%'
+    OR LOWER(COALESCE(publication.file_path,'')) LIKE '%/fixtures/%'
+    OR LOWER(COALESCE(publication.file_path,'')) LIKE '%/mock/%'
+    OR LOWER(COALESCE(publication.file_path,'')) LIKE '%/mocks/%'
+    OR LOWER(COALESCE(publication.file_path,'')) GLOB '*.spec.*'
+    OR LOWER(COALESCE(publication.file_path,'')) GLOB '*.test.*')`;
+  if (requestedKind === "test") occurrenceWhere.push(testPath);
+  else if (requestedKind === "handler") occurrenceWhere.push(`publication.edge_type='handles' AND NOT ${testPath}`);
+  else if (requestedKind === "definition") occurrenceWhere.push(`publication.edge_type='declares' AND NOT ${testPath}`);
+  else if (requestedKind === "client") occurrenceWhere.push(`publication.edge_type='invokes' AND NOT ${testPath}`);
+
+  const baseFrom = `FROM endpoint_publication publication JOIN nodes n ON n.identity_key=publication.endpoint_identity WHERE ${occurrenceWhere.join(" AND ")}`;
+  const count = store.db.prepare(
+    `${REVISION_ENDPOINT_CTE} SELECT COUNT(*) AS candidateCount FROM (SELECT n.id ${baseFrom} GROUP BY n.id,n.identity_key)`,
+  ).get(scope.revision.snapshotId, ...occurrenceParams) as { candidateCount: number };
+  const pageWhere = [...occurrenceWhere];
+  const pageParams = [...occurrenceParams];
+  if (after) {
+    pageWhere.push("(n.identity_key>? OR (n.identity_key=? AND n.id>?))");
+    pageParams.push(after.identityKey, after.identityKey, after.nodeId);
+  }
+  const candidates = store.db.prepare(
+    `${REVISION_ENDPOINT_CTE}
+     SELECT n.id AS nodeId,n.title,n.identity_key AS identityKey,
+            json_extract(n.meta, '$.protocol') AS protocol
+       FROM endpoint_publication publication
+       JOIN nodes n ON n.identity_key=publication.endpoint_identity
+      WHERE ${pageWhere.join(" AND ")}
+      GROUP BY n.id,n.title,n.identity_key,n.meta
+      ORDER BY n.identity_key,n.id
+      LIMIT ?`,
+  ).all(scope.revision.snapshotId, ...pageParams, limit + 1) as EndpointInventoryRow[];
+  const pageCandidates = candidates.slice(0, limit);
+  if (pageCandidates.length === 0) {
+    return { rows: [], candidateCount: Number(count.candidateCount), eligibleCount: 0, hasNext: false };
+  }
+  const identities = pageCandidates.map((candidate) => candidate.identityKey);
+  const edges = store.db.prepare(
+    `${REVISION_ENDPOINT_CTE}
+     SELECT publication.*
+       FROM endpoint_publication publication
+      WHERE publication.endpoint_identity IN (${identities.map(() => "?").join(",")})
+      ORDER BY publication.endpoint_identity,publication.edge_type,publication.locator_identity`,
+  ).all(scope.revision.snapshotId, ...identities) as Array<{
+    endpoint_identity: string;
+    locator_identity: string | null;
+    edge_type: string;
+    method: string;
+    confidence: number;
+    provenance: string;
+    file_path: string | null;
+  }>;
+  const revisionView = openRevisionView(store, scope.revision);
+  const locatorIdentityKeys = [...new Set(edges.flatMap((edge) => edge.locator_identity ? [edge.locator_identity] : []))];
+  const locatorSources = new Map(
+    revisionView.symbolVersions(locatorIdentityKeys).map((source) => [source.identityKey, source]),
+  );
+  const evidence = new Map<string, EndpointOccurrence[]>();
+  for (const edge of edges) {
+    const nodeId = store.findNodeIdByIdentity(edge.endpoint_identity);
+    if (!nodeId) continue;
+    const provenance = JSON.parse(edge.provenance || "{}") as Record<string, unknown>;
+    const revisionEdge: RevisionEdgeRow = {
+      id: "",
+      srcIdentityKey: edge.edge_type === "invokes" ? edge.locator_identity ?? "" : edge.endpoint_identity,
+      ...(edge.edge_type === "invokes"
+        ? { dstIdentityKey: edge.endpoint_identity }
+        : edge.locator_identity ? { dstIdentityKey: edge.locator_identity } : {}),
+      edgeType: edge.edge_type,
+      method: edge.method,
+      confidence: edge.confidence,
+      provenance,
+      scope: "revision",
+    };
+    const occurrence = endpointOccurrenceForRevisionEdge(store, scope, revisionEdge, locatorSources);
+    if (!occurrence) continue;
+    const current = evidence.get(nodeId) ?? [];
+    current.push(occurrence);
+    evidence.set(nodeId, current);
+  }
+  const rows = pageCandidates.map((candidate) => ({
+    ...candidate,
+    occurrences: dedupeEndpointOccurrences(evidence.get(candidate.nodeId) ?? []),
+  }));
+  const candidateCount = Number(count.candidateCount ?? 0);
+  return {
+    rows,
+    candidateCount,
+    eligibleCount: Math.max(0, candidateCount - (after ? 1 : 0)),
+    hasNext: candidates.length > pageCandidates.length,
+  };
+}
+
+function endpointPublicationExclusions(
+  store: KnowledgeStore,
+  scope: EndpointInventoryScope,
+  options: EndpointInventoryPageOptions,
+): EndpointPublicationReceipt["excluded"] {
+  if (!scope.repoId || !scope.revisionId) return [];
+  const rows = store.db.prepare(
+    `SELECT file_path AS filePath,start_line AS startLine,raw_target AS discoveryKey,
+            reason_code AS reasonCode,reason
+       FROM unresolved_reference_items
+      WHERE repo_id=? AND revision_id=?
+        AND reason_code IN ('ambiguous-grpc-handler','ambiguous-grpc-endpoint','ambiguous-grpc-declaration')
+      ORDER BY file_path,start_line,id`,
+  ).all(scope.repoId, scope.revisionId) as Array<{
+    filePath: string; startLine: number; discoveryKey: string; reasonCode: string; reason: string;
+  }>;
+  return rows.flatMap((row) => {
+    let candidateEndpointIds: string[] = [];
+    try {
+      const parsed = JSON.parse(row.reason) as { candidateEndpointIds?: unknown };
+      if (Array.isArray(parsed.candidateEndpointIds)) candidateEndpointIds = parsed.candidateEndpointIds
+        .filter((value): value is string => typeof value === "string")
+        .sort();
+    } catch { candidateEndpointIds = []; }
+    const protocol: string | null = row.discoveryKey.startsWith("grpc::") ? "grpc" : null;
+    const edgeType = row.reasonCode === "ambiguous-grpc-handler"
+      ? "handles" as const
+      : row.reasonCode === "ambiguous-grpc-declaration"
+        ? "declares" as const
+        : "invokes" as const;
+    const provenanceKind = classifyEndpointProvenanceKind({ edgeType, filePath: row.filePath });
+    const occurrence: EndpointOccurrence = {
+      provenanceKind,
+      repoId: scope.repoId!,
+      commit: scope.revision?.commitSha ?? scope.revisionId!,
+      snapshot: scope.revision?.snapshotId ?? scope.revisionId!,
+      file: row.filePath,
+      line: row.startLine,
+    };
+    if (!matchesEndpointFilter({
+      identityKey: row.discoveryKey,
+      protocol,
+      occurrences: [occurrence],
+    }, options)) return [];
+    return [{
+      discoveryKey: row.discoveryKey,
+      reasonCode: row.reasonCode,
+      candidateEndpointIds,
+      provenance: { provenanceKind, filePath: row.filePath, ...(row.startLine > 0 ? { startLine: row.startLine } : {}) },
+    }];
+  });
+}
+
+function readEndpointInventoryPage(
+  store: KnowledgeStore,
+  options: EndpointInventoryPageOptions,
+  limit: number,
+): EndpointInventoryPage {
+  if (options.handledOnly === true && options.provenanceKind && options.provenanceKind !== "handler") {
+    throw new EndpointInventoryPageError(
+      "INVALID_ARGUMENT",
+      "handledOnly is exactly provenanceKind=handler and cannot be combined with another provenanceKind",
+    );
+  }
+  const scope = options.scope ?? resolveEndpointInventoryScope(store, { repoId: options.repoId });
+  // A branch may point at a database revision created by an older runtime even
+  // when the database-wide schema has already migrated. Refuse before the
+  // legacy endpoint-publication fallback scans the full resolved-edge graph;
+  // every transport can then return the same typed remediation quickly.
+  if (scope.branchId) assertRuntimeIndexCompatible(store, scope.branchId);
+  const repoId = scope.repoId ?? options.repoId;
+  const scopeKey = `${scope.repoId ?? "*"}|${scope.branchId ?? "*"}|${endpointFilterKey(options)}|${ENDPOINT_INVENTORY_ORDERING}`;
+  const revision = scope.revisionId ?? (scope.repoId ? null : globalEndpointInventoryRevision(store));
+  let after: { identityKey: string; nodeId: string } | null = null;
+  if (options.cursor) {
+    try {
+      const decoded = ENDPOINT_INVENTORY_CURSOR_CODEC.decode(options.cursor, { operation: "endpoints", scope: scopeKey, revision, limit });
+      const [identityKey, nodeId] = decoded.lastKey.split("\u0000");
+      if (!identityKey || !nodeId) {
+        throw new KnowledgeContractError("CURSOR_INVALID", "malformed cursor: invalid lastKey format", { cursor: options.cursor }, false);
+      }
+      after = { identityKey, nodeId };
+    } catch (error) {
+      if (error instanceof KnowledgeContractError) throw error;
+      const code = String((error as Error).message ?? error);
+      if (code === "CURSOR_REQUEST_MISMATCH") {
+        throw new KnowledgeContractError("CURSOR_REQUEST_MISMATCH", "cursor was created with a different limit", { cursor: options.cursor, requestedLimit: limit }, false);
+      }
+      if (code === "CURSOR_OPERATION_MISMATCH" || code === "CURSOR_SCOPE_MISMATCH" || code === "CURSOR_STALE" || code === "CURSOR_EXPIRED") throw error;
+      throw new KnowledgeContractError("CURSOR_INVALID", "malformed cursor", { cursor: options.cursor }, false);
+    }
+  }
+
+  const revisionPage = revisionEndpointPageRows(store, scope, options, after, limit);
+  if (revisionPage) {
+    const pageRows = revisionPage.rows;
+    const hasNext = revisionPage.hasNext;
+    const items = hydrateEndpointInventoryRows(store, pageRows, scope);
+    const nextCursor = hasNext && pageRows.length > 0
+      ? ENDPOINT_INVENTORY_CURSOR_CODEC.encode({
+          schemaVersion: "1", contractVersion: "2", operation: "endpoints", scope: scopeKey,
+          orderingKey: ENDPOINT_INVENTORY_ORDERING,
+          lastKey: `${pageRows.at(-1)!.identityKey}\u0000${pageRows.at(-1)!.nodeId}`,
+          revision, expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(), limit,
+        })
+      : null;
+    const excluded = endpointPublicationExclusions(store, scope, options);
+    return {
+      items,
+      scope,
+      candidateCount: revisionPage.candidateCount,
+      remainingCount: Math.max(0, revisionPage.eligibleCount - items.length),
+      totalIsExact: true,
+      truncated: hasNext,
+      nextCursor,
+      publication: {
+        discovered: revisionPage.candidateCount + excluded.length,
+        persisted: revisionPage.candidateCount,
+        queryable: revisionPage.candidateCount,
+        excluded,
+        totalIsExact: true,
+      },
+    };
+  }
+
+  const filter = endpointInventoryFilter(repoId, options);
+  const countRow = (after
+    ? store.db.prepare(
+        `SELECT COUNT(*) AS candidateCount,
+                COALESCE(SUM(CASE WHEN n.identity_key>? OR (n.identity_key=? AND n.id>?) THEN 1 ELSE 0 END),0) AS eligibleCount
+           FROM nodes n
+          WHERE ${filter.where.join(" AND ")}`,
+      ).get(after.identityKey, after.identityKey, after.nodeId, ...filter.params)
+    : store.db.prepare(
+        `SELECT COUNT(*) AS candidateCount, COUNT(*) AS eligibleCount
+           FROM nodes n
+          WHERE ${filter.where.join(" AND ")}`,
+      ).get(...filter.params)) as { candidateCount: number; eligibleCount: number };
+
+  const pageWhere = [...filter.where];
+  const pageParams: Array<string | number> = [...filter.params];
+  if (after) {
+    pageWhere.push("(n.identity_key>? OR (n.identity_key=? AND n.id>?))");
+    pageParams.push(after.identityKey, after.identityKey, after.nodeId);
+  }
+  pageParams.push(limit + 1);
+  const rows = store.db.prepare(
+    `SELECT n.id AS nodeId, n.title, n.identity_key AS identityKey,
+            json_extract(n.meta, '$.protocol') AS protocol
+       FROM nodes n
+      WHERE ${pageWhere.join(" AND ")}
+      ORDER BY n.identity_key, n.id
+      LIMIT ?`,
+  ).all(...pageParams) as EndpointInventoryRow[];
+  const pageRows = rows.slice(0, limit);
+  const hasNext = rows.length > pageRows.length;
+  const items = hydrateEndpointInventoryRows(store, pageRows, scope);
+  const nextCursor = hasNext && pageRows.length > 0
+    ? ENDPOINT_INVENTORY_CURSOR_CODEC.encode({
+        schemaVersion: "1",
+        contractVersion: "2",
+        operation: "endpoints",
+        scope: scopeKey,
+        orderingKey: ENDPOINT_INVENTORY_ORDERING,
+        lastKey: `${pageRows.at(-1)!.identityKey}\u0000${pageRows.at(-1)!.nodeId}`,
+        revision,
+        expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+        limit,
+      })
+    : null;
+  const candidateCount = Number(countRow.candidateCount ?? 0);
+  const eligibleCount = Number(countRow.eligibleCount ?? 0);
+  return {
+    items,
+    scope,
+    candidateCount,
+    remainingCount: Math.max(0, eligibleCount - items.length),
+    totalIsExact: true,
+    truncated: hasNext,
+    nextCursor,
+    publication: {
+      discovered: candidateCount,
+      persisted: candidateCount,
+      queryable: candidateCount,
+      excluded: [],
+      totalIsExact: true,
+    },
+  };
+}
+
+/**
+ * Canonical ownership-only endpoint page. One SQLite read transaction covers
+ * scope, counting, keyset selection, hydration and cursor construction.
+ */
+export function listEndpointInventoryPage(
+  store: KnowledgeStore,
+  options: EndpointInventoryPageOptions = {},
+): EndpointInventoryPage {
+  const limit = options.limit ?? 100;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 500) {
+    throw new EndpointInventoryPageError("INVALID_ARGUMENT", "endpoint page limit must be an integer between 1 and 500");
+  }
+  if (options.provenanceKind && !(["definition", "client", "handler", "test"] as string[]).includes(options.provenanceKind)) {
+    throw new EndpointInventoryPageError("INVALID_ARGUMENT", `unsupported endpoint provenanceKind: ${options.provenanceKind}`);
+  }
+  return store.db.transaction(() => readEndpointInventoryPage(store, options, limit))();
+}
+
+/** Compatibility full-list helper retained for existing core consumers. */
+export function listEndpointInventory(
+  store: KnowledgeStore,
+  options: EndpointInventoryPageOptions = {},
+): EndpointInventoryItem[] {
+  const scope = options.scope ?? resolveEndpointInventoryScope(store, { repoId: options.repoId });
+  const items: EndpointInventoryItem[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = listEndpointInventoryPage(store, { ...options, scope, limit: 500, ...(cursor ? { cursor } : {}) });
+    items.push(...page.items);
+    cursor = page.nextCursor ?? undefined;
+  } while (cursor);
+  return items;
 }
 
 export interface PackSourceOptions {
@@ -1911,25 +3701,32 @@ export interface PackSourceOptions {
 export function buildContextPack(
   store: KnowledgeStore,
   target: string,
-  options?: { branchId?: string; repoId?: string; revision?: RevisionContext; limit?: number } & PackSourceOptions,
+  options?: { branchId?: string; repoId?: string; revision?: RevisionContext; limit?: number; offset?: number } & PackSourceOptions,
 ): ContextPack {
   const limit = options?.limit ?? 25;
-  const attach = (result: ContextPack): ContextPack => publicEvidenceFields(store, result, {
+  const offset = Math.max(0, options?.offset ?? 0);
+  const attach = (result: ContextPack): ContextPack => {
+    const payloadCount = contextPayloadCount(result);
+    return publicEvidenceFields(store, result, {
     repoId: options?.repoId,
     branchId: options?.branchId,
     revision: options?.revision,
     completeness: result.completeness.status,
-    proofStatus: result.focus && (result.callers.length + result.calls.length > 0) ? "proven" : "not_proven",
-    candidateCount: result.callers.length + result.calls.length,
-    returnedCount: result.callers.length + result.calls.length,
+    // Relations are lower-bound evidence even when callers/callees exist.
+    // Presence must not be presented as proof while the pack is partial.
+    proofStatus: "not_proven",
+    candidateCount: result.candidateCount ?? payloadCount,
+    returnedCount: result.returnedCount ?? payloadCount,
     truncated: result.truncated.length > 0,
     cursor: null,
-  }) as unknown as ContextPack;
+    }) as unknown as ContextPack;
+  };
   const empty: ContextPack = {
     target, trust: null, focus: null, callers: [], calls: [], renderedBy: [], renders: [],
     invokedDynamicallyBy: [], invokesDynamic: [], remoteCalls: [], invokedBy: [],
     referencedBy: [], usesTypes: [],
     routes: [], tests: [], errors: [], envs: [], notes: [], importers: [], signals: [],
+    firstHopRelations: [], handles: [],
     externalCalls: [], completeness: { status: "unknown", externalCallCount: 0, note: "Nothing resolved for this target, so there is no calls list to describe." },
     truncated: [],
     ambiguous: null, assemblyError: null,
@@ -1943,13 +3740,14 @@ export function buildContextPack(
   if (resolution.kind === "none") return attach(empty);
   if (resolution.kind === "ambiguous") return attach({ ...empty, ambiguous: resolution.candidates });
   const focusId = resolution.nodeId;
+  assertResolvedNodeInScope(store, focusId, options);
 
   // The symbol DID resolve uniquely at this point — any throw from here on is
   // an internal assembly failure (corrupt/incomplete row, disk read fault,
   // etc.), NOT "not found". Surfacing it as assemblyError keeps it from being
   // silently indistinguishable from a genuine zero-match.
   try {
-    return attach(buildContextPackBody(store, target, focusId, limit, options));
+    return attach(buildContextPackBody(store, target, focusId, limit, offset, options));
   } catch (e) {
     return attach({ ...empty, assemblyError: (e as Error).message });
   }
@@ -1960,7 +3758,8 @@ function buildContextPackBody(
   target: string,
   focusId: string,
   limit: number,
-  options: { branchId?: string; revision?: RevisionContext; limit?: number } | undefined,
+  offset: number,
+  options: { branchId?: string; revision?: RevisionContext; limit?: number; offset?: number } | undefined,
 ): ContextPack {
   const detail = getNodeDetail(store, focusId, options);
   const active = "status='active'";
@@ -2002,26 +3801,50 @@ function buildContextPackBody(
     .sort((a, b) => a.specifier.localeCompare(b.specifier));
 
   const truncatedRelations = new Set<string>();
+  // Read a stable small relation window up front. Without this floor, page 1
+  // saw only `limit + 1` candidates while page 2 expanded every relation to
+  // `offset + limit + 1`, making the advertised total drift across cursors.
+  const relationScanLimit = Math.min(100_000, Math.max(100, offset + limit + 1));
   const capped = (relation: string, rows: { id: string }[]) => {
-    if (rows.length > limit) truncatedRelations.add(relation);
-    return rows.slice(0, limit);
+    if (rows.length > relationScanLimit) truncatedRelations.add(relation);
+    return rows.slice(0, relationScanLimit);
   };
-  const snapshotIds = (type: string, direction: "in" | "out") => snapshotEdgePairsForNodes(
-    store,
-    snapshotRevision!,
-    [focusId],
-    { edgeTypes: [type], direction, limit: limit + 1 },
-  )
-    .map((edge) => direction === "in" ? edge.src : edge.dst).filter((id): id is string => Boolean(id)).map((id) => ({ id })).slice(0, limit + 1);
+  const snapshotRelationNames = [
+    "callers", "calls", "renderedBy", "renders", "invokedDynamicallyBy", "invokesDynamic",
+    "remoteCalls", "referencedBy", "usesTypes", "tests", "errors", "envs", "routes",
+  ];
+  const snapshotRelationScanLimit = 10_001;
+  // A revision Context Pack used to run the same snapshot-wide resolved-edge
+  // query once per relation type. On a multi-thousand-file snapshot that made
+  // one context lookup perform fourteen equivalent scans and occasionally
+  // cross the CLI's 10s hard timeout. Read all direct relation types once,
+  // then preserve each relation's independent limit+1 truncation in memory.
+  const snapshotRelationPairs = snapshotRevision
+    ? snapshotEdgePairsForNodes(store, snapshotRevision, [focusId], {
+        edgeTypes: ["calls", "renders", "invokes_dynamic", "invokes", "references", "tests", "throws", "uses", "handles"],
+        direction: "both",
+        limit: snapshotRelationScanLimit,
+      })
+    : [];
+  if (snapshotRelationPairs.length >= snapshotRelationScanLimit) {
+    for (const relation of snapshotRelationNames) truncatedRelations.add(relation);
+  }
+  const snapshotIds = (type: string, direction: "in" | "out") => snapshotRelationPairs
+    .filter((edge) => edge.edgeType === type && (direction === "in" ? edge.dst === focusId : edge.src === focusId))
+    .map((edge) => direction === "in" ? edge.src : edge.dst)
+    .filter((id): id is string => Boolean(id))
+    .map((id) => ({ id }))
+    .sort((left, right) => left.id.localeCompare(right.id))
+    .slice(0, relationScanLimit + 1);
   const inEdges = (relation: string, type: string) => capped(
     relation,
-    snapshotRevision ? snapshotIds(type, "in") : store.db.prepare(`SELECT DISTINCT src AS id FROM edges WHERE dst=? AND edge_type=? AND ${active}${bx} LIMIT ?`)
-      .all(...(branchId ? [focusId, type, branchId, limit + 1] : [focusId, type, limit + 1])) as { id: string }[],
+    snapshotRevision ? snapshotIds(type, "in") : store.db.prepare(`SELECT DISTINCT src AS id FROM edges WHERE dst=? AND edge_type=? AND ${active}${bx} ORDER BY src LIMIT ? OFFSET ?`)
+      .all(...(branchId ? [focusId, type, branchId, relationScanLimit + 1, 0] : [focusId, type, relationScanLimit + 1, 0])) as { id: string }[],
   );
   const outEdges = (relation: string, type: string) => capped(
     relation,
-    snapshotRevision ? snapshotIds(type, "out") : store.db.prepare(`SELECT DISTINCT dst AS id FROM edges WHERE src=? AND edge_type=? AND dst IS NOT NULL AND ${active}${bx} LIMIT ?`)
-      .all(...(branchId ? [focusId, type, branchId, limit + 1] : [focusId, type, limit + 1])) as { id: string }[],
+    snapshotRevision ? snapshotIds(type, "out") : store.db.prepare(`SELECT DISTINCT dst AS id FROM edges WHERE src=? AND edge_type=? AND dst IS NOT NULL AND ${active}${bx} ORDER BY dst LIMIT ? OFFSET ?`)
+      .all(...(branchId ? [focusId, type, branchId, relationScanLimit + 1, 0] : [focusId, type, relationScanLimit + 1, 0])) as { id: string }[],
   );
 
   const callers = inEdges("callers", "calls");
@@ -2045,11 +3868,36 @@ function buildContextPackBody(
            WHERE edge_type='invokes' AND ${active} AND src != ?
            AND dst IN (${handledEndpoints.map(() => "?").join(",")}) LIMIT ?`,
         )
-        .all(focusId, ...handledEndpoints.map((e) => e.id), limit + 1) as { id: string }[])
+        .all(focusId, ...handledEndpoints.map((e) => e.id), relationScanLimit + 1) as { id: string }[])
     : [];
   const referencedBy = inEdges("referencedBy", "references");
   const usesTypes = outEdges("usesTypes", "references");
-  const tests = inEdges("tests", "tests");
+  const focusFilePath = detail?.versions.find((version) => version.status === "fresh")?.filePath
+    ?? detail?.versions[0]?.filePath
+    ?? null;
+  const fileSymbolIds = focusFilePath
+    ? (store.db.prepare(
+        `SELECT DISTINCT node_id AS id FROM symbol_versions
+          WHERE file_path=? AND status='fresh'${branchId ? " AND branch_id=?" : ""}
+          ORDER BY node_id`,
+      ).all(...(branchId ? [focusFilePath, branchId] : [focusFilePath])) as Array<{ id: string }>).map((row) => row.id)
+    : [];
+  const tests = fileSymbolIds.length > 0
+    ? capped("tests", snapshotRevision
+        ? snapshotEdgePairsForNodes(store, snapshotRevision, fileSymbolIds, {
+            edgeTypes: ["tests"], direction: "in", limit: relationScanLimit + 1,
+          })
+          .map((edge) => ({ id: edge.src }))
+          .filter((row, index, rows) => rows.findIndex((candidate) => candidate.id === row.id) === index)
+          .sort((left, right) => left.id.localeCompare(right.id))
+          .slice(0, relationScanLimit + 1)
+        : store.db.prepare(
+            `SELECT DISTINCT src AS id FROM edges
+              WHERE dst IN (${fileSymbolIds.map(() => "?").join(",")})
+                AND edge_type='tests' AND ${active}${bx}
+              ORDER BY src LIMIT ? OFFSET ?`,
+          ).all(...fileSymbolIds, ...(branchId ? [branchId] : []), relationScanLimit + 1, 0) as Array<{ id: string }>)
+    : inEdges("tests", "tests");
   const errors = outEdges("errors", "throws").map((r) => nodeBrief(store, r.id).title);
   const envs = outEdges("envs", "uses").map((r) => nodeBrief(store, r.id).title);
 
@@ -2062,7 +3910,7 @@ function buildContextPackBody(
     const ph = callerIds.map(() => "?").join(",");
     const viaCaller = store.db
       .prepare(`SELECT DISTINCT src AS id FROM edges WHERE edge_type='handles' AND ${active} AND dst IN (${ph}) LIMIT ?`)
-      .all(...callerIds, limit) as { id: string }[];
+      .all(...callerIds, relationScanLimit) as { id: string }[];
     for (const r of viaCaller) {
       const t = nodeBrief(store, r.id).title;
       if (!routeSet.has(t)) routeSet.set(t, "caller");
@@ -2071,20 +3919,22 @@ function buildContextPackBody(
   const routes = [...routeSet].map(([route, via]) => ({ route, via }));
 
   // notes linked to the focus (any incoming edge whose source is a note node).
-  const notes = briefsFrom(
-    store,
-    store.db.prepare(
+  const notes = store.db.prepare(
       `SELECT DISTINCT e.src AS id FROM edges e JOIN nodes n ON n.id=e.src
-       WHERE e.dst=? AND ${active} AND n.node_type='note' LIMIT ?`,
-    ).all(focusId, limit) as { id: string }[],
-  );
+       WHERE e.dst=? AND ${active} AND n.node_type='note' ORDER BY e.src LIMIT ?`,
+    ).all(focusId, relationScanLimit) as { id: string }[];
 
   // importers: files importing the focus's file (focus ← defines ← file → imports).
   const fileRow = store.db
     .prepare(`SELECT src AS id FROM edges WHERE dst=? AND edge_type='defines' AND ${active} LIMIT 1`)
     .get(focusId) as { id: string } | undefined;
   const importers = fileRow
-    ? briefsFrom(store, store.db.prepare(`SELECT DISTINCT src AS id FROM edges WHERE dst=? AND edge_type='imports' AND ${active} LIMIT ?`).all(fileRow.id, limit) as { id: string }[])
+    ? store.db.prepare(`SELECT DISTINCT src AS id FROM edges WHERE dst=? AND edge_type='imports' AND ${active} ORDER BY src LIMIT ?`).all(fileRow.id, relationScanLimit) as { id: string }[]
+    : [];
+  const focusSource = sourceContextForNode(store, focusId, options);
+  const relationBriefs = (rows: Array<{ id: string }>) => briefsFrom(store, rows, options, focusSource);
+  const endpointRelations = detail?.node.nodeType === "endpoint"
+    ? readEndpointRelations(store, focusId, options)?.relations ?? []
     : [];
 
   // risk/attention signals — cheap heuristics from the graph itself.
@@ -2099,7 +3949,7 @@ function buildContextPackBody(
   if (remoteCalls.length) signals.push(`calls ${remoteCalls.length} remote gRPC endpoint(s) — cross-service dependency`);
   if (invokedBy.length) signals.push(`invoked by ${invokedBy.length} caller(s) in other services — cross-service contract`);
 
-  return {
+  return paginateContextPackRelations({
     target,
     trust: trustEnvelopeForBranch(store, branchId),
     focus: detail
@@ -2114,22 +3964,24 @@ function buildContextPackBody(
           branches: detail.versions.map((v) => ({ branch: v.branchId, status: v.status })),
         }
       : null,
-    callers: briefsFrom(store, callers),
-    calls: briefsFrom(store, calls),
-    renderedBy: briefsFrom(store, renderedBy),
-    renders: briefsFrom(store, renders),
-    invokedDynamicallyBy: briefsFrom(store, invokedDynamicallyBy),
-    invokesDynamic: briefsFrom(store, invokesDynamic),
-    remoteCalls: briefsFrom(store, remoteCalls),
-    invokedBy: briefsFrom(store, invokedBy),
-    referencedBy: briefsFrom(store, referencedBy),
-    usesTypes: briefsFrom(store, usesTypes),
+    callers: relationBriefs(callers),
+    calls: relationBriefs(calls),
+    renderedBy: relationBriefs(renderedBy),
+    renders: relationBriefs(renders),
+    invokedDynamicallyBy: relationBriefs(invokedDynamicallyBy),
+    invokesDynamic: relationBriefs(invokesDynamic),
+    remoteCalls: relationBriefs(remoteCalls),
+    invokedBy: relationBriefs(invokedBy),
+    referencedBy: relationBriefs(referencedBy),
+    usesTypes: relationBriefs(usesTypes),
     routes,
-    tests: briefsFrom(store, tests),
+    tests: relationBriefs(tests),
     errors,
     envs,
-    notes,
-    importers,
+    notes: relationBriefs(notes),
+    importers: relationBriefs(importers),
+    firstHopRelations: endpointRelations,
+    handles: endpointRelations.filter((relation) => relation.edgeType === "handles"),
     signals,
     externalCalls: externalCallGroups,
     completeness: {
@@ -2147,7 +3999,7 @@ function buildContextPackBody(
     ambiguous: null,
     assemblyError: null,
     ...(scopeFallback ? { scopeFallback } : {}),
-  };
+  }, offset, limit);
 }
 
 // Render a Context Pack as Markdown — what an AI coding agent reads before editing.
@@ -2255,7 +4107,13 @@ export interface FlowStep {
    * TypeScript interface as the caller of thirteen functions. The traversal knew
    * the parent all along and dropped it. */
   parentNodeId?: string;
-  source?: { repoId: string; filePath: string; startLine: number; endLine?: number; revisionId: string };
+  source?: SourceReference;
+  /** This edge crosses repository ownership; both step sources remain intact. */
+  boundary?: boolean;
+  evidenceState?: EvidenceProofStatus;
+  edgeEvidence?: EndpointRelation["edgeEvidence"];
+  /** Canonical evidence for the edge that produced this hop. */
+  graphEvidence?: GraphEdgeEvidenceEnvelope;
 }
 export type FlowDiagnosticReason =
   | "not_indexed" // no gRPC endpoint or symbol/note matches the target at all
@@ -2276,6 +4134,10 @@ export interface FlowResult {
   // context query per hop to discover regression tests and operational notes.
   relatedTests: ContextBrief[];
   linkedKnowledge: ContextBrief[];
+  /** Execution-only projection; root is retained as the flow entry. */
+  executionSteps?: FlowStep[];
+  /** Type/reference projection kept separate from executable traversal hops. */
+  referenceSteps?: FlowStep[];
   diagnostic?: FlowDiagnostic;
   ambiguous?: SymbolCandidate[]; // populated only when diagnostic.reason === "ambiguous"
   // Set ONLY when no revision/branchId was supplied by the caller and the
@@ -2292,6 +4154,7 @@ export interface FlowResult {
   proofStatus?: EvidenceProofStatus;
   candidateCount?: number;
   returnedCount?: number;
+  totalIsExact?: boolean;
   truncated?: boolean;
   cursor?: string | null;
 }
@@ -2361,10 +4224,10 @@ function flowEnrichment(
   return { relatedTests: uniqueBriefs(testIds), linkedKnowledge: uniqueBriefs(knowledgeIds) };
 }
 
-const DOWNSTREAM = ["calls", "renders", "invokes_dynamic", "invokes", "references", "reads", "writes", "throws", "uses", "handles"];
-const FLOW_INGRESS = ["handles", "calls", "renders", "invokes_dynamic", "invokes"];
+const DOWNSTREAM = ["calls", "renders", "invokes_dynamic", "invokes", "references", "reads", "writes", "throws", "uses", "handles", ...FRAMEWORK_EDGE_TYPES];
+const FLOW_INGRESS = ["handles", "calls", "renders", "invokes_dynamic", "invokes", ...FRAMEWORK_EDGE_TYPES];
 
-type FlowTraversalEdge = { id: string; via: string };
+type FlowTraversalEdge = { id: string; via: string; graphEvidence?: GraphEdgeEvidenceEnvelope };
 type FlowDownstreamEdge = FlowTraversalEdge & { src: string };
 
 function flowIngressPath(
@@ -2377,7 +4240,7 @@ function flowIngressPath(
   const focusOnly = [{ id: focus, via: "root" }];
   if (store.getNode(focus)?.node_type === "endpoint") return focusOnly;
 
-  type ReverseEdge = { parent: string; child: string; via: string };
+  type ReverseEdge = { parent: string; child: string; via: string; graphEvidence?: GraphEdgeEvidenceEnvelope };
   const queue: Array<{ id: string; reverseEdges: ReverseEdge[] }> = [
     { id: focus, reverseEdges: [] },
   ];
@@ -2398,12 +4261,12 @@ function flowIngressPath(
       seen.add(parent.id);
       const reverseEdges = [
         ...current.reverseEdges,
-        { parent: parent.id, child: current.id, via: parent.via },
+        { parent: parent.id, child: current.id, via: parent.via, graphEvidence: parent.graphEvidence },
       ];
       if (store.getNode(parent.id)?.node_type === "endpoint") {
         return [
           { id: parent.id, via: "root" },
-          ...reverseEdges.reverse().map((edge) => ({ id: edge.child, via: edge.via })),
+          ...reverseEdges.reverse().map((edge) => ({ id: edge.child, via: edge.via, graphEvidence: edge.graphEvidence })),
         ];
       }
       queue.push({ id: parent.id, reverseEdges });
@@ -2421,14 +4284,15 @@ function appendFlowDownstream(
   outEdges: (ids: string[]) => FlowDownstreamEdge[],
   depthCap: number,
   limit: number,
-  revisionId: string,
+  scope?: TargetScopeOptions,
+  initialFrontier?: Array<{ id: string; depth: number }>,
 ): void {
   // Breadth-first expansion preserves every shallow/direct relationship before
   // spending the response budget on one large descendant subtree. The old DFS
   // could exhaust a 60-step limit inside the first callee and silently omit a
   // sibling call that Context had already confirmed. `seen` is checked before
   // append so converging branches also do not duplicate steps.
-  let frontier: Array<{ id: string; depth: number }> = [{ id: focus, depth: focusDepth }];
+  let frontier: Array<{ id: string; depth: number }> = initialFrontier ?? [{ id: focus, depth: focusDepth }];
   while (frontier.length > 0 && steps.length < limit) {
     const expandable = frontier.filter((item) => item.depth < depthCap);
     if (expandable.length === 0) break;
@@ -2448,7 +4312,7 @@ function appendFlowDownstream(
         if (!edge || seen.has(edge.id) || !store.getNode(edge.id)) continue;
         seen.add(edge.id);
         const depth = current.depth + 1;
-        steps.push({ depth, parentNodeId: current.id, ...nodeBriefStep(store, edge.id, revisionId), via: edge.via });
+        steps.push({ depth, parentNodeId: current.id, ...nodeBriefStep(store, edge.id, scope), via: edge.via, graphEvidence: edge.graphEvidence });
         if (depth < depthCap) next.push({ id: edge.id, depth });
       }
     }
@@ -2562,22 +4426,78 @@ export function resolveGrpcEndpoint(store: KnowledgeStore, input: string): GrpcR
   return { kind: "ambiguous", candidates };
 }
 
+function endpointFlowSeed(
+  store: KnowledgeStore,
+  focus: string,
+  options: TargetScopeOptions | undefined,
+  limit: number,
+): { steps: FlowStep[]; seen: Set<string>; frontier: Array<{ id: string; depth: number }> } | null {
+  const view = readEndpointRelations(store, focus, options);
+  if (!view) return null;
+  const root: FlowStep = { depth: 0, ...nodeBriefStep(store, focus, options), via: "root" };
+  const direct = view.relations.slice(0, Math.max(0, limit - 1));
+  const steps: FlowStep[] = [root, ...direct.map((relation): FlowStep => ({
+    depth: 1,
+    parentNodeId: focus,
+    nodeId: relation.nodeId,
+    title: relation.title,
+    nodeType: relation.nodeType,
+    via: relation.edgeType,
+    ...(relation.source ? { source: relation.source } : {}),
+    ...(relation.boundary ? { boundary: true } : {}),
+    evidenceState: relation.evidenceState,
+    edgeEvidence: relation.edgeEvidence,
+    graphEvidence: relation.graphEvidence,
+  }))];
+  return {
+    steps,
+    seen: new Set(steps.map((step) => step.nodeId)),
+    frontier: direct.map((relation) => ({ id: relation.nodeId, depth: 1 })),
+  };
+}
+
 export function buildFlow(
   store: KnowledgeStore,
   target: string,
-  options?: { branchId?: string; repoId?: string; revision?: RevisionContext; depth?: number; limit?: number },
+  options?: { branchId?: string; repoId?: string; revision?: RevisionContext; depth?: number; limit?: number; offset?: number },
 ): FlowResult {
-  const attach = (result: FlowResult): FlowResult => publicEvidenceFields(store, result, {
-    repoId: options?.repoId,
-    branchId: options?.branchId,
-    revision: options?.revision,
-    completeness: result.root ? "partial" : "unknown",
-    proofStatus: result.steps.length > 1 ? "proven" : "not_proven",
-    candidateCount: result.steps.length,
-    returnedCount: result.steps.length,
-    truncated: false,
-    cursor: null,
-  }) as unknown as FlowResult;
+  // The public knowledge.flow contract defaults to 20 hops on every surface.
+  // Keep that default here so callers that omit an explicit limit (notably the
+  // CLI) cannot silently return a different graph than MCP/query-server.
+  const requestedLimit = Math.max(1, Math.min(100, options?.limit ?? 20));
+  const pageOffset = Math.max(0, Math.trunc(options?.offset ?? 0));
+  // Discover one row beyond the requested page so `truncated` means that a
+  // continuation can actually return another identity. The public page limit
+  // remains unchanged; this is only the bounded traversal budget.
+  const discoveryLimit = Math.min(10_000, pageOffset + requestedLimit + 1);
+  const attach = (result: FlowResult): FlowResult => {
+    const candidateSteps = result.steps;
+    const boundedSteps = candidateSteps.slice(pageOffset, pageOffset + requestedLimit);
+    const truncated = candidateSteps.length > pageOffset + boundedSteps.length;
+    const steps = boundedSteps.map((step, index) => index === 0
+      ? (pageOffset === 0 ? step : { ...step, graphEvidence: step.graphEvidence ?? unresolvedGraphEdgeEvidence("flow_edge_record_missing") })
+      : { ...step, graphEvidence: step.graphEvidence ?? unresolvedGraphEdgeEvidence("flow_edge_record_missing") });
+    return publicEvidenceFields(store, {
+      ...result,
+      root: result.root,
+      steps,
+      executionSteps: steps.filter((step) => step.via === "root" || isExecutionEdge(step.via)),
+      referenceSteps: steps.filter((step) => isReferenceEdge(step.via)),
+      totalIsExact: !truncated,
+    }, {
+      repoId: options?.repoId,
+      branchId: options?.branchId,
+      revision: options?.revision,
+      completeness: result.root ? "partial" : "unknown",
+      // Flow is assembled from statically resolved steps and is never a proof
+      // that all runtime paths were discovered.
+      proofStatus: "not_proven",
+      candidateCount: candidateSteps.length,
+      returnedCount: steps.length,
+      truncated,
+      cursor: null,
+    }) as unknown as FlowResult;
+  };
   const grpc = resolveGrpcEndpoint(store, target);
   let focus: string | null = null;
   let attemptedKey: string | null = null;
@@ -2594,7 +4514,10 @@ export function buildFlow(
     });
   } else {
     if (grpc.kind === "not_found") attemptedKey = grpc.attemptedKey;
-    const sym = resolveSymbolMatches(store, target, options);
+    const scoped = resolveSymbolMatches(store, target, options);
+    const sym = scoped.kind === "none" && options?.repoId
+      ? resolveSymbolMatches(store, target)
+      : scoped;
     if (sym.kind === "unique") {
       focus = sym.nodeId;
     } else if (sym.kind === "ambiguous") {
@@ -2619,31 +4542,54 @@ export function buildFlow(
       },
     });
   }
+  assertResolvedNodeInScope(store, focus, options);
   const depthCap = options?.depth ?? 5;
-  const limit = options?.limit ?? 60;
+  const limit = discoveryLimit;
   if (options?.revision && !options.revision.snapshotId.startsWith("legacy:")) {
     const outEdges = (ids: string[]) => snapshotEdgePairsForNodes(store, options.revision!, ids, {
       edgeTypes: DOWNSTREAM,
       direction: "out",
       limit: Math.max(limit, Math.min(5_000, limit * ids.length)),
-    }).filter((edge) => edge.dst).map((edge) => ({ src: edge.src, id: edge.dst!, via: edge.edgeType }));
+    }).filter((edge) => edge.dst).map((edge) => ({
+      src: edge.src,
+      id: edge.dst!,
+      via: edge.edgeType,
+      graphEvidence: graphEdgeEvidence({
+        edgeType: edge.edgeType,
+        method: edge.method,
+        confidence: edge.confidence,
+        provenance: edge.provenance,
+        scope: edge.scope,
+      }),
+    }));
     const inEdges = (id: string) => snapshotEdgePairsForNodes(store, options.revision!, [id], {
       edgeTypes: FLOW_INGRESS,
       direction: "in",
       limit,
-    }).filter((edge) => edge.dst === id).map((edge) => ({ id: edge.src, via: edge.edgeType }));
-    const flowRevisionId = options.revision.snapshotId ?? options.revision.branchId ?? "live";
-    const ingress = flowIngressPath(store, focus, inEdges, depthCap, limit);
-    const steps: FlowStep[] = ingress.map((edge, depth) => ({ depth, ...nodeBriefStep(store, edge.id, flowRevisionId), via: edge.via }));
-    const root = steps[0];
-    const seen = new Set<string>(ingress.map((edge) => edge.id));
-    appendFlowDownstream(store, focus, ingress.length - 1, steps, seen, outEdges, depthCap, limit, flowRevisionId);
-    const enrichment = flowEnrichment(store, steps.map((step) => step.nodeId), {
+    }).filter((edge) => edge.dst === id).map((edge) => ({
+      id: edge.src,
+      via: edge.edgeType,
+      graphEvidence: graphEdgeEvidence({
+        edgeType: edge.edgeType,
+        method: edge.method,
+        confidence: edge.confidence,
+        provenance: edge.provenance,
+        scope: edge.scope,
+      }),
+    }));
+    const endpointSeed = endpointFlowSeed(store, focus, options, limit);
+    const ingress = endpointSeed ? [] : flowIngressPath(store, focus, inEdges, depthCap, limit);
+    const steps: FlowStep[] = endpointSeed?.steps ?? ingress.map((edge, depth) => ({ depth, ...nodeBriefStep(store, edge.id, options), via: edge.via, ...(edge.graphEvidence ? { graphEvidence: edge.graphEvidence } : {}) }));
+    const seen = endpointSeed?.seen ?? new Set<string>(ingress.map((edge) => edge.id));
+    appendFlowDownstream(store, focus, endpointSeed ? 0 : ingress.length - 1, steps, seen, outEdges, depthCap, limit, options, endpointSeed?.frontier);
+    const boundedSteps = markFlowBoundaries(steps);
+    const root = boundedSteps[0];
+    const enrichment = flowEnrichment(store, boundedSteps.map((step) => step.nodeId), {
       branchId: options.revision.branchId,
       limit,
       snapshotRevision: options.revision,
     });
-    return attach({ target, trust: options.revision.branchId ? trustEnvelopeForBranch(store, options.revision.branchId) : null, root, steps, ...enrichment, ...(steps.length === 1 ? { diagnostic: { reason: "no_outgoing_edges" as const, message: `"${root.title}" is indexed but has no outgoing edges in the selected revision.` } } : {}) });
+    return attach({ target, trust: options.revision.branchId ? trustEnvelopeForBranch(store, options.revision.branchId) : null, root, steps: boundedSteps, ...enrichment, ...(boundedSteps.length === 1 ? { diagnostic: { reason: "no_outgoing_edges" as const, message: `"${root.title}" is indexed but has no outgoing edges in the selected revision.` } } : {}) });
   }
   const explicitBranchId = revisionBranchId(options);
   const branchId = explicitBranchId ?? liveBranchOf(store, focus);
@@ -2654,34 +4600,50 @@ export function buildFlow(
   const outEdges = (ids: string[]) => {
     const srcPlaceholders = ids.map(() => "?").join(",");
     const params = branchId ? [...ids, ...DOWNSTREAM, branchId] : [...ids, ...DOWNSTREAM];
-    return store.db
+    const rows = store.db
       .prepare(
-        `SELECT DISTINCT src, dst AS id, edge_type AS via FROM edges
+         `SELECT DISTINCT src, dst AS id, edge_type AS via,
+                 origin, method, confidence, provenance, evidence_id AS evidenceId,
+                 branch_id AS branchId
+            FROM edges
          WHERE src IN (${srcPlaceholders}) AND dst IS NOT NULL AND status='active' AND edge_type IN (${ph})${bx}
          ORDER BY src, edge_type, dst`,
       )
-      .all(...params) as FlowDownstreamEdge[];
+      .all(...params) as Array<FlowDownstreamEdge & { origin?: string | null; method?: string | null; confidence?: number | null; provenance?: string | Record<string, unknown> | null; evidenceId?: string | null; branchId?: string | null }>;
+    return rows.map((edge) => ({
+        ...edge,
+        graphEvidence: graphEdgeEvidence({ edgeType: edge.via, origin: edge.origin, method: edge.method, confidence: edge.confidence, provenance: edge.provenance, evidenceId: edge.evidenceId, branchId: edge.branchId, scope: branchId ? "revision" : undefined }),
+      })) as FlowDownstreamEdge[];
   };
 
   const inEdges = (id: string) => {
     const ingressPlaceholders = FLOW_INGRESS.map(() => "?").join(",");
     const params = branchId ? [id, ...FLOW_INGRESS, branchId] : [id, ...FLOW_INGRESS];
-    return store.db
+    const rows = store.db
       .prepare(
-        `SELECT DISTINCT src AS id, edge_type AS via FROM edges
+        `SELECT DISTINCT src AS id, edge_type AS via,
+                 origin, method, confidence, provenance, evidence_id AS evidenceId,
+                 branch_id AS branchId
+            FROM edges
          WHERE dst=? AND status='active' AND edge_type IN (${ingressPlaceholders})${bx}
          ORDER BY edge_type, src`,
       )
-      .all(...params) as Array<{ id: string; via: string }>;
+      .all(...params) as Array<{ id: string; via: string; origin?: string | null; method?: string | null; confidence?: number | null; provenance?: string | Record<string, unknown> | null; evidenceId?: string | null; branchId?: string | null }>;
+    return rows.map((edge) => ({
+        ...edge,
+        graphEvidence: graphEdgeEvidence({ edgeType: edge.via, origin: edge.origin, method: edge.method, confidence: edge.confidence, provenance: edge.provenance, evidenceId: edge.evidenceId, branchId: edge.branchId, scope: branchId ? "revision" : undefined }),
+      }));
   };
 
-  const ingress = flowIngressPath(store, focus, inEdges, depthCap, limit);
-  const steps: FlowStep[] = ingress.map((edge, depth) => ({ depth, ...nodeBriefStep(store, edge.id, branchId ?? "live"), via: edge.via }));
-  const root = steps[0];
-  const seen = new Set<string>(ingress.map((edge) => edge.id));
-  appendFlowDownstream(store, focus, ingress.length - 1, steps, seen, outEdges, depthCap, limit, branchId ?? "live");
-  const enrichment = flowEnrichment(store, steps.map((step) => step.nodeId), { branchId: branchId ?? undefined, limit });
-  if (steps.length === 1) {
+  const endpointSeed = endpointFlowSeed(store, focus, options, limit);
+  const ingress = endpointSeed ? [] : flowIngressPath(store, focus, inEdges, depthCap, limit);
+  const steps: FlowStep[] = endpointSeed?.steps ?? ingress.map((edge, depth) => ({ depth, ...nodeBriefStep(store, edge.id, options), via: edge.via, ...(edge.graphEvidence ? { graphEvidence: edge.graphEvidence } : {}) }));
+  const seen = endpointSeed?.seen ?? new Set<string>(ingress.map((edge) => edge.id));
+  appendFlowDownstream(store, focus, endpointSeed ? 0 : ingress.length - 1, steps, seen, outEdges, depthCap, limit, options, endpointSeed?.frontier);
+  const boundedSteps = markFlowBoundaries(steps);
+  const root = boundedSteps[0];
+  const enrichment = flowEnrichment(store, boundedSteps.map((step) => step.nodeId), { branchId: branchId ?? undefined, limit });
+  if (boundedSteps.length === 1) {
     const node = store.getNode(focus);
     const isEndpoint = node?.node_type === "endpoint";
     // A FILE node with defines/imports is not a leaf, and saying so sent one
@@ -2698,7 +4660,7 @@ export function buildFlow(
     const defines = fileEdges.find((row) => row.type === "defines")?.n ?? 0;
     const imports = fileEdges.find((row) => row.type === "imports")?.n ?? 0;
     return attach({
-      target, trust: trustEnvelopeForBranch(store, branchId), root, steps, ...enrichment,
+      target, trust: trustEnvelopeForBranch(store, branchId), root, steps: boundedSteps, ...enrichment,
       diagnostic: {
         reason: isEndpoint ? "endpoint_no_handler" : "no_outgoing_edges",
         message: isEndpoint
@@ -2710,16 +4672,21 @@ export function buildFlow(
       ...(scopeFallback ? { scopeFallback } : {}),
     });
   }
-  return attach({ target, trust: trustEnvelopeForBranch(store, branchId), root, steps, ...enrichment, ...(scopeFallback ? { scopeFallback } : {}) });
+  return attach({ target, trust: trustEnvelopeForBranch(store, branchId), root, steps: boundedSteps, ...enrichment, ...(scopeFallback ? { scopeFallback } : {}) });
 }
 
-function nodeBriefStep(store: KnowledgeStore, id: string, revisionId = "live") {
-  const b = nodeBrief(store, id);
-  const source = store.db.prepare("SELECT b.repo_id AS repoId,sv.file_path AS filePath,sv.start_line AS startLine,sv.end_line AS endLine FROM symbol_versions sv JOIN branches b ON b.id=sv.branch_id WHERE sv.node_id=? AND sv.status='fresh' ORDER BY sv.start_line LIMIT 1").get(id) as { repoId: string | null; filePath: string | null; startLine: number | null; endLine: number | null } | undefined;
-  return {
-    ...b,
-    ...(source?.repoId && source.filePath && source.startLine != null ? { source: { repoId: source.repoId, filePath: source.filePath, startLine: source.startLine, ...(source.endLine != null ? { endLine: source.endLine } : {}), revisionId } } : {}),
-  };
+function markFlowBoundaries(steps: FlowStep[]): FlowStep[] {
+  const byId = new Map(steps.map((step) => [step.nodeId, step]));
+  return steps.map((step) => {
+    const parent = step.parentNodeId ? byId.get(step.parentNodeId) : undefined;
+    return parent?.source?.repoId && step.source?.repoId && parent.source.repoId !== step.source.repoId
+      ? { ...step, boundary: true }
+      : step;
+  });
+}
+
+function nodeBriefStep(store: KnowledgeStore, id: string, scope?: TargetScopeOptions): ContextBrief {
+  return nodeBrief(store, id, scope);
 }
 
 // —— Explore v2: verbatim source packs ———————————————————————————————
@@ -2871,8 +4838,14 @@ export function buildExplorePack(
   target: string,
   options?: { branchId?: string; repoId?: string; revision?: RevisionContext; depth?: number; limit?: number } & PackSourceOptions,
 ): ExplorePack {
-  let context = buildContextPack(store, target, options);
-  let flow = buildFlow(store, target, options);
+  // A revision is already repository-scoped. Carry that ownership into every
+  // resolver below; otherwise an explicitly selected snapshot can still
+  // produce ambiguity candidates from every repository in the database.
+  const queryOptions = options?.repoId || !options?.revision?.repoId
+    ? options
+    : { ...options, repoId: options.revision.repoId };
+  let context = buildContextPack(store, target, queryOptions);
+  let flow = buildFlow(store, target, queryOptions);
   let searchFallback: string | null = null;
   let searchCandidates: SymbolCandidate[] | null = null;
   // Fuzzy resolution: an exact miss (no focus, no flow root, not ambiguous)
@@ -2884,8 +4857,8 @@ export function buildExplorePack(
       .searchText(target, { limit: 5 })
       .filter((hit) => hit.nodeType === "symbol" || hit.nodeType === "endpoint");
     if (hits.length === 1) {
-      context = buildContextPack(store, hits[0].nodeId, options);
-      flow = buildFlow(store, hits[0].nodeId, options);
+      context = buildContextPack(store, hits[0].nodeId, queryOptions);
+      flow = buildFlow(store, hits[0].nodeId, queryOptions);
       searchFallback = `resolved "${target}" via search fallback → ${hits[0].title}`;
     } else if (hits.length > 1) {
       searchCandidates = hits.map((hit) => ({
@@ -2903,7 +4876,12 @@ export function buildExplorePack(
   const handler = context.focus?.nodeType === "endpoint"
     ? flow.steps.find((step) => step.via === "handles" && step.nodeType === "symbol")
     : undefined;
-  const implementationContext = handler ? buildContextPack(store, handler.nodeId, options) : null;
+  // The handler was discovered through a valid cross-service edge from the
+  // already-scoped focus. It is evidence, not a second user-selected target,
+  // so read it from its own source scope instead of rejecting it as foreign.
+  const implementationContext = handler
+    ? buildContextPack(store, handler.nodeId, { ...queryOptions, repoId: undefined, revision: undefined, branchId: undefined })
+    : null;
   const effectiveContext = implementationContext ?? context;
   const trust = context.trust ?? implementationContext?.trust ?? flow.trust;
   // Whichever underlying query actually hit the live-branch fallback (context
@@ -2911,7 +4889,7 @@ export function buildExplorePack(
   // built from) — see ExplorePack.scopeFallback.
   const scopeFallback = effectiveContext.scopeFallback ?? flow.scopeFallback;
   const blastRadius = focusId
-    ? exploreGraph(store, "impact", focusId, { depth: options?.depth, limit: options?.limit, revision: options?.revision, branchId: options?.branchId }).nodes
+    ? exploreGraph(store, "impact", focusId, { depth: queryOptions?.depth, limit: queryOptions?.limit, revision: queryOptions?.revision, branchId: queryOptions?.branchId, repoId: queryOptions?.repoId }).nodes
     : [];
   const rows = focusId
     ? store.db.prepare(
@@ -2923,15 +4901,23 @@ export function buildExplorePack(
             ${revisionBranchId(options) ? "AND (branch_id=? OR branch_id IS NULL)" : ""}
           GROUP BY edge_type, origin, method, confidence
           ORDER BY edge_type, method`,
-      ).all(...(revisionBranchId(options) ? [focusId, focusId, revisionBranchId(options)] : [focusId, focusId])) as Array<{
+      ).all(...(revisionBranchId(queryOptions) ? [focusId, focusId, revisionBranchId(queryOptions)] : [focusId, focusId])) as Array<{
         edgeType: string; origin: string; method: string; confidence: number; count: number;
       }>
     : [];
-  const totalEdges = rows.reduce((sum, row) => sum + row.count, 0);
-  const inferredEdges = rows
+  const persistedTotalEdges = rows.reduce((sum, row) => sum + row.count, 0);
+  const persistedInferredEdges = rows
     .filter((row) => row.method === "INFERRED")
     .reduce((sum, row) => sum + row.count, 0);
-  const minimum = rows.length > 0 ? Math.min(...rows.map((row) => row.confidence)) : 0;
+  const flowEdges = flow.steps.filter((step) => step.depth > 0);
+  const inferredFlowEdges = flowEdges.filter((step) => step.graphEvidence?.evidenceState === "inferred").length;
+  const totalEdges = Math.max(persistedTotalEdges, flowEdges.length);
+  const inferredEdges = Math.max(persistedInferredEdges, inferredFlowEdges);
+  const confidenceValues = [
+    ...rows.map((row) => row.confidence),
+    ...flowEdges.flatMap((step) => typeof step.graphEvidence?.confidence === "number" ? [step.graphEvidence.confidence] : []),
+  ];
+  const minimum = confidenceValues.length > 0 ? Math.min(...confidenceValues) : 0;
   // Unresolvable external calls cap the level below "high". Strictly speaking
   // confidence measures the edges that ARE here (precision) and completeness
   // is a separate axis, which `completeness` now reports — but a caller who
@@ -3136,8 +5122,12 @@ export interface AffectedResult {
   files: string[];
   changed: ContextBrief[];
   impacted: ContextBrief[];
+  /** Direct outgoing dependencies of the changed symbols. */
+  dependencies: ContextBrief[];
   tests: ContextBrief[];
   routes: string[];
+  /** Commands are suggestions only; they are never proof that a test ran. */
+  suggestedVerification: string[];
   target?: { requested: string; nodeId: string; nodeType: string };
   candidateCount?: number;
   totalIsExact?: boolean;
@@ -3151,6 +5141,267 @@ export interface AffectedResult {
   proofStatus?: EvidenceProofStatus;
   returnedCount?: number;
   cursor?: string | null;
+  /** Graph facts explaining the returned impact hops. */
+  impactEdges?: AffectedEdgeEvidence[];
+}
+
+export interface AffectedEdgeEvidence {
+  src: string;
+  dst: string;
+  edgeType: string;
+  evidenceState: "proven" | "candidate";
+  origin: string | null;
+  method: string | null;
+  confidence: number | null;
+  provenance: Record<string, unknown> | null;
+  scope: "revision" | "global" | "unknown";
+  graphEvidence: GraphEdgeEvidenceEnvelope;
+}
+
+function suggestedVerification(files: string[]): string[] {
+  const normalized = files.map((file) => file.toLowerCase());
+  const suggestions: string[] = [];
+  if (normalized.some((file) => /\.(ts|tsx|js|jsx|mjs|cjs)$/u.test(file))) {
+    suggestions.push("pnpm test", "pnpm typecheck");
+  }
+  if (normalized.some((file) => /\.rs$/u.test(file))) {
+    suggestions.push("cargo test", "cargo check");
+  }
+  if (normalized.some((file) => /\.(py|go|java|kt|kts)$/u.test(file))) {
+    suggestions.push("Run the repository-configured test command", "Run the repository-configured build or type-check command");
+  }
+  return suggestions.length > 0
+    ? [...new Set(suggestions)]
+    : ["Run the repository-configured test command", "Run the repository-configured build or type-check command"];
+}
+
+function affectedDependencies(
+  store: KnowledgeStore,
+  ids: string[],
+  options?: { branchId?: string; revision?: RevisionContext },
+): ContextBrief[] {
+  const uniqueIds = [...new Set(ids)];
+  if (uniqueIds.length === 0) return [];
+  const branchId = revisionBranchId(options);
+  let dependencyIds: string[] = [];
+  if (options?.revision && !options.revision.snapshotId.startsWith("legacy:")) {
+    dependencyIds = snapshotEdgePairsForNodes(store, options.revision, uniqueIds, {
+      edgeTypes: [...DEPENDENCY_EDGE_TYPES],
+      direction: "out",
+      limit: 10_000,
+    }).map((edge) => edge.dst).filter((id): id is string => Boolean(id));
+  } else {
+    const sourcePlaceholders = uniqueIds.map(() => "?").join(",");
+    const rows = store.db.prepare(
+      `SELECT DISTINCT dst AS id FROM edges
+        WHERE src IN (${sourcePlaceholders}) AND dst IS NOT NULL
+          AND edge_type IN (${DEPENDENCY_EDGE_TYPES.map(() => "?").join(",")})
+          AND status='active'
+          ${branchId ? "AND (branch_id=? OR branch_id IS NULL)" : ""}
+        ORDER BY dst LIMIT 10000`,
+    ).all(...uniqueIds, ...DEPENDENCY_EDGE_TYPES, ...(branchId ? [branchId] : [])) as Array<{ id: string }>;
+    dependencyIds = rows.map((row) => row.id);
+  }
+  return [...new Set(dependencyIds)].map((id) => {
+    const brief = nodeBrief(store, id);
+    return { nodeId: brief.nodeId, title: brief.title, nodeType: brief.nodeType };
+  });
+}
+
+function parseEdgeProvenance(value: unknown): Record<string, unknown> | null {
+  if (typeof value === "string") {
+    try { return JSON.parse(value) as Record<string, unknown>; } catch { return null; }
+  }
+  return value && typeof value === "object" ? value as Record<string, unknown> : null;
+}
+
+function affectedImpactEdges(
+  store: KnowledgeStore,
+  ids: string[],
+  options?: { branchId?: string; revision?: RevisionContext },
+): AffectedEdgeEvidence[] {
+  if (ids.length === 0) return [];
+  const placeholders = ids.map(() => "?").join(",");
+  const branchId = revisionBranchId(options);
+  const rows = store.db.prepare(
+    `SELECT src, dst, edge_type AS edgeType, origin, method, confidence, provenance,
+            evidence_id AS evidenceId,
+            CASE WHEN branch_id IS NULL THEN 'global' ELSE 'revision' END AS scope
+       FROM edges
+      WHERE dst IN (${placeholders}) AND src IN (${placeholders})
+        AND status='active' AND edge_type IN (${IMPACT_EDGE_TYPES.map(() => "?").join(",")})
+        ${branchId ? "AND (branch_id=? OR branch_id IS NULL)" : ""}
+      ORDER BY edge_type, src, dst, id`,
+  ).all(
+    ...ids,
+    ...ids,
+    ...IMPACT_EDGE_TYPES,
+    ...(branchId ? [branchId] : []),
+  ) as Array<{ src: string; dst: string; edgeType: string; origin: string | null; method: string | null; confidence: number | null; provenance: unknown; evidenceId: string | null; scope: "revision" | "global" | "unknown" }>;
+  return rows.map((row) => {
+    const graphEvidence = graphEdgeEvidence({
+      edgeType: row.edgeType,
+      origin: row.origin,
+      method: row.method,
+      confidence: row.confidence,
+      provenance: row.provenance,
+      evidenceId: row.evidenceId,
+      scope: row.scope,
+    });
+    return {
+      ...row,
+      // Preserve the old two-state affected contract while exposing the
+      // richer evidence envelope beside it.
+      evidenceState: graphEvidence.evidenceState === "proven" && row.edgeType === "calls" ? "proven" as const : "candidate" as const,
+      provenance: parseEdgeProvenance(row.provenance),
+      graphEvidence,
+    };
+  });
+}
+
+export type AffectedRequest = {
+  kind: "file" | "node";
+  values: string[];
+  repoId?: string;
+  revision?: RevisionContext;
+};
+
+export type AffectedInput = {
+  files?: unknown;
+  file?: unknown;
+  path?: unknown;
+  target?: unknown;
+  node?: unknown;
+  symbol?: unknown;
+  positional?: unknown;
+  repoId?: string;
+  revision?: RevisionContext;
+};
+
+export class AffectedRequestError extends Error {
+  readonly retryable = false;
+
+  constructor(
+    readonly code: "INVALID_ARGUMENT",
+    message: string,
+    readonly details: Record<string, unknown> = {},
+  ) {
+    super(message);
+    this.name = "AffectedRequestError";
+  }
+}
+
+function affectedStrings(value: unknown): string[] {
+  const values = Array.isArray(value) ? value : value == null ? [] : [value];
+  return values
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function isRepoRelativeFileLike(value: string): boolean {
+  if (/^(?:node|symbol):/u.test(value) || value.startsWith("/")) return false;
+  return value.includes("/") || /\.[^/]+$/u.test(value);
+}
+
+function isIndexedAffectedFile(
+  store: KnowledgeStore,
+  filePath: string,
+  options: Pick<AffectedRequest, "repoId" | "revision">,
+): boolean {
+  const branchId = options.revision?.branchId;
+  const repoId = options.repoId ?? options.revision?.repoId;
+  const fileCheckpoint = store.db.prepare(
+    `SELECT 1
+       FROM files_index
+      WHERE file_path=?
+        ${repoId ? "AND repo_id=?" : ""}
+        ${branchId ? "AND branch_id=?" : ""}
+      LIMIT 1`,
+  ).get(...[filePath, ...(repoId ? [repoId] : []), ...(branchId ? [branchId] : [])]);
+  if (fileCheckpoint) return true;
+  return Boolean(store.db.prepare(
+    `SELECT 1
+       FROM symbol_versions sv
+       JOIN branches b ON b.id=sv.branch_id
+      WHERE sv.file_path=? AND sv.status='fresh'
+        ${repoId ? "AND b.repo_id=?" : ""}
+        ${branchId ? "AND sv.branch_id=?" : ""}
+      LIMIT 1`,
+  ).get(...[filePath, ...(repoId ? [repoId] : []), ...(branchId ? [branchId] : [])]));
+}
+
+/**
+ * Classifies the public affected inputs once for every adapter. File fields
+ * are explicit; a bare repo-relative file path wins over fuzzy node lookup.
+ */
+export function normalizeAffectedRequest(store: KnowledgeStore, input: AffectedInput): AffectedRequest {
+  const fileValues = [
+    ...affectedStrings(input.files),
+    ...affectedStrings(input.file),
+    ...affectedStrings(input.path),
+  ];
+  const nodeValues = [
+    ...affectedStrings(input.target),
+    ...affectedStrings(input.node),
+    ...affectedStrings(input.symbol),
+  ];
+  const positionalValues = affectedStrings(input.positional);
+  const scope = { repoId: input.repoId, revision: input.revision };
+
+  if (fileValues.length > 0 && nodeValues.length > 0) {
+    throw new AffectedRequestError("INVALID_ARGUMENT", "affected accepts file inputs or a node target, not both", {
+      fileValues,
+      nodeValues,
+      remediation: "provide file/files/path or target/node/symbol, but not both",
+    });
+  }
+  if (nodeValues.length > 1 && new Set(nodeValues).size > 1) {
+    throw new AffectedRequestError("INVALID_ARGUMENT", "affected accepts exactly one node target", {
+      nodeValues,
+      remediation: "provide one of target, node, or symbol",
+    });
+  }
+  if (fileValues.length > 0) return { kind: "file", values: fileValues, ...scope };
+  if (nodeValues.length > 0) return { kind: "node", values: [nodeValues[0]], ...scope };
+  if (positionalValues.length !== 1) return { kind: "file", values: positionalValues, ...scope };
+
+  const value = positionalValues[0];
+  if (isIndexedAffectedFile(store, value, scope) || isRepoRelativeFileLike(value)) {
+    return { kind: "file", values: [value], ...scope };
+  }
+  return { kind: "node", values: [value], ...scope };
+}
+
+export type AffectedDispatchResult =
+  | { request: AffectedRequest; result: AffectedResult }
+  | { request: AffectedRequest; error: { code: "TARGET_NOT_RESOLVED"; message: string; retryable: false } };
+
+/** Executes the normalized affected request shared by CLI and MCP. */
+export function dispatchAffectedRequest(
+  store: KnowledgeStore,
+  request: AffectedRequest,
+): AffectedDispatchResult {
+  if (request.kind === "file") {
+    return {
+      request,
+      result: affectedByFiles(store, request.values, { revision: request.revision }),
+    };
+  }
+  const result = affectedByNode(store, request.values[0], {
+    revision: request.revision,
+    repoId: request.repoId ?? request.revision?.repoId,
+  });
+  return result
+    ? { request, result }
+    : {
+      request,
+      error: {
+        code: "TARGET_NOT_RESOLVED",
+        message: `affected target could not be resolved: ${request.values[0]}`,
+        retryable: false,
+      },
+    };
 }
 
 /**
@@ -3163,18 +5414,27 @@ export function affectedByNode(
   requested: string,
   options?: { depth?: number; limit?: number; revision?: RevisionContext; repoId?: string },
 ): AffectedResult | null {
-  const resolution = resolveSymbolMatches(store, requested, options?.repoId ? { repoId: options.repoId } : undefined);
+  const scoped = resolveSymbolMatches(store, requested, options?.repoId ? { repoId: options.repoId } : undefined);
+  const resolution = scoped.kind === "none" && options?.repoId
+    ? resolveSymbolMatches(store, requested)
+    : scoped;
   if (resolution.kind !== "unique") return null;
   const target = store.getNode(resolution.nodeId);
   if (!target) return null;
+  assertResolvedNodeInScope(store, resolution.nodeId, options);
   const location = store.db.prepare(
     "SELECT file_path AS filePath FROM symbol_versions WHERE node_id=? AND status='fresh' ORDER BY start_line LIMIT 1",
   ).get(resolution.nodeId) as { filePath: string | null } | undefined;
+  // Preserve the requested symbol as the traversal seed. File-level affected
+  // remains a separate operation; widening here would pull unrelated sibling
+  // symbols and their callers into a node-targeted answer.
   const graph = exploreGraph(store, "impact", resolution.nodeId, {
     depth: options?.depth,
     limit: options?.limit,
     repoId: options?.repoId,
     revision: options?.revision,
+    includeDiagnostics: false,
+    includeEvidence: false,
   });
   const ids = [resolution.nodeId, ...graph.nodes.map((node) => node.nodeId)];
   const placeholders = ids.map(() => "?").join(",");
@@ -3182,21 +5442,39 @@ export function affectedByNode(
     ? store.db.prepare(
         `SELECT DISTINCT src AS id, edge_type AS edgeType FROM edges
            WHERE dst IN (${placeholders}) AND status='active' AND edge_type IN ('tests','handles')`,
-      ).all(...ids) as Array<{ id: string; edgeType: string }>
+    ).all(...ids) as Array<{ id: string; edgeType: string }>
     : [];
   const brief = (id: string): ContextBrief => nodeBrief(store, id);
-  return {
+  const dependencies = affectedDependencies(store, [resolution.nodeId], options);
+  const tests = related.filter((row) => row.edgeType === "tests").map((row) => brief(row.id));
+  const routes = related.filter((row) => row.edgeType === "handles").map((row) => brief(row.id).title);
+  const impactEdges = affectedImpactEdges(store, ids, options);
+  const result: AffectedResult = {
     files: location?.filePath ? [location.filePath] : [],
     changed: [brief(resolution.nodeId)],
     impacted: graph.nodes,
-    tests: related.filter((row) => row.edgeType === "tests").map((row) => brief(row.id)),
-    routes: related.filter((row) => row.edgeType === "handles").map((row) => brief(row.id).title),
+    dependencies,
+    tests,
+    routes,
+    suggestedVerification: suggestedVerification(location?.filePath ? [location.filePath] : []),
     target: { requested, nodeId: resolution.nodeId, nodeType: target.node_type },
-    candidateCount: graph.candidateCount ?? graph.nodes.length,
-    totalIsExact: graph.totalIsExact ?? false,
-    completeness: graph.completeness ?? "unknown",
+    candidateCount: 1 + graph.nodes.length,
+    totalIsExact: false,
+    completeness: graph.completeness === "partial" ? "partial" : "lower_bound",
     coverageGaps: graph.coverageGaps ?? ["impact_edges_are_static_only"],
+    impactEdges,
   };
+  return publicEvidenceFields(store, result, {
+    repoId: options?.repoId ?? target.repo_id ?? undefined,
+    branchId: options?.revision?.branchId,
+    revision: options?.revision,
+    completeness: result.completeness ?? "unknown",
+    proofStatus: "candidate",
+    candidateCount: result.candidateCount ?? result.changed.length + result.impacted.length,
+    returnedCount: result.changed.length + result.impacted.length,
+    truncated: result.completeness === "partial",
+    cursor: null,
+  }) as unknown as AffectedResult;
 }
 
 export function affectedByFiles(
@@ -3206,34 +5484,83 @@ export function affectedByFiles(
 ): AffectedResult {
   const depth = options?.depth ?? 3;
   const limit = options?.limit ?? 200;
-  const attach = (result: AffectedResult): AffectedResult => publicEvidenceFields(store, result, {
-    branchId: options?.branchId,
-    revision: options?.revision,
-    completeness: (result.changed.length + result.impacted.length) >= limit ? "partial" : "lower_bound",
-    proofStatus: result.changed.length + result.impacted.length > 0 ? "candidate" : "not_proven",
-    candidateCount: result.changed.length + result.impacted.length,
-    returnedCount: result.changed.length + result.impacted.length,
-    truncated: result.changed.length + result.impacted.length >= limit,
-    cursor: null,
-  }) as unknown as AffectedResult;
-  if (files.length === 0) return attach({ files, changed: [], impacted: [], tests: [], routes: [] });
+  const completeEmptyFileLookup = (): boolean => {
+    const branchId = revisionBranchId(options);
+    const repoId = options?.revision?.repoId;
+    if (!branchId || !repoId || files.length === 0) return false;
+    return files.every((filePath) => Boolean(store.db.prepare(
+      `SELECT 1
+         FROM files_index fi
+        WHERE fi.repo_id=? AND fi.branch_id=? AND fi.file_path=? AND fi.status='indexed'
+          AND NOT EXISTS (
+            SELECT 1 FROM symbol_versions sv
+             WHERE sv.branch_id=fi.branch_id AND sv.file_path=fi.file_path AND sv.status='fresh'
+          )
+        LIMIT 1`,
+    ).get(repoId, branchId, filePath)));
+  };
+  const attach = (result: AffectedResult): AffectedResult => {
+    const resultCount = result.changed.length + result.impacted.length;
+    const exactEmpty = resultCount === 0 && completeEmptyFileLookup();
+    return {
+      ...publicEvidenceFields(store, result, {
+        branchId: options?.branchId,
+        revision: options?.revision,
+        completeness: resultCount >= limit ? "partial" : "lower_bound",
+        proofStatus: resultCount > 0 ? "candidate" : exactEmpty ? "proven" : "not_proven",
+        candidateCount: resultCount,
+        returnedCount: resultCount,
+        truncated: resultCount >= limit,
+        cursor: null,
+      }),
+      totalIsExact: exactEmpty,
+    } as unknown as AffectedResult;
+  };
+  if (files.length === 0) return attach({ files, changed: [], impacted: [], dependencies: [], tests: [], routes: [], suggestedVerification: suggestedVerification(files) });
   if (options?.revision && !options.revision.snapshotId.startsWith("legacy:")) {
     const view = openRevisionView(store, options.revision);
-    const changedIds = view.symbolVersions().filter((row) => files.includes(row.filePath)).map((row) => row.nodeId);
-    const pairs = snapshotEdgePairs(store, options.revision);
+    const changedIds = view.symbolVersionsForFiles(files).map((row) => row.nodeId);
     const seen = new Set(changedIds); let frontier = [...changedIds];
     for (let d = 0; d < (options.depth ?? 3) && frontier.length && seen.size < (options.limit ?? 200); d++) {
       const next: string[] = [];
-      for (const id of frontier) for (const edge of pairs) if (edge.dst === id && ["calls", "references"].includes(edge.edgeType) && !seen.has(edge.src)) { seen.add(edge.src); next.push(edge.src); }
+      const frontierSet = new Set(frontier);
+      const remaining = Math.max(1, (options.limit ?? 200) - seen.size);
+      const pairs = snapshotEdgePairsForNodes(store, options.revision, frontier, {
+        edgeTypes: [...IMPACT_EDGE_TYPES],
+        direction: "in",
+        limit: Math.min(50_000, Math.max(1_000, remaining * 50)),
+      });
+      for (const edge of pairs) {
+        if (!edge.dst || !frontierSet.has(edge.dst) || seen.has(edge.src)) continue;
+        seen.add(edge.src);
+        next.push(edge.src);
+        if (seen.size >= (options.limit ?? 200)) break;
+      }
       frontier = next;
     }
+    const related = snapshotEdgePairsForNodes(store, options.revision, [...seen], {
+      edgeTypes: ["tests", "handles"],
+      direction: "in",
+      limit: Math.min(10_000, Math.max(1_000, (options.limit ?? 200) * 10)),
+    });
+    const testIds = [...new Set(related.filter((edge) => edge.edgeType === "tests").map((edge) => edge.src))];
+    const routeIds = [...new Set(related.filter((edge) => edge.edgeType === "handles").map((edge) => edge.src))];
     const brief = (ids: string[]) => ids.map((id) => { const b = nodeBrief(store, id); return { nodeId: b.nodeId, title: b.title, nodeType: b.nodeType }; });
-    return attach({ files, changed: brief(changedIds), impacted: brief([...seen].filter((id) => !changedIds.includes(id))), tests: [], routes: [] });
+    return attach({
+      files,
+      changed: brief(changedIds),
+      impacted: brief([...seen].filter((id) => !changedIds.includes(id))),
+      dependencies: affectedDependencies(store, changedIds, options),
+      tests: brief(testIds),
+      routes: routeIds.map((id) => nodeBrief(store, id).title),
+      suggestedVerification: suggestedVerification(files),
+      impactEdges: [],
+    });
   }
   const ph = files.map(() => "?").join(",");
   const branchId = revisionBranchId(options);
   const changedIds = (store.db
-    .prepare(`SELECT DISTINCT node_id AS id FROM symbol_versions WHERE file_path IN (${ph})${branchId ? " AND branch_id=?" : ""}`)
+    .prepare(`SELECT DISTINCT node_id AS id FROM symbol_versions WHERE file_path IN (${ph}) AND status='fresh'${branchId ? " AND branch_id=?" : ""}`)
     .all(...(branchId ? [...files, branchId] : files)) as { id: string }[]).map((r) => r.id);
 
   // transitive who_calls from the changed set = blast radius.
@@ -3245,7 +5572,7 @@ export function affectedByFiles(
       if (seen.size >= limit) break;
       // both "calls" and "references" mean "depends on this" — a DTO/type change
       // ripples through its type-users just as a fn change ripples through callers.
-      const callers = store.db.prepare(`SELECT DISTINCT src FROM edges WHERE dst=? AND edge_type IN ('calls','references') AND status='active'${branchId ? " AND (branch_id=? OR branch_id IS NULL)" : ""}`).all(...(branchId ? [id, branchId] : [id])) as { src: string }[];
+      const callers = store.db.prepare(`SELECT DISTINCT src FROM edges WHERE dst=? AND edge_type IN (${IMPACT_EDGE_TYPES.map(() => "?").join(",")}) AND status='active'${branchId ? " AND (branch_id=? OR branch_id IS NULL)" : ""}`).all(id, ...IMPACT_EDGE_TYPES, ...(branchId ? [branchId] : [])) as { src: string }[];
       for (const c of callers) if (!seen.has(c.src)) { seen.add(c.src); next.push(c.src); }
     }
     frontier = next;
@@ -3266,9 +5593,28 @@ export function affectedByFiles(
     files,
     changed: brief(changedIds),
     impacted: brief(impactedIds),
+    dependencies: affectedDependencies(store, changedIds, options),
+    impactEdges: affectedImpactEdges(store, [...seen], options),
     tests: brief(tests.map((t) => t.id)),
     routes: routes.map((r) => nodeBrief(store, r.id).title),
+    suggestedVerification: suggestedVerification(files),
   });
+}
+
+// Keep the shared affected contract on the existing public core export so
+// adapters do not grow their own target-vs-file selection rules.
+export namespace affectedByFiles {
+  export const normalize = normalizeAffectedRequest;
+  export const dispatch = dispatchAffectedRequest;
+  export const RequestError = AffectedRequestError;
+  // Existing public core namespace keeps adapter access stable without a
+  // second inventory-specific adapter rule.
+  export const endpointInventory = listEndpointInventory;
+  export const endpointInventoryPage = listEndpointInventoryPage;
+  export const materializeEndpointOccurrences = materializeRevisionEndpointOccurrences;
+  export const inventoryRevision = endpointInventoryRevision;
+  export const endpointScope = resolveEndpointInventoryScope;
+  export const listEnvelope = buildKnowledgeListEnvelope;
 }
 
 // —— architecture: one-call project overview (AI onboarding, § parity) ——
@@ -3311,6 +5657,15 @@ export function architecture(
     `SELECT node_type AS k, COUNT(*) AS n FROM nodes ${nodeScope} GROUP BY node_type ORDER BY n DESC`,
     ...nodeArgs,
   );
+  // Endpoint nodes may be global contract identities (`repo_id IS NULL`) and
+  // acquire repository ownership through endpoint_memberships. Architecture
+  // must use the same rule as knowledge_endpoints or the two public counts
+  // can differ by orders of magnitude for shared gRPC contracts.
+      const endpointFilter = endpointInventoryFilter(repoId, {});
+  const endpointCount = store.db.prepare(
+    `SELECT COUNT(*) AS n FROM nodes n WHERE ${endpointFilter.where.join(" AND ")}`,
+  ).get(...endpointFilter.params) as { n: number };
+  nodeCounts.endpoint = Number(endpointCount.n ?? 0);
   const edgeCounts = countMap(
     `SELECT e.edge_type AS k, COUNT(*) AS n FROM edges e ${edgeJoin}
       WHERE e.status='active' GROUP BY e.edge_type ORDER BY n DESC`,
@@ -3334,8 +5689,8 @@ export function architecture(
   ).map((h) => { const b = nodeBrief(store, h.id); return { title: b.title, nodeType: b.nodeType, degree: h.degree }; })
    .filter((h) => h.nodeType === "symbol" && !GENERIC_UTILITY_HUB_NAMES.has(h.title.toLowerCase())).slice(0, 12);
   const entryPoints = rows<{ title: string }>(
-    `SELECT title FROM nodes WHERE node_type='endpoint' ${repoId ? "AND repo_id=?" : ""} ORDER BY title LIMIT 30`,
-    ...(repoId ? [repoId] : []),
+    `SELECT n.title FROM nodes n WHERE ${endpointFilter.where.join(" AND ")} ORDER BY n.title LIMIT 30`,
+    ...endpointFilter.params,
   ).map((r) => r.title);
   return { repos, nodeCounts, edgeCounts, languages, hubs, entryPoints };
 }
@@ -3583,6 +5938,8 @@ export interface DeadCodeResult {
   truncated: boolean;
   /** Total candidates in the selected scope, independent of page size. */
   candidateCount: number;
+  /** Candidates after the final item on this page. */
+  remainingCount: number;
   totalIsExact: boolean;
 }
 
@@ -3616,6 +5973,7 @@ export function deadCode(store: KnowledgeStore, options?: DeadCodeOptions): Dead
         scope: { repo: options.repo, path: options.path ?? null, branch: options.branchId ?? null },
         truncated: false,
         candidateCount: 0,
+        remainingCount: 0,
         totalIsExact: true,
       };
     }
@@ -3634,42 +5992,55 @@ export function deadCode(store: KnowledgeStore, options?: DeadCodeOptions): Dead
           .get(repoId) as { id: string } | undefined)?.id ?? null
       : null);
 
-  const where: string[] = ["n.node_type='symbol'", "sv.status='fresh'"];
-  const params: unknown[] = [];
-  if (repoId) { where.push("n.repo_id=?"); params.push(repoId); }
-  if (branchId) { where.push("sv.branch_id=?"); params.push(branchId); }
+  const baseWhere: string[] = ["n.node_type='symbol'", "sv.status='fresh'"];
+  const baseParams: unknown[] = [];
+  if (repoId) { baseWhere.push("n.repo_id=?"); baseParams.push(repoId); }
+  if (branchId) { baseWhere.push("sv.branch_id=?"); baseParams.push(branchId); }
   if (options?.path) {
     // Prefix match on the repo-relative path. LIKE would treat _ and % in a
     // real path as wildcards, so compare the prefix directly.
-    where.push("substr(sv.file_path, 1, ?) = ?");
-    params.push(options.path.length, options.path);
+    baseWhere.push("substr(sv.file_path, 1, ?) = ?");
+    baseParams.push(options.path.length, options.path);
   }
+  const pageWhere = [...baseWhere];
+  const pageParams = [...baseParams];
   if (options?.after) {
-    where.push("(sv.file_path > ? OR (sv.file_path = ? AND (sv.start_line > ? OR (sv.start_line = ? AND n.id > ?))))");
-    params.push(options.after.filePath, options.after.filePath, options.after.startLine, options.after.startLine, options.after.nodeId);
+    pageWhere.push("(sv.file_path > ? OR (sv.file_path = ? AND (sv.start_line > ? OR (sv.start_line = ? AND n.id > ?))))");
+    pageParams.push(options.after.filePath, options.after.filePath, options.after.startLine, options.after.startLine, options.after.nodeId);
   }
 
   const count = (store.db.prepare(
     `SELECT COUNT(DISTINCT n.id) AS count
        FROM nodes n
        JOIN symbol_versions sv ON sv.node_id = n.id
-      WHERE ${where.join(" AND ")}
+      WHERE ${baseWhere.join(" AND ")}
         AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.dst=n.id AND e.status='active'
                           AND e.edge_type IN ('calls','references','handles','tests'))`,
-  ).get(...params) as { count: number }).count;
+  ).get(...baseParams) as { count: number }).count;
 
   const rows = store.db.prepare(
     `SELECT DISTINCT n.id AS id, sv.file_path AS filePath, sv.start_line AS startLine, sv.end_line AS endLine
        FROM nodes n
        JOIN symbol_versions sv ON sv.node_id = n.id
-      WHERE ${where.join(" AND ")}
+      WHERE ${pageWhere.join(" AND ")}
         AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.dst=n.id AND e.status='active'
                           AND e.edge_type IN ('calls','references','handles','tests'))
-      ORDER BY sv.file_path, sv.start_line
+      ORDER BY sv.file_path, sv.start_line, n.id
       LIMIT ?`,
-  ).all(...params, limit + 1) as Array<{ id: string; filePath: string | null; startLine: number | null; endLine: number | null }>;
+  ).all(...pageParams, limit + 1) as Array<{ id: string; filePath: string | null; startLine: number | null; endLine: number | null }>;
 
   const truncated = rows.length > limit;
+  const pageRows = rows.slice(0, limit);
+  const last = pageRows.at(-1);
+  const remainingCount = !last ? 0 : (store.db.prepare(
+    `SELECT COUNT(DISTINCT n.id) AS count
+       FROM nodes n
+       JOIN symbol_versions sv ON sv.node_id = n.id
+      WHERE ${baseWhere.join(" AND ")}
+        AND (sv.file_path > ? OR (sv.file_path = ? AND (sv.start_line > ? OR (sv.start_line = ? AND n.id > ?))))
+        AND NOT EXISTS (SELECT 1 FROM edges e WHERE e.dst=n.id AND e.status='active'
+                          AND e.edge_type IN ('calls','references','handles','tests'))`,
+  ).get(...baseParams, last.filePath ?? "", last.filePath ?? "", last.startLine ?? -1, last.startLine ?? -1, last.id) as { count: number }).count;
   const scopeNote = repoLabel || options?.path
     ? ` Scope: ${[repoLabel && `repo ${repoLabel}`, options?.path && `under ${options.path}`].filter(Boolean).join(", ")}.`
     : " Scope: every indexed repo — pass repo/path to get a list you can act on.";
@@ -3695,7 +6066,7 @@ export function deadCode(store: KnowledgeStore, options?: DeadCodeOptions): Dead
   );
 
   return {
-    candidates: rows.slice(0, limit).map((r) => {
+    candidates: pageRows.map((r) => {
       const brief = nodeBrief(store, r.id);
       const importers = r.filePath ? fileImportedBy.get(r.filePath) ?? 0 : 0;
       return {
@@ -3717,6 +6088,7 @@ export function deadCode(store: KnowledgeStore, options?: DeadCodeOptions): Dead
     scope: { repo: repoLabel, path: options?.path ?? null, branch: branchId },
     truncated,
     candidateCount: count,
+    remainingCount,
     totalIsExact: true,
   };
 }
@@ -3727,18 +6099,74 @@ export function deadCode(store: KnowledgeStore, options?: DeadCodeOptions): Dead
 // invoked but whose provider/handler isn't indexed (no source) are NOT shown —
 // they were dangling noise. This answers "how do the services relate" without a
 // symbol focus.
-export function serviceGraph(store: KnowledgeStore, options?: { revision?: RevisionContext; branchId?: string }): GraphView {
-  if (options?.revision && !options.revision.snapshotId.startsWith("legacy:")) {
+type ServiceGraphOptions = {
+  repo?: string;
+  repoId?: string;
+  includeDirectNeighbours?: boolean;
+  revision?: RevisionContext;
+  branchId?: string;
+};
+
+function resolveServiceRepoId(store: KnowledgeStore, options: ServiceGraphOptions): string | undefined {
+  const selector = options.repo ?? options.repoId;
+  if (!selector) return options.revision?.repoId;
+  const ids = store.resolveRepoIds(selector);
+  if (ids.length === 0) {
+    throw new KnowledgeContractError(
+      "REPOSITORY_NOT_FOUND",
+      "no indexed repo matches " + selector,
+      { repo: selector, remediation: "call index_status({\"mode\":\"detailed\"}) and choose an indexed repository" },
+    );
+  }
+  if (ids.length > 1) {
+    throw new KnowledgeContractError(
+      "INVALID_ARGUMENT",
+      "repository selector is ambiguous: " + selector,
+      { repo: selector, candidates: ids, remediation: "specify the repository id" },
+    );
+  }
+  if (options.revision?.repoId && options.revision.repoId !== ids[0]) {
+    throw new KnowledgeContractError(
+      "INVALID_ARGUMENT",
+      "repository does not own the selected revision",
+      { repo: ids[0], revisionRepoId: options.revision.repoId, remediation: "use a revision from the selected repository" },
+    );
+  }
+  return ids[0];
+}
+
+function typedServiceIdentity(repoId: string): string {
+  return "service:" + repoId;
+}
+
+export function serviceGraph(store: KnowledgeStore, options: ServiceGraphOptions = {}): GraphView {
+  const selectedRepoId = resolveServiceRepoId(store, options);
+  const requestedBranchId = options.branchId ?? options.revision?.branchId ?? null;
+  if (options?.revision && !options.revision.snapshotId.startsWith("legacy:") && !isCurrentRevisionSnapshot(store, options.revision)) {
     const repos = store.db.prepare("SELECT id, name FROM repos").all() as { id: string; name: string }[];
     const repoName = new Map(repos.map((r) => [r.id, r.name]));
-    const pairs = snapshotEdgePairs(store, options.revision);
+    const pairs = snapshotEdgePairs(store, options.revision, { edgeTypes: ["handles", "invokes"], limit: 50_000 });
+    const pairNodeIds = [...new Set(pairs.flatMap((edge) => [edge.src, edge.dst].filter((id): id is string => Boolean(id))))];
+    const repoByNode = new Map<string, string>();
+    for (let offset = 0; offset < pairNodeIds.length; offset += 2_000) {
+      const chunk = pairNodeIds.slice(offset, offset + 2_000);
+      const rows = store.db.prepare(
+        `SELECT id,repo_id AS repoId FROM nodes WHERE id IN (${chunk.map(() => "?").join(",")}) AND repo_id IS NOT NULL`,
+      ).all(...chunk) as Array<{ id: string; repoId: string }>;
+      for (const row of rows) repoByNode.set(row.id, row.repoId);
+    }
     const providers = new Map<string, Set<string>>();
-    for (const edge of pairs.filter((e) => e.edgeType === "handles" && e.dst)) { const repo = store.getNode(edge.dst!)?.repo_id; if (repo) (providers.get(edge.src) ?? providers.set(edge.src, new Set()).get(edge.src)!).add(repo); }
+    for (const edge of pairs.filter((e) => e.edgeType === "handles" && e.dst)) { const repo = repoByNode.get(edge.dst!); if (repo) (providers.get(edge.src) ?? providers.set(edge.src, new Set()).get(edge.src)!).add(repo); }
     const nodes = new Map<string, GraphView["nodes"][number]>(); const edges = new Map<string, GraphView["edges"][number]>();
-    const use = (id: string) => { if (!nodes.has(id)) nodes.set(id, { nodeId: id, title: repoName.get(id) ?? id, nodeType: "service" }); };
-    for (const edge of pairs.filter((e) => e.edgeType === "invokes" && e.dst)) { const consumer = store.getNode(edge.src)?.repo_id; if (!consumer) continue; for (const provider of providers.get(edge.dst!) ?? []) if (provider !== consumer) { use(consumer); use(provider); edges.set(`${consumer}|${provider}`, { src: consumer, dst: provider, edgeType: "invokes" }); } }
+    const use = (id: string) => { if (!nodes.has(id)) nodes.set(id, { nodeId: typedServiceIdentity(id), title: repoName.get(id) ?? id, nodeType: "service" }); };
+    for (const edge of pairs.filter((e) => e.edgeType === "invokes" && e.dst)) { const consumer = repoByNode.get(edge.src); if (!consumer) continue; for (const provider of providers.get(edge.dst!) ?? []) if (provider !== consumer) { use(consumer); use(provider); const graphEvidence = graphEdgeEvidence({ edgeType: "invokes", method: edge.method, confidence: edge.confidence, provenance: edge.provenance, scope: "revision", branchId: options.revision.branchId }); edges.set(`${consumer}|${provider}`, { src: typedServiceIdentity(consumer), dst: typedServiceIdentity(provider), edgeType: "invokes", sourceType: "service_graph", revisionId: options.revision.snapshotId, graphEvidence }); } }
     for (const repo of repos) use(repo.id);
-    return { focus: null, nodes: [...nodes.values()], edges: [...edges.values()] };
+    const visible = selectedRepoId
+      ? new Set([typedServiceIdentity(selectedRepoId), ...(options.includeDirectNeighbours === false ? [] : [...edges.values()].filter((edge) => edge.src === typedServiceIdentity(selectedRepoId) || edge.dst === typedServiceIdentity(selectedRepoId)).flatMap((edge) => [edge.src, edge.dst]))])
+      : new Set([...nodes.values()].map((node) => node.nodeId));
+    const visibleEdges = [...edges.values()].filter((edge) => visible.has(edge.src) && visible.has(edge.dst));
+    const scope = { repoId: selectedRepoId ?? null, branchId: options.revision.branchId ?? null, revisionId: options.revision.snapshotId };
+    return { focus: null, nodes: [...nodes.values()].filter((node) => visible.has(node.nodeId)), edges: visibleEdges, revision: options.revision, scope, evidence: buildEvidenceEnvelope(store, { repoId: selectedRepoId, branchId: options.revision.branchId, revision: options.revision, scope, completeness: "lower_bound", proofStatus: "not_proven", candidateCount: visibleEdges.length, returnedCount: visibleEdges.length, coverageGaps: visibleEdges.length ? ["service_graph_is_aggregated"] : ["service_edges_not_observed"] }) };
   }
   const repos = store.db.prepare("SELECT id, name FROM repos").all() as { id: string; name: string }[];
   const repoName = new Map(repos.map((r) => [r.id, r.name]));
@@ -3746,22 +6174,22 @@ export function serviceGraph(store: KnowledgeStore, options?: { revision?: Revis
     "SELECT e.src AS endpoint, n.repo_id AS repo FROM edges e JOIN nodes n ON n.id=e.dst WHERE e.edge_type='handles' AND e.status='active' AND n.repo_id IS NOT NULL",
   ).all() as { endpoint: string; repo: string }[];
   const consumers = store.db.prepare(
-    "SELECT e.dst AS endpoint, n.repo_id AS repo FROM edges e JOIN nodes n ON n.id=e.src WHERE e.edge_type='invokes' AND e.status='active' AND n.repo_id IS NOT NULL",
-  ).all() as { endpoint: string; repo: string }[];
+    "SELECT e.dst AS endpoint, n.repo_id AS repo, e.origin, e.method, e.confidence, e.provenance, e.branch_id AS branchId FROM edges e JOIN nodes n ON n.id=e.src WHERE e.edge_type='invokes' AND e.status='active' AND n.repo_id IS NOT NULL" + (requestedBranchId ? " AND (e.branch_id=? OR e.branch_id IS NULL)" : ""),
+  ).all(...(requestedBranchId ? [requestedBranchId] : [])) as Array<{ endpoint: string; repo: string; origin: string | null; method: string | null; confidence: number | null; provenance: unknown; branchId: string | null }>;
 
   const provBy = new Map<string, Set<string>>();
   for (const p of providers) { (provBy.get(p.endpoint) ?? provBy.set(p.endpoint, new Set()).get(p.endpoint)!).add(p.repo); }
 
   const nodes = new Map<string, GraphView["nodes"][number]>();
-  const useRepo = (id: string) => { if (!nodes.has(id)) nodes.set(id, { nodeId: id, title: repoName.get(id) ?? id, nodeType: "service" }); };
+  const useRepo = (id: string) => { if (!nodes.has(id)) nodes.set(id, { nodeId: typedServiceIdentity(id), title: repoName.get(id) ?? id, nodeType: "service" }); };
   const edgeSet = new Map<string, GraphView["edges"][number]>();
-  const addEdge = (src: string, dst: string, t: string) => { const k = `${src}|${dst}|${t}`; if (!edgeSet.has(k)) edgeSet.set(k, { src, dst, edgeType: t }); };
+  const addEdge = (src: string, dst: string, t: string, evidence?: GraphEdgeEvidenceEnvelope, revisionId?: string | null) => { const k = `${src}|${dst}|${t}`; if (!edgeSet.has(k)) edgeSet.set(k, { src: typedServiceIdentity(src), dst: typedServiceIdentity(dst), edgeType: t, sourceType: "service_graph", revisionId: revisionId ?? null, ...(evidence ? { graphEvidence: evidence } : {}) }); };
 
   for (const c of consumers) {
     useRepo(c.repo);
     const provs = provBy.get(c.endpoint);
     if (provs && provs.size) {
-      for (const p of provs) if (p !== c.repo) { useRepo(p); addEdge(c.repo, p, "invokes"); }
+      for (const p of provs) if (p !== c.repo) { useRepo(p); addEdge(c.repo, p, "invokes", graphEdgeEvidence({ edgeType: "invokes", origin: c.origin, method: c.method, confidence: c.confidence, provenance: c.provenance, scope: c.branchId ? "revision" : "environment", branchId: c.branchId }), c.branchId ?? requestedBranchId); }
     }
     // else: the endpoint has no indexed handler (no source) → skip it. We don't
     // surface "invoked but unimplemented-in-index" endpoints as standalone nodes;
@@ -3775,20 +6203,121 @@ export function serviceGraph(store: KnowledgeStore, options?: { revision?: Revis
   // links for the service graph (e.g. auth depends_on @snsoft/player-grpc →
   // link auth repo → flyover repo).
   const pkgDeps = store.db.prepare(
-    `SELECT sn.repo_id AS consumerRepo, dn.repo_id AS providerRepo
+    `SELECT sn.repo_id AS consumerRepo, dn.repo_id AS providerRepo,
+            e.origin, e.method, e.confidence, e.provenance, e.branch_id AS branchId
      FROM edges e
      JOIN nodes sn ON sn.id = e.src
      JOIN nodes dn ON dn.id = e.dst
      WHERE e.edge_type='depends_on' AND e.status='active'
        AND sn.repo_id IS NOT NULL AND dn.repo_id IS NOT NULL`,
-  ).all() as { consumerRepo: string; providerRepo: string }[];
+  ).all() as Array<{ consumerRepo: string; providerRepo: string; origin: string | null; method: string | null; confidence: number | null; provenance: unknown; branchId: string | null }>;
   for (const d of pkgDeps) {
     if (d.consumerRepo !== d.providerRepo) {
       useRepo(d.consumerRepo);
       useRepo(d.providerRepo);
-      addEdge(d.consumerRepo, d.providerRepo, "depends_on");
+      addEdge(d.consumerRepo, d.providerRepo, "depends_on", graphEdgeEvidence({ edgeType: "depends_on", origin: d.origin, method: d.method, confidence: d.confidence, provenance: d.provenance, scope: d.branchId ? "revision" : "environment", branchId: d.branchId }), d.branchId ?? requestedBranchId);
     }
   }
 
-  return { focus: null, nodes: [...nodes.values()], edges: [...edgeSet.values()] };
+  const visible = selectedRepoId
+    ? new Set([
+        typedServiceIdentity(selectedRepoId),
+        ...(options.includeDirectNeighbours === false
+          ? []
+          : [...edgeSet.values()]
+              .filter((edge) => edge.src === typedServiceIdentity(selectedRepoId) || edge.dst === typedServiceIdentity(selectedRepoId))
+              .flatMap((edge) => [edge.src, edge.dst])),
+      ])
+    : new Set([...nodes.values()].map((node) => node.nodeId));
+  const visibleEdges = [...edgeSet.values()].filter((edge) => visible.has(edge.src) && visible.has(edge.dst));
+  const scope = {
+    repoId: selectedRepoId ?? null,
+    branchId: requestedBranchId,
+    revisionId: options.revision?.snapshotId ?? requestedBranchId,
+  };
+  return {
+    focus: null,
+    nodes: [...nodes.values()].filter((node) => visible.has(node.nodeId)),
+    edges: visibleEdges,
+    revision: options.revision ?? null,
+    scope,
+    evidence: buildEvidenceEnvelope(store, {
+      repoId: selectedRepoId,
+      branchId: requestedBranchId ?? undefined,
+      revision: options.revision,
+      scope,
+      completeness: "lower_bound",
+      proofStatus: "not_proven",
+      candidateCount: visibleEdges.length,
+      returnedCount: visibleEdges.length,
+      coverageGaps: visibleEdges.length ? ["service_graph_is_aggregated"] : ["service_edges_not_observed"],
+    }),
+  };
+}
+
+export interface ServiceContextResult {
+  target: {
+    nodeId: string;
+    nodeType: "service";
+    repoId: string;
+    identityKey: string;
+    locator: { filePath: null; startLine: null };
+  };
+  graph: GraphView;
+}
+
+/** Resolve a typed service identity and return its scoped graph context. */
+export function serviceContext(store: KnowledgeStore, target: string, options: ServiceGraphOptions = {}): ServiceContextResult {
+  const selector = target.startsWith("service:") ? target.slice("service:".length) : target;
+  const repoId = resolveServiceRepoId(store, { ...options, repo: selector });
+  if (!repoId) throw new KnowledgeContractError("REPOSITORY_NOT_FOUND", "service target has no repository", { target });
+  return {
+    target: {
+      nodeId: typedServiceIdentity(repoId),
+      nodeType: "service",
+      repoId,
+      identityKey: typedServiceIdentity(repoId),
+      locator: { filePath: null, startLine: null },
+    },
+    graph: serviceGraph(store, { ...options, repo: repoId }),
+  };
+}
+
+/** Bounded path continuation over stable service identities. */
+export function servicePath(
+  store: KnowledgeStore,
+  from: string,
+  to: string,
+  options: Pick<ServiceGraphOptions, "revision" | "branchId"> = {},
+): GraphResult {
+  // A path may cross repositories. Resolve both typed identities independently;
+  // a revision belongs to the graph snapshot's owner, not to every service
+  // that appears as a neighbour in that graph.
+  const fromRepo = resolveServiceRepoId(store, { repo: from.startsWith("service:") ? from.slice("service:".length) : from });
+  const toRepo = resolveServiceRepoId(store, { repo: to.startsWith("service:") ? to.slice("service:".length) : to });
+  if (!fromRepo || !toRepo) return { mode: "path", nodes: [], candidateCount: 0, totalIsExact: true, completeness: "complete", coverageGaps: ["service_target_not_found"] };
+  const graph = serviceGraph(store, { ...options, repo: fromRepo });
+  const start = typedServiceIdentity(fromRepo);
+  const goal = typedServiceIdentity(toRepo);
+  const nodeById = new Map(graph.nodes.map((node) => [node.nodeId, node]));
+  const nextById = new Map<string, string[]>();
+  for (const edge of graph.edges) nextById.set(edge.src, [...(nextById.get(edge.src) ?? []), edge.dst]);
+  const queue = [start];
+  const previous = new Map<string, string>();
+  const seen = new Set(queue);
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (current === goal) break;
+    for (const next of nextById.get(current) ?? []) {
+      if (seen.has(next)) continue;
+      seen.add(next);
+      previous.set(next, current);
+      queue.push(next);
+    }
+  }
+  if (!seen.has(goal)) return { mode: "path", nodes: [], candidateCount: 0, totalIsExact: true, completeness: "complete", coverageGaps: ["service_path_not_found"], revision: options.revision };
+  const ids: string[] = [];
+  for (let current: string | undefined = goal; current; current = previous.get(current)) ids.unshift(current);
+  const nodes = ids.map((id) => nodeById.get(id)).filter((node): node is GraphView["nodes"][number] => Boolean(node)).map((node) => ({ nodeId: node.nodeId, title: node.title, nodeType: node.nodeType }));
+  return { mode: "path", nodes, candidateCount: nodes.length, totalIsExact: true, completeness: "complete", coverageGaps: [], revision: options.revision, evidence: graph.evidence };
 }

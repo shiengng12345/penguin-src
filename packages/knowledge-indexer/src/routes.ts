@@ -13,8 +13,10 @@ export interface ExtractedEndpoint {
   key: string; // display key: "gRPC Svc.Method" | "EVENT pattern" | "GET /path"
   handlerQualifiedName: string; // Controller.method
   controllerName: string;
+  startLine: number;
   // gRPC only: the target service + rpc method, used to build a GLOBAL (cross-repo)
   // endpoint id so a provider and a consumer in different repos connect.
+  grpcPackageName?: string;
   grpcService?: string;
   grpcMethod?: string;
   // HTTP only: the success status this endpoint returns — @HttpCode(n) if
@@ -87,6 +89,14 @@ function joinPath(base: string | null, sub: string | null): string {
   return "/" + parts.join("/");
 }
 
+function grpcServiceMetadata(value: string): { packageName?: string; service: string } {
+  const normalized = value.trim().replace(/^\.+|\.+$/g, "");
+  const split = normalized.lastIndexOf(".");
+  return split > 0
+    ? { packageName: normalized.slice(0, split), service: normalized.slice(split + 1) }
+    : { service: normalized };
+}
+
 function findAll(node: Node, type: string, out: Node[] = []): Node[] {
   if (node.type === type) out.push(node);
   for (let i = 0; i < node.namedChildCount; i++) findAll(node.namedChild(i)!, type, out);
@@ -126,9 +136,11 @@ export function extractEndpoints(root: Node): ExtractedEndpoint[] {
       // Gather all of the method's decorators first — @HttpCode may sit apart
       // from the verb decorator, and we need its value when emitting the route.
       const decs: ReturnType<typeof decoratorInfo>[] = [];
+      let endpointStartLine = m.startPosition.row + 1;
       let sib = m.previousNamedSibling;
       while (sib && sib.type === "decorator") {
         decs.push(decoratorInfo(sib));
+        endpointStartLine = Math.min(endpointStartLine, sib.startPosition.row + 1);
         sib = sib.previousNamedSibling;
       }
       const httpCode = decs.find((d) => d.name === "HttpCode")?.nums[0];
@@ -139,7 +151,7 @@ export function extractEndpoints(root: Node): ExtractedEndpoint[] {
           endpoints.push({
             protocol: "http",
             key: `${verb} ${joinPath(httpBase, info.args[0] ?? null)}`,
-            handlerQualifiedName, controllerName: className,
+            handlerQualifiedName, controllerName: className, startLine: endpointStartLine,
             // @HttpCode wins; else NestJS defaults (POST→201, else→200).
             httpStatus: httpCode ?? (verb === "POST" ? 201 : 200),
           });
@@ -161,18 +173,21 @@ export function extractEndpoints(root: Node): ExtractedEndpoint[] {
           }
           const rpc = (rpcNode?.type === "string" ? stringVal(rpcNode) : undefined) ?? methodName;
           svc = svc ?? className;
+          const grpcService = grpcServiceMetadata(svc);
           endpoints.push({
             protocol: "grpc",
             key: `gRPC ${svc}.${rpc}`,
-            handlerQualifiedName, controllerName: className,
-            grpcService: svc, grpcMethod: rpc,
+            handlerQualifiedName, controllerName: className, startLine: endpointStartLine,
+            grpcPackageName: grpcService.packageName,
+            grpcService: grpcService.service,
+            grpcMethod: rpc,
           });
         } else if (name === "MessagePattern" || name === "EventPattern") {
           const pat = info.args[0] ?? methodName;
           endpoints.push({
             protocol: "kafka",
             key: `${name === "EventPattern" ? "EVENT" : "MSG"} ${pat}`,
-            handlerQualifiedName, controllerName: className,
+            handlerQualifiedName, controllerName: className, startLine: endpointStartLine,
           });
         }
       }

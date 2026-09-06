@@ -52,23 +52,19 @@ test("buildContextPack marks fallback the same way", () => {
   store.close();
 });
 
-// CLI emit() integration (Task 7's second half): the legacy graph verbs never
-// resolve a scope at all (command-dispatch.ts's `default:` case calls
-// exploreGraph() with no revision and emit()s with no ScopeEnvelope), so the
-// FALLBACK_LIVE_BRANCH warning has to be spliced directly into the plain JSON
-// payload rather than through the scope-envelope wrapper Task 6 built.
-test("CLI: an unscoped legacy graph verb (callers) surfaces scopeFallback + a FALLBACK_LIVE_BRANCH warning", async () => {
+// CLI graph verbs now resolve the same git-aware scope as context/flow. They
+// should carry the normal locator and must not rely on the old live-branch
+// fallback warning path.
+test("CLI: graph verb (callers) carries the resolved scope", async () => {
   const { store, branchId, rootPath } = fixture();
   const lines = [];
   const code = await runCli(["callers", "B", "--json"], cliDeps(store, rootPath, lines));
   assert.equal(code, 0);
   const payload = JSON.parse(lines.at(-1));
-  assert.deepEqual(payload.scopeFallback, { branchId });
-  assert.equal(payload.locator, undefined); // no ScopeEnvelope for this verb — confirms the non-wrapper code path ran
-  assert.ok(
-    payload.warnings?.some((w) => w.code === "FALLBACK_LIVE_BRANCH"),
-    `expected a FALLBACK_LIVE_BRANCH warning, got: ${JSON.stringify(payload.warnings)}`,
-  );
+  assert.equal(payload.scopeFallback, undefined);
+  assert.equal(payload.locator.branchName, "main");
+  assert.equal(payload.alignment, "fallback");
+  assert.ok(!payload.warnings?.some((w) => w.code === "FALLBACK_LIVE_BRANCH"));
   store.close();
 });
 

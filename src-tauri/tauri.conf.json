@@ -43,9 +43,8 @@
     ],
     "resources": [
       "../.penguin.config.json",
-      "../packages/mcp/package.json",
-      "../packages/mcp/dist/index.js",
-      "../packages/mcp/bundle/**/*",
+      "../packages/mcp/bundle/package.json",
+      "../packages/mcp/bundle/dist/**/*",
       "../packages/knowledge-cli/bundle/**/*"
     ]
   },

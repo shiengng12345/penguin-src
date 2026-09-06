@@ -1,4 +1,5 @@
 import { statSync } from "node:fs";
+import { createRequire } from "node:module";
 import type { KnowledgeStore } from "./store.js";
 import { trigramLaneEnabled } from "./trigram-lane.js";
 import {
@@ -86,6 +87,26 @@ export interface StorageReport {
   };
   maintenance: MaintenanceState & { lastResult: MaintenanceResult | null };
   repos: StorageRepoRow[];
+  semantic: SemanticStorageReport;
+}
+
+export interface SemanticStorageReport {
+  ready: boolean;
+  backend: "sqlite-vec" | "unavailable" | "debug-fallback";
+  reason: string | null;
+  embeddingSpaces: number;
+  activeGenerations: number;
+  stagingGenerations: number;
+  expectedChunks: number;
+  readyJobs: number;
+  pendingJobs: number;
+  failedJobs: number;
+  readyRefs: number;
+  vectorRows: number;
+  orphanRefs: number;
+  orphanVectors: number;
+  modelDiskBytes: number | null;
+  lastCheckpoint: string | null;
 }
 
 // Health thresholds. Ratio-based (not absolute size): the 25GB incident was a
@@ -427,12 +448,13 @@ export function buildStorageReport(store: KnowledgeStore, options: BuildStorageR
   const files = readStorageFileSizes(store);
   recordDailySample(store, files);
   const weeklyDeltaBytes = weeklyDelta(store, files);
+  const tables = options.computeTables ? analyzeStorageTables(store) : persistedTables(store);
   return {
     computedAt: new Date().toISOString(),
     files,
     health: evaluateStorageHealth(files, weeklyDeltaBytes),
     growth: { weeklyDeltaBytes, samples: recentSamples(store) },
-    tables: options.computeTables ? analyzeStorageTables(store) : persistedTables(store),
+    tables,
     gc: {
       lastRun: lastGcRun(store),
       hotFeatureLimit: DEFAULT_REVISION_RETENTION.maxHotFeatureViews,
@@ -440,7 +462,91 @@ export function buildStorageReport(store: KnowledgeStore, options: BuildStorageR
     },
     maintenance: { ...maintenanceState(store), lastResult: lastMaintenanceResult(store) },
     repos: repoRows(store),
+    semantic: semanticStorageReport(store, tables?.categories.find((category) => category.key === "vectors")?.bytes ?? null),
   };
+}
+
+function semanticStorageReport(store: KnowledgeStore, vectorStorageBytes: number | null): SemanticStorageReport {
+  const empty: SemanticStorageReport = { ready: false, backend: "unavailable", reason: "NO_ACTIVE_SPACE", embeddingSpaces: 0, activeGenerations: 0, stagingGenerations: 0, expectedChunks: 0, readyJobs: 0, pendingJobs: 0, failedJobs: 0, readyRefs: 0, vectorRows: 0, orphanRefs: 0, orphanVectors: 0, modelDiskBytes: null, lastCheckpoint: null };
+  try {
+    const count = (sql: string): number => Number((store.db.prepare(sql).get() as { n: number }).n);
+    const last = store.db.prepare("SELECT MAX(updated_at) AS value FROM embedding_jobs").get() as { value: string | null };
+    let backend: SemanticStorageReport["backend"] = "unavailable";
+    let reason: string | null = "SQLITE_VEC_MISSING";
+    try {
+      const require = createRequire(import.meta.url);
+      const extension = require("sqlite-vec") as { load: (db: { loadExtension(path: string): void }) => void };
+      extension.load(store.db);
+      backend = "sqlite-vec";
+      reason = null;
+    } catch {
+      if (process.env.PENGUIN_VECTOR_DEBUG_FALLBACK === "1") { backend = "debug-fallback"; reason = "DEBUG_VECTOR_FALLBACK"; }
+    }
+    // Counters describe the newest staging generation when work is running;
+    // otherwise they describe the serving generation. Readiness is evaluated
+    // independently against the active generation so backfill never makes an
+    // already-serving vector space look unavailable.
+    const current = store.db.prepare(`
+      SELECT id,status,expected_chunks AS expectedChunks
+        FROM embedding_generations
+       WHERE status IN ('staging','active')
+       ORDER BY CASE status WHEN 'staging' THEN 0 ELSE 1 END,rowid DESC LIMIT 1
+    `).get() as { id: string; status: "staging" | "active"; expectedChunks: number } | undefined;
+    const currentId = current?.id ?? "";
+    const jobCount = (statusSql: string): number => Number((store.db.prepare(
+      `SELECT COUNT(*) AS n FROM embedding_jobs WHERE generation_id=? AND ${statusSql}`,
+    ).get(currentId) as { n: number }).n);
+    const refCount = (statusSql: string): number => Number((store.db.prepare(
+      `SELECT COUNT(*) AS n FROM semantic_embedding_refs r WHERE r.generation_id=? AND ${statusSql}`,
+    ).get(currentId) as { n: number }).n);
+    const active = store.db.prepare(`
+      SELECT id,expected_chunks AS expectedChunks FROM embedding_generations
+       WHERE status='active' ORDER BY rowid DESC LIMIT 1
+    `).get() as { id: string; expectedChunks: number } | undefined;
+    const activeJob = (statusSql: string): number => active ? Number((store.db.prepare(
+      `SELECT COUNT(*) AS n FROM embedding_jobs WHERE generation_id=? AND ${statusSql}`,
+    ).get(active.id) as { n: number }).n) : 0;
+    const activeRef = (statusSql: string): number => active ? Number((store.db.prepare(
+      `SELECT COUNT(*) AS n FROM semantic_embedding_refs r WHERE r.generation_id=? AND ${statusSql}`,
+    ).get(active.id) as { n: number }).n) : 0;
+    const report: SemanticStorageReport = {
+      ready: false,
+      backend,
+      reason,
+      embeddingSpaces: count("SELECT COUNT(*) AS n FROM embedding_spaces"),
+      activeGenerations: count("SELECT COUNT(*) AS n FROM embedding_generations WHERE status='active'"),
+      stagingGenerations: count("SELECT COUNT(*) AS n FROM embedding_generations WHERE status='staging'"),
+      expectedChunks: current?.expectedChunks ?? 0,
+      readyJobs: current ? jobCount("status='ready'") : 0,
+      pendingJobs: current ? jobCount("status IN ('pending','running')") : 0,
+      failedJobs: current ? jobCount("status='failed'") : 0,
+      readyRefs: current ? refCount("r.status='ready'") : 0,
+      vectorRows: current ? refCount("r.status='ready' AND EXISTS (SELECT 1 FROM semantic_vector_values v WHERE v.vec_rowid=r.vec_rowid)") : 0,
+      orphanRefs: count("SELECT COUNT(*) AS n FROM semantic_embedding_refs r JOIN embedding_generations g ON g.id=r.generation_id LEFT JOIN embedding_jobs j ON j.generation_id=r.generation_id AND j.chunk_id=r.chunk_id WHERE g.status='active' AND j.id IS NULL"),
+      orphanVectors: count("SELECT COUNT(*) AS n FROM semantic_vector_values v LEFT JOIN semantic_embedding_refs r ON r.vec_rowid=v.vec_rowid WHERE r.model_hash IS NULL"),
+      // Persisted dbstat category, computed only by explicit analyze/index
+      // maintenance; null remains honest when no scan has run yet.
+      modelDiskBytes: vectorStorageBytes,
+      lastCheckpoint: last.value ?? null,
+    };
+    if (report.backend !== "sqlite-vec") report.reason = "SQLITE_VEC_MISSING";
+    else if (!active) report.reason = report.stagingGenerations > 0 ? "EMBEDDING_GENERATION_INCOMPLETE" : "NO_ACTIVE_SPACE";
+    else {
+      const activeReadyJobs = activeJob("status='ready'");
+      const activeReadyRefs = activeRef("r.status='ready'");
+      const activeVectorRows = activeRef("r.status='ready' AND EXISTS (SELECT 1 FROM semantic_vector_values v WHERE v.vec_rowid=r.vec_rowid)");
+      report.ready = active.expectedChunks > 0
+        && activeReadyJobs === active.expectedChunks
+        && activeReadyRefs === active.expectedChunks
+        && activeReadyRefs === activeVectorRows
+        && report.orphanRefs === 0
+        && report.orphanVectors === 0;
+      if (!report.ready) report.reason = "EMBEDDING_GENERATION_INCOMPLETE";
+    }
+    return report;
+  } catch {
+    return empty;
+  }
 }
 
 // Manual maintenance from the Storage page. Runs synchronously inside the

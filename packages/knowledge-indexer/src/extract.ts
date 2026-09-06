@@ -44,6 +44,17 @@ export interface ExtractedImportBinding {
   typeOnly: boolean;
 }
 
+/** A source-grounded owner-property -> declared-type relationship. */
+export interface ExtractedReceiverBinding {
+  ownerQualifiedName: string;
+  propertyName: string;
+  typeName: string;
+  typeSpecifier?: string;
+  /** Resolved repository-relative file, added by the indexing pipeline. */
+  typeFilePath?: string;
+  startLine: number;
+}
+
 export interface ExtractedFile {
   lang: Lang;
   symbols: ExtractedSymbol[];
@@ -55,6 +66,8 @@ export interface ExtractedFile {
   // `useSelector` looks like an unqualified name and the resolver's
   // unique-same-repo-hit tier happily binds it to a jest.mock stub.
   importBindings: ExtractedImportBinding[];
+  /** TypeScript constructor property bindings used for receiver-aware calls. */
+  receiverBindings: ExtractedReceiverBinding[];
   endpoints: ExtractedEndpoint[]; // NestJS endpoints (gRPC/kafka/http), ts/tsx
   grpcClientCalls: GrpcClientCall[]; // inter-service gRPC client invocations
   identifiers: IdentifierEntry[]; // TS/JS fields and object keys, from this same AST
@@ -137,6 +150,133 @@ function extractJsMetadata(root: Node): { identifiers: IdentifierEntry[]; logSit
 
 function escapeRegExp(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function matchingClose(source: string, open: number, left: string, right: string): number {
+  let depth = 0;
+  let quote: string | null = null;
+  let escaped = false;
+  for (let index = open; index < source.length; index += 1) {
+    const char = source[index];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === "`") {
+      quote = char;
+      continue;
+    }
+    if (char === left) depth += 1;
+    else if (char === right && --depth === 0) return index;
+  }
+  return -1;
+}
+
+function splitTopLevel(source: string): Array<{ value: string; offset: number }> {
+  const result: Array<{ value: string; offset: number }> = [];
+  let start = 0;
+  let parens = 0;
+  let braces = 0;
+  let brackets = 0;
+  let angle = 0;
+  let quote: string | null = null;
+  let escaped = false;
+  for (let index = 0; index < source.length; index += 1) {
+    const char = source[index];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === quote) quote = null;
+      continue;
+    }
+    if (char === "'" || char === '"' || char === "`") {
+      quote = char;
+      continue;
+    }
+    if (char === "(") parens += 1;
+    else if (char === ")") parens -= 1;
+    else if (char === "{") braces += 1;
+    else if (char === "}") braces -= 1;
+    else if (char === "[") brackets += 1;
+    else if (char === "]") brackets -= 1;
+    else if (char === "<") angle += 1;
+    else if (char === ">" && angle > 0) angle -= 1;
+    else if (char === "," && parens === 0 && braces === 0 && brackets === 0 && angle === 0) {
+      const value = source.slice(start, index).trim();
+      if (value) result.push({ value, offset: start });
+      start = index + 1;
+    }
+  }
+  const value = source.slice(start).trim();
+  if (value) result.push({ value, offset: start });
+  return result;
+}
+
+function lineAt(source: string, offset: number): number {
+  return source.slice(0, Math.max(0, offset)).split(/\r?\n/u).length;
+}
+
+function extractReceiverBindings(
+  source: string,
+  symbols: ExtractedSymbol[],
+  importBindings: ExtractedImportBinding[],
+): ExtractedReceiverBinding[] {
+  const bindings: ExtractedReceiverBinding[] = [];
+  for (const owner of symbols.filter((symbol) => symbol.kind === "class")) {
+    const classPattern = new RegExp(`\\bclass\\s+${escapeRegExp(owner.name)}\\b`, "gu");
+    const classMatch = [...source.matchAll(classPattern)].find((match) => lineAt(source, match.index ?? 0) === owner.startLine)
+      ?? source.match(new RegExp(`\\bclass\\s+${escapeRegExp(owner.name)}\\b`, "u"));
+    const classStart = classMatch?.index ?? -1;
+    if (classStart < 0) continue;
+    const classOpen = source.indexOf("{", classStart);
+    const classEnd = classOpen >= 0 ? matchingClose(source, classOpen, "{", "}") : -1;
+    if (classOpen < 0 || classEnd < 0) continue;
+    const classBody = source.slice(classStart, classEnd + 1);
+    const constructorMatch = /\bconstructor\s*\(/u.exec(classBody);
+    if (!constructorMatch) continue;
+    const open = classStart + constructorMatch.index + constructorMatch[0].lastIndexOf("(");
+    const close = matchingClose(source, open, "(", ")");
+    if (close < 0) continue;
+    for (const parameter of splitTopLevel(source.slice(open + 1, close))) {
+      const withoutDecorators = parameter.value.replace(/@[A-Za-z_$][\w$]*(?:\s*\([^)]*\))?/gu, " ");
+      // Only TypeScript parameter properties establish a stable receiver
+      // binding. A normal constructor argument is not automatically a field.
+      if (!/\b(?:public|private|protected|readonly)\b/u.test(withoutDecorators)) continue;
+      const match = /\b(?:public|private|protected|readonly)\b[\s\S]*?\b([A-Za-z_$][\w$]*)\s*(?:[?!])?\s*:\s*([A-Za-z_$][\w$]*(?:\s*\.\s*[A-Za-z_$][\w$]*)?)/u.exec(withoutDecorators);
+      if (!match) continue;
+      const propertyName = match[1];
+      const typeName = match[2].replace(/\s+/gu, "");
+      const typeBinding = importBindings.find((binding) => binding.localName === typeName && !binding.typeOnly);
+      const binding: ExtractedReceiverBinding = {
+        ownerQualifiedName: owner.qualifiedName,
+        propertyName,
+        typeName: typeName.split(".").at(-1) ?? typeName,
+        startLine: lineAt(source, open + 1 + parameter.offset),
+        ...(typeBinding ? { typeSpecifier: typeBinding.specifier } : {}),
+      };
+      if (!bindings.some((item) => item.ownerQualifiedName === binding.ownerQualifiedName
+        && item.propertyName === binding.propertyName)) bindings.push(binding);
+    }
+  }
+  return bindings;
+}
+
+function memberReceiverForCall(node: Node, lang: Lang): string | undefined {
+  const parent = node.parent;
+  if (!parent) return undefined;
+  if ((lang === "ts" || lang === "tsx" || lang === "js") && parent.type === "member_expression") {
+    return parent.childForFieldName("object")?.text;
+  }
+  if (lang === "rust" && parent.type === "field_expression") {
+    return parent.childForFieldName("value")?.text;
+  }
+  if (lang === "rust" && parent.type === "scoped_identifier") {
+    const children = parent.namedChildren.filter((child): child is Node => Boolean(child));
+    return children.length > 1 ? children.slice(0, -1).map((child) => child.text).join("::") : undefined;
+  }
+  return undefined;
 }
 
 // content_hash = hash of the symbol's IMPLEMENTATION, independent of its own
@@ -228,7 +368,7 @@ export async function extractSymbols(input: {
   const lang = input.lang;
   const base: ExtractedFile = {
     lang, symbols: [], refs: [], fileImports: [], importBindings: [], endpoints: [], grpcClientCalls: [],
-    identifiers: [], logSites: [], channels: [], parseError: null, parseSkipped: null,
+    receiverBindings: [], identifiers: [], logSites: [], channels: [], parseError: null, parseSkipped: null,
   };
   const max = input.maxBytes ?? DEFAULT_MAX_BYTES;
   if (Buffer.byteLength(input.source, "utf8") > max) {
@@ -316,10 +456,7 @@ export async function extractSymbols(input: {
         contentHash: contentHashOf(def.node.text, nameCap.node.text),
       });
     } else if (callCap) {
-      const member = callCap.node.parent?.type === "member_expression"
-        ? callCap.node.parent
-        : null;
-      const receiver = member?.childForFieldName("object")?.text;
+      const receiver = memberReceiverForCall(callCap.node, lang);
       refs.push({
         kind: "call",
         rawName: callCap.node.text,
@@ -417,6 +554,10 @@ export async function extractSymbols(input: {
     group.forEach((symbol, index) => { symbol.qualifiedName = `${symbol.qualifiedName}${symbol.identityDiscriminator || `#${index + 1}`}`; });
   }
 
+  const receiverBindings = (lang === "ts" || lang === "tsx")
+    ? extractReceiverBindings(input.source, symbols, importBindings)
+    : [];
+
   // Code entities (thrown errors, env reads) join the refs stream so they get
   // the same enclosing-symbol attribution, then become entity edges in the pipeline.
   if (lang === "ts" || lang === "tsx") {
@@ -475,7 +616,7 @@ export async function extractSymbols(input: {
     // framework adapters are represented by the same binding extractor, while
     // unresolved/computed names remain candidates instead of becoming joins.
     const channels = extractChannelBindings(input.source, symbols);
-    return { lang, symbols, refs, fileImports, importBindings, endpoints, grpcClientCalls, identifiers, logSites, channels, parseError: null, parseSkipped: null };
+    return { lang, symbols, refs, fileImports, importBindings, receiverBindings, endpoints, grpcClientCalls, identifiers, logSites, channels, parseError: null, parseSkipped: null };
   } finally {
     query?.delete();
     tree?.delete();

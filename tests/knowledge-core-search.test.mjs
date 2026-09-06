@@ -3,7 +3,7 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { KnowledgeStore, search } from "../packages/knowledge-core/dist/index.js";
+import { KnowledgeStore, search, searchKnowledge, searchKnowledgeAsync } from "../packages/knowledge-core/dist/index.js";
 
 function openTemp() {
   const dir = mkdtempSync(join(tmpdir(), "pk-search-"));
@@ -51,6 +51,23 @@ test("searchText finds notes and symbols", () => {
     "(req: LoginReq) => LoginRes",
     "symbol search results should expose the indexed signature without an extra get_node call",
   );
+  store.close();
+});
+
+test("unscoped unified search caps repository fan-out and discloses searched scopes", () => {
+  const store = openTemp();
+  const scopes = [];
+  for (let index = 0; index < 5; index += 1) {
+    const repoId = store.registerRepo({ name: `repo-${index}`, rootPath: `/work/repo-${index}` });
+    const branchId = store.registerBranch({ repoId, name: "main", status: "live" });
+    scopes.push({ repoId, snapshotId: `legacy:${branchId}` });
+  }
+  const result = searchKnowledge({ query: "collision", page: { limit: 10 } }, { store, scopes });
+  assert.equal(result.diagnostics.queryStatus, "NO_MATCH_INCOMPLETE");
+  assert.ok(result.diagnostics.warnings.some((warning) => warning.code === "GLOBAL_SCOPE_CAPPED"));
+  assert.equal(result.scope.searchedRepos.length, 4);
+  assert.equal(result.completeness, "partial");
+  assert.equal(result.proofStatus, "not_proven");
   store.close();
 });
 
@@ -256,5 +273,62 @@ test("search(): repo-scoped lookup finds a global gRPC endpoint through its prov
 
   const hits = search(store, "GetPlayerProfileByJwt", { repo: "flyover" });
   assert.ok(hits.some((hit) => hit.nodeId === endpointId), JSON.stringify(hits));
+  store.close();
+});
+
+test("searchKnowledge exposes source-only field matches as source_occurrence, never addressless symbols", () => {
+  const store = openTemp();
+  const repoId = store.registerRepo({ name: "fields", rootPath: "/work/fields" });
+  const branchId = store.registerBranch({ repoId, name: "main", status: "live" });
+  store.indexIdentifiers({
+    repoId,
+    filePath: "src/types.ts",
+    entries: [{ name: "suspensionPeriod", startLine: 5, kind: "field" }],
+  });
+  store.upsertFileCheckpoint({ repoId, branchId, filePath: "src/types.ts", status: "indexed" });
+
+  const response = searchKnowledge(
+    { query: "suspensionPeriod", scope: { revisions: [{ repoId }] } },
+    { store, scopes: [{ repoId, snapshotId: `legacy:${branchId}` }] },
+  );
+
+  assert.ok(response.hits.length > 0, JSON.stringify(response));
+  assert.ok(response.hits.every((hit) => hit.kind === "source_occurrence"), JSON.stringify(response.hits));
+  assert.ok(response.hits.every((hit) => hit.nodeId === undefined && hit.locator.nodeId === undefined), JSON.stringify(response.hits));
+  store.close();
+});
+
+test("searchKnowledge public boundary strictly rejects invalid requests", () => {
+  const store = openTemp();
+  const invalid = [
+    { request: {}, code: "INVALID_QUERY" },
+    { request: { query: "   " }, code: "INVALID_QUERY" },
+    { request: { query: "x", mode: "unsupported" }, code: "INVALID_SEARCH_REQUEST" },
+    { request: { query: "x", page: { limit: 0 } }, code: "INVALID_SEARCH_REQUEST" },
+    { request: { query: "x", page: { limit: 201 } }, code: "INVALID_SEARCH_REQUEST" },
+    { request: { query: "x", scope: { paths: "src" } }, code: "INVALID_SEARCH_REQUEST" },
+    { request: { query: "x", scope: { paths: ["src", 7] } }, code: "INVALID_SEARCH_REQUEST" },
+    { request: { query: "x", page: { cursor: 7 } }, code: "INVALID_SEARCH_REQUEST" },
+  ];
+  for (const item of invalid) {
+    assert.throws(
+      () => searchKnowledge(item.request, { store }),
+      (error) => error?.code === item.code,
+      JSON.stringify(item.request),
+    );
+  }
+  store.close();
+});
+
+test("searchKnowledgeAsync applies the same strict public validation", async () => {
+  const store = openTemp();
+  await assert.rejects(
+    searchKnowledgeAsync({ query: "\t" }, { store }),
+    (error) => error?.code === "INVALID_QUERY",
+  );
+  await assert.rejects(
+    searchKnowledgeAsync({ query: "x", scope: { paths: [false] } }, { store }),
+    (error) => error?.code === "INVALID_SEARCH_REQUEST",
+  );
   store.close();
 });

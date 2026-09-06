@@ -3,6 +3,7 @@ pub mod controller;
 pub mod manager;
 pub mod policy;
 pub mod commands;
+pub mod knowledge_runtime;
 
 pub use error::RuntimeError;
 pub use commands::{new_state, RuntimeState};

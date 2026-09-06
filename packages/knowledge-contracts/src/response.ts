@@ -20,6 +20,46 @@ function requireString(value: unknown, path: string): string {
   return value;
 }
 
+export type GraphEdgeEvidenceState = "proven" | "inferred" | "candidate" | "unresolved";
+
+export interface GraphEdgeEvidenceEnvelope {
+  evidenceState: GraphEdgeEvidenceState;
+  origin: string | null;
+  method: string | null;
+  confidence: number | null;
+  scope: "revision" | "environment" | "unknown";
+  provenance: { filePath?: string; startLine?: number; evidenceId?: string } | null;
+  gaps: string[];
+}
+
+export function validateGraphEdgeEvidenceEnvelope(
+  input: unknown,
+  path = "edgeEvidence",
+): GraphEdgeEvidenceEnvelope {
+  if (!isRecord(input)) invalid(path, path + " must be an object");
+  if (!["proven", "inferred", "candidate", "unresolved"].includes(String(input.evidenceState))) {
+    invalid(path + ".evidenceState", path + ".evidenceState is invalid");
+  }
+  for (const key of ["origin", "method"] as const) {
+    if (input[key] !== null && typeof input[key] !== "string") invalid(path + "." + key, path + "." + key + " must be a string or null");
+  }
+  if (input.confidence !== null && (typeof input.confidence !== "number" || !Number.isFinite(input.confidence))) {
+    invalid(path + ".confidence", path + ".confidence must be finite or null");
+  }
+  if (!["revision", "environment", "unknown"].includes(String(input.scope))) invalid(path + ".scope", path + ".scope is invalid");
+  if (input.provenance !== null) {
+    if (!isRecord(input.provenance)) invalid(path + ".provenance", path + ".provenance must be an object or null");
+    for (const key of ["filePath", "evidenceId"] as const) {
+      if (input.provenance[key] !== undefined && typeof input.provenance[key] !== "string") invalid(path + ".provenance." + key, path + ".provenance." + key + " must be a string");
+    }
+    if (input.provenance.startLine !== undefined && (!Number.isInteger(input.provenance.startLine) || Number(input.provenance.startLine) < 1)) {
+      invalid(path + ".provenance.startLine", path + ".provenance.startLine must be a positive integer");
+    }
+  }
+  if (!Array.isArray(input.gaps) || input.gaps.some((gap) => typeof gap !== "string")) invalid(path + ".gaps", path + ".gaps must be a string array");
+  return input as unknown as GraphEdgeEvidenceEnvelope;
+}
+
 function validateLocator(value: unknown, path: string): SearchLocator {
   if (!isRecord(value)) invalid(path, path + " must be an object");
   requireString(value.repoId, path + ".repoId");
@@ -57,6 +97,11 @@ function validateHit(value: unknown, path: string): SearchHit {
   }
   if (!Array.isArray(value.evidence)) invalid(path + ".evidence", path + ".evidence must be an array");
   value.evidence.forEach((evidence, index) => validateEvidence(evidence, path + ".evidence[" + index + "]"));
+  if ((value.kind === "symbol" || value.kind === "field")
+    && typeof value.nodeId !== "string"
+    && typeof (value.locator as Record<string, unknown>).nodeId !== "string") {
+    invalid(path + ".nodeId", path + " symbol/field hits must expose a public node id; source-only matches must use kind=source_occurrence");
+  }
   return value as unknown as SearchHit;
 }
 
@@ -65,6 +110,13 @@ export function validateSearchResponse(input: unknown): SearchResponse {
   if (input.schemaVersion !== "2") invalid("response.schemaVersion", "response.schemaVersion must be 2");
   if (!Array.isArray(input.hits)) invalid("response.hits", "response.hits must be an array");
   input.hits.forEach((hit, index) => validateHit(hit, "response.hits[" + index + "]"));
+  const hitCount = input.hits.length;
+  if (input.returnedCount !== undefined && (!Number.isInteger(input.returnedCount) || Number(input.returnedCount) !== hitCount)) {
+    invalid("response.returnedCount", "response.returnedCount must equal response.hits.length");
+  }
+  if (input.candidateCount !== undefined && (!Number.isInteger(input.candidateCount) || Number(input.candidateCount) < hitCount)) {
+    invalid("response.candidateCount", "response.candidateCount must be an integer greater than or equal to response.hits.length");
+  }
   if (!isRecord(input.diagnostics)) invalid("response.diagnostics", "response.diagnostics must be an object");
   if (![
     "MATCH",
@@ -74,6 +126,12 @@ export function validateSearchResponse(input: unknown): SearchResponse {
     "INDEX_ERROR",
   ].includes(String(input.diagnostics.queryStatus))) {
     invalid("response.diagnostics.queryStatus", "response.diagnostics.queryStatus is invalid");
+  }
+  if (hitCount > 0 && input.diagnostics.queryStatus !== "MATCH") {
+    invalid("response.diagnostics.queryStatus", "response.diagnostics.queryStatus must be MATCH when hits are returned");
+  }
+  if (hitCount === 0 && input.diagnostics.queryStatus === "MATCH") {
+    invalid("response.diagnostics.queryStatus", "response.diagnostics.queryStatus cannot be MATCH when no hits are returned");
   }
   if (!Array.isArray(input.diagnostics.nextActions)) {
     invalid("response.diagnostics.nextActions", "response.diagnostics.nextActions must be an array");
@@ -87,8 +145,38 @@ export function validateSearchResponse(input: unknown): SearchResponse {
   if (typeof input.diagnostics.scopeApplied !== "boolean") {
     invalid("response.diagnostics.scopeApplied", "response.diagnostics.scopeApplied must be boolean");
   }
+  if (!isRecord(input.diagnostics.semantic)
+    || typeof input.diagnostics.semantic.requested !== "boolean"
+    || typeof input.diagnostics.semantic.applied !== "boolean"
+    || !Number.isInteger(input.diagnostics.semantic.ready)
+    || !Number.isInteger(input.diagnostics.semantic.expected)
+    || !Array.isArray(input.diagnostics.semantic.activeGenerationIds)
+    || !Array.isArray(input.diagnostics.semantic.lanesUsed)) {
+    invalid("response.diagnostics.semantic", "response.diagnostics.semantic must expose truthful application and progress fields");
+  }
   if (!Number.isInteger(input.diagnostics.candidateCount) || Number(input.diagnostics.candidateCount) < 0) {
     invalid("response.diagnostics.candidateCount", "response.diagnostics.candidateCount must be a non-negative integer");
+  }
+  if (Number(input.diagnostics.candidateCount) < hitCount) {
+    invalid("response.diagnostics.candidateCount", "response.diagnostics.candidateCount must be greater than or equal to response.hits.length");
+  }
+  if (input.candidateCount !== undefined && Number(input.diagnostics.candidateCount) !== Number(input.candidateCount)) {
+    invalid("response.diagnostics.candidateCount", "response.diagnostics.candidateCount must equal response.candidateCount");
+  }
+  if (input.evidence !== undefined) {
+    if (!isRecord(input.evidence)) invalid("response.evidence", "response.evidence must be an object");
+    if (!Number.isInteger(input.evidence.returnedCount) || Number(input.evidence.returnedCount) !== hitCount) {
+      invalid("response.evidence.returnedCount", "response.evidence.returnedCount must equal response.hits.length");
+    }
+    if (input.evidence.candidateCount !== null && (!Number.isInteger(input.evidence.candidateCount) || Number(input.evidence.candidateCount) < hitCount)) {
+      invalid("response.evidence.candidateCount", "response.evidence.candidateCount must be null or an integer greater than or equal to response.hits.length");
+    }
+    if (input.returnedCount !== undefined && Number(input.evidence.returnedCount) !== Number(input.returnedCount)) {
+      invalid("response.evidence.returnedCount", "response.evidence.returnedCount must equal response.returnedCount");
+    }
+    if (input.candidateCount !== undefined && input.evidence.candidateCount !== null && Number(input.evidence.candidateCount) !== Number(input.candidateCount)) {
+      invalid("response.evidence.candidateCount", "response.evidence.candidateCount must equal response.candidateCount");
+    }
   }
   if (input.error !== undefined) {
     if (!isRecord(input.error) || typeof input.error.code !== "string" || typeof input.error.message !== "string" || !isRecord(input.error.details) || typeof input.error.retryable !== "boolean") {
@@ -122,4 +210,32 @@ export function normalizeSearchResponse(input: unknown): SearchResponse {
     } as SearchDiagnostics,
   };
   return stable(normalized) as SearchResponse;
+}
+
+/** Canonical shape for every public read-only list. `null` means the source
+ * cannot establish the value; callers must inspect `gaps` instead of treating
+ * an absent count as zero. */
+export interface KnowledgeListEnvelope<T = unknown> {
+  items: T[];
+  scope: Record<string, unknown> | null;
+  revision: Record<string, unknown> | null;
+  freshness: Record<string, unknown>;
+  coverage: {
+    status: "complete" | "partial" | "unknown";
+    discovered: number | null;
+    admitted: number | null;
+    excluded: number | null;
+    failed: number | null;
+    stale: number | null;
+    unresolvedReferences: number | null;
+  };
+  completeness: "complete" | "lower_bound" | "partial" | "unknown";
+  proofStatus: "proven" | "not_proven" | "candidate" | "unresolved";
+  candidateCount: number | null;
+  returnedCount: number;
+  remainingCount: number | null;
+  totalIsExact: boolean;
+  truncated: boolean;
+  nextCursor: string | null;
+  gaps: string[];
 }

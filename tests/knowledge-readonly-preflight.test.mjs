@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, existsSync } from "node:fs";
+import { mkdtempSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -47,7 +48,7 @@ test("outdated schema + read-only open throws SCHEMA_OUTDATED instead of migrati
   const writable = KnowledgeStore.open({ dbPath, ledgerPath });
   // (writable open migrates as before)
   const stored = writable.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get();
-  assert.equal(Number(stored.value), 14);
+  assert.equal(Number(stored.value), 18);
   writable.close();
 });
 
@@ -61,7 +62,7 @@ test("CLI read verb against a stale-schema DB fails loud (exit 3, SCHEMA_OUTDATE
 
   assert.equal(code, 3);
   assert.match(errs.join("\n"), /SCHEMA_OUTDATED|schema is outdated/);
-  assert.match(errs.join("\n"), /penguin index/);
+  assert.match(errs.join("\n"), /knowledge_index/);
 
   // The failed read-only dispatch must not have run DDL/migration: open the
   // raw file directly (bypassing openDatabase entirely) to check the on-disk
@@ -122,7 +123,7 @@ test("runQueryServer against a version-spoofed store emits an error hello frame 
   assert.equal(frames.length, 1, JSON.stringify(frames));
   assert.equal(frames[0].type, "hello");
   assert.equal(frames[0].error?.code, "SCHEMA_OUTDATED");
-  assert.match(frames[0].error?.message ?? "", /penguin index/);
+  assert.match(frames[0].error?.message ?? "", /knowledge_index/);
   // Must NOT also carry a real handshake's fields -- the Rust bridge treats
   // an error hello and a normal hello as mutually exclusive shapes.
   assert.equal(frames[0].schemaVersion, undefined);
@@ -134,4 +135,50 @@ test("runQueryServer against a version-spoofed store emits an error hello frame 
   const stored = db.prepare("SELECT value FROM meta WHERE key='schema_version'").get();
   assert.equal(Number(stored.value), 12);
   db.close();
+});
+
+test("[mutation-root-safety] confirmed MCP register/index/rebuild never accepts an invalid repository root", async () => {
+  const workspace = mkdtempSync(join(tmpdir(), "penguin-mcp-preflight-workspace-"));
+  const nonGitDirectory = join(workspace, "not-a-repository");
+  const regularFile = join(workspace, "not-a-directory");
+  mkdirSync(nonGitDirectory);
+  writeFileSync(regularFile, "file\n");
+
+  const oldRoots = process.env.PENGUIN_MCP_WORKSPACE_ROOTS;
+  const oldMutations = process.env.PENGUIN_MCP_MUTATIONS;
+  const oldSecret = process.env.PENGUIN_MCP_CONFIRMATION_SECRET;
+  process.env.PENGUIN_MCP_WORKSPACE_ROOTS = workspace;
+  process.env.PENGUIN_MCP_MUTATIONS = "enabled";
+  process.env.PENGUIN_MCP_CONFIRMATION_SECRET = "strict-preflight-secret";
+  const {
+    createMutationConfirmationToken,
+    runKnowledgeTool,
+  } = await import(`../packages/mcp/dist/knowledge-tools.js?strict-preflight=${Date.now()}`);
+
+  const directory = mkdtempSync(join(tmpdir(), "penguin-mcp-preflight-db-"));
+  const store = KnowledgeStore.open({
+    dbPath: join(directory, "knowledge.db"),
+    ledgerPath: join(directory, "ledger.jsonl"),
+  });
+  const cases = [
+    ["knowledge_repository_register", "knowledge.repository.register", regularFile],
+    ["knowledge_index", "knowledge.index", nonGitDirectory],
+    ["knowledge_rebuild", "knowledge.rebuild", join(workspace, "missing")],
+  ];
+  for (const [tool, capability, root_path] of cases) {
+    const input = { root_path, confirmed: true };
+    const confirmation_token = createMutationConfirmationToken(capability, input, {
+      secret: "strict-preflight-secret",
+    });
+    const result = await runKnowledgeTool(tool, { ...input, confirmation_token }, { store });
+    assert.ok(result.error, `${tool} unexpectedly accepted invalid root ${root_path}: ${JSON.stringify(result)}`);
+    assert.equal(result.error.code, "MUTATION_PREFLIGHT_INVALID", `${tool}: ${JSON.stringify(result)}`);
+    assert.equal(result.error.retryable, false);
+  }
+  assert.equal(store.db.prepare("SELECT COUNT(*) AS count FROM repos").get().count, 0);
+  store.close();
+
+  if (oldRoots === undefined) delete process.env.PENGUIN_MCP_WORKSPACE_ROOTS; else process.env.PENGUIN_MCP_WORKSPACE_ROOTS = oldRoots;
+  if (oldMutations === undefined) delete process.env.PENGUIN_MCP_MUTATIONS; else process.env.PENGUIN_MCP_MUTATIONS = oldMutations;
+  if (oldSecret === undefined) delete process.env.PENGUIN_MCP_CONFIRMATION_SECRET; else process.env.PENGUIN_MCP_CONFIRMATION_SECRET = oldSecret;
 });

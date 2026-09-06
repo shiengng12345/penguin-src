@@ -31,10 +31,14 @@ const TS_QUERY = `
 (pair key: (property_identifier) @name value: (arrow_function)) @definition.method
 (call_expression function: (identifier) @reference.call)
 (call_expression function: (member_expression property: (property_identifier) @reference.call))
+(new_expression constructor: (identifier) @reference.call)
+(new_expression constructor: (member_expression property: (property_identifier) @reference.call))
 (import_statement source: (string (string_fragment) @reference.import))
 (call_expression function: (import) arguments: (arguments (string (string_fragment) @reference.import)))
 (type_annotation (type_identifier) @reference.type)
 (type_arguments (type_identifier) @reference.type)
+(type_annotation (nested_type_identifier (type_identifier) @reference.type))
+(type_arguments (nested_type_identifier (type_identifier) @reference.type))
 (generic_type name: (type_identifier) @reference.type)
 (extends_clause (identifier) @reference.type)
 (implements_clause (type_identifier) @reference.type)
@@ -56,6 +60,8 @@ const JS_QUERY = `
 (pair key: (property_identifier) @name value: (arrow_function)) @definition.method
 (call_expression function: (identifier) @reference.call)
 (call_expression function: (member_expression property: (property_identifier) @reference.call))
+(new_expression constructor: (identifier) @reference.call)
+(new_expression constructor: (member_expression property: (property_identifier) @reference.call))
 (import_statement source: (string (string_fragment) @reference.import))
 (call_expression function: (import) arguments: (arguments (string (string_fragment) @reference.import)))
 `;

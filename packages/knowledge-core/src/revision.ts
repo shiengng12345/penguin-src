@@ -48,6 +48,14 @@ interface BranchRecord {
   current_snapshot_id: string | null;
 }
 
+interface ReadySnapshotRecord {
+  id: string;
+  repo_id: string;
+  commit_sha: string | null;
+  worktree_fingerprint: string | null;
+  merge_base_sha: string | null;
+}
+
 function branchRows(store: KnowledgeStore, repoId: string): BranchRecord[] {
   return store.db
     .prepare(
@@ -84,14 +92,74 @@ function contextOf(branch: BranchRecord, selector: RevisionSelector, reason?: st
   };
 }
 
+function branchForSnapshot(
+  rows: BranchRecord[],
+  snapshotId: string,
+  selector: RevisionSelector,
+): BranchRecord | undefined {
+  if (selector.branch) {
+    return rows.find(
+      (row) => (row.id === selector.branch || row.name === selector.branch)
+        && row.current_snapshot_id === snapshotId,
+    );
+  }
+  return rows.find((row) => row.current_snapshot_id === snapshotId);
+}
+
+function snapshotContextOf(
+  snapshot: ReadySnapshotRecord,
+  selector: RevisionSelector,
+  branch?: BranchRecord,
+  reason?: string,
+): RevisionContext {
+  const exactWorktree = Boolean(
+    selector.worktreeFingerprint
+      && snapshot.worktree_fingerprint
+      && selector.worktreeFingerprint === snapshot.worktree_fingerprint,
+  );
+  return {
+    repoId: snapshot.repo_id,
+    ...(branch ? { branch: branch.name, branchId: branch.id } : {}),
+    commitSha: snapshot.commit_sha ?? "(worktree)",
+    snapshotId: snapshot.id,
+    ...(snapshot.merge_base_sha ? { mergeBaseSha: snapshot.merge_base_sha } : {}),
+    ...(snapshot.worktree_fingerprint ? { worktreeFingerprint: snapshot.worktree_fingerprint } : {}),
+    trust: exactWorktree
+      ? "exact_worktree"
+      : snapshot.commit_sha
+        ? "exact_commit"
+        : "trust_unavailable",
+    ...(reason ? { degradationReason: reason } : {}),
+  };
+}
+
+function currentContextOf(
+  store: KnowledgeStore,
+  branch: BranchRecord,
+  selector: RevisionSelector,
+  reason?: string,
+): RevisionContext {
+  const legacy = contextOf(branch, selector, reason);
+  if (!branch.current_snapshot_id) return legacy;
+  const snapshot = store.db.prepare(
+    `SELECT id, repo_id, commit_sha, worktree_fingerprint, merge_base_sha
+       FROM revision_snapshots
+      WHERE id=? AND repo_id=? AND state='ready'`,
+  ).get(branch.current_snapshot_id, branch.repo_id) as ReadySnapshotRecord | undefined;
+  if (!snapshot) return legacy;
+  if (selector.commitSha && snapshot.commit_sha !== selector.commitSha) return legacy;
+  return snapshotContextOf(snapshot, selector, branch, reason);
+}
+
 export function resolveRevisionContext(
   store: KnowledgeStore,
   selector: RevisionSelector,
 ): RevisionResolution {
-  const rows = branchRows(store, selector.repoId);
-  if (rows.length === 0) {
+  const repoExists = store.db.prepare("SELECT 1 FROM repos WHERE id=?").get(selector.repoId);
+  if (!repoExists) {
     return { status: "not_found", candidates: [], reason: `repository not found: ${selector.repoId}` };
   }
+  const rows = branchRows(store, selector.repoId);
 
   // Before immutable snapshot storage exists, branch rows are addressable as
   // legacy snapshots. Keep this compatibility path explicit and deterministic.
@@ -104,26 +172,15 @@ export function resolveRevisionContext(
       return { status: "resolved", context: contextOf(snapshotRows[0], selector) };
     }
     const snapshot = store.db.prepare(
-      "SELECT id, repo_id, commit_sha, worktree_fingerprint, state FROM revision_snapshots WHERE id=? AND repo_id=?",
-    ).get(selector.snapshotId, selector.repoId) as { id: string; repo_id: string; commit_sha: string | null; worktree_fingerprint: string | null; state: string } | undefined;
-    if (snapshot?.state === "ready") {
-      const branch = rows.find((row) => row.current_snapshot_id === snapshot.id);
-      if (branch) {
-        const context = contextOf(branch, { ...selector, worktreeFingerprint: snapshot.worktree_fingerprint ?? selector.worktreeFingerprint });
-        return {
-          status: "resolved",
-          context: {
-            ...context,
-            snapshotId: snapshot.id,
-            commitSha: snapshot.commit_sha ?? context.commitSha,
-            trust: snapshot.worktree_fingerprint && selector.worktreeFingerprint === snapshot.worktree_fingerprint
-              ? "exact_worktree"
-              : snapshot.commit_sha
-                ? "exact_commit"
-                : "trust_unavailable",
-          },
-        };
-      }
+      `SELECT id, repo_id, commit_sha, worktree_fingerprint, merge_base_sha
+         FROM revision_snapshots
+        WHERE id=? AND repo_id=? AND state='ready'`,
+    ).get(selector.snapshotId, selector.repoId) as ReadySnapshotRecord | undefined;
+    if (snapshot) {
+      return {
+        status: "resolved",
+        context: snapshotContextOf(snapshot, selector, branchForSnapshot(rows, snapshot.id, selector)),
+      };
     }
     // An explicitly supplied snapshot is a hard selector. Falling through to
     // the sole-live-branch resolution below would answer from a different
@@ -136,6 +193,31 @@ export function resolveRevisionContext(
   }
 
   if (selector.commitSha) {
+    const readySnapshots = store.db.prepare(
+      `SELECT id, repo_id, commit_sha, worktree_fingerprint, merge_base_sha
+         FROM revision_snapshots
+        WHERE repo_id=? AND commit_sha=? AND state='ready'
+        ORDER BY published_at DESC, id`,
+    ).all(selector.repoId, selector.commitSha) as ReadySnapshotRecord[];
+    if (readySnapshots.length > 0) {
+      const currentSnapshots = readySnapshots.filter((snapshot) =>
+        branchForSnapshot(rows, snapshot.id, selector));
+      const candidates = currentSnapshots.length === 1 ? currentSnapshots : readySnapshots;
+      if (candidates.length === 1) {
+        const snapshot = candidates[0];
+        return {
+          status: "resolved",
+          context: snapshotContextOf(snapshot, selector, branchForSnapshot(rows, snapshot.id, selector)),
+        };
+      }
+      return {
+        status: "ambiguous",
+        candidates: candidates.map((snapshot) =>
+          snapshotContextOf(snapshot, selector, branchForSnapshot(rows, snapshot.id, selector))),
+        reason: `commit ${selector.commitSha} resolves to multiple ready snapshots; provide snapshotId`,
+      };
+    }
+
     // A commit selector is an exact knowledge selector. A branch head can be
     // newer than the indexed commit, so accepting head_commit here would
     // silently return last_indexed_commit evidence for a different revision.
@@ -148,13 +230,13 @@ export function resolveRevisionContext(
         (row.last_indexed_commit === null && row.head_commit === selector.commitSha),
     );
     if (commitRows.length === 1) {
-      return { status: "resolved", context: contextOf(commitRows[0], selector) };
+      return { status: "resolved", context: currentContextOf(store, commitRows[0], selector) };
     }
     if (commitRows.length > 1) {
       return {
         status: "ambiguous",
         candidates: commitRows.map((row) => contextOf(row, selector)),
-        reason: `commit ${selector.commitSha} resolves to multiple branches; pass --branch or --snapshot`,
+        reason: `commit ${selector.commitSha} resolves to multiple branches; provide the branch or snapshotId field`,
       };
     }
     // A caller that names a commit is asking for that exact indexed commit;
@@ -169,7 +251,7 @@ export function resolveRevisionContext(
   if (selector.branch) {
     const explicitRows = rows.filter((row) => row.id === selector.branch || row.name === selector.branch);
     if (explicitRows.length === 1) {
-      return { status: "resolved", context: contextOf(explicitRows[0], selector) };
+      return { status: "resolved", context: currentContextOf(store, explicitRows[0], selector) };
     }
     return {
       status: "not_found",
@@ -180,20 +262,20 @@ export function resolveRevisionContext(
 
   const liveRows = rows.filter((row) => row.status === "live");
   if (liveRows.length === 1) {
-    return { status: "resolved", context: contextOf(liveRows[0], selector) };
+    return { status: "resolved", context: currentContextOf(store, liveRows[0], selector) };
   }
   if (liveRows.length > 1) {
     return {
       status: "ambiguous",
       candidates: liveRows.map((row) => contextOf(row, selector)),
-      reason: "multiple live branches; pass --branch, --commit, or --snapshot",
+      reason: "multiple live branches; provide branch, commitSha, or snapshotId",
     };
   }
 
   return {
     status: "not_found",
     candidates: rows.map((row) => contextOf(row, selector)),
-    reason: "no live branch is available; pass --branch or --commit",
+    reason: "no live branch is available; provide an indexed branch or commitSha from index_status",
   };
 }
 

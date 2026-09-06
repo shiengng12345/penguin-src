@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 15,
+  "schemaVersion": 18,
   "contractVersion": "2",
   "requiredCapabilities": [
     "search",

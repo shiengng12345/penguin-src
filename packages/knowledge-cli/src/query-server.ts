@@ -1,9 +1,11 @@
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { Worker } from "node:worker_threads";
-import { CAPABILITIES, capabilityHash } from "@penguin/knowledge-contracts";
-import { getSourceHit, compactIndexStatus, buildStatusPanel, buildStorageReport, runStorageMaintenance, SCHEMA_VERSION } from "@penguin/knowledge-core";
+import { CAPABILITIES, capabilityHash, validateSemanticStatusResponse } from "@penguin/knowledge-contracts";
+import { executeSemanticControl, getSourceHit, compactIndexStatus, buildStatusPanel, buildStorageReport, listSemanticStatuses, resolveSemanticScopeKey, applySemanticRuntimeState, runStorageMaintenance, SCHEMA_VERSION } from "@penguin/knowledge-core";
 import { runCli, type CliDeps } from "./index.js";
+import { ensureSemanticWorker } from "./semantic-worker.js";
+import { runtimeIdentity } from "./runtime-identity.js";
 import { dispatchQueryFrame, encodeFrame, parseFrame, queryHello } from "./query-protocol.js";
 
 interface QueryWorkerJob {
@@ -11,22 +13,91 @@ interface QueryWorkerJob {
   capabilityId: string;
   input: unknown;
   resolve: (value: unknown) => void;
-  reject: (error: Error & { code?: string }) => void;
-  timer: ReturnType<typeof setTimeout>;
+  reject: (error: QueryRuntimeError) => void;
+  timer?: ReturnType<typeof setTimeout>;
   signal?: AbortSignal;
   abortListener?: () => void;
   settled: boolean;
   startedAt: number;
   startedCpu: NodeJS.CpuUsage;
+  timeoutMs: number;
 }
+
+type QueryRuntimeError = Error & {
+  code: string;
+  details?: Record<string, unknown>;
+  retryable?: boolean;
+  remediation?: string;
+};
 
 interface QueryWorkerSlot {
   worker: Worker;
   current?: QueryWorkerJob;
 }
 
-function queryRuntimeError(code: string, message: string): Error & { code: string } {
-  return Object.assign(new Error(message), { code });
+function queryRuntimeError(
+  code: string,
+  message: string,
+  details?: Record<string, unknown>,
+  retryable = false,
+  remediation?: string,
+): QueryRuntimeError {
+  return Object.assign(new Error(message), {
+    code,
+    ...(details && Object.keys(details).length > 0 ? { details } : {}),
+    ...(retryable ? { retryable: true } : {}),
+    ...(remediation ? { remediation } : {}),
+  });
+}
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function timeoutCapabilityId(capabilityId: string, input: unknown): string {
+  if (capabilityId !== "knowledge.mcp_tool") return capabilityId;
+  const request = record(input);
+  const name = request && typeof request.name === "string" ? request.name : undefined;
+  const capability = name
+    ? CAPABILITIES.find((candidate) => candidate.id.replaceAll(".", "_") === name)
+    : undefined;
+  return capability?.id ?? name ?? capabilityId;
+}
+
+function timeoutScope(input: unknown): unknown {
+  const request = record(input);
+  if (!request) return null;
+  if (request.scope !== undefined) return request.scope;
+  if (request.arguments !== undefined) return timeoutScope(request.arguments);
+  const scopeKeys = [
+    "workspaceId", "revisions", "paths", "languages", "kinds",
+    "repo", "repo_id", "branch", "snapshot_id", "commit_sha",
+  ];
+  const selected = Object.fromEntries(scopeKeys
+    .filter((key) => request[key] !== undefined)
+    .map((key) => [key, request[key]]));
+  return Object.keys(selected).length > 0 ? selected : null;
+}
+
+const BOUNDED_QUERY_PHASES = [
+  "scopeResolution",
+  "count",
+  "candidateSelection",
+  "hydration",
+  "evidence",
+  "serialization",
+] as const;
+
+/** Preserve the core's measured execution timings at the transport boundary. */
+export function withBoundedQueryTimings(value: unknown): unknown {
+  const result = record(value);
+  const diagnostics = result && record(result.diagnostics);
+  if (!result || !diagnostics || !Array.isArray(result.hits) || !record(diagnostics.timingsMs)) return value;
+  const timings = diagnostics.timingsMs as Record<string, unknown>;
+  if (!BOUNDED_QUERY_PHASES.every((phase) => typeof timings[phase] === "number" && Number.isFinite(timings[phase]))) return value;
+  return value;
 }
 
 /**
@@ -102,7 +173,7 @@ export class QueryWorkerPool {
       id: string;
       ok: boolean;
       result?: unknown;
-      error?: { code?: string; message?: string };
+      error?: { code?: string; message?: string; details?: Record<string, unknown>; retryable?: boolean; remediation?: string };
     }) => {
       if (slot.worker !== worker || message.type !== "result") return;
       const job = slot.current;
@@ -114,10 +185,16 @@ export class QueryWorkerPool {
       } else {
         this.logSlowOrStopped(job, message.error?.code ?? "error");
         this.settle(
-        job,
-        false,
-        queryRuntimeError(message.error?.code ?? "INTERNAL", message.error?.message ?? "query worker failed"),
-      );
+          job,
+          false,
+          queryRuntimeError(
+            message.error?.code ?? "INTERNAL",
+            message.error?.message ?? "query worker failed",
+            message.error?.details,
+            message.error?.retryable ?? false,
+            message.error?.remediation,
+          ),
+        );
       }
       this.drain();
     });
@@ -166,12 +243,12 @@ export class QueryWorkerPool {
   private settle(job: QueryWorkerJob, ok: boolean, value: unknown): void {
     if (job.settled) return;
     job.settled = true;
-    clearTimeout(job.timer);
+    if (job.timer) clearTimeout(job.timer);
     if (job.signal && job.abortListener) {
       job.signal.removeEventListener("abort", job.abortListener);
     }
     if (ok) job.resolve(value);
-    else job.reject(value as Error & { code?: string });
+    else job.reject(value as QueryRuntimeError);
   }
 
   private stop(job: QueryWorkerJob, code: "CANCELLED" | "QUERY_TIMEOUT"): void {
@@ -181,14 +258,30 @@ export class QueryWorkerPool {
     const activeSlot = this.slots.find((slot) => slot.current === job);
     if (activeSlot) this.replace(activeSlot);
     this.logSlowOrStopped(job, code);
-    this.settle(
-      job,
-      false,
-      queryRuntimeError(
-        code,
-        code === "CANCELLED" ? "query was cancelled" : "query exceeded the hard timeout",
-      ),
-    );
+    if (code === "QUERY_TIMEOUT") {
+      const remediation = "retry with a narrower scope and a smaller page limit; inspect the elapsed and budget values before retrying";
+      const scope = timeoutScope(job.input);
+      this.settle(
+        job,
+        false,
+        queryRuntimeError(
+          code,
+          "query exceeded the hard timeout",
+          {
+            capability: timeoutCapabilityId(job.capabilityId, job.input),
+            elapsedMs: Math.max(0, performance.now() - job.startedAt),
+            budgetMs: job.timeoutMs,
+            scope,
+            scopeStatus: scope === null ? "unknown" : "requested",
+            nextAction: remediation,
+          },
+          true,
+          remediation,
+        ),
+      );
+    } else {
+      this.settle(job, false, queryRuntimeError(code, "query was cancelled"));
+    }
     this.drain();
   }
 
@@ -200,6 +293,13 @@ export class QueryWorkerPool {
       if (!job) break;
       if (job.settled) continue;
       slot.current = job;
+      // A timeout is an execution budget, not a queue budget. Starting it in
+      // run() made a second concurrent request expire while waiting behind a
+      // valid first request, and the client could not distinguish queue delay
+      // from a slow SQLite operation. Arm it only once a worker owns the job.
+      job.startedAt = performance.now();
+      job.startedCpu = process.cpuUsage();
+      job.timer = setTimeout(() => this.stop(job, "QUERY_TIMEOUT"), Math.max(1, job.timeoutMs));
       slot.worker.postMessage({
         type: "run",
         id: job.id,
@@ -228,13 +328,13 @@ export class QueryWorkerPool {
         input,
         resolve,
         reject,
-        timer: undefined as unknown as ReturnType<typeof setTimeout>,
+        timer: undefined,
         signal,
         settled: false,
         startedAt: performance.now(),
         startedCpu: process.cpuUsage(),
+        timeoutMs: Math.max(1, timeoutMs),
       };
-      job.timer = setTimeout(() => this.stop(job, "QUERY_TIMEOUT"), Math.max(1, timeoutMs));
       if (signal) {
         job.abortListener = () => this.stop(job, "CANCELLED");
         signal.addEventListener("abort", job.abortListener, { once: true });
@@ -391,10 +491,35 @@ export async function runQueryServer(deps: CliDeps, input = process.stdin, outpu
   let framingErrors = 0;
   let framingCorruption = false;
   const invoke = async (capabilityId: string, value: unknown, signal?: AbortSignal): Promise<unknown> => {
-    if (capabilityId === "knowledge.capabilities") return { schemaVersion: String(SCHEMA_VERSION), contractVersion: "2", buildId: process.env.PENGUIN_BUILD_ID ?? "local", capabilityHash: capabilityHash(CAPABILITIES), capabilities: caches.capabilityRegistry };
+    if (capabilityId === "knowledge.capabilities") return { schemaVersion: String(SCHEMA_VERSION), contractVersion: "2", buildId: process.env.PENGUIN_BUILD_ID ?? "local", capabilityHash: capabilityHash(CAPABILITIES), modelHash: runtimeIdentity().modelHash, capabilities: caches.capabilityRegistry };
     if (capabilityId === "knowledge.index_status") return compactIndexStatus(store);
     if (capabilityId === "knowledge.status_panel") return buildStatusPanel(store);
     if (capabilityId === "knowledge.storage_report") return buildStorageReport(store);
+    if (capabilityId === "knowledge.semantic_status") {
+      const request = value as { scopeKey?: string } | undefined;
+      const scope = request?.scopeKey ? resolveSemanticScopeKey(store, request.scopeKey) : undefined;
+      if (scope && !scope.resolvedScopeKey) {
+        throw Object.assign(new Error(`semantic scope was not found: ${request?.scopeKey}`), {
+          code: scope.ambiguousRepoIds?.length ? "SCOPE_AMBIGUOUS" : "SCOPE_NOT_FOUND",
+          details: { requestedScopeKey: request?.scopeKey, validScopeKeys: scope.validScopeKeys, validRepositoryNames: scope.validRepositoryNames },
+        });
+      }
+      return validateSemanticStatusResponse({
+        statuses: applySemanticRuntimeState(
+          listSemanticStatuses(store, scope?.resolvedScopeKey),
+          runtimeIdentity().generation,
+        ),
+        ...(scope ? { requestedScopeKey: scope.requestedScopeKey, resolvedScopeKey: scope.resolvedScopeKey } : {}),
+      });
+    }
+    if (capabilityId === "knowledge.semantic_control") {
+      return executeSemanticControl({
+        store,
+        request: value,
+        runtimeState: runtimeIdentity().generation,
+        wake: () => ensureSemanticWorker({ store, cwd: deps.cwd }),
+      });
+    }
     if (capabilityId === "knowledge.maintenance") {
       const action = (value as { action?: string } | undefined)?.action;
       if (action !== "collect" && action !== "vacuum" && action !== "analyze") {
@@ -509,7 +634,13 @@ export async function runQueryServer(deps: CliDeps, input = process.stdin, outpu
     const task = frame.type === "request"
       ? executionQueue.run(capability?.mutating ?? true, async () => { const response = await dispatchQueryFrame(frame, invoke, cancelled, active); if (capability?.mutating) caches.invalidate(); return response; })
       : dispatchQueryFrame(frame, invoke, cancelled, active);
-    tasks.push(task.then((response) => { if (response) output.write(encodeFrame(response)); }));
+    tasks.push(task.then((response) => {
+      if (!response) return;
+      const timedResponse = response.ok
+        ? { ...response, result: withBoundedQueryTimings(response.result) }
+        : response;
+      output.write(encodeFrame(timedResponse));
+    }));
   }
   await Promise.all(tasks);
   await queryWorkers.close();

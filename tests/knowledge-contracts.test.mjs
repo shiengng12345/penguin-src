@@ -97,6 +97,15 @@ test("SearchResponse validates locator/evidence shape and normalizes nondetermin
       timingsMs: { source: 12 },
       candidateCount: 1,
       truncated: false,
+      semantic: {
+        requested: false,
+        applied: false,
+        reason: "not_requested",
+        ready: 0,
+        expected: 0,
+        activeGenerationIds: [],
+        lanesUsed: ["source"],
+      },
     },
     page: { limit: 50, totalIsExact: true, total: 1 },
   };
@@ -106,4 +115,13 @@ test("SearchResponse validates locator/evidence shape and normalizes nondetermin
   assert.equal(normalized.hits[0].locator.filePath, "src/call-site.ts");
   assert.equal("snippet" in normalized.hits[0], false, "compact hits retain locator/evidence without requiring a snippet");
   assert.throws(() => validateSearchResponse({ ...response, schemaVersion: "1" }));
+  assert.throws(() => validateSearchResponse({ ...response, returnedCount: 0 }), /returnedCount/);
+  assert.throws(() => validateSearchResponse({ ...response, candidateCount: 0, returnedCount: 1 }), /candidateCount/);
+  assert.throws(() => validateSearchResponse({ ...response, diagnostics: { ...response.diagnostics, queryStatus: "NO_MATCH_INCOMPLETE" } }), /queryStatus/);
+  assert.throws(() => validateSearchResponse({
+    ...response,
+    returnedCount: 1,
+    candidateCount: 1,
+    evidence: { proofStatus: "candidate", candidateCount: 1, returnedCount: 0, truncated: false, cursor: null },
+  }), /evidence.returnedCount/);
 });

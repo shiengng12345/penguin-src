@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Database, FolderOpen, Loader2, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -7,18 +7,20 @@ import {
   knowledgeAgentHookSetup,
   knowledgeCliSetup,
   knowledgeCliStatus,
-  knowledgeReindex,
+  knowledgeCorpusStart,
+  knowledgeCorpusStatus,
   mcpInstallToLocalClients,
-  onIndexProgress,
 } from "@/lib/knowledge-client";
 
 // Full-screen teaching page shown while the knowledge base is empty (no DB or
 // zero repos). Replaces ALL wiki chrome. Primary path is one-click: native
-// folder picker → in-app index (knowledge_reindex) with live progress; the
+// folder picker → detached, repository-sharded corpus index with live status; the
 // terminal command stays as the secondary path. Polling flips into the wiki
 // automatically once repos > 0.
 export function WikiOnboarding({ onRefresh, onClose }: { onRefresh: () => void; onClose: () => void }) {
-  const [indexing, setIndexing] = useState<{ dir: string; done: number; total: number; file: string } | null>(null);
+  const [indexing, setIndexing] = useState<{ dir: string; done: number; total: number; file: string; phase: string } | null>(null);
+  const mountedRef = useRef(true);
+  useEffect(() => () => { mountedRef.current = false; }, []);
   const [obError, setObError] = useState<string | null>(null);
   // One-click AI integration: penguin command on PATH + MCP into Claude/Codex +
   // global CLAUDE.md/AGENTS.md guidance. `done` carries the per-item summary.
@@ -61,11 +63,12 @@ export function WikiOnboarding({ onRefresh, onClose }: { onRefresh: () => void; 
       results.push({ state: "fail", text: `penguin 命令:${formatKnowledgeError(e)}` });
     }
     try {
-      const msg = await mcpInstallToLocalClients();
-      const skipped = msg.match(/Skipped \(not installed\): ([^.]+)\./)?.[1];
+      const result = await mcpInstallToLocalClients();
+      const changed = result.changedClients.join("、");
+      const skipped = result.skippedClients.join("、");
       results.push({
         state: "ok",
-        text: `MCP 已接入(重启客户端生效)${skipped ? ` — 未安装已跳过:${skipped}` : ""}`,
+        text: `MCP ${result.wroteConfig ? "已自动更新" : "已是最新"}(重启客户端生效)${changed ? ` — 已更新:${changed}` : ""}${skipped ? ` — 未安装已跳过:${skipped}` : ""}`,
       });
     } catch (e) {
       results.push({ state: "fail", text: `MCP:${formatKnowledgeError(e)}` });
@@ -127,19 +130,34 @@ export function WikiOnboarding({ onRefresh, onClose }: { onRefresh: () => void; 
     const { open } = await import("@tauri-apps/plugin-dialog");
     const dir = await open({ directory: true, multiple: false, title: "选择要索引的代码仓库" });
     if (typeof dir !== "string") return; // cancelled
-    setIndexing({ dir, done: 0, total: 0, file: "" });
-    const unlisten = await onIndexProgress((p) => {
-      if (p.phase !== "scan" && p.phase !== "index") return;
-      setIndexing((cur) => (cur ? { ...cur, done: p.done ?? 0, total: p.total ?? 0, file: p.file ?? "" } : cur));
-    });
     try {
-      await knowledgeReindex(dir);
-      onRefresh(); // repos > 0 now — parent flips into the wiki
+      const launch = await knowledgeCorpusStart(dir, "both");
+      setIndexing({ dir, done: 0, total: 0, file: "", phase: "index" });
+      // The child is intentionally detached: the user can close this window
+      // and a later session will read the same status sidecar. Polling here is
+      // only for onboarding copy; WikiPage owns the durable status panel.
+      const poll = window.setInterval(() => {
+        void knowledgeCorpusStatus(launch.statusPath)
+          .then((job) => {
+            if (!mountedRef.current) { window.clearInterval(poll); return; }
+            setIndexing((cur) => cur ? {
+              ...cur,
+              done: job.completedRepos,
+              total: job.totalRepos,
+              phase: job.phase,
+              file: job.lastFile ?? "",
+            } : cur);
+            onRefresh();
+            if (["completed", "failed", "cancelled"].includes(job.state)) {
+              window.clearInterval(poll);
+              if (job.state === "completed") setIndexing(null);
+            }
+          })
+          .catch(() => undefined);
+      }, 1000);
+      onRefresh();
     } catch (e) {
       setObError(formatKnowledgeError(e));
-    } finally {
-      unlisten();
-      setIndexing(null);
     }
   }, [onRefresh]);
 

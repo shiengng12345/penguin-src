@@ -1,6 +1,6 @@
 import chokidar, { type FSWatcher } from "chokidar";
 import type { KnowledgeStore } from "@penguin/knowledge-core";
-import { indexRepo, type IndexReport } from "./pipeline.js";
+import { indexRepo, type IndexReport, type SemanticIndexOptions } from "./pipeline.js";
 
 export interface WatcherStatus {
   watching: boolean;
@@ -27,6 +27,7 @@ export function startWatcher(input: {
   store: KnowledgeStore;
   rootPath: string;
   debounceMs?: number;
+  semantic?: SemanticIndexOptions;
   onRun?: (report: IndexReport) => void;
 }): WatcherHandle {
   // 500ms: long enough to coalesce an editor save burst (format-on-save,
@@ -55,7 +56,7 @@ export function startWatcher(input: {
     running = true;
     status.queued = 0;
     try {
-      const report = await indexRepo({ store: input.store, rootPath: input.rootPath, mode: "incremental" });
+      const report = await indexRepo({ store: input.store, rootPath: input.rootPath, mode: "incremental", semantic: input.semantic });
       status.runs += 1;
       status.lastIndexedAt = new Date().toISOString();
       input.onRun?.(report);
@@ -81,7 +82,9 @@ export function startWatcher(input: {
   }
 
   const watcher: FSWatcher = chokidar.watch(input.rootPath, {
-    ignored: (p: string) => /(^|[/\\])(\.git|node_modules|target|dist|build)([/\\]|$)/.test(p),
+    ignored: (p: string) => /(^|[/\\])(\.git|node_modules|target|dist|build|\.pnpm-store|\.npm)([/\\]|$)/.test(p)
+      || /(^|[/\\])\.yarn[/\\](cache|unplugged)([/\\]|$)/.test(p)
+      || /(^|[/\\])\.bun[/\\]install[/\\]cache([/\\]|$)/.test(p),
     ignoreInitial: true,
     persistent: true,
   });

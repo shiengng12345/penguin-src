@@ -7,7 +7,7 @@
 //  3. pinned branches refuse deletion (CLI) and are exempt from auto mechanisms.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execSync } from "node:child_process";
@@ -50,7 +50,10 @@ test("failed index run does NOT demote the previous live branch", async () => {
   const featBranchId = store.registerBranch({
     repoId: r1.repoId, name: "feature", headCommit: "c1", checkoutPath: root, status: "snapshot",
   });
-  const lock = IndexTaskLock.tryAcquire(`${r1.repoId}:${featBranchId}:${root}`);
+  // readGitContext canonicalizes macOS `/var` aliases to the real checkout
+  // path (usually `/private/var`). Use the same identity in this in-process
+  // contention fixture so it exercises the lock rather than a path spelling.
+  const lock = IndexTaskLock.tryAcquire(`${r1.repoId}:${featBranchId}:${realpathSync.native(root)}`);
   assert.ok(lock, "test holds the lock");
   await assert.rejects(() => indexRepo({ store, rootPath: root, mode: "incremental" }), /already running/);
   lock.release();
@@ -73,6 +76,29 @@ test("first successful named Git branch becomes canonical master", async () => {
   const { store } = openStore();
   const report = await indexRepo({ store, rootPath: root, mode: "incremental" });
   assert.equal(store.getDefaultBranch(report.repoId).name, "feature-first");
+  store.close();
+});
+
+test("index self-heals a branch pointer whose snapshot was removed", async () => {
+  const root = tempRepo();
+  writeGit(root, "ref: refs/heads/main\n", { main: "c0" });
+  mkdirSync(join(root, "src"), { recursive: true });
+  writeFileSync(join(root, "src", "heal.ts"), "export function heal() { return 1; }");
+  const { store } = openStore();
+  const first = await indexRepo({ store, rootPath: root, mode: "incremental", semantic: { enabled: false } });
+  const branch = store.getBranch(first.repoId, "main");
+  store.db.prepare(`
+    UPDATE branches
+       SET current_snapshot_id='snapshot_missing', last_indexed_commit='stale',
+           last_indexed_at='2026-09-02T00:00:00.000Z', indexed_worktree_state='clean'
+     WHERE id=?
+  `).run(branch.id);
+
+  const second = await indexRepo({ store, rootPath: root, mode: "incremental", semantic: { enabled: false } });
+  const healed = store.getBranch(second.repoId, "main");
+  assert.notEqual(healed.current_snapshot_id, "snapshot_missing");
+  assert.ok(store.db.prepare("SELECT 1 FROM revision_snapshots WHERE id=?").get(healed.current_snapshot_id));
+  assert.notEqual(healed.stale_reason, "orphan_snapshot_pointer");
   store.close();
 });
 

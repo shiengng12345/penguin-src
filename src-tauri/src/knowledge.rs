@@ -15,12 +15,18 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use tauri::Manager;
 
 use crate::mcp::detect_node_path;
+use crate::runtime::knowledge_runtime::{
+    runtime_root, KnowledgeRuntimeManager, RuntimeManifest, RuntimeNativeDependency,
+    RuntimeSigning, DEFAULT_CONTRACT_SCHEMA_VERSION, RUNTIME_MANIFEST_SCHEMA,
+};
 
 // Resolve the Node used to run the knowledge CLI. Unlike the MCP server (pure
-// bundled JS, ABI-agnostic), the CLI loads a NATIVE module (better-sqlite3), so
+// bundled JS, ABI-agnostic), the CLI loads NATIVE modules (better-sqlite3 and
+// sqlite-vec), so
 // it MUST run under a Node whose ABI matches the installed build. In dev that's
 // the developer's own shell node — the one `pnpm install` built the native
 // module against — so prefer it over homebrew/usr-local (which may be a
@@ -167,7 +173,8 @@ fn note_runtime_crash(state: &QueryRuntimeState) -> Result<bool, String> {
 // Keep this value synchronized with @penguin/knowledge-contracts. The
 // handshake must reject a bundled CLI whose capability surface differs from
 // the Tauri build; accepting any non-empty hash would allow silent drift.
-const EXPECTED_CAPABILITY_HASH: &str = "09b687dd5765536942dcaa640ac7bffb52c900201e50d07c608aefb9d7e34e96";
+const EXPECTED_CAPABILITY_HASH: &str = "f99fca378bb72ee30313ccc9da98ce4eb353c9b41eff230726186fd16446b67f";
+const EXPECTED_SCHEMA_VERSION: u64 = 18;
 
 fn validate_runtime_hello(frame: &serde_json::Value) -> Result<(), String> {
     if frame.get("type").and_then(|v| v.as_str()) != Some("hello") {
@@ -190,7 +197,7 @@ fn validate_runtime_hello(frame: &serde_json::Value) -> Result<(), String> {
         return Err(format!("{code}: {message}"));
     }
     if frame.get("protocolVersion").and_then(|v| v.as_u64()) != Some(1)
-        || frame.get("schemaVersion").and_then(|v| v.as_u64()).is_none()
+        || frame.get("schemaVersion").and_then(|v| v.as_u64()) != Some(EXPECTED_SCHEMA_VERSION)
         || frame.get("capabilityHash").and_then(|v| v.as_str()) != Some(EXPECTED_CAPABILITY_HASH) {
         return Err("RUNTIME_CAPABILITY_MISMATCH: query runtime handshake mismatch".to_string());
     }
@@ -359,15 +366,328 @@ pub(crate) fn knowledge_query_cancel<R: tauri::Runtime>(app: tauri::AppHandle<R>
 // node_modules + wasm), shipped as a Tauri resource. Tauri rewrites `../foo`
 // resources to `_up_/foo` under Resources; probe both layouts.
 fn bundled_runtime_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<PathBuf> {
-    let resource_dir = app.path().resource_dir().ok()?;
-    let candidates = [
-        resource_dir.join("_up_/packages/knowledge-cli/bundle"),
-        resource_dir.join("packages/knowledge-cli/bundle"),
-        resource_dir.join("bundle"),
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        let candidates = [
+            resource_dir.join("_up_/packages/knowledge-cli/bundle"),
+            resource_dir.join("packages/knowledge-cli/bundle"),
+            resource_dir.join("bundle"),
+        ];
+        if let Some(found) = candidates.into_iter().find(|c| c.join("penguin.mjs").is_file()) {
+            return Some(found);
+        }
+    }
+    std::env::current_dir().ok().and_then(|cwd| {
+        cwd.ancestors()
+            .map(|ancestor| ancestor.join("packages/knowledge-cli/bundle"))
+            .find(|candidate| candidate.join("penguin.mjs").is_file())
+    })
+}
+
+fn bundled_mcp_runtime_dir<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<PathBuf> {
+    if let Ok(resource_dir) = app.path().resource_dir() {
+        let candidates = [
+            resource_dir.join("_up_/packages/mcp/bundle"),
+            resource_dir.join("packages/mcp/bundle"),
+        ];
+        if let Some(found) = candidates.into_iter().find(|c| c.join("dist/index.js").is_file()) {
+            return Some(found);
+        }
+    }
+    std::env::current_dir().ok().and_then(|cwd| {
+        cwd.ancestors()
+            .map(|ancestor| ancestor.join("packages/mcp/bundle"))
+            .find(|candidate| candidate.join("dist/index.js").is_file())
+    })
+}
+
+fn runtime_source_fingerprint(paths: &[&Path]) -> u64 {
+    // Artifact identity must survive copying the exact same .app from the
+    // build directory into /Applications. Absolute paths and mtimes are
+    // installation metadata, not build identity, so hash only ordered file
+    // contents with an explicit length delimiter.
+    let mut hasher = sha2::Sha256::new();
+    for path in paths {
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                hasher.update((bytes.len() as u64).to_le_bytes());
+                hasher.update(bytes);
+            }
+            Err(_) => {
+                hasher.update(0_u64.to_le_bytes());
+                hasher.update(b"missing-runtime-artifact");
+            }
+        }
+    }
+    let digest = hasher.finalize();
+    u64::from_le_bytes(digest[..8].try_into().expect("sha256 prefix is eight bytes"))
+}
+
+fn versioned_runtime_manifest<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    cli: &Path,
+    mcp: &Path,
+) -> RuntimeManifest {
+    let app_version = app.package_info().version.to_string();
+    let native_dependencies = native_runtime_dependencies(cli);
+    let model_hash = native_dependencies.iter()
+        .find(|dependency| dependency.name == "embedding-model-manifest")
+        .map(|dependency| dependency.sha256.clone())
+        .unwrap_or_else(|| "0".repeat(64));
+    let mut fingerprint_paths = vec![
+        cli.join("penguin.mjs"),
+        cli.join("node"),
+        mcp.join("dist/index.js"),
+        cli.join("models/nomic-embed-text-v1.5/manifest.json"),
+        cli.join("models/nomic-embed-text-v1.5/onnx/model_quantized.onnx"),
     ];
-    candidates
+    fingerprint_paths.extend(native_dependencies.iter().map(|dependency| cli.join(&dependency.path)));
+    let fingerprint_refs = fingerprint_paths.iter().map(PathBuf::as_path).collect::<Vec<_>>();
+    let fingerprint = runtime_source_fingerprint(&fingerprint_refs);
+    RuntimeManifest {
+        build_id: format!("{app_version}-{fingerprint:016x}"),
+        app_version,
+        capability_hash: EXPECTED_CAPABILITY_HASH.to_string(),
+        model_hash,
+        schema_version: RUNTIME_MANIFEST_SCHEMA,
+        contract_schema_version: DEFAULT_CONTRACT_SCHEMA_VERSION,
+        contract_version: "2".to_string(),
+        cli_entry: "penguin.mjs".to_string(),
+        mcp_entry: "mcp/dist/index.js".to_string(),
+        node_path: "node".to_string(),
+        wasm_path: "wasm".to_string(),
+        created_at: format!("build:{fingerprint:016x}"),
+        file_hashes: Default::default(),
+        platform: std::env::consts::OS.to_string(),
+        architecture: std::env::consts::ARCH.to_string(),
+        native_dependencies,
+        signing: RuntimeSigning {
+            status: std::env::var("PENGUIN_SIGNING_STATUS")
+                // A locally built runtime without release credentials is
+                // observably unsigned, not unknowable. Signed release jobs
+                // set the explicit status (and later identity/notarization).
+                .unwrap_or_else(|_| "unsigned".to_string()),
+            identity: None,
+            notarized: None,
+        },
+        ready: false,
+    }
+}
+
+fn native_runtime_dependencies(cli: &Path) -> Vec<RuntimeNativeDependency> {
+    // Rust reports `aarch64`/`x86_64`, while npm native packages use
+    // `arm64`/`x64`. Keep this mapping in the manifest path as well as in the
+    // vendor script, otherwise a valid bundled dylib is reported unavailable
+    // during the first installed-runtime activation.
+    let package_arch = match std::env::consts::ARCH {
+        "aarch64" => "arm64",
+        "x86_64" => "x64",
+        other => other,
+    };
+    let package_platform = match std::env::consts::OS {
+        "macos" => "darwin",
+        "windows" => "windows",
+        "linux" => "linux",
+        other => other,
+    };
+    let sqlite_vec_path = format!("node_modules/sqlite-vec-{package_platform}-{package_arch}/vec0.dylib");
+    let onnxruntime_path = format!("node_modules/onnxruntime-node/bin/napi-v6/{package_platform}/{package_arch}/onnxruntime_binding.node");
+    let sharp_path = format!("node_modules/@img/sharp-{package_platform}-{package_arch}/lib/sharp-{package_platform}-{package_arch}.node");
+    let entries = vec![
+        ("bundled-node", "node".to_string()),
+        ("better-sqlite3", "node_modules/better-sqlite3/build/Release/better_sqlite3.node".to_string()),
+        ("sqlite-vec", sqlite_vec_path),
+        ("onnxruntime-node", onnxruntime_path),
+        ("sharp", sharp_path),
+        ("embedding-model-manifest", "models/nomic-embed-text-v1.5/manifest.json".to_string()),
+        ("embedding-model", "models/nomic-embed-text-v1.5/onnx/model_quantized.onnx".to_string()),
+        ("embedding-tokenizer", "models/nomic-embed-text-v1.5/tokenizer.json".to_string()),
+    ];
+    entries
         .into_iter()
-        .find(|c| c.join("penguin.mjs").exists())
+        .map(|(name, relative)| {
+            let path = cli.join(&relative);
+            let sha256 = std::fs::read(&path)
+                .map(|bytes| format!("{:x}", sha2::Sha256::digest(bytes)))
+                .unwrap_or_default();
+            RuntimeNativeDependency {
+                name: name.to_string(),
+                version: "bundled".to_string(),
+                path: relative.to_string(),
+                status: if sha256.is_empty() { "unavailable" } else { "ready" }.to_string(),
+                sha256,
+            }
+        })
+        .collect()
+}
+
+/// Synchronize the packaged CLI and MCP resources into one verified generation.
+/// This is the only Tauri install/startup entry point that may activate a new
+/// knowledge runtime.
+pub(crate) fn sync_bundled_knowledge_runtime<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> Result<RuntimeManifest, String> {
+    let cli = bundled_runtime_dir(app).ok_or_else(|| "RUNTIME_NOT_INSTALLED: bundled CLI runtime missing".to_string())?;
+    let mcp = bundled_mcp_runtime_dir(app).ok_or_else(|| "RUNTIME_NOT_INSTALLED: bundled MCP runtime missing".to_string())?;
+    let manager = KnowledgeRuntimeManager::new(runtime_root().ok_or_else(|| "RUNTIME_NOT_INSTALLED: home directory missing".to_string())?);
+    let manifest = versioned_runtime_manifest(app, &cli, &mcp);
+    let previous = manager.active_knowledge_runtime().ok().map(|active| active.build_id);
+    let installed = manager.install_bundled_knowledge_runtime_from_bundles(&cli, &mcp, manifest)?;
+    if previous.as_deref() != Some(installed.build_id.as_str()) {
+        if let Ok(mut state) = RUNTIME_SWITCH_STATE.lock() {
+            *state = Some((previous, installed.build_id.clone()));
+        }
+    }
+    Ok(installed)
+}
+
+pub(crate) fn active_knowledge_runtime_paths() -> Result<(PathBuf, PathBuf), String> {
+    let root = runtime_root().ok_or_else(|| "RUNTIME_NOT_INSTALLED: home directory missing".to_string())?;
+    let manager = KnowledgeRuntimeManager::new(&root);
+    let manifest = manager.active_knowledge_runtime()?;
+    let current = manager.active_knowledge_runtime_dir()?;
+    let node = current.join(&manifest.node_path);
+    let mcp = current.join(&manifest.mcp_entry);
+    if !node.is_file() || !mcp.is_file() {
+        return Err("RUNTIME_NOT_INSTALLED: active runtime paths are incomplete".to_string());
+    }
+    Ok((mcp, node))
+}
+
+static RUNTIME_SWITCH_STATE: std::sync::Mutex<Option<(Option<String>, String)>> = std::sync::Mutex::new(None);
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct KnowledgeRuntimeSyncResult {
+    previous_build_id: Option<String>,
+    active_build_id: Option<String>,
+    runtime_path: Option<String>,
+    switched: bool,
+    restart_required: bool,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct KnowledgeRuntimeHealth {
+    healthy: bool,
+    active_build_id: Option<String>,
+    app_version: Option<String>,
+    contract_version: Option<String>,
+    capability_hash: Option<String>,
+    model_hash: Option<String>,
+    schema_version: Option<u32>,
+    platform: Option<String>,
+    architecture: Option<String>,
+    native_dependencies: Vec<RuntimeNativeDependency>,
+    signing: RuntimeSigning,
+    runtime_path: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct KnowledgeRuntimeRestartRequirement {
+    required: bool,
+    previous_build_id: Option<String>,
+    active_build_id: Option<String>,
+    action: Option<String>,
+}
+
+#[tauri::command]
+pub(crate) async fn knowledge_runtime_sync<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<KnowledgeRuntimeSyncResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let manager = KnowledgeRuntimeManager::new(runtime_root().ok_or_else(|| "RUNTIME_NOT_INSTALLED: home directory missing".to_string())?);
+        let previous = manager.active_knowledge_runtime().ok().map(|manifest| manifest.build_id);
+        match sync_bundled_knowledge_runtime(&app) {
+            Ok(active) => Ok(KnowledgeRuntimeSyncResult {
+                previous_build_id: previous.clone(),
+                active_build_id: Some(active.build_id.clone()),
+                runtime_path: Some(manager.root().join("current").display().to_string()),
+                switched: previous.as_deref() != Some(active.build_id.as_str()),
+                restart_required: previous.as_deref() != Some(active.build_id.as_str()),
+                error: None,
+            }),
+            Err(error) => Ok(KnowledgeRuntimeSyncResult {
+                previous_build_id: previous,
+                active_build_id: None,
+                runtime_path: Some(manager.root().join("current").display().to_string()),
+                switched: false,
+                restart_required: false,
+                error: Some(error),
+            }),
+        }
+    })
+    .await
+    .map_err(|error| format!("runtime sync task failed: {error}"))?
+}
+
+#[tauri::command]
+pub(crate) async fn knowledge_runtime_health() -> KnowledgeRuntimeHealth {
+    tauri::async_runtime::spawn_blocking(|| {
+        let Some(root) = runtime_root() else {
+            return KnowledgeRuntimeHealth { healthy: false, active_build_id: None, app_version: None, contract_version: None, capability_hash: None, model_hash: None, schema_version: None, platform: None, architecture: None, native_dependencies: Vec::new(), signing: RuntimeSigning::default(), runtime_path: None, error: Some("RUNTIME_NOT_INSTALLED: home directory missing".to_string()) };
+        };
+        let manager = KnowledgeRuntimeManager::new(&root);
+        match manager.active_knowledge_runtime() {
+            Ok(active) => KnowledgeRuntimeHealth {
+                healthy: true,
+                active_build_id: Some(active.build_id),
+                app_version: Some(active.app_version),
+                contract_version: Some(active.contract_version),
+                capability_hash: Some(active.capability_hash),
+                model_hash: Some(active.model_hash),
+                schema_version: Some(active.contract_schema_version),
+                platform: Some(active.platform),
+                architecture: Some(active.architecture),
+                native_dependencies: active.native_dependencies,
+                signing: active.signing,
+                runtime_path: Some(root.join("current").display().to_string()),
+                error: None,
+            },
+            Err(error) => KnowledgeRuntimeHealth {
+                healthy: false,
+                active_build_id: None,
+                app_version: None,
+                contract_version: None,
+                capability_hash: None,
+                model_hash: None,
+                schema_version: None,
+                platform: None,
+                architecture: None,
+                native_dependencies: Vec::new(),
+                signing: RuntimeSigning::default(),
+                runtime_path: Some(root.join("current").display().to_string()),
+                error: Some(error),
+            },
+        }
+    })
+    .await
+    .unwrap_or_else(|error| KnowledgeRuntimeHealth { healthy: false, active_build_id: None, app_version: None, contract_version: None, capability_hash: None, model_hash: None, schema_version: None, platform: None, architecture: None, native_dependencies: Vec::new(), signing: RuntimeSigning::default(), runtime_path: None, error: Some(format!("runtime health task failed: {error}")) })
+}
+
+#[tauri::command]
+pub(crate) fn knowledge_runtime_restart_required() -> KnowledgeRuntimeRestartRequirement {
+    let state = RUNTIME_SWITCH_STATE.lock().ok().and_then(|state| state.clone());
+    match state {
+        Some((previous_build_id, active_build_id)) => KnowledgeRuntimeRestartRequirement {
+            required: previous_build_id.is_some(),
+            previous_build_id,
+            active_build_id: Some(active_build_id),
+            action: Some("Restart Claude/Codex MCP sessions to load the active Penguin runtime.".to_string()),
+        },
+        None => KnowledgeRuntimeRestartRequirement { required: false, previous_build_id: None, active_build_id: None, action: None },
+    }
+}
+
+pub(crate) fn sync_knowledge_runtime_on_startup<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    // Complete the gate before prewarm/launcher installation starts; otherwise
+    // the first process can observe a missing `current` pointer and silently
+    // choose a different runtime generation.
+    if let Err(error) = sync_bundled_knowledge_runtime(&app) {
+        eprintln!("knowledge runtime sync failed: {error}");
+    }
 }
 
 // Resources may be copied without the executable bit; restore it so the
@@ -386,6 +706,17 @@ fn ensure_executable(path: &std::path::Path) {
 #[cfg(not(unix))]
 fn ensure_executable(_path: &std::path::Path) {}
 
+fn runtime_nonce() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0)
+}
+
+fn write_atomic(path: &Path, content: &str) -> Result<(), String> {
+    let tmp = path.with_extension(format!("tmp.{}.{}", std::process::id(), runtime_nonce()));
+    std::fs::write(&tmp, content).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, path).map_err(|e| format!("rename {}: {e}", path.display()))
+}
+
 // Resolve how to run the CLI: prefer the packaged self-contained bundle (its
 // own node + vendored native + wasm), else dev mode (system node + the
 // tsc-built dist/bin.js walked up from cwd).
@@ -394,8 +725,8 @@ fn resolve_invocation<R: tauri::Runtime>(
 ) -> Result<CliInvocation, String> {
     // Debug builds prefer the LIVE tsc dist (its schema stays in lockstep with
     // the dev CLI — a stale packaged bundle would otherwise trip the schema
-    // downgrade guard on a dev-upgraded DB). Release builds prefer the
-    // self-contained bundle. Either way, fall back to the other.
+    // downgrade guard on a dev-upgraded DB). Release builds are fail-closed:
+    // the versioned manager must be the only source of a packaged runtime.
     if cfg!(debug_assertions) {
         if let Some(inv) = dev_invocation(app) {
             return Ok(inv);
@@ -407,15 +738,31 @@ fn resolve_invocation<R: tauri::Runtime>(
         if let Some(inv) = bundled_invocation(app) {
             return Ok(inv);
         }
-        if let Some(inv) = dev_invocation(app) {
-            return Ok(inv);
-        }
     }
     Err("penguin CLI not found (no dev dist/bin.js, no packaged bundle)".to_string())
 }
 
 // The packaged self-contained runtime (own node + vendored native + wasm).
 fn bundled_invocation<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Option<CliInvocation> {
+    if let Ok(manager) = runtime_root().map(KnowledgeRuntimeManager::new).ok_or(()) {
+        if let Ok(manifest) = manager.active_knowledge_runtime() {
+            let Ok(root) = manager.active_knowledge_runtime_dir() else { return None; };
+            let node = root.join(&manifest.node_path);
+            let cli = root.join(&manifest.cli_entry);
+            if node.is_file() && cli.is_file() {
+                ensure_executable(&node);
+                return Some(CliInvocation {
+                    node,
+                    cli,
+                    wasm_dir: Some(root.join(&manifest.wasm_path)),
+                    self_contained: true,
+                });
+            }
+        }
+    }
+    // In a release build, falling back into the .app would bypass the
+    // versioned activation pointer after a failed or partial installation.
+    if !cfg!(debug_assertions) { return None; }
     let dir = bundled_runtime_dir(app)?;
     let node = dir.join("node");
     let cli = dir.join("penguin.mjs");
@@ -474,10 +821,20 @@ pub fn install_cli_command<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
 fn install_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<PathBuf, String> {
     let inv = resolve_invocation(app)?;
     let home = std::env::var_os("HOME").ok_or("no HOME")?;
-    let bin_dir = PathBuf::from(home).join(".local/bin");
+    let bin_dir = PathBuf::from(&home).join(".local/bin");
     std::fs::create_dir_all(&bin_dir).map_err(|e| e.to_string())?;
     let target = bin_dir.join("penguin");
-    let wasm_line = inv
+    let stable_runtime = if inv.self_contained {
+        sync_bundled_knowledge_runtime(app)?;
+        Some(runtime_root().ok_or("no runtime root")?.join("current"))
+    } else { None };
+    let launch_inv = stable_runtime.as_ref().map(|dir| CliInvocation {
+        node: dir.join("node"),
+        cli: dir.join("penguin.mjs"),
+        wasm_dir: Some(dir.join("wasm")),
+        self_contained: true,
+    }).unwrap_or(inv);
+    let wasm_line = launch_inv
         .wasm_dir
         .as_ref()
         .map(|w| format!("export PENGUIN_WASM_DIR=\"{}\"\n", w.display()))
@@ -490,20 +847,21 @@ fn install_launcher<R: tauri::Runtime>(app: &tauri::AppHandle<R>) -> Result<Path
     //   included). The workspace's node_modules track the developer's node,
     //   so a pinned absolute path is what goes stale here — it broke the CLI
     //   the moment better-sqlite3 was rebuilt for a newer node.
-    let script = if inv.self_contained {
+    let script = if launch_inv.self_contained {
+        let launcher_dir = PathBuf::from(&home).join(".penguin/bin");
+        std::fs::create_dir_all(&launcher_dir).map_err(|e| e.to_string())?;
+        let launcher_source = launcher_dir.join("penguin-cli-launcher.mjs");
+        write_atomic(&launcher_source, include_str!("../../scripts/knowledge-cli-launcher.mjs"))?;
         format!(
-            "#!/bin/sh\n# Auto-generated by Penguin.app — runs the bundled knowledge CLI\n# with its own vendored node (ABI-matched to the bundled native modules).\n{}exec \"{}\" \"{}\" \"$@\"\n",
-            wasm_line,
-            inv.node.display(),
-            inv.cli.display(),
+            "#!/bin/sh\n# Auto-generated by Penguin.app — resolves ~/.penguin/runtimes/current.\nexec \"$HOME/.penguin/runtimes/current/node\" \"$HOME/.penguin/bin/penguin-cli-launcher.mjs\" \"$@\"\n",
         )
     } else {
         format!(
             "#!/bin/sh\n# Auto-generated by Penguin.app — runs the workspace knowledge CLI.\n# Uses the `node` on your PATH when available (matches the workspace's\n# node_modules); falls back to the node detected at install time.\n{}if command -v node >/dev/null 2>&1; then\n  exec node \"{}\" \"$@\"\nfi\nexec \"{}\" \"{}\" \"$@\"\n",
             wasm_line,
-            inv.cli.display(),
-            inv.node.display(),
-            inv.cli.display(),
+            launch_inv.cli.display(),
+            launch_inv.node.display(),
+            launch_inv.cli.display(),
         )
     };
     write_launcher_script(&target, &script).map_err(|e| e.to_string())?;
@@ -1007,7 +1365,8 @@ fn write_launcher_script(target: &std::path::Path, script: &str) -> std::io::Res
 mod tests {
     use super::{
         ensure_zshrc_path, reconcile_claude_hooks, reconcile_guidance_block,
-        note_runtime_crash, validate_runtime_hello, write_launcher_script, QueryRuntimeState,
+        note_runtime_crash, runtime_source_fingerprint, semantic_control_input,
+        validate_runtime_hello, write_launcher_script, QueryRuntimeState,
     };
     use std::path::PathBuf;
 
@@ -1050,12 +1409,52 @@ mod tests {
     }
 
     #[test]
+    fn semantic_control_transport_forwards_unvalidated_canonical_payload() {
+        let payload = semantic_control_input(
+            "pause".to_string(),
+            None,
+            Some("generation-forwarded-to-canonical-validator".to_string()),
+            "  token  ".to_string(),
+        );
+        assert_eq!(payload["action"], "pause");
+        assert_eq!(payload.get("scopeKey"), None);
+        assert_eq!(payload["generationId"], "generation-forwarded-to-canonical-validator");
+        assert_eq!(payload["operationToken"], "  token  ");
+    }
+
+    #[test]
+    fn runtime_fingerprint_is_content_stable_across_install_paths() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("penguin-runtime-fingerprint-{}-{nonce}", std::process::id()));
+        let left = root.join("build/runtime.bin");
+        let right = root.join("Applications/Penguin/runtime.bin");
+        std::fs::create_dir_all(left.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(right.parent().unwrap()).unwrap();
+        std::fs::write(&left, b"same packaged runtime").unwrap();
+        std::fs::write(&right, b"same packaged runtime").unwrap();
+        assert_eq!(
+            runtime_source_fingerprint(&[left.as_path()]),
+            runtime_source_fingerprint(&[right.as_path()]),
+        );
+        std::fs::write(&right, b"different packaged runtime").unwrap();
+        assert_ne!(
+            runtime_source_fingerprint(&[left.as_path()]),
+            runtime_source_fingerprint(&[right.as_path()]),
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn resident_runtime_rejects_protocol_schema_and_capability_drift() {
-        let valid = serde_json::json!({ "type": "hello", "protocolVersion": 1, "schemaVersion": 13, "capabilityHash": super::EXPECTED_CAPABILITY_HASH });
+        let valid = serde_json::json!({ "type": "hello", "protocolVersion": 1, "schemaVersion": super::EXPECTED_SCHEMA_VERSION, "capabilityHash": super::EXPECTED_CAPABILITY_HASH });
         assert!(validate_runtime_hello(&valid).is_ok());
         for invalid in [
-            serde_json::json!({ "type": "hello", "protocolVersion": 2, "schemaVersion": 13, "capabilityHash": super::EXPECTED_CAPABILITY_HASH }),
-            serde_json::json!({ "type": "hello", "protocolVersion": 1, "schemaVersion": 13, "capabilityHash": "stale" }),
+            serde_json::json!({ "type": "hello", "protocolVersion": 2, "schemaVersion": super::EXPECTED_SCHEMA_VERSION, "capabilityHash": super::EXPECTED_CAPABILITY_HASH }),
+            serde_json::json!({ "type": "hello", "protocolVersion": 1, "schemaVersion": 17, "capabilityHash": super::EXPECTED_CAPABILITY_HASH }),
+            serde_json::json!({ "type": "hello", "protocolVersion": 1, "schemaVersion": super::EXPECTED_SCHEMA_VERSION, "capabilityHash": "stale" }),
             serde_json::json!({ "type": "hello", "protocolVersion": 1, "capabilityHash": super::EXPECTED_CAPABILITY_HASH }),
         ] {
             assert!(validate_runtime_hello(&invalid).unwrap_err().starts_with("RUNTIME_CAPABILITY_MISMATCH"));
@@ -1385,9 +1784,14 @@ mod tests {
     }
 }
 
-// Run the bundled CLI with args and return stdout. Single source of query/index
-// logic — no duplication of the query layer in Rust.
-fn run_cli<R: tauri::Runtime>(app: &tauri::AppHandle<R>, args: &[String]) -> Result<String, String> {
+// Run the bundled CLI with args and return the complete process output. Keeping
+// this capture separate lets diagnostic commands return a structured JSON
+// report even when the report correctly uses a non-zero exit code to signal a
+// reconciliation gap.
+fn run_cli_capture<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    args: &[String],
+) -> Result<std::process::Output, String> {
     let inv = resolve_invocation(app)?;
     let mut cmd = Command::new(&inv.node);
     cmd.arg(&inv.cli);
@@ -1397,9 +1801,14 @@ fn run_cli<R: tauri::Runtime>(app: &tauri::AppHandle<R>, args: &[String]) -> Res
     for a in args {
         cmd.arg(a);
     }
-    let out = cmd
-        .output()
-        .map_err(|e| format!("penguin CLI failed to launch: {e}"))?;
+    cmd.output()
+        .map_err(|e| format!("penguin CLI failed to launch: {e}"))
+}
+
+// Run the bundled CLI with args and return stdout. Single source of query/index
+// logic — no duplication of the query layer in Rust.
+fn run_cli<R: tauri::Runtime>(app: &tauri::AppHandle<R>, args: &[String]) -> Result<String, String> {
+    let out = run_cli_capture(app, args)?;
     if !out.status.success() {
         let code = out.status.code().unwrap_or(-1);
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -1412,6 +1821,26 @@ fn run_cli<R: tauri::Runtime>(app: &tauri::AppHandle<R>, args: &[String]) -> Res
         return Err(format!("penguin CLI exit {}: {}", code, stderr.trim()));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+// Reconciliation is intentionally fail-closed: a mismatch must be visible to
+// the caller, but the structured report is still the useful result. Preserve
+// stdout for that case instead of turning it into a generic Tauri error.
+fn run_cli_report<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    args: &[String],
+) -> Result<String, String> {
+    let out = run_cli_capture(app, args)?;
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    if out.status.success() || !stdout.trim().is_empty() {
+        return Ok(stdout);
+    }
+    let code = out.status.code().unwrap_or(-1);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if code == 127 || stderr.contains("NODE_MODULE_VERSION") {
+        clear_node_cache();
+    }
+    Err(format!("penguin CLI exit {}: {}", code, stderr.trim()))
 }
 
 // Warm the knowledge CLI path off the UI thread at startup. The first query
@@ -1436,6 +1865,26 @@ pub(crate) fn prewarm<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
         if let Ok(worker) = ResidentQueryWorker::spawn(&app) {
             *guard = Some(worker);
         }
+    });
+}
+
+/// Best-effort startup wake for durable semantic work. The CLI supervisor is
+/// intentionally short lived and detached; Tauri only asks it to resume any
+/// queued generation and never waits for model loading or embedding work.
+pub(crate) fn wake_semantic_worker_on_startup<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
+    std::thread::spawn(move || {
+        use tauri::Emitter;
+        if !knowledge_db_path().map(|path| path.exists()).unwrap_or(false) { return; }
+        let args = vec![
+            "semantic".to_string(),
+            "wake".to_string(),
+            "--json".to_string(),
+        ];
+        let payload = run_cli(&app, &args)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .unwrap_or_else(|| serde_json::json!({ "reason": "STARTUP_WAKE_BEST_EFFORT_FAILED" }));
+        let _ = app.emit("knowledge-semantic-status-changed", payload);
     });
 }
 
@@ -1561,13 +2010,86 @@ pub(crate) async fn knowledge_query_canonical<R: tauri::Runtime>(
 ) -> Result<String, String> {
     if !matches!(
         capability_id.as_str(),
-        "knowledge.search" | "knowledge.get_hit" | "knowledge.status_panel" | "knowledge.storage_report" | "knowledge.maintenance"
+        "knowledge.search" | "knowledge.get_hit" | "knowledge.status_panel" | "knowledge.storage_report" | "knowledge.maintenance" | "knowledge.semantic_status" | "knowledge.semantic_control"
     ) {
         return Err("CANONICAL_CAPABILITY_NOT_ALLOWED".to_string());
     }
     tauri::async_runtime::spawn_blocking(move || resident_query(&app, &capability_id, input, request_id).map(|result| result.to_string()))
         .await
         .map_err(|error| format!("canonical knowledge query task failed: {error}"))?
+}
+
+/// Canonical semantic status transport for the webview. Rust deliberately
+/// forwards the JSON payload unchanged so Tauri, CLI and MCP cannot invent
+/// different lifecycle meanings.
+#[tauri::command]
+pub(crate) async fn knowledge_semantic_status<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    scope_key: Option<String>,
+) -> Result<String, String> {
+    let input = scope_key.map_or_else(
+        || serde_json::json!({}),
+        |scope_key| serde_json::json!({ "scopeKey": scope_key }),
+    );
+    tauri::async_runtime::spawn_blocking(move || {
+        resident_query(&app, "knowledge.semantic_status", input, None)
+            .map(|result| result.to_string())
+    })
+    .await
+    .map_err(|error| format!("semantic status task failed: {error}"))?
+}
+
+/// Owner-local semantic controls. `operation_token` is canonical idempotency
+/// data inside the request payload; resident transport correlation uses a
+/// separate per-request id so concurrent replays cannot overwrite each other.
+fn semantic_control_input(
+    action: String,
+    scope_key: Option<String>,
+    generation_id: Option<String>,
+    operation_token: String,
+) -> serde_json::Value {
+    let mut input = serde_json::json!({
+        "action": action,
+        "operationToken": operation_token,
+    });
+    if let Some(scope_key) = scope_key {
+        input["scopeKey"] = serde_json::Value::String(scope_key);
+    }
+    if let Some(generation_id) = generation_id {
+        input["generationId"] = serde_json::Value::String(generation_id);
+    }
+    input
+}
+
+#[tauri::command]
+pub(crate) async fn knowledge_semantic_control<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    action: String,
+    scope_key: Option<String>,
+    generation_id: Option<String>,
+    operation_token: String,
+) -> Result<String, String> {
+    use tauri::Emitter;
+    let input = semantic_control_input(action, scope_key, generation_id, operation_token);
+    let app_for_query = app.clone();
+    let raw = tauri::async_runtime::spawn_blocking(move || {
+        resident_query(
+            &app_for_query,
+            "knowledge.semantic_control",
+            input,
+            // Correlation IDs are per request. operationToken remains inside
+            // the canonical payload for idempotency, so concurrent replays do
+            // not overwrite each other's pending response channel.
+            None,
+        )
+        .map(|result| result.to_string())
+    })
+    .await
+    .map_err(|error| format!("semantic control task failed: {error}"))??;
+    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&raw) {
+        let _ = app.emit("knowledge-semantic-status-changed", payload);
+    }
+    Ok(raw)
 }
 
 // One-shot incremental index of a repo (headless), returns the JSON report.
@@ -1584,9 +2106,205 @@ pub(crate) async fn knowledge_reindex<R: tauri::Runtime>(
     args.push("--progress-events".to_string());
     // Indexing can run for minutes — never on the main thread, or the whole UI
     // freezes for the entire index. Streams knowledge-index-progress events.
-    tauri::async_runtime::spawn_blocking(move || run_cli_streaming(&app, &args))
+    let app_for_run = app.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || run_cli_streaming(&app_for_run, &args))
         .await
-        .map_err(|e| format!("knowledge reindex task failed: {e}"))?
+        .map_err(|e| format!("knowledge reindex task failed: {e}"))?;
+    if result.is_ok() {
+        use tauri::Emitter;
+        let _ = app.emit("knowledge-semantic-status-changed", serde_json::json!({ "reason": "INDEX_ENQUEUED" }));
+    }
+    result
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct KnowledgeCorpusLaunch {
+    pub status_path: String,
+    pub control_path: String,
+    pub pid: u32,
+}
+
+fn corpus_status_path(requested: Option<String>) -> Result<PathBuf, String> {
+    if let Some(path) = requested {
+        let candidate = PathBuf::from(path);
+        return if candidate.is_absolute() {
+            Ok(candidate)
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(candidate))
+                .map_err(|e| format!("cannot resolve corpus status path: {e}"))
+        };
+    }
+    let home = dirs::home_dir().ok_or("home directory unavailable")?;
+    let jobs = home.join(".penguin").join("jobs");
+    std::fs::create_dir_all(&jobs)
+        .map_err(|e| format!("cannot create corpus job directory: {e}"))?;
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    Ok(jobs.join(format!("full-corpus-tauri-{}-{nonce}.json", std::process::id())))
+}
+
+fn spawn_corpus_background<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    root_path: String,
+    mode: String,
+    status_path: PathBuf,
+) -> Result<KnowledgeCorpusLaunch, String> {
+    use tauri::Emitter;
+
+    if !matches!(mode.as_str(), "index" | "rebuild" | "both") {
+        return Err("corpus mode must be index, rebuild, or both".to_string());
+    }
+    if let Some(parent) = status_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("cannot create corpus status directory: {e}"))?;
+    }
+    let inv = resolve_invocation(app)?;
+    let mut command = Command::new(&inv.node);
+    command
+        .arg(&inv.cli)
+        .args(["corpus", "run", &root_path, "--mode", &mode, "--status"])
+        .arg(&status_path)
+        .args(["--progress-events", "--json"])
+        // The Tauri owner has already initiated this local job. The CLI still
+        // guards direct pipes/automation; this explicit environment marker
+        // only authorizes this app-owned background child.
+        .env("PENGUIN_KNOWLEDGE_TRUSTED_BACKGROUND", "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    if let Some(wasm) = &inv.wasm_dir {
+        command.env("PENGUIN_WASM_DIR", wasm);
+    }
+    let mut child = command
+        .spawn()
+        .map_err(|e| format!("corpus worker launch failed: {e}"))?;
+    let pid = child.id();
+    let stderr = child.stderr.take();
+    let app_event = app.clone();
+    let status_for_event = status_path.clone();
+    std::thread::spawn(move || {
+        let mut stderr_tail = String::new();
+        if let Some(stderr) = stderr {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                if let Some(rest) = line.strip_prefix("PENGUIN_PROGRESS ") {
+                    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(rest) {
+                        let _ = app_event.emit("knowledge-corpus-progress", payload);
+                    }
+                } else {
+                    stderr_tail.push_str(&line);
+                    stderr_tail.push('\n');
+                    if stderr_tail.len() > 8_000 {
+                        let keep_from = stderr_tail.len().saturating_sub(8_000);
+                        stderr_tail = stderr_tail[keep_from..].to_string();
+                    }
+                }
+            }
+        }
+        let exit = child.wait();
+        let payload = serde_json::json!({
+            "statusPath": status_for_event,
+            "pid": pid,
+            "exitCode": exit.as_ref().ok().and_then(std::process::ExitStatus::code),
+            "ok": exit.as_ref().map(std::process::ExitStatus::success).unwrap_or(false),
+            "stderr": stderr_tail.trim(),
+        });
+        let _ = app_event.emit("knowledge-corpus-status-changed", payload);
+    });
+    Ok(KnowledgeCorpusLaunch {
+        status_path: status_path.display().to_string(),
+        control_path: format!("{}.control.json", status_path.display()),
+        pid,
+    })
+}
+
+/// Start a cold full-corpus job and return immediately. The child owns the
+/// indexer writer; its status/control sidecars remain usable after the UI is
+/// closed or a new Penguin window/session is opened.
+#[tauri::command]
+pub(crate) async fn knowledge_corpus_start<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    path: Option<String>,
+    mode: Option<String>,
+    status_path: Option<String>,
+) -> Result<KnowledgeCorpusLaunch, String> {
+    let root_path = path.unwrap_or_else(|| {
+        std::env::current_dir()
+            .map(|cwd| cwd.display().to_string())
+            .unwrap_or_default()
+    });
+    let mode = mode.unwrap_or_else(|| "both".to_string());
+    let status_path = corpus_status_path(status_path)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        spawn_corpus_background(&app, root_path, mode, status_path)
+    })
+    .await
+    .map_err(|e| format!("corpus start task failed: {e}"))?
+}
+
+/// Read the durable status sidecar without opening the knowledge database.
+#[tauri::command]
+pub(crate) async fn knowledge_corpus_status(status_path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        std::fs::read_to_string(&status_path)
+            .map_err(|e| format!("cannot read corpus status {}: {e}", status_path))
+    })
+    .await
+    .map_err(|e| format!("corpus status task failed: {e}"))?
+}
+
+/// Keep pause/resume/cancel/retry on the canonical CLI control surface. This
+/// command is short-lived and never opens the database or steals the writer.
+#[tauri::command]
+pub(crate) async fn knowledge_corpus_control<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    action: String,
+    status_path: String,
+) -> Result<String, String> {
+    if !matches!(action.as_str(), "pause" | "resume" | "cancel" | "retry") {
+        return Err("corpus action must be pause, resume, cancel, or retry".to_string());
+    }
+    let args = vec![
+        "corpus".to_string(),
+        action,
+        "--status".to_string(),
+        status_path,
+        "--json".to_string(),
+    ];
+    tauri::async_runtime::spawn_blocking(move || run_cli(&app, &args))
+        .await
+        .map_err(|e| format!("corpus control task failed: {e}"))?
+}
+
+/// Run the independent source-versus-persisted reconciliation through the
+/// canonical CLI. Unlike a normal query, a failed reconciliation still returns
+/// its JSON body so the UI can show the exact gaps and remediation.
+#[tauri::command]
+pub(crate) async fn knowledge_corpus_reconcile<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    path: Option<String>,
+    strict: Option<bool>,
+) -> Result<String, String> {
+    let root_path = path.unwrap_or_else(|| {
+        std::env::current_dir()
+            .map(|cwd| cwd.display().to_string())
+            .unwrap_or_default()
+    });
+    let mut args = vec![
+        "corpus".to_string(),
+        "reconcile".to_string(),
+        root_path,
+        "--json".to_string(),
+    ];
+    if strict.unwrap_or(false) {
+        args.push("--strict".to_string());
+    }
+    tauri::async_runtime::spawn_blocking(move || run_cli_report(&app, &args))
+        .await
+        .map_err(|e| format!("corpus reconcile task failed: {e}"))?
 }
 
 #[derive(Serialize)]
