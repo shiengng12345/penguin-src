@@ -79,7 +79,6 @@ import {
   resolveTarget,
   TargetResolutionError,
   reconcileCorpus,
-  resolveBundledEmbeddingSpaceIdentity,
   createFullResetPlan,
   executeFullReset,
   finalizeFullReset,
@@ -110,14 +109,6 @@ import { runtimeIdentity } from "./runtime-identity.js";
 export { listCliRegistrations } from "@penguin/knowledge-contracts";
 export { LarkDocumentBindingStore, type LarkDocumentBinding, type ExplicitBindingInput, type LarkBindingCandidate } from "./api-doc-binding-store.js";
 export { parseCliArguments, type ParsedCliArguments } from "./args.js";
-
-function semanticIndexOptions() {
-  try { return { enabled: true, space: resolveBundledEmbeddingSpaceIdentity() }; }
-  catch (error) {
-    if (String((error as Error).message ?? error) === "LOCAL_EMBEDDING_MODEL_NOT_INSTALLED") return { enabled: true };
-    throw error;
-  }
-}
 
 export interface CliDeps {
   cwd: string;
@@ -789,7 +780,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
         if (!source) { emit(deps, json, "external source not found", { error: "EXTERNAL_SOURCE_NOT_FOUND" }); return 2; }
         if (source.type === "markdown_directory") {
           const fingerprinted = fingerprintMarkdownDirectory(source.location);
-          const report = await indexRepo({ store, rootPath: source.location, mode: "incremental", semantic: semanticIndexOptions(), onProgress: (payload) => emitProgress(deps, payload) });
+          const report = await indexRepo({ store, rootPath: source.location, mode: "incremental", onProgress: (payload) => emitProgress(deps, payload) });
           const synced = sources.markSynced(source.id, { content: fingerprinted.fingerprint, licenseWarning: "external Markdown is untrusted; verify before relying on it" });
           emit(deps, json, `synced ${source.id}`, { source: synced, files: fingerprinted.files.length, index: report });
           return report.errors > 0 ? 1 : 0;
@@ -1199,7 +1190,6 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           store,
           statusPath: statusFile,
           ...(numberOption("max-attempts") !== undefined ? { maxAttempts: numberOption("max-attempts") } : {}),
-          semantic: semanticIndexOptions(),
           onProgress: (event) => {
             if (emitEvents) emitProgress(deps, event);
           },
@@ -1361,7 +1351,6 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
         ...(statusFile ? { statusPath: statusFile } : {}),
         ...(optionValue("id") ? { jobId: optionValue("id") } : {}),
         ...(numberOption("max-attempts") !== undefined ? { maxAttempts: numberOption("max-attempts") } : {}),
-        semantic: semanticIndexOptions(),
         onProgress: (event) => {
           if (emitEvents) emitProgress(deps, event);
         },
@@ -1435,7 +1424,6 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
           : undefined;
           const report = await indexRepo({
           store, rootPath: target, mode,
-            semantic: semanticIndexOptions(),
             onProgress: emitEvents
             ? (p) => {
                 if (EVENT_OUTPUT.get(deps)) {
@@ -1871,7 +1859,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
         for (const repo of repos) {
           const pointers = store.db.prepare("SELECT id,current_snapshot_id,head_commit,last_indexed_commit,last_indexed_at FROM branches WHERE repo_id=?").all(repo.id) as Array<{ id: string; current_snapshot_id: string | null; head_commit: string | null; last_indexed_commit: string | null; last_indexed_at: string | null }>;
           try {
-            const rebuilt = await indexRepo({ store, rootPath: repo.rootPath, mode: "rebuild", semantic: semanticIndexOptions() });
+            const rebuilt = await indexRepo({ store, rootPath: repo.rootPath, mode: "rebuild" });
             const checks = integrity(repo.id); const orphanCount = Object.values(checks).reduce((sum, value) => sum + value, 0);
             if (orphanCount) throw new Error(`integrity check failed: ${JSON.stringify(checks)}`);
             results.push({ repo: repo.name, report: rebuilt, integrity: checks, status: "migrated" });

@@ -24,7 +24,7 @@ const FINALIZE_SUBS: Array<{ id: IndexStageId; running: string }> = [
   { id: "git", running: "reading git history" },
 ];
 
-const ALL_STAGE_IDS: IndexStageId[] = ["scan", "parse", "deletes", "proto", "link", "packages", "git", "semantic"];
+const ALL_STAGE_IDS: IndexStageId[] = ["scan", "parse", "deletes", "proto", "link", "packages", "git"];
 
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
@@ -45,9 +45,6 @@ export interface RenderState {
   edges: number;
   endpoints: number;
   discoveries: number;
-  embeddingReady: number;
-  embeddingTotal: number;
-  embeddingFailed: number;
   startedAt: number;
   parseStartedAt: number | null;
   spinnerFrame: number;
@@ -61,7 +58,6 @@ export function initialRenderState(label: string, mode: "incremental" | "rebuild
   return {
     label, mode, stages, done: 0, total: 0, file: "", langTotals: {}, langDone: {},
     symbols: 0, edges: 0, endpoints: 0, discoveries: 0,
-    embeddingReady: 0, embeddingTotal: 0, embeddingFailed: 0,
     startedAt: now, parseStartedAt: null, spinnerFrame: 0,
   };
 }
@@ -97,11 +93,6 @@ export function applyEvent(state: RenderState, ev: IndexProgressEvent, color: bo
       state.symbols = ev.symbols;
       state.edges = ev.edges;
       state.endpoints = ev.endpoints;
-      return null;
-    case "embedding":
-      state.embeddingReady = ev.ready;
-      state.embeddingTotal = ev.total;
-      state.embeddingFailed = ev.failed;
       return null;
     case "discovery": {
       state.discoveries += 1;
@@ -244,29 +235,10 @@ export function renderRegionLines(state: RenderState, width: number, color: bool
     }
   }
   lines.push(...finalizeLine(state, c));
-  lines.push(...semanticLine(state, c));
   lines.push(
     `  ${c("2", "Symbols")} ${fmtInt(state.symbols)}   ${c("2", "Edges")} ${fmtInt(state.edges)}   ${c("2", "Endpoints")} ${fmtInt(state.endpoints)}`,
   );
   return lines;
-}
-
-function semanticLine(state: RenderState, c: (sgr: string, s: string) => string): string[] {
-  const s = state.stages.semantic;
-  if (s.state === "pending") return [];
-  const name = "Semantic vectors".padEnd(18);
-  if (s.state === "done") {
-    const elapsed = s.elapsedMs != null ? c("2", fmtElapsed(s.elapsedMs).padStart(7)) : "";
-    const detail = s.detail ? c("2", s.detail) : "";
-    return [`  ${c("32", "✔")} ${name} ${detail}${detail && elapsed ? "  " : ""}${elapsed}`];
-  }
-  const spin = c("36", SPINNER[state.spinnerFrame % SPINNER.length]);
-  if (state.embeddingTotal <= 0) return [`  ${spin} ${name} ${c("2", "preparing chunks")}`];
-  const pct = `${String(Math.round((state.embeddingReady / state.embeddingTotal) * 100)).padStart(3)}%`;
-  const failed = state.embeddingFailed > 0 ? c("31", ` · ${state.embeddingFailed} failed`) : "";
-  return [
-    `  ${spin} ${name} [${bar(state.embeddingReady, state.embeddingTotal, 20, c)}] ${c("1;36", pct)} · ${state.embeddingReady}/${state.embeddingTotal}${failed}`,
-  ];
 }
 
 // The collapsed "Finalize graph" line: pending until any sub-stage starts,
@@ -317,9 +289,6 @@ export function summaryLines(report: IndexCompletionReport, state: RenderState, 
   if (report.skipped > 0) lines.push(`    ${c("2", `${fmtInt(report.skipped)} unchanged`)}`);
   if (report.errors > 0) {
     lines.push(`    ${c("33", `${report.errors} parser error${report.errors === 1 ? "" : "s"}`)} ${c("2", "→ penguin doctor")}`);
-  }
-  if (report.semantic?.status === "queued") {
-    lines.push(`    ${c("36", "Semantic queued")} · ${fmtInt(report.semantic.chunks)} chunks`);
   }
   if (report.semanticWorker?.status === "start_failed" || report.semanticWorker?.status === "version_mismatch") {
     lines.push(`    ${c("31", "Worker start failed")} · ${report.semanticWorker.reason ?? report.semanticWorker.status}`);

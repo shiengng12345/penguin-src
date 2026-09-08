@@ -21,10 +21,9 @@ import {
   indexRepo,
   type IndexProgressEvent,
   type IndexReport,
-  type SemanticIndexOptions,
 } from "./pipeline.js";
 
-export type FullCorpusPhase = "index" | "rebuild" | "semantic" | "verify";
+export type FullCorpusPhase = "index" | "rebuild" | "verify";
 export type FullCorpusMode = "index" | "rebuild";
 export type FullCorpusJobState = "running" | "paused" | "completed" | "failed" | "cancelled";
 
@@ -67,7 +66,6 @@ export interface FullCorpusRepoReceipt {
   symbols: number;
   edges: number;
   endpoints: number;
-  semanticState: "queued" | "running" | "complete" | "unavailable";
   mode: FullCorpusMode;
   eligibleFiles: number;
   zeroEligibleFilePolicy: boolean;
@@ -85,7 +83,6 @@ export interface FullCorpusRunOptions {
   modes?: FullCorpusMode[];
   statusPath?: string;
   jobId?: string;
-  semantic?: SemanticIndexOptions;
   signal?: AbortSignal;
   maxAttempts?: number;
   /** Used only by the terminal-job retry wrapper to retain retry history. */
@@ -96,7 +93,6 @@ export interface FullCorpusRunOptions {
 export interface FullCorpusRetryOptions {
   store: KnowledgeStore;
   statusPath: string;
-  semantic?: SemanticIndexOptions;
   signal?: AbortSignal;
   maxAttempts?: number;
   onProgress?: (event: IndexProgressEvent & { rootPath: string; job: FullCorpusJob }) => void;
@@ -326,12 +322,6 @@ async function waitIfPaused(job: FullCorpusJob, signal?: AbortSignal): Promise<v
   }
 }
 
-function semanticState(report: IndexReport): FullCorpusRepoReceipt["semanticState"] {
-  if (!report.semantic.requested || report.semantic.status === "disabled") return "unavailable";
-  if (report.semantic.status === "active") return "complete";
-  return "queued";
-}
-
 function receipt(store: KnowledgeStore, report: IndexReport, mode: FullCorpusMode, eligibleFiles: number): FullCorpusRepoReceipt {
   const symbols = Number((store.db.prepare("SELECT COUNT(*) AS n FROM nodes WHERE repo_id=? AND node_type='symbol'").get(report.repoId) as { n: number }).n ?? 0);
   const edges = Number((store.db.prepare("SELECT COUNT(*) AS n FROM edges WHERE branch_id=? AND status='active'").get(report.branchId) as { n: number }).n ?? 0);
@@ -349,7 +339,6 @@ function receipt(store: KnowledgeStore, report: IndexReport, mode: FullCorpusMod
     symbols,
     edges,
     endpoints,
-    semanticState: semanticState(report),
     mode,
     eligibleFiles,
     zeroEligibleFilePolicy: eligibleFiles === 0,
@@ -410,7 +399,6 @@ async function runMode(
           store,
           rootPath,
           mode: mode === "rebuild" ? "rebuild" : "incremental",
-          semantic: options.semantic ?? { enabled: true },
           onProgress: (event) => {
             job.lastFile = "file" in event ? (event.file ?? job.lastFile) : job.lastFile;
             job.executionMs = Date.now() - startedAt;
@@ -511,11 +499,6 @@ export async function runFullCorpus(options: FullCorpusRunOptions): Promise<Full
         return result;
       }
     }
-    job.phase = "semantic";
-    persistJob(job);
-    // Semantic work is queued by indexRepo after graph publication. The runner
-    // does not drain it inline; this keeps the cold graph run fire-and-forget
-    // and lets the durable worker report its own state.
     await waitIfPaused(job, options.signal);
     job.phase = "verify";
     job.state = "completed";
@@ -571,7 +554,6 @@ export async function retryFullCorpus(options: FullCorpusRetryOptions): Promise<
     statusPath,
     jobId: previous.jobId,
     initialRetryCount: previous.retryCount + 1,
-    ...(options.semantic ? { semantic: options.semantic } : {}),
     ...(options.signal ? { signal: options.signal } : {}),
     ...(options.maxAttempts !== undefined ? { maxAttempts: options.maxAttempts } : {}),
     ...(options.onProgress ? { onProgress: options.onProgress } : {}),

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
 import { basename, dirname, extname, relative, resolve as pathResolve } from "node:path";
 import { performance } from "node:perf_hooks";
-import { INDEX_FORMAT_VERSION, SCHEMA_VERSION, SEMANTIC_CHUNKER_VERSION, GitTopologyStore, FileFactStore, ResolutionStore, SourceStore, SourceSnapshotStore, affectedByFiles, createEmbeddingSpace, replaceSemanticSnapshotChunks, resolveBranchBase, type EmbeddingProvider, type EmbeddingSpaceIdentity, type KnowledgeStore, type ParsedFileFact, type ParsedEdge, type SnapshotOverlayEntry, type SourceSnapshotOverlayEntry } from "@penguin/knowledge-core";
+import { INDEX_FORMAT_VERSION, SCHEMA_VERSION, GitTopologyStore, FileFactStore, ResolutionStore, SourceStore, SourceSnapshotStore, affectedByFiles, resolveBranchBase, type KnowledgeStore, type ParsedFileFact, type ParsedEdge, type SnapshotOverlayEntry, type SourceSnapshotOverlayEntry } from "@penguin/knowledge-core";
 import type { EndpointPublicationReceipt } from "@penguin/knowledge-contracts";
 import { extractSymbols, EXTRACT_MAX_BYTES, type ExtractedFile, type ExtractedSymbol } from "./extract.js";
 import { ParsePool } from "./parse-pool.js";
@@ -27,7 +27,6 @@ import { ingestSourceFile } from "./source-ingest.js";
 import { hashFileStream } from "./encoding.js";
 import { anonymousCallbackIdentity } from "./identity.js";
 import { extractNestJsFrameworkEdges } from "./framework-edges.js";
-import { enqueueSemanticGeneration } from "./embedding-indexer.js";
 
 export interface RevisionTruth {
   repoId: string;
@@ -69,7 +68,6 @@ export interface IndexReport {
    * separately from errors so an intentional exclusion never reads as breakage,
    * and separately from skipped so it stays visible rather than vanishing. */
   excluded: number;
-  semantic: SemanticIndexReport;
   renamed: number;
   commits: number; // git commit nodes captured
   tags: number; // git tag nodes captured
@@ -94,24 +92,6 @@ export interface IndexReport {
     checkpointWarning: string | null;
     checkpoint: { busy: number; log: number; checkpointed: number };
   };
-}
-
-export interface SemanticIndexReport {
-  requested: boolean;
-  status: "disabled" | "queued" | "active";
-  files: number;
-  chunks: number;
-  generationId: string | null;
-  reason: string | null;
-}
-
-export interface SemanticIndexOptions {
-  /** Persist revision-scoped chunks even when no model is installed. */
-  enabled?: boolean;
-  provider?: EmbeddingProvider;
-  space?: EmbeddingSpaceIdentity;
-  batchSize?: number;
-  chunkerVersion?: string;
 }
 
 export interface ParseTimingBreakdown {
@@ -1288,7 +1268,7 @@ async function indexFileWithSource(
 }
 
 // Pipeline stages indexRepo runs through, in order. UIs render this list.
-export type IndexStageId = "scan" | "parse" | "deletes" | "proto" | "link" | "packages" | "git" | "semantic";
+export type IndexStageId = "scan" | "parse" | "deletes" | "proto" | "link" | "packages" | "git";
 
 // Progress events: the legacy per-file "scan"/"index" shapes are kept verbatim
 // (existing CLI bar + Tauri Wiki bar parse them), PLUS typed pipeline events —
@@ -1298,7 +1278,6 @@ export type IndexProgressEvent =
   | { phase: "scan"; done: number; total: number; file: string; langs?: Record<string, number> }
   | { phase: "index"; done: number; total: number; file: string; lang?: string }
   | { phase: "stage"; stage: IndexStageId; state: "start" | "done"; detail?: string; elapsedMs?: number }
-  | { phase: "embedding"; ready: number; total: number; failed: number; generationId: string }
   | { phase: "metric"; symbols: number; edges: number; endpoints: number }
   | { phase: "discovery"; kind: "endpoint" | "service" | "link"; title: string; file?: string };
 
@@ -1332,14 +1311,13 @@ export async function indexRepo(input: {
   store: KnowledgeStore;
   rootPath: string;
   mode: "incremental" | "rebuild";
-  semantic?: SemanticIndexOptions;
   onProgress?: (p: IndexProgressEvent) => void;
   /** Narrow crash-boundary injection used by the child-process recovery test. */
   testHooks?: {
     afterSemanticEnqueue?: (context: { branchId: string; generationId: string }) => void;
     beforeSnapshotPublish?: (context: { branchId: string; snapshotId: string }) => void;
     beforeStage?: (context: { stage: IndexStageId }) => void;
-    beforeMaintenance?: (context: { phase: "before_semantic_checkpoint" | "final_checkpoint" }) => void;
+    beforeMaintenance?: (context: { phase: "final_checkpoint" }) => void;
   };
 }): Promise<IndexReport> {
   const runStartedAt = Date.now();
@@ -1443,7 +1421,6 @@ export async function indexRepo(input: {
     coverage: { discovered: 0, admitted: 0, excluded: 0, failed: 0, stale: 0, byReason: {} },
     coverageWarnings: [],
     scanned: 0, parsed: 0, skipped: 0, deleted: 0, errors: 0, excluded: 0, renamed: 0,
-    semantic: { requested: Boolean(input.semantic && input.semantic.enabled !== false), status: "disabled", files: 0, chunks: 0, generationId: null, reason: input.semantic && input.semantic.enabled !== false ? "EMBEDDING_SPACE_UNAVAILABLE" : null },
     commits: 0, tags: 0,
     timings: { totalMs: 0, stages: {}, parse: emptyParseTimings() },
     maintenance: {
@@ -1496,67 +1473,6 @@ export async function indexRepo(input: {
       .prepare("SELECT COUNT(DISTINCT endpoint_id) AS c FROM endpoint_memberships WHERE repo_id=?")
       .get(repoId) as { c: number }).c;
     emit({ phase: "metric", symbols, edges, endpoints });
-  };
-
-  // Semantic indexing deliberately runs only after the graph snapshot is
-  // published. A large local embedding backfill can take minutes; keeping it
-  // inside a rebuild transaction made the graph unavailable, grew one giant
-  // WAL, and discarded all completed vectors on interruption.
-  const runSemanticIndex = (): void => {
-    const semanticOptions = input.semantic;
-    if (!semanticOptions || semanticOptions.enabled === false) return;
-    try {
-      const chunkerVersion = semanticOptions.chunkerVersion
-        ?? semanticOptions.space?.chunkerVersion
-        ?? SEMANTIC_CHUNKER_VERSION;
-      const sources = store.db.prepare(`
-        SELECT e.file_path AS canonicalFilePath,
-               COALESCE(e.source_blob_id,f.source_blob_id) AS sourceBlobId,
-               b.decoded_content AS text
-          FROM effective_snapshot_sources e
-          JOIN source_facts f ON f.id=e.source_fact_id
-          JOIN source_blobs b ON b.id=COALESCE(e.source_blob_id,f.source_blob_id)
-         WHERE e.snapshot_id=? AND f.repo_id=?
-         ORDER BY e.file_path
-      `).all(snapshot.id, repoId) as Array<{ canonicalFilePath: string; sourceBlobId: number; text: string }>;
-      const existing = store.db.prepare(`
-        SELECT COUNT(*) AS total,
-               COALESCE(SUM(chunker_version=?),0) AS matching
-          FROM semantic_chunks WHERE snapshot_id=?
-      `).get(chunkerVersion, snapshot.id) as { total: number; matching: number };
-      const chunkResult = existing.total > 0 && existing.matching === existing.total
-        ? { files: Number((store.db.prepare("SELECT COUNT(DISTINCT canonical_file_path) AS n FROM semantic_chunks WHERE snapshot_id=?").get(snapshot.id) as { n: number }).n), chunks: existing.total }
-        : replaceSemanticSnapshotChunks(store, {
-            repoId,
-            snapshotId: snapshot.id,
-            sources,
-            chunkerVersion,
-          });
-      report.semantic = { requested: true, status: "disabled", files: chunkResult.files, chunks: chunkResult.chunks, generationId: null, reason: "EMBEDDING_SPACE_UNAVAILABLE" };
-      if (!semanticOptions.space) return;
-      if (chunkResult.chunks === 0) throw new Error("EMBEDDING_NO_CHUNKS");
-      const ids = (store.db.prepare("SELECT id FROM semantic_chunks WHERE snapshot_id=? ORDER BY id").all(snapshot.id) as Array<{ id: string }>).map((row) => row.id);
-      const enqueued = enqueueSemanticGeneration({
-        store,
-        repoId,
-        space: semanticOptions.space,
-        snapshotId: snapshot.id,
-        scopeKey: `repo:${repoId}`,
-        chunkIds: ids,
-      });
-      report.semantic = {
-        ...report.semantic,
-        status: enqueued.status,
-        generationId: enqueued.generationId,
-      };
-      input.testHooks?.afterSemanticEnqueue?.({ branchId, generationId: enqueued.generationId });
-    } catch (error) {
-      const reason = String((error as Error).message ?? error);
-      const staging = store.db.prepare("SELECT id FROM embedding_generations WHERE snapshot_id=? AND scope_key=? AND status='staging' ORDER BY created_at DESC LIMIT 1").get(snapshot.id, `repo:${repoId}`) as { id: string } | undefined;
-      // Preserve staging generations and their ready jobs. A later index run
-      // resumes them instead of throwing away minutes of local model work.
-      report.semantic = { ...report.semantic, status: "disabled", generationId: staging?.id ?? null, reason };
-    }
   };
 
   let rebuildTransactionOpen = false;
@@ -2521,21 +2437,8 @@ export async function indexRepo(input: {
       rebuildTransactionOpen = false;
     }
     // Graph publication is a complete durability boundary. Restore normal WAL
-    // behavior and fold the graph transaction before the optional local model
-    // starts; a multi-hour semantic backfill must never retain the rebuild WAL.
+    // behavior and fold the graph transaction now that the snapshot is live.
     restoreSqliteTuning();
-    if (input.semantic && input.semantic.enabled !== false) {
-      input.testHooks?.beforeMaintenance?.({ phase: "before_semantic_checkpoint" });
-      await truncateWal();
-      stageStart("semantic");
-      runSemanticIndex();
-      stageDone(
-        "semantic",
-        report.semantic.status === "active"
-          ? `${report.semantic.chunks} chunks active`
-          : `${report.semantic.chunks} chunks · ${report.semantic.status}`,
-      );
-    }
     const rebuildHotIndexes = [
       "idx_edges_parser_branch_file",
       "idx_edges_parser_global_repo_file",

@@ -51,8 +51,6 @@ export {
   KNOWLEDGE_PARSER_VERSION,
   KNOWLEDGE_RESOLVER_VERSION,
   type IndexReport,
-  type SemanticIndexReport,
-  type SemanticIndexOptions,
   type IndexProgressEvent,
   type IndexStageId,
 } from "./pipeline.js";
@@ -90,5 +88,3 @@ export { extractNestJsFrameworkEdges, type FrameworkSymbol, type FrameworkSymbol
 export { extractChannelBindings, type ExtractedChannelBinding, type ChannelProtocol, type ChannelBindingStatus } from "./channels.js";
 export { deploymentBlastRadius, extractIacFacts, type DeploymentBlastRadiusResult, type IacFact, type IacKind } from "./iac.js";
 export { anonymousCallbackIdentity } from "./identity.js";
-export { backfillEmbeddings, activateEmbeddingGeneration, enqueueSemanticGeneration, drainSemanticQueue, garbageCollectEmbeddingVectors, type EmbeddingBackfillCheckpoint, type EmbeddingBackfillInput, type EmbeddingBackfillResult, type SemanticEnqueueResult, type SemanticDrainInput, type SemanticDrainResult } from "./embedding-indexer.js";
-export { recoverEmbeddingWorker } from "./embedding-worker.js";

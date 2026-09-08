@@ -70,7 +70,6 @@ import {
   ScopeResolutionError,
   resolveTarget,
   openBundledEmbeddingProvider,
-  resolveBundledEmbeddingSpaceIdentity,
   listSemanticStatuses,
   resolveSemanticScopeKey,
   applySemanticRuntimeState,
@@ -729,17 +728,10 @@ async function runKnowledgeToolUnsafe(name: string, a: Record<string, unknown>, 
         : routedName === "knowledge_rebuild" ? "rebuild" : "index";
       const validatedRoot = assertOwnerMutationRoot(store, mutationAction, rootPath);
       const confirmedRoot = assertOwnerMutationRoot(store, mutationAction, rootPath, validatedRoot, true);
-      let semantic;
-      try { semantic = { enabled: true, space: resolveBundledEmbeddingSpaceIdentity() }; }
-      catch (error) {
-        if (String((error as Error).message ?? error) !== "LOCAL_EMBEDDING_MODEL_NOT_INSTALLED") throw error;
-        semantic = { enabled: true };
-      }
       const report = await indexer.indexRepo({
         store,
         rootPath: confirmedRoot,
         mode: routedName === "knowledge_rebuild" ? "rebuild" : "incremental",
-        semantic,
       });
       const worker = await invokeLocalCli(["semantic", "wake", "--json"]);
       return { ...report, semanticWorker: worker };
