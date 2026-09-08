@@ -237,6 +237,13 @@ export function fullCorpusNodeSelectionMode(
 }
 
 const REBUILDABLE_ASSET_TABLE_SET = new Set<string>(REBUILDABLE_ASSET_TABLES);
+// embedding_models/embedding_spaces are a shared installed-model registry,
+// not corpus rows tied to any one repo/snapshot — a full-corpus reset must
+// not wipe them (this predates the semantic subsystem's removal and stays
+// true now: if an existing install still has this leftover registry data,
+// it is only reachable through it being present in REBUILDABLE_ASSET_TABLES
+// for auditing/counting purposes, never through a full-corpus wipe).
+const FULL_CORPUS_RETAINED_TABLES = new Set(["embedding_models", "embedding_spaces"]);
 
 /** A complete-corpus reset must stay inside SQLite. Materializing every node,
  * chunk, source blob, and vector ID in JavaScript makes reset memory scale with
@@ -253,6 +260,7 @@ export function fullCorpusResetPredicate(
       : { sql: "id NOT IN (SELECT value FROM json_each(?))", args: [jsonSet(protectedIds)] };
   }
   if (table === "edges") return { sql: "origin='parser'", args: [] };
+  if (FULL_CORPUS_RETAINED_TABLES.has(table)) return null;
   if (REBUILDABLE_ASSET_TABLE_SET.has(table)) return { sql: "1", args: [] };
   return null;
 }
@@ -683,7 +691,8 @@ function deleteTargetRows(
       // their protected predicates below.
       if (
         scope.allRepositoriesSelected &&
-        REBUILDABLE_ASSET_TABLE_SET.has(table)
+        REBUILDABLE_ASSET_TABLE_SET.has(table) &&
+        !FULL_CORPUS_RETAINED_TABLES.has(table)
       ) {
         db.prepare(`DROP TABLE IF EXISTS ${quoteIdentifier(table)}`).run();
         droppedRebuildableTables.push(table);

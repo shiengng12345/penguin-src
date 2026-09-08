@@ -9,6 +9,14 @@ import type { KnowledgeArtifactManifest } from "./artifact-manifest.js";
 import { buildLogicalDelta, type LogicalDelta } from "./artifact-delta.js";
 
 function sha(value: Uint8Array): string { return createHash("sha256").update(value).digest("hex"); }
+// A fresh install's schema no longer creates the semantic/vector embedding
+// tables (Task 9 of the Nomic removal plan), but an existing install's
+// database that predates that change still has them, populated with real
+// file paths and raw embedding vectors — this guard keeps the strip below a
+// safe no-op on fresh installs and a real DELETE on existing ones.
+function tableExists(db: KnowledgeStore["db"], name: string): boolean {
+  return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name));
+}
 function remoteFingerprint(remoteUrl: string | null): string | undefined {
   if (!remoteUrl) return undefined;
   const normalized = remoteUrl.trim().replace(/\.git$/i, "").replace(/\/+$/, "").toLowerCase();
@@ -20,9 +28,12 @@ export function previewKnowledgeArtifact(store: KnowledgeStore, options: Pick<Ar
   const count = (table: string): number => Number((store.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n ?? 0);
   const pageCount = Number(store.db.pragma("page_count", { simple: true }) ?? 0);
   const pageSize = Number(store.db.pragma("page_size", { simple: true }) ?? 4096);
-  // semantic_chunks no longer exists (the embedding subsystem was removed),
-  // so the embeddings count is always 0 regardless of includeEmbeddings.
-  return { estimatedBytes: pageCount * pageSize, included: { source: options.includeSource === true, notes: options.includeNotes === true, evidence: options.includeEvidence === true, embeddings: options.includeEmbeddings === true }, counts: { sourceBlobs: options.includeSource ? count("source_blobs") : 0, notes: options.includeNotes ? count("fts_notes") : 0, evidence: options.includeEvidence ? count("trust_evidence") : 0, embeddings: 0 }, ...(options.repoIds?.length ? { repoIds: options.repoIds } : {}), ...(options.snapshotIds?.length ? { snapshotIds: options.snapshotIds } : {}), requiresConfirmation: true };
+  // semantic_chunks no longer exists on a fresh install (the embedding
+  // subsystem was removed), but an existing install's database that
+  // predates that change may still have it populated — report the real
+  // count so the preview matches what exportKnowledgeArtifact will actually
+  // strip/include, instead of a hardcoded 0 that could understate a leak.
+  return { estimatedBytes: pageCount * pageSize, included: { source: options.includeSource === true, notes: options.includeNotes === true, evidence: options.includeEvidence === true, embeddings: options.includeEmbeddings === true }, counts: { sourceBlobs: options.includeSource ? count("source_blobs") : 0, notes: options.includeNotes ? count("fts_notes") : 0, evidence: options.includeEvidence ? count("trust_evidence") : 0, embeddings: options.includeEmbeddings && tableExists(store.db, "semantic_chunks") ? count("semantic_chunks") : 0 }, ...(options.repoIds?.length ? { repoIds: options.repoIds } : {}), ...(options.snapshotIds?.length ? { snapshotIds: options.snapshotIds } : {}), requiresConfirmation: true };
 }
 const DELTA_CHUNK_SIZE = 64 * 1024;
 function deltaFor(base: Uint8Array, current: Uint8Array, tombstoneCount: number): { delta: Uint8Array; manifest: { algorithm: "fixed-chunk-v1"; chunkSize: number; baseDatabaseBytes: number; tombstoneCount: number } } {
@@ -125,10 +136,18 @@ export function exportKnowledgeArtifact(store: KnowledgeStore, options: Artifact
     if (options.includeEvidence !== true) {
       for (const table of ["finding_evidence", "validated_findings", "trust_evidence"]) artifactDb.prepare(`DELETE FROM ${table}`).run();
     }
-    // The semantic/vector embedding subsystem (semantic_embedding_refs,
-    // semantic_vector_values, embedding_models, semantic_chunks) was
-    // removed; those tables no longer exist in any database, so there is
-    // nothing left to strip regardless of options.includeEmbeddings.
+    if (options.includeEmbeddings !== true) {
+      // The semantic/vector embedding subsystem was removed and a fresh
+      // install's schema no longer creates these tables, but this plan
+      // deliberately never ran a DROP TABLE migration for them — an existing
+      // install's database can still have them, populated with real file
+      // paths and raw embedding vectors. Guard each DELETE so this stays a
+      // no-op on a fresh install (tables don't exist) and a real strip on an
+      // existing one (tables exist).
+      for (const table of ["semantic_embedding_refs", "semantic_vector_values", "embedding_models", "semantic_chunks"]) {
+        if (tableExists(artifactDb, table)) artifactDb.prepare(`DELETE FROM ${table}`).run();
+      }
+    }
     if (options.baseDatabase) tombstoneCount = addArtifactTombstones(artifactDb, options.baseDatabase, DatabaseConstructor, cloneDir, sha(options.baseDatabase));
   } finally {
     artifactDb.close();
