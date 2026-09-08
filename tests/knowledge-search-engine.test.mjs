@@ -4,7 +4,7 @@ import { mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
-import { KnowledgeStore, GitTopologyStore, FileFactStore, SourceStore, SourceSnapshotStore, openRevisionView, searchKnowledge, searchKnowledgeAsync, searchLegacyRows, HmacSearchCursorCodec, planSearch, rankSearchHits, semanticLaneScore, recordSearchFeedback, listSearchFeedback, deleteSearchFeedback, exportSearchFeedback, reflectSearchFeedback, listReflectionSuggestions, reviewReflectionSuggestion } from "../packages/knowledge-core/dist/index.js";
+import { KnowledgeStore, GitTopologyStore, FileFactStore, SourceStore, SourceSnapshotStore, openRevisionView, searchKnowledge, searchKnowledgeAsync, searchLegacyRows, HmacSearchCursorCodec, planSearch, rankSearchHits, recordSearchFeedback, listSearchFeedback, deleteSearchFeedback, exportSearchFeedback, reflectSearchFeedback, listReflectionSuggestions, reviewReflectionSuggestion } from "../packages/knowledge-core/dist/index.js";
 
 function setup() {
   const dir = mkdtempSync(join(tmpdir(), "pk-search-engine-"));
@@ -368,12 +368,6 @@ test("ranking uses deterministic repo/revision/path/line/byte/hit tie-breaks and
   ]);
   assert.deepEqual(ranked.map((hit) => hit.hitId), ["earlier", "later"]);
   assert.ok(ranked[0].rankReasons.includes("lane_rank=1"));
-});
-
-test("semantic score is normalized inside its lane instead of added to lexical score", () => {
-  assert.equal(semanticLaneScore(-1), 0);
-  assert.equal(semanticLaneScore(1), 0.55);
-  assert.equal(semanticLaneScore(99), 0.55);
 });
 
 test("symbol and identifier lanes preserve raw names while matching normalized identifier forms", () => {

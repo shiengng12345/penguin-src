@@ -37,9 +37,9 @@ test("buildStorageReport returns file sizes, samples once per day, and never thr
   assert.equal(first.gc.hotFeatureLimit, 20);
   assert.equal(first.maintenance.running, false);
   assert.deepEqual(first.repos, []);
-  assert.equal(first.semantic.ready, false);
-  assert.equal(first.semantic.activeGenerations, 0);
-  assert.equal(first.semantic.reason, "NO_ACTIVE_SPACE");
+  // The semantic/vector embedding subsystem was removed; the report no
+  // longer carries a semantic storage sub-section at all.
+  assert.equal("semantic" in first, false);
 
   // Same-day resample updates in place — exactly one row per calendar day.
   buildStorageReport(store);
@@ -59,10 +59,6 @@ test("dbstat table categories are present and human-mappable", () => {
     assert.ok(["graph_edges", "source_content", "fts", "vectors", "symbols", "other"].includes(key), `unknown category ${key}`);
   }
   assert.ok(report.tables.categories.every((category) => category.bytes > 0));
-  // The semantic/vector backend was removed; its storage sub-report now
-  // always falls back to the empty/unavailable shape (modelDiskBytes stays
-  // null, never populated from the dbstat scan).
-  assert.equal(report.semantic.modelDiskBytes, null);
   store.close();
 });
 

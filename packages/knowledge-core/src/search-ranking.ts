@@ -2,7 +2,7 @@ import type { SearchHit } from "@penguin/knowledge-contracts";
 import type { ParsedKnowledgeQuery } from "./search-planner.js";
 
 export const SEARCH_RANKER_VERSION = "ranker-v2";
-export const LANE_WEIGHTS = { source: 1, path: 1, symbol: 0.85, graph: 0.8, note: 0.7, evidence: 0.75, semantic: 0.55, vector: 0.55 } as const;
+export const LANE_WEIGHTS = { source: 1, path: 1, symbol: 0.85, graph: 0.8, note: 0.7, evidence: 0.75 } as const;
 
 export interface RankTuple {
   exactIdentity: 0 | 1;
@@ -42,18 +42,14 @@ export function rankTupleForHit(hit: SearchHit, parsed?: ParsedKnowledgeQuery): 
   };
 }
 
-/** Keep cosine similarity in its own bounded lane; never add it directly to
- * lexical/BM25 scores. */
-export function semanticLaneScore(similarity: number): number {
-  const normalized = Math.max(0, Math.min(1, ((Number.isFinite(similarity) ? similarity : 0) + 1) / 2));
-  return LANE_WEIGHTS.semantic * normalized;
-}
-
 export function rankSearchHits(hits: SearchHit[], parsed?: ParsedKnowledgeQuery): SearchHit[] {
   return hits.map((hit) => ({
     ...hit,
     score: Math.round(hit.score * 1_000_000) / 1_000_000,
-    rankReasons: [...hit.rankReasons, `lane_rank=${LANE_WEIGHTS[hit.lane] ?? 0}`, ...(parsed ? (() => { const tuple = rankTupleForHit(hit, parsed); return [`rank_tuple=${tuple.exactIdentity}/${tuple.exactTitle}/${tuple.termCoverage.toFixed(4)}/${tuple.lanePriority}/${tuple.laneScore.toFixed(6)}`]; })() : [])],
+    // hit.lane's type (SearchLane) is wider than LANE_WEIGHTS' keys (it still
+    // includes the now-unused "semantic"/"vector" lanes); the cast plus the
+    // `?? 0` fallback keeps this safe for a lane with no configured weight.
+    rankReasons: [...hit.rankReasons, `lane_rank=${(LANE_WEIGHTS as Record<string, number>)[hit.lane] ?? 0}`, ...(parsed ? (() => { const tuple = rankTupleForHit(hit, parsed); return [`rank_tuple=${tuple.exactIdentity}/${tuple.exactTitle}/${tuple.termCoverage.toFixed(4)}/${tuple.lanePriority}/${tuple.laneScore.toFixed(6)}`]; })() : [])],
   }))
     .sort((a, b) => {
       const left = rankTupleForHit(a, parsed);
