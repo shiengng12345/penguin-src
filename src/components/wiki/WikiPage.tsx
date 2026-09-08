@@ -16,7 +16,6 @@ import { BranchPickerPopover, type BranchPickerOption } from "@/components/wiki/
 import { WikiStoragePage } from "@/components/wiki/WikiStoragePage";
 import { IndexProgressBanner } from "@/components/wiki/IndexProgressBanner";
 import { CorpusJobPanel } from "@/components/wiki/CorpusJobPanel";
-import { SemanticWorkerPanel } from "@/components/wiki/SemanticWorkerPanel";
 import { WikiOnboarding } from "@/components/wiki/WikiOnboarding";
 import { GraphEmptyState, GraphStatsOverlay, type GraphScope } from "@/components/wiki/GraphStatsOverlay";
 import { WikiStatusFooter } from "@/components/wiki/WikiStatusFooter";
@@ -243,7 +242,6 @@ export function WikiPage({ onClose }: WikiPageProps) {
       {error && !isNoDatabaseError(error) && <div className="mx-6 mt-3 rounded-md border border-yellow-500/30 bg-yellow-500/10 px-3 py-2 text-sm text-yellow-200">{error}</div>}
       <IndexProgressBanner />
       <CorpusJobPanel />
-      <SemanticWorkerPanel />
 
       <div className="flex min-h-0 flex-1 flex-col">
         <section className="flex min-h-0 min-w-0 flex-col bg-background">
