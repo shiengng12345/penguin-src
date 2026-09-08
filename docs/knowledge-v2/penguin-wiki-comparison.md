@@ -63,6 +63,16 @@ flowchart TD
 
 注意：能力矩阵里的 `implemented` 代表代码和 contract 已存在；它不自动代表每一台机器上的外部 MCP client 已经成功加载，也不代表所有动态代码关系都能被静态索引证明。
 
+### 2.3 已移除能力：语义 / 向量搜索（semantic / vector search）
+
+Penguin 早期曾包含一套基于 Nomic embedding 模型和 ONNX runtime 的语义（向量）搜索子系统：`knowledge.semantic_status`、`knowledge.semantic_control` 两个 capability、独立的 `VectorStore`、索引管线里的 embedding 阶段、后台语义 worker，以及前端 `SemanticWorkerPanel`。经过工程评估（见 [`docs/quality/penguin-knowledge-power-roadmap-claude-deepseek.md`](../quality/penguin-knowledge-power-roadmap-claude-deepseek.md)）确认它从未真正打通到生产可用状态——一直停留在基础设施骨架阶段，会在真实使用中出现"界面看起来支持 semantic search，运行时却没有向量、没有可用扩展"的危险状态。因此这套子系统已被整体移除，这是一次移除而不是功能回退；当前不存在任何真正执行语义搜索的 CLI verb、MCP tool 或 Tauri command。
+
+移除过程中，出于成本收益考虑，刻意保留了三处"表面仍可见、但已经失效"的残留，特此说明，避免被误读为移除不彻底或遗留 bug：
+
+1. **仍被声明、但已死的 capability。** `packages/knowledge-contracts/src/semantic.ts` 以及 `knowledge.semantic_status`/`knowledge.semantic_control` 两个 capability id 仍然保留在 contracts manifest 里——这也是为什么本仓库里自动生成的 [Capability Matrix](./capability-matrix.md)、[CLI Reference](./cli-reference.md)、[MCP Reference](./mcp-reference.md) 目前仍会把它们列为 `available`/`implemented`。但背后已经没有任何真正的 CLI/MCP/Tauri 实现在响应它们。彻底清除这两个声明需要同时重写生成式 onboarding 文案和一份 golden test snapshot，被判定为一次独立、更彻底的后续任务，不在本轮移除范围内。
+2. **仍被接受、但已失效的搜索选项。** 通用搜索 API 的 `options.semantic: "off" | "fallback" | "blend"` 字段仍会被接受（避免破坏还在传这个字段的旧客户端），但搜索引擎现在无条件忽略它，始终只返回确定性的 graph/lexical/source 结果。这与 `mode` 字段不同——`mode` 已经彻底不再接受 `"semantic"` 这个取值，属于完全移除。
+3. **过时的原生运行时清单。** `src-tauri/src/knowledge.rs` 里的 runtime-integrity manifest（`native_runtime_dependencies()` / `versioned_runtime_manifest()`）仍然把已删除的 `nomic-embed-text-v1.5` 模型文件、以及不再随包分发的 `onnxruntime-node`/`sharp` 列为预期的原生依赖，其 `model_hash` 字段目前是一个永久占位值而非真实哈希。这是它与 `packages/knowledge-cli/src/runtime-identity.ts` 之间一次跨进程运行时握手协议的一部分，需要单独、谨慎地调查后才能安全修正，因此本轮移除有意未触碰它。
+
 ## 3. 与其他工具的定位对比
 
 以下比较按“代码 Agent 是否能可靠使用知识”这个目标，而不是按普通笔记软件的功能数量比较。
