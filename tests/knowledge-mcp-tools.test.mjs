@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import ts from "typescript";
 import { build } from "esbuild";
-import { KnowledgeStore, GitTopologyStore, SourceStore, SourceSnapshotStore, SavedQueryStore, EmbeddingLifecycle, createEmbeddingSpace, embeddingSpaceIdentity, searchKnowledge, SCHEMA_VERSION } from "../packages/knowledge-core/dist/index.js";
+import { KnowledgeStore, GitTopologyStore, SourceStore, SourceSnapshotStore, SavedQueryStore, searchKnowledge, SCHEMA_VERSION } from "../packages/knowledge-core/dist/index.js";
 import { CAPABILITIES, validateCapabilityOutput } from "../packages/knowledge-contracts/dist/index.js";
 import { runCli } from "../packages/knowledge-cli/dist/index.js";
 
@@ -423,7 +423,7 @@ test("node affected preserves symbol granularity while context may surface file-
   store.close();
 });
 
-test("canonical nested semantic option reaches the async semantic adapter", async () => {
+test("canonical nested semantic option routes through the async adapter and degrades to deterministic lanes", async () => {
   const { store, repoId } = seed();
   const response = await runKnowledgeTool("knowledge_search", {
     query: "login behavior",
@@ -432,7 +432,13 @@ test("canonical nested semantic option reaches the async semantic adapter", asyn
     options: { semantic: "blend" },
     page: { limit: 5 },
   }, { store });
-  assert.notEqual(response.diagnostics?.semantic?.reason, "async_semantic_lane_required", JSON.stringify(response));
+  // The semantic/hybrid vector lane has been removed from knowledge-core: a
+  // request for options.semantic now always gets a deterministic-only
+  // result with an explicit degradation reason instead of a hybrid-fused
+  // response (see search-engine.ts's searchKnowledgeAsync doc comment).
+  assert.equal(response.diagnostics?.semantic?.requested, true, JSON.stringify(response));
+  assert.equal(response.diagnostics?.semantic?.applied, false, JSON.stringify(response));
+  assert.equal(response.diagnostics?.semantic?.reason, "async_semantic_lane_required", JSON.stringify(response));
   store.close();
 });
 

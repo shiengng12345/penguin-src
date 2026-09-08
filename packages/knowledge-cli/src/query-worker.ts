@@ -2,11 +2,9 @@ import { parentPort, workerData } from "node:worker_threads";
 import type { SearchRequest, SearchResponse } from "@penguin/knowledge-contracts";
 import {
   KnowledgeStore,
-  openBundledEmbeddingProvider,
   resolveRevisionContext,
   searchKnowledgeAsync,
   serviceGraph,
-  type EmbeddingProvider,
 } from "@penguin/knowledge-core";
 
 interface WorkerRequest {
@@ -24,25 +22,6 @@ const store = KnowledgeStore.open({
   ledgerPath: config.ledgerPath,
   allowSchemaMutation: false,
 });
-
-// Query workers are resident for the lifetime of the Tauri query server. Keep
-// the model promise in this worker instead of opening Nomic for every search:
-// the first semantic request pays the model-load cost, while subsequent
-// requests reuse the same ONNX session and only pay query embedding plus
-// SQLite vector retrieval. A rejected promise is cleared so a transient model
-// startup failure can be retried after the runtime has recovered.
-let semanticProviderPromise: Promise<EmbeddingProvider | undefined> | null = null;
-
-async function optionalBundledSemanticProvider() {
-  if (!semanticProviderPromise) {
-    semanticProviderPromise = openBundledEmbeddingProvider().catch((error) => {
-      semanticProviderPromise = null;
-      if (String((error as Error).message ?? error) === "LOCAL_EMBEDDING_MODEL_NOT_INSTALLED") return undefined;
-      throw error;
-    });
-  }
-  return semanticProviderPromise;
-}
 
 async function runSearch(input: SearchRequest): Promise<SearchResponse> {
   const requested = input.scope?.revisions ?? [];
@@ -94,11 +73,6 @@ async function runSearch(input: SearchRequest): Promise<SearchResponse> {
   const response = await searchKnowledgeAsync(request, {
     store,
     ...(scopes.length ? { scopes } : {}),
-    // searchKnowledgeAsync only invokes the factory when the request opts into
-    // semantic retrieval. Passing the resident factory here makes the Tauri
-    // query runtime feature-complete with CLI/MCP while preserving the fast
-    // deterministic path for ordinary searches.
-    semanticProviderFactory: optionalBundledSemanticProvider,
   });
   return scopeWarnings.length
     ? {

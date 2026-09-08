@@ -3,11 +3,12 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { QueryWorkerPool } from "../packages/knowledge-cli/dist/query-server.js";
 
-test("resident query worker keeps semantic retrieval available and reuses its provider", () => {
+test("resident query worker serves search through the deterministic async surface", () => {
   const source = readFileSync(new URL("../packages/knowledge-cli/src/query-worker.ts", import.meta.url), "utf8");
   assert.match(source, /searchKnowledgeAsync/u);
-  assert.match(source, /semanticProviderPromise/u);
-  assert.match(source, /semanticProviderFactory:\s*optionalBundledSemanticProvider/u);
+  assert.doesNotMatch(source, /semanticProviderPromise/u);
+  assert.doesNotMatch(source, /semanticProviderFactory/u);
+  assert.doesNotMatch(source, /openBundledEmbeddingProvider/u);
 });
 
 test("query timeout starts when a queued job begins execution", async () => {

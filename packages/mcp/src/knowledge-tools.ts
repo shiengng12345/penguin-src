@@ -69,16 +69,10 @@ import {
   resolveQueryScope,
   ScopeResolutionError,
   resolveTarget,
-  openBundledEmbeddingProvider,
-  listSemanticStatuses,
-  resolveSemanticScopeKey,
-  applySemanticRuntimeState,
   readResetManifest,
-  executeSemanticControl,
   HmacOperationCursorCodec,
   resolveLocalCursorSecret,
   type ResolvedQueryScope,
-  type VerifiedLocalEmbeddingProvider,
   buildOnboardingDocument,
   reconcileCorpus,
   type CorpusCanonicalProjection,
@@ -99,14 +93,6 @@ import { createKnowledgeApiDocAdapter, currentApiDocRevisionIds } from "../../kn
 
 const execFileAsync = promisify(execFile);
 const OPERATION_CURSOR_CODEC = new HmacOperationCursorCodec(resolveLocalCursorSecret());
-
-async function optionalBundledSemanticProvider(): Promise<VerifiedLocalEmbeddingProvider | undefined> {
-  try { return await openBundledEmbeddingProvider(); }
-  catch (error) {
-    if (String((error as Error).message ?? error) === "LOCAL_EMBEDDING_MODEL_NOT_INSTALLED") return undefined;
-    throw error;
-  }
-}
 
 export interface KnowledgeToolOptions {
   /** Host-owned adapter; credentials are resolved outside the MCP process. */
@@ -797,7 +783,7 @@ async function runSemanticSearchAdapter(input: Record<string, unknown>, store: K
       explain: normalized.explain === true,
     },
     page: { limit: Number.isInteger(normalized.limit) ? normalized.limit as number : 20, ...(typeof normalized.cursor === "string" ? { cursor: normalized.cursor } : {}) },
-  }, { store, semanticProviderFactory: optionalBundledSemanticProvider });
+  }, { store });
 }
 
 function repositoryCandidates(store: KnowledgeStore, repoIds: string[]): Array<{ repoId: string; name: string; rootPath: string }> {
