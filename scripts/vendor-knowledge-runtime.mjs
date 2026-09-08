@@ -27,7 +27,6 @@ import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rm
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { materializePinnedEmbeddingModel } from "./lib/knowledge-model-assets.mjs";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(join(repoRoot, "packages/knowledge-core/index.js"));
@@ -37,7 +36,6 @@ const vendoredModules = join(bundleDir, "node_modules");
 const wasmDir = join(bundleDir, "wasm");
 const mcpBundleDir = join(repoRoot, "packages/mcp/bundle");
 const cacheDir = join(repoRoot, ".cache/vendor");
-const modelConfig = JSON.parse(readFileSync(join(repoRoot, "config/knowledge-embedding-models.json"), "utf8"));
 
 // --- target selection -------------------------------------------------------
 const NODE_VERSION = process.env.PENGUIN_NODE_VERSION ?? "v22.23.1"; // Node 22 LTS
@@ -135,49 +133,6 @@ if (!statSync(sqliteVecLibrary, { throwIfNoEntry: false })) {
 // self-contained runtime, including its wasm payload.
 copyInto(pkgDir("re2-wasm"), "re2-wasm");
 
-// Transformers.js is bundled into the CLI/MCP JavaScript, while its ONNX
-// engine remains external because esbuild cannot inline native `.node` files.
-// Copy the exact target native runtime and its dependency beside the bundles.
-const transformersSrc = pkgDir("@huggingface/transformers");
-copyInto(transformersSrc, "@huggingface/transformers");
-const onnxRuntimeSrc = pkgDir("onnxruntime-node", transformersSrc);
-const onnxRuntimeVersion = JSON.parse(readFileSync(join(onnxRuntimeSrc, "package.json"), "utf8")).version;
-const onnxTargetDir = join(onnxRuntimeSrc, "bin", "napi-v6", "darwin", targetArch);
-if (!statSync(onnxTargetDir, { throwIfNoEntry: false })) {
-  throw new Error(`onnxruntime-node@${onnxRuntimeVersion} has no darwin-${targetArch} payload; install/vendor the target package before release`);
-}
-const vendoredOnnxRuntime = copyInto(onnxRuntimeSrc, "onnxruntime-node");
-// onnxruntime-node publishes every supported OS/architecture in one npm
-// package. A macOS app can execute exactly one target payload, so retaining
-// Linux/Windows and the other Mac architecture only inflates the release.
-const vendoredOnnxNativeRoot = join(vendoredOnnxRuntime, "bin", "napi-v6");
-for (const platform of readdirSync(vendoredOnnxNativeRoot)) {
-  const platformDir = join(vendoredOnnxNativeRoot, platform);
-  if (!statSync(platformDir).isDirectory()) continue;
-  for (const arch of readdirSync(platformDir)) {
-    const archDir = join(platformDir, arch);
-    if (platform !== "darwin" || arch !== targetArch) {
-      rmSync(archDir, { recursive: true, force: true });
-    }
-  }
-  if (readdirSync(platformDir).length === 0) rmSync(platformDir, { recursive: true, force: true });
-}
-copyInto(pkgDir("onnxruntime-common", onnxRuntimeSrc), "onnxruntime-common");
-
-// Transformers imports Sharp at module initialization even for text-only
-// feature extraction. Its JavaScript is bundled, but the target binding and
-// libvips payload are resolved dynamically and must sit in node_modules.
-const sharpSrc = pkgDir("sharp", transformersSrc);
-const sharpVersion = JSON.parse(readFileSync(join(sharpSrc, "package.json"), "utf8")).version;
-const sharpPlatformPackage = `@img/sharp-darwin-${targetArch}`;
-const sharpLibvipsPackage = `@img/sharp-libvips-darwin-${targetArch}`;
-copyInto(sharpSrc, "sharp");
-copyInto(pkgDir("@img/colour", sharpSrc), "@img/colour");
-copyInto(pkgDir("detect-libc", sharpSrc), "detect-libc");
-copyInto(pkgDir("semver", sharpSrc), "semver");
-copyInto(pkgDir(sharpPlatformPackage, sharpSrc, "sharp.node"), sharpPlatformPackage);
-copyInto(pkgDir(sharpLibvipsPackage, sharpSrc, "lib"), sharpLibvipsPackage);
-
 // Overlay the target-arch/ABI prebuilt .node when the installed one (built for
 // the host) doesn't match the target. Host-matches-target → keep installed.
 const dotNode = join(vendoredModules, "better-sqlite3/build/Release/better_sqlite3.node");
@@ -232,32 +187,13 @@ if (hostMatches) {
 }
 chmodSync(nodeDst, 0o755);
 
-// --- 4) pinned local embedding model (verified, no runtime download) --------
-const selectedModel = modelConfig.selected;
-if (!selectedModel || selectedModel.runtimeDownloadAllowed !== false) {
-  throw new Error("pinned local embedding model is not selected");
-}
-const modelCacheDir = join(repoRoot, ".cache/models", selectedModel.bundleDirectory);
-for (const asset of selectedModel.assets) {
-  download(
-    `https://huggingface.co/${selectedModel.modelId}/resolve/${selectedModel.revision}/${asset.path}`,
-    join(modelCacheDir, asset.path),
-  );
-}
-const modelResult = materializePinnedEmbeddingModel({
-  selection: selectedModel,
-  cacheDirectory: modelCacheDir,
-  outputDirectory: join(bundleDir, "models", selectedModel.bundleDirectory),
-});
-
 console.log(
   `[vendor] target=darwin-${targetArch} node=${NODE_VERSION} (abi ${targetAbi})` +
     `${hostMatches ? " [reused host]" : " [downloaded]"}\n` +
-    `[vendor] better-sqlite3@${bsqVersion} + sqlite-vec@${sqliteVecVersion} (${sqliteVecPlatformPackage}) + onnxruntime-node@${onnxRuntimeVersion} + sharp@${sharpVersion} (${sharpPlatformPackage}) + ${grammarCount} grammars + runtime wasm → ${bundleDir}\n` +
-    `[vendor] ${selectedModel.modelId}@${selectedModel.revision.slice(0, 12)} (${modelResult.modelBytes} bytes, ${modelResult.assetCount} verified assets) → ${modelResult.outputDirectory}`,
+    `[vendor] better-sqlite3@${bsqVersion} + sqlite-vec@${sqliteVecVersion} (${sqliteVecPlatformPackage}) + ${grammarCount} grammars + runtime wasm → ${bundleDir}`,
 );
 
-// --- 5) materialize a self-contained MCP release directory -----------------
+// --- 4) materialize a self-contained MCP release directory -----------------
 // Keep dist beside node_modules so Node cannot accidentally resolve a pnpm
 // workspace addon compiled for a different ABI during doctor/release checks.
 rmSync(join(mcpBundleDir, "node_modules"), { recursive: true, force: true });

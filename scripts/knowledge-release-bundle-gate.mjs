@@ -102,28 +102,6 @@ export function assertBundleIdentityMatch({ appDir, appLabel, workspaceDir, work
   return { match: true, appIdentity, workspaceIdentity };
 }
 
-export function assertEmbeddedModelIdentity({ appDir, workspaceDir, manifestRelativePath }) {
-  const appPath = join(appDir, manifestRelativePath);
-  const workspacePath = join(workspaceDir, manifestRelativePath);
-  if (!existsSync(appPath) || !existsSync(workspacePath)) {
-    throw new Error(
-      `RELEASE_BUNDLE_STALE: embedding-model manifest is missing from installed app or workspace ` +
-        `(${appPath}; ${workspacePath}). Rebuild it with ` +
-        "`pnpm tauri build`, then rerun the gate.",
-    );
-  }
-  const appModelHash = createHash("sha256").update(readFileSync(appPath)).digest("hex");
-  const expectedModelHash = createHash("sha256").update(readFileSync(workspacePath)).digest("hex");
-  if (appModelHash !== expectedModelHash) {
-    throw new Error(
-      `RELEASE_BUNDLE_STALE: embedding-model manifest (${appPath}) does not match workspace ` +
-        `manifest (${workspacePath}). Rebuild it with ` +
-        "`pnpm tauri build`, then rerun the gate.",
-    );
-  }
-  return { expectedModelHash, appModelHash };
-}
-
 // Pre-probe guard: prove the app's embedded bundle is byte-identical to the
 // current workspace release bundle before we ever spawn the app. A stale app
 // (rebuilt workspace, un-rebuilt Tauri bundle) must fail here with an
@@ -147,6 +125,18 @@ const appPath = resolve(process.env.PENGUIN_APP_PATH ?? join(root, "src-tauri/ta
 const resources = join(appPath, "Contents", "Resources");
 const appVersion = JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version;
 const expectedCapabilityHash = capabilityHash(CAPABILITIES);
+// NOTE: "embedding-model", "embedding-model-manifest", "embedding-tokenizer",
+// "onnxruntime-node", and "sharp" are still published by
+// `native_runtime_dependencies()` in `src-tauri/src/knowledge.rs` (hardcoded
+// to the now-deleted `models/nomic-embed-text-v1.5/...` paths), and
+// `modelHash` throughout this file/the MCP+CLI capability contracts is
+// derived from that same embedded-model manifest. Removing the model files
+// (this task) did not update that Rust code or the modelHash plumbing — both
+// are out of this task's file scope (src-tauri/, runtime-identity.ts,
+// mcp/index.ts, command-dispatch.ts). Until a follow-up task removes the
+// hardcoded model dependency entries from knowledge.rs, a real
+// `pnpm tauri build` + this gate will still expect these five entries and a
+// real model hash. Flagged, not fixed here.
 const expectedRuntimeDependencies = [
   "better-sqlite3",
   "bundled-node",
@@ -351,12 +341,7 @@ let tempHome;
       workspaceDir: join(root, "packages/knowledge-cli/bundle"),
       workspaceLabel: "workspace release bundle (packages/knowledge-cli/bundle)",
       entryFiles: CLI_BUNDLE_ENTRY_FILES,
-      treeDirs: ["wasm", "models", "node_modules"],
-    }),
-    model: assertEmbeddedModelIdentity({
-      appDir: cliBundle,
-      workspaceDir: join(root, "packages/knowledge-cli/bundle"),
-      manifestRelativePath: "models/nomic-embed-text-v1.5/manifest.json",
+      treeDirs: ["wasm", "node_modules"],
     }),
   };
 
