@@ -2345,7 +2345,6 @@
                 "path",
                 "regex",
                 "lexical",
-                "semantic",
                 "structural"
               ]
             },
@@ -7355,7 +7354,6 @@
                 "path",
                 "regex",
                 "lexical",
-                "semantic",
                 "structural"
               ]
             },

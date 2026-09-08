@@ -5,7 +5,7 @@ import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { EmbeddingLifecycle, KnowledgeStore, createEmbeddingSpace } from "../packages/knowledge-core/dist/index.js";
+import { KnowledgeStore } from "../packages/knowledge-core/dist/index.js";
 import { runCli } from "../packages/knowledge-cli/dist/index.js";
 import { CAPABILITIES } from "../packages/knowledge-contracts/dist/index.js";
 
@@ -89,100 +89,6 @@ test("non-interactive mutations require the exact operation token", async () => 
 
   assert.equal(await runCli(["index", dir, `--confirm=${preview.operationToken}`], deps), 0);
   assert.equal(deps.storeExists(), true);
-});
-
-test("semantic CLI rejects pause/resume generation drift through the canonical validator", async () => {
-  const { deps, lines } = harness();
-  const store = deps.openStore();
-  store.close();
-  const code = await runCli([
-    "semantic", "pause", "--scope", "repo:repo-1", "--generation", "forbidden-generation",
-    "--operation-token", "operation-123", "--json",
-  ], deps);
-  assert.equal(code, 2);
-  assert.equal(JSON.parse(lines.at(-1)).error.code, "INVALID_SEMANTIC_CONTRACT");
-});
-
-test("semantic CLI returns an error envelope for operation token conflicts", async () => {
-  const { deps, lines, errs } = harness();
-  const store = deps.openStore();
-  const repoId = store.registerRepo({ name: "semantic-cli", rootPath: "/semantic-cli" });
-  const space = createEmbeddingSpace(store, {
-    providerId: "fixture",
-    modelId: "cli-conflict",
-    weightsDigest: "a".repeat(64),
-    tokenizerDigest: "b".repeat(64),
-    dimensions: 2,
-    pooling: "mean",
-    normalization: "none",
-    chunkerVersion: "v1",
-  });
-  new EmbeddingLifecycle(store).createGeneration({
-    spaceId: space.id,
-    snapshotId: "snapshot",
-    scopeKey: `repo:${repoId}`,
-    expectedChunks: 1,
-  });
-  new EmbeddingLifecycle(store).applyControl({
-    action: "pause",
-    scopeKey: `repo:${repoId}`,
-    operationToken: "cli-conflict-operation",
-  });
-  store.close();
-
-  const code = await runCli([
-    "semantic", "resume", "--scope", `repo:${repoId}`,
-    "--operation-token", "cli-conflict-operation", "--json",
-  ], deps);
-  assert.equal(code, 2);
-  assert.equal(JSON.parse(lines.at(-1)).error.code, "OPERATION_TOKEN_CONFLICT");
-  assert.equal(errs.some((line) => /\bat\s+\S+.*:\d+/u.test(line)), false, "CLI must not emit a stack trace");
-
-  lines.length = 0;
-  errs.length = 0;
-  const textCode = await runCli([
-    "semantic", "resume", "--scope", `repo:${repoId}`,
-    "--operation-token", "cli-conflict-operation",
-  ], deps);
-  assert.equal(textCode, 2);
-  assert.match(errs.join("\n"), /OPERATION_TOKEN_CONFLICT/);
-  assert.equal(errs.some((line) => /\bat\s+\S+.*:\d+/u.test(line)), false, "text CLI must not emit a stack trace");
-});
-
-function runCorruptSemanticCli(args) {
-  const dir = mkdtempSync(join(tmpdir(), "penguin-corrupt-semantic-"));
-  const dbPath = join(dir, "knowledge.db");
-  writeFileSync(dbPath, "not a sqlite database");
-  const result = spawnSync(process.execPath, ["packages/knowledge-cli/dist/bin.js", "semantic", "status", ...args], {
-    cwd: process.cwd(),
-    env: {
-      ...process.env,
-      PENGUIN_KNOWLEDGE_DB: dbPath,
-      PENGUIN_KNOWLEDGE_LEDGER: join(dir, "ledger.jsonl"),
-    },
-    encoding: "utf8",
-  });
-  rmSync(dir, { recursive: true, force: true });
-  return { ...result, dir };
-}
-
-test("semantic status sanitizes corrupt database failures as JSON", () => {
-  const result = runCorruptSemanticCli(["--json"]);
-  assert.equal(result.status, 3);
-  const payload = JSON.parse(result.stdout.trim());
-  assert.equal(payload.error.code, "KNOWLEDGE_DB_OPEN_FAILED");
-  assert.equal(result.stderr, "");
-  assert.doesNotMatch(result.stdout, new RegExp(result.dir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  assert.doesNotMatch(result.stdout, /command-dispatch\.(?:ts|js):\d+|\bat\s+\S+.*:\d+/u);
-});
-
-test("semantic status sanitizes corrupt database failures as text", () => {
-  const result = runCorruptSemanticCli([]);
-  assert.equal(result.status, 3);
-  assert.equal(result.stdout, "");
-  assert.match(result.stderr, /^KNOWLEDGE_DB_OPEN_FAILED: knowledge database could not be opened/i);
-  assert.doesNotMatch(result.stderr, new RegExp(result.dir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  assert.doesNotMatch(result.stderr, /command-dispatch\.(?:ts|js):\d+|\bat\s+\S+.*:\d+/u);
 });
 
 test("onboarding carries hashes and saves only after reviewing its exact token", async () => {

@@ -352,33 +352,13 @@ export function readPersistedCorpusTruth(
   const readySnapshot = snapshotId
     ? scalar(store.db, "SELECT COUNT(*) AS n FROM revision_snapshots WHERE id=? AND repo_id=? AND state='ready'", snapshotId, scope.repoId) === 1
     : false;
-  const chunks = snapshotId
-    ? scalar(store.db, "SELECT COUNT(*) AS n FROM semantic_chunks WHERE snapshot_id=? AND repo_id=?", snapshotId, scope.repoId)
-    : 0;
-  const ready = snapshotId
-    ? scalar(store.db, `
-        SELECT COUNT(*) AS n
-          FROM semantic_embedding_refs r
-          JOIN semantic_chunks c ON c.id=r.chunk_id
-         WHERE c.snapshot_id=? AND c.repo_id=? AND r.status='ready'
-      `, snapshotId, scope.repoId)
-    : 0;
-  const pending = snapshotId
-    ? scalar(store.db, `
-        SELECT COUNT(*) AS n
-          FROM semantic_embedding_refs r
-          JOIN semantic_chunks c ON c.id=r.chunk_id
-         WHERE c.snapshot_id=? AND c.repo_id=? AND r.status IN ('pending','running')
-      `, snapshotId, scope.repoId)
-    : 0;
-  const failed = snapshotId
-    ? scalar(store.db, `
-        SELECT COUNT(*) AS n
-          FROM semantic_embedding_refs r
-          JOIN semantic_chunks c ON c.id=r.chunk_id
-         WHERE c.snapshot_id=? AND c.repo_id=? AND r.status='failed'
-      `, snapshotId, scope.repoId)
-    : 0;
+  // The semantic/vector embedding subsystem (semantic_chunks,
+  // semantic_embedding_refs) was removed; those tables no longer exist, so
+  // this layer is always reported empty instead of querying for them.
+  const chunks = 0;
+  const ready = 0;
+  const pending = 0;
+  const failed = 0;
   const instance = store.db.prepare("SELECT value FROM meta WHERE key='database_instance_id'").get() as { value?: string } | undefined;
   return {
     counts: {

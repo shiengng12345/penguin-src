@@ -311,40 +311,15 @@ interface SemanticProgressSummary {
   activeGenerationIds: string[];
 }
 
+// The semantic/vector embedding subsystem (embedding_generations,
+// embedding_jobs, semantic_active_spaces) was removed; there is no
+// generation progress left to report, so this always returns the empty
+// summary instead of querying now-nonexistent tables.
 function semanticProgressForScopes(
-  store: KnowledgeStore,
-  scopes: ResolvedRevisionScope[],
+  _store: KnowledgeStore,
+  _scopes: ResolvedRevisionScope[],
 ): SemanticProgressSummary {
-  const summary: SemanticProgressSummary = { expected: 0, ready: 0, activeGenerationIds: [] };
-  const activeGenerationIds = new Set<string>();
-  const scopeKeys = new Set(
-    scopes
-      .map((scope) => scope.repoId ? `repo:${scope.repoId}` : null)
-      .filter((scopeKey): scopeKey is string => Boolean(scopeKey)),
-  );
-  const statement = store.db.prepare(`
-    SELECT g.expected_chunks AS expected,
-           COALESCE(SUM(j.status='ready'),0) AS ready,
-           active.generation_id AS activeGenerationId
-      FROM embedding_generations g
-     LEFT JOIN embedding_jobs j ON j.generation_id=g.id
-     LEFT JOIN semantic_active_spaces active ON active.scope_key=g.scope_key
-     WHERE g.id=COALESCE(
-       (SELECT generation_id FROM semantic_active_spaces WHERE scope_key=?),
-       (SELECT id FROM embedding_generations WHERE scope_key=? AND status='staging' ORDER BY created_at DESC,id DESC LIMIT 1),
-       (SELECT id FROM embedding_generations WHERE scope_key=? AND status='active' ORDER BY created_at DESC,id DESC LIMIT 1)
-     )
-     GROUP BY g.id
-  `);
-  for (const scopeKey of scopeKeys) {
-    const row = statement.get(scopeKey, scopeKey, scopeKey) as { expected: number; ready: number; activeGenerationId: string | null } | undefined;
-    if (!row) continue;
-    summary.expected += Number(row.expected);
-    summary.ready += Number(row.ready);
-    if (row.activeGenerationId) activeGenerationIds.add(row.activeGenerationId);
-  }
-  summary.activeGenerationIds = [...activeGenerationIds];
-  return summary;
+  return { expected: 0, ready: 0, activeGenerationIds: [] };
 }
 
 export function searchKnowledge(input: SearchRequest | NormalizedSearchRequest, context: SearchContext): SearchResponse {

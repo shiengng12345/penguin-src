@@ -47,12 +47,12 @@ test("openDatabase enables WAL", () => {
 test("openDatabase skipMaintenance avoids write-path index housekeeping", () => {
   const path = tempDbPath();
   const first = openDatabase(path);
-  first.exec("DROP INDEX idx_semantic_chunks_reuse");
+  first.exec("DROP INDEX idx_nodes_identity");
   first.close();
 
   const guarded = openDatabase(path, { skipMaintenance: true });
   assert.equal(
-    guarded.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_semantic_chunks_reuse'").get(),
+    guarded.prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_nodes_identity'").get(),
     undefined,
   );
   guarded.close();

@@ -8,10 +8,9 @@ import {
   GitTopologyStore,
   KnowledgeStore,
   affectedByNode,
-  listSemanticStatuses,
   searchKnowledge,
 } from "../packages/knowledge-core/dist/index.js";
-import { normalizeKnowledgeError, validateSemanticStatus } from "../packages/knowledge-contracts/dist/index.js";
+import { normalizeKnowledgeError } from "../packages/knowledge-contracts/dist/index.js";
 import * as core from "../packages/knowledge-core/dist/index.js";
 import { handleKnowledgeTool } from "../packages/mcp/dist/knowledge-tools.js";
 
@@ -66,32 +65,6 @@ test("[schema-skew] active branch schema skew is a typed incompatible state with
   } finally {
     store.close();
   }
-});
-
-test("[semantic-empty-state] reports a canonical not_queued state for a registered repository with no generation", () => {
-  const directory = mkdtempSync(join(tmpdir(), "penguin-capability-semantic-empty-"));
-  const rootPath = join(directory, "repo");
-  mkdirSync(rootPath);
-  const store = KnowledgeStore.open({
-    dbPath: join(directory, "knowledge.db"),
-    ledgerPath: join(directory, "ledger.jsonl"),
-  });
-  const repoId = store.registerRepo({ name: "EmptySemanticRepo", rootPath });
-
-  const statuses = listSemanticStatuses(store, `repo:${repoId}`);
-
-  assert.equal(statuses.length, 1);
-  assert.deepEqual(validateSemanticStatus(statuses[0]), statuses[0]);
-  assert.equal(statuses[0].state, "not_queued");
-  assert.equal(statuses[0].scopeKey, `repo:${repoId}`);
-  assert.equal(statuses[0].repoId, repoId);
-  assert.equal(statuses[0].generationId, null);
-  assert.equal(statuses[0].activeGenerationId, null);
-  assert.equal(statuses[0].expected, 0);
-  assert.equal(statuses[0].ready, 0);
-  assert.equal(statuses[0].progressPercent, 0);
-  assert.equal(statuses[0].reason, "SEMANTIC_GENERATION_NOT_QUEUED");
-  store.close();
 });
 
 test("[scope-kinds-symbol] repo and symbol kind scope cannot starve an exact symbol behind global FTS candidates", () => {

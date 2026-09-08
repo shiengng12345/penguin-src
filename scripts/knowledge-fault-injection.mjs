@@ -16,7 +16,7 @@ import { KnowledgeStore, canonicalPathForCheck } from "../packages/knowledge-cor
 import { indexRepo } from "../packages/knowledge-indexer/dist/index.js";
 import { assertDatabaseIntegrity, classifyError, writeImmutableJson } from "./knowledge-load-report.mjs";
 
-export const FAULT_CHECKPOINTS = ["scan", "parse", "publish", "maintenance", "semantic"];
+export const FAULT_CHECKPOINTS = ["scan", "parse", "publish", "maintenance"];
 const MAX_CHECKPOINTS = 5;
 const DEFAULT_TIMEOUT_MS = 30_000;
 
@@ -67,16 +67,6 @@ function requireInputs(options) {
 function childScript({ rootPath, dbPath, ledgerPath, checkpoint }) {
   const coreUrl = new URL("../packages/knowledge-core/dist/index.js", import.meta.url).href;
   const indexerUrl = new URL("../packages/knowledge-indexer/dist/index.js", import.meta.url).href;
-  const space = {
-    providerId: "fixture",
-    modelId: "fault-injection",
-    weightsDigest: "1".repeat(64),
-    tokenizerDigest: "2".repeat(64),
-    dimensions: 2,
-    pooling: "mean",
-    normalization: "none",
-    chunkerVersion: "semantic-chunker-v1",
-  };
   return `
     import { KnowledgeStore } from ${JSON.stringify(coreUrl)};
     import { indexRepo } from ${JSON.stringify(indexerUrl)};
@@ -84,19 +74,14 @@ function childScript({ rootPath, dbPath, ledgerPath, checkpoint }) {
     const store = KnowledgeStore.open({ dbPath: ${JSON.stringify(dbPath)}, ledgerPath: ${JSON.stringify(ledgerPath)} });
     const kill = () => process.kill(process.pid, "SIGKILL");
     const hooks = {
-      // Scan/parse are stage-entry boundaries. Semantic is intentionally
-      // injected after its generation is enqueued below, so this harness
-      // proves that a durable semantic job also survives an abrupt death.
-      beforeStage: ({ stage }) => { if (checkpoint === stage && stage !== "semantic") kill(); },
+      beforeStage: ({ stage }) => { if (checkpoint === stage) kill(); },
       beforeSnapshotPublish: () => { if (checkpoint === "publish") kill(); },
       beforeMaintenance: () => { if (checkpoint === "maintenance") kill(); },
-      afterSemanticEnqueue: () => { if (checkpoint === "semantic") kill(); },
     };
     await indexRepo({
       store,
       rootPath: ${JSON.stringify(rootPath)},
       mode: "rebuild",
-      semantic: checkpoint === "semantic" ? { enabled: true, space: ${JSON.stringify(space)} } : { enabled: false },
       testHooks: hooks,
     });
     store.close();
@@ -149,7 +134,7 @@ async function runCheckpoint(input) {
        WHERE s.state <> 'ready'
     `).get().count) === 0;
     try {
-      const report = await indexRepo({ store, rootPath: input.rootPath, mode: "incremental", semantic: { enabled: false } });
+      const report = await indexRepo({ store, rootPath: input.rootPath, mode: "incremental" });
       result.recovery = { ok: true, parsed: report.parsed, skipped: report.skipped, deleted: report.deleted, errors: report.errors, snapshotId: report.revisionTruth?.snapshotId ?? null };
     } catch (error) {
       const classified = classifyError(error);

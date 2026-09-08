@@ -477,21 +477,6 @@ test("cursor with changed limit returns CURSOR_REQUEST_MISMATCH error", async ()
   }
 });
 
-test("invalid semantic mode in search returns typed error", async () => {
-  const { store, repo, lines, deps, json } = fixture();
-  try {
-    const exitCode = await runCli(["search", "test", "--repo", repo, "--semantic", "invalid-mode", "--json"], deps);
-    assert.notEqual(exitCode, 0);
-    const payload = json();
-    assert.ok(payload.error);
-    assert.ok(payload.error.code);
-    assert.ok(payload.error.message);
-    assert.equal(typeof payload.error.retryable, "boolean");
-  } finally {
-    store.close();
-  }
-});
-
 test("missing required argument returns typed error with remediation", async () => {
   const { store, lines, deps, json } = fixture();
   try {

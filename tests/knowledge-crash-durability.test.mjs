@@ -18,7 +18,7 @@ test("all indexer crash checkpoints recover without publishing a broken snapshot
     dbPath: fixture.dbPath,
     ledgerPath: fixture.ledgerPath,
     reportPath: undefined,
-    checkpoints: ["scan", "parse", "publish", "maintenance", "semantic"],
+    checkpoints: ["scan", "parse", "publish", "maintenance"],
     timeoutMs: 30_000,
   });
 
@@ -28,7 +28,6 @@ test("all indexer crash checkpoints recover without publishing a broken snapshot
     "parse",
     "publish",
     "maintenance",
-    "semantic",
   ]);
   assert.ok(report.results.every((result) => result.childSignal === "SIGKILL"));
   assert.ok(report.results.every((result) => result.integrityBeforeRecovery?.ok === true));

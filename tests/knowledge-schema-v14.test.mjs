@@ -25,18 +25,6 @@ test("schema version is 18 and endpoint identity objects exist", () => {
   store.close();
 });
 
-test("schema installs semantic reuse performance indexes without a version bump", () => {
-  const store = freshStore();
-  const indexes = new Set(
-    store.db.prepare("SELECT name FROM sqlite_master WHERE type='index'").all().map((row) => row.name),
-  );
-  assert.ok(indexes.has("idx_semantic_chunks_snapshot"));
-  assert.ok(indexes.has("idx_semantic_chunks_reuse"));
-  assert.ok(indexes.has("idx_semantic_embedding_refs_reuse"));
-  assert.equal(Number(store.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value), 18);
-  store.close();
-});
-
 test("migration upgrades an empty v13 store idempotently", () => {
   const store = freshStore();
   // Simulate a pre-bump database: strip the new objects and mark it v13.
@@ -78,30 +66,6 @@ test("migration upgrades v14 repository and branch metadata without requiring re
   assert.deepEqual(reopened.db.prepare("SELECT id FROM branches").all(), [{ id: branchId }]);
   assert.ok(reopened.db.prepare("SELECT name FROM sqlite_master WHERE name='endpoint_aliases'").get());
   assert.ok(reopened.db.prepare("SELECT name FROM sqlite_master WHERE name='endpoint_memberships'").get());
-  reopened.close();
-});
-
-test("migration adds v17 semantic reference columns before creating their index", () => {
-  const store = freshStore();
-  // Reproduce a real v15 table: semantic_embedding_refs already exists, but
-  // the v17 generation/space columns and their composite index do not.
-  store.db.exec("DROP INDEX idx_semantic_embedding_refs_generation");
-  store.db.exec("DROP INDEX idx_semantic_embedding_refs_reuse");
-  store.db.exec("ALTER TABLE semantic_embedding_refs DROP COLUMN generation_id");
-  store.db.exec("ALTER TABLE semantic_embedding_refs DROP COLUMN space_id");
-  store.db.prepare("UPDATE meta SET value='15' WHERE key='schema_version'").run();
-  const dbPath = store.db.name;
-  store.close();
-
-  const reopened = KnowledgeStore.open({
-    dbPath,
-    ledgerPath: dbPath.replace(/knowledge\.db$/, "ledger.jsonl"),
-  });
-  const columns = reopened.db.prepare("PRAGMA table_info(semantic_embedding_refs)").all().map((column) => column.name);
-  assert.ok(columns.includes("generation_id"));
-  assert.ok(columns.includes("space_id"));
-  assert.ok(reopened.db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_semantic_embedding_refs_generation'").get());
-  assert.equal(Number(reopened.db.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value), 18);
   reopened.close();
 });
 

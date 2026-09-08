@@ -20,7 +20,9 @@ export function previewKnowledgeArtifact(store: KnowledgeStore, options: Pick<Ar
   const count = (table: string): number => Number((store.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n ?? 0);
   const pageCount = Number(store.db.pragma("page_count", { simple: true }) ?? 0);
   const pageSize = Number(store.db.pragma("page_size", { simple: true }) ?? 4096);
-  return { estimatedBytes: pageCount * pageSize, included: { source: options.includeSource === true, notes: options.includeNotes === true, evidence: options.includeEvidence === true, embeddings: options.includeEmbeddings === true }, counts: { sourceBlobs: options.includeSource ? count("source_blobs") : 0, notes: options.includeNotes ? count("fts_notes") : 0, evidence: options.includeEvidence ? count("trust_evidence") : 0, embeddings: options.includeEmbeddings ? count("semantic_chunks") : 0 }, ...(options.repoIds?.length ? { repoIds: options.repoIds } : {}), ...(options.snapshotIds?.length ? { snapshotIds: options.snapshotIds } : {}), requiresConfirmation: true };
+  // semantic_chunks no longer exists (the embedding subsystem was removed),
+  // so the embeddings count is always 0 regardless of includeEmbeddings.
+  return { estimatedBytes: pageCount * pageSize, included: { source: options.includeSource === true, notes: options.includeNotes === true, evidence: options.includeEvidence === true, embeddings: options.includeEmbeddings === true }, counts: { sourceBlobs: options.includeSource ? count("source_blobs") : 0, notes: options.includeNotes ? count("fts_notes") : 0, evidence: options.includeEvidence ? count("trust_evidence") : 0, embeddings: 0 }, ...(options.repoIds?.length ? { repoIds: options.repoIds } : {}), ...(options.snapshotIds?.length ? { snapshotIds: options.snapshotIds } : {}), requiresConfirmation: true };
 }
 const DELTA_CHUNK_SIZE = 64 * 1024;
 function deltaFor(base: Uint8Array, current: Uint8Array, tombstoneCount: number): { delta: Uint8Array; manifest: { algorithm: "fixed-chunk-v1"; chunkSize: number; baseDatabaseBytes: number; tombstoneCount: number } } {
@@ -123,9 +125,10 @@ export function exportKnowledgeArtifact(store: KnowledgeStore, options: Artifact
     if (options.includeEvidence !== true) {
       for (const table of ["finding_evidence", "validated_findings", "trust_evidence"]) artifactDb.prepare(`DELETE FROM ${table}`).run();
     }
-    if (options.includeEmbeddings !== true) {
-      for (const table of ["semantic_embedding_refs", "semantic_vector_values", "embedding_models", "semantic_chunks"]) artifactDb.prepare(`DELETE FROM ${table}`).run();
-    }
+    // The semantic/vector embedding subsystem (semantic_embedding_refs,
+    // semantic_vector_values, embedding_models, semantic_chunks) was
+    // removed; those tables no longer exist in any database, so there is
+    // nothing left to strip regardless of options.includeEmbeddings.
     if (options.baseDatabase) tombstoneCount = addArtifactTombstones(artifactDb, options.baseDatabase, DatabaseConstructor, cloneDir, sha(options.baseDatabase));
   } finally {
     artifactDb.close();

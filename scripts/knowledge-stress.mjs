@@ -20,7 +20,6 @@ import {
   KnowledgeStore,
   assertWorkspacePath,
   canonicalPathForCheck,
-  listSemanticStatuses,
 } from "../packages/knowledge-core/dist/index.js";
 import { discoverFullCorpusRepositories, indexRepo } from "../packages/knowledge-indexer/dist/index.js";
 import {
@@ -840,17 +839,10 @@ export async function runStressProfile({ rootPath, dbPath, ledgerPath, profileNa
       ? runMcpLoad({ rootPath, dbPath, ledgerPath, ledgerInitiallyEmpty: mcpLedgerInitiallyEmpty, profile, options }).catch((error) => failedMcpLoad(profile, error))
       : Promise.resolve(mcpReport);
     [, , mcpReport] = await Promise.all([reads, writers, mcp]);
-    try {
-      const statuses = listSemanticStatuses(store);
-      const eligible = statuses.filter((status) => status.expected > 0);
-      const unavailable = statuses.filter((status) => ["disabled", "stalled", "cancelled", "superseded"].includes(status.state));
-      if (eligible.length === 0) accumulator.gaps.push("semantic_no_eligible_space_or_explicitly_unavailable");
-      accumulator.semantic = { spaces: statuses.length, eligible: eligible.length, unavailable: unavailable.length, states: statuses.map((status) => ({ scopeKey: status.scopeKey, state: status.state, ready: status.ready, expected: status.expected })) };
-    } catch (error) {
-      const classified = classifyError(error);
-      accumulator.semantic = { status: "unavailable", error: classified.code ?? classified.type };
-      accumulator.gaps.push("semantic_status_unavailable");
-    }
+    // The semantic/vector embedding subsystem was removed; there is no
+    // generation status left to sample.
+    accumulator.semantic = { status: "unavailable", error: "SEMANTIC_SUBSYSTEM_REMOVED" };
+    accumulator.gaps.push("semantic_status_unavailable");
     integrity = assertDatabaseIntegrity(store);
   } catch (error) {
     const classified = classifyError(error);

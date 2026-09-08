@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
 import { pathToFileURL } from "node:url";
-import { EmbeddingLifecycle, KnowledgeStore, GitTopologyStore, SourceStore, SourceSnapshotStore, createEmbeddingSpace } from "../packages/knowledge-core/dist/index.js";
+import { KnowledgeStore, GitTopologyStore, SourceStore, SourceSnapshotStore } from "../packages/knowledge-core/dist/index.js";
 import { QueryWorkerPool } from "../packages/knowledge-cli/dist/query-server.js";
 
 function createFixture() {
@@ -39,22 +39,6 @@ function createFixture() {
   const cow = new SourceSnapshotStore(store);
   cow.replaceOverlay(snapshot.id, [{ op: "add", path: "src/runtime.ts", sourceFactId: fact }]);
   cow.materializeManifest(snapshot.id);
-  const space = createEmbeddingSpace(store, {
-    providerId: "fixture",
-    modelId: "query-runtime",
-    weightsDigest: "a".repeat(64),
-    tokenizerDigest: "b".repeat(64),
-    dimensions: 2,
-    pooling: "mean",
-    normalization: "none",
-    chunkerVersion: "v1",
-  });
-  new EmbeddingLifecycle(store).createGeneration({
-    spaceId: space.id,
-    snapshotId: snapshot.id,
-    scopeKey: `repo:${repoId}`,
-    expectedChunks: 1,
-  });
   store.close();
   return { dir, dbPath, ledgerPath, snapshotId: snapshot.id, repoId };
 }
@@ -114,35 +98,6 @@ test("resident query runtime speaks JSONL and returns real source search results
     assert.equal(capabilities.result.capabilityHash, hello.capabilityHash);
     assert.ok(capabilities.result.capabilities.some((item) => item.id === "knowledge.search"));
 
-    const operationToken = "query-runtime-operation";
-    child.stdin.write(JSON.stringify({ type: "request", id: "semantic-control", capabilityId: "knowledge.semantic_control", input: {
-      action: "pause",
-      scopeKey: `repo:${fixture.repoId}`,
-      operationToken,
-    } }) + "\n");
-    const controlled = await reader.next((frame) => frame.id === "semantic-control");
-    assert.equal(controlled.ok, true);
-    assert.equal(controlled.result.operationToken, operationToken);
-    assert.equal(controlled.result.status.scopeKey, `repo:${fixture.repoId}`);
-
-    child.stdin.write(JSON.stringify({ type: "request", id: "semantic-replay", capabilityId: "knowledge.semantic_control", input: {
-      action: "pause",
-      scopeKey: `repo:${fixture.repoId}`,
-      operationToken,
-    } }) + "\n");
-    const replayed = await reader.next((frame) => frame.id === "semantic-replay");
-    assert.equal(replayed.ok, true);
-    assert.equal(replayed.result.operationToken, operationToken);
-
-    child.stdin.write(JSON.stringify({ type: "request", id: "semantic-conflict", capabilityId: "knowledge.semantic_control", input: {
-      action: "resume",
-      scopeKey: `repo:${fixture.repoId}`,
-      operationToken,
-    } }) + "\n");
-    const conflict = await reader.next((frame) => frame.id === "semantic-conflict");
-    assert.equal(conflict.ok, false);
-    assert.equal(conflict.error.code, "OPERATION_TOKEN_CONFLICT");
-
     child.stdin.write(JSON.stringify({ type: "request", id: "compat", capabilityId: "knowledge.cli", input: { args: ["status", "--json"] } }) + "\n");
     const compat = await reader.next((frame) => frame.id === "compat");
     assert.equal(compat.ok, true);
@@ -182,13 +137,6 @@ test("resident query runtime speaks JSONL and returns real source search results
     const badSchema = await reader.next((frame) => frame.id === "bad-schema");
     assert.equal(badSchema.ok, false);
     assert.equal(badSchema.error.code, "INVALID_SEARCH_REQUEST");
-
-    child.stdin.write(JSON.stringify({ type: "request", id: "bad-scope", capabilityId: "knowledge.semantic_status", input: {
-      scopeKey: "repo-that-does-not-exist",
-    } }) + "\n");
-    const badScope = await reader.next((frame) => frame.id === "bad-scope");
-    assert.equal(badScope.ok, false);
-    assert.equal(badScope.error.code, "SCOPE_NOT_FOUND");
 
     child.stdin.write(JSON.stringify({ type: "request", id: "hit", capabilityId: "knowledge.get_hit", input: {
       snapshotId: fixture.snapshotId,

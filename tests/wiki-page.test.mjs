@@ -11,7 +11,6 @@ test("Wiki human surface defaults to graph without the retired Focus navigation"
   assert.doesNotMatch(page, /icon=\{<Search/);
   assert.doesNotMatch(page, /<WikiSearchPage/);
   assert.match(page, />Graph<\/TabBtn>/);
-  assert.match(page, /<SemanticWorkerPanel/);
   assert.match(page, /WikiContextPane/);
   assert.match(page, /Relations/);
   assert.doesNotMatch(page, /SLS Evidence/);

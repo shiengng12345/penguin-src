@@ -14,7 +14,6 @@ test("schema reference is generated from migration metadata", () => {
   const source = readFileSync("docs/knowledge-v2/schema-reference.md", "utf8");
   assert.match(source, /Current schema version:\*\*\s*18/);
   assert.match(source, /source-snapshots/);
-  assert.match(source, /semantic_chunks/);
   assert.doesNotMatch(source, /TODO|placeholder/i);
 });
 
