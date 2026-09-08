@@ -137,8 +137,6 @@ const WIKI_CAPABILITY_IDS = new Set([
   "knowledge.capabilities",
   "knowledge.index_status",
   "knowledge.status_panel",
-  "knowledge.semantic_status",
-  "knowledge.semantic_control",
   "knowledge.get_node",
   "knowledge.callers",
   "knowledge.callees",

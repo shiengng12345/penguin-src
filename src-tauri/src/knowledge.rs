@@ -173,7 +173,7 @@ fn note_runtime_crash(state: &QueryRuntimeState) -> Result<bool, String> {
 // Keep this value synchronized with @penguin/knowledge-contracts. The
 // handshake must reject a bundled CLI whose capability surface differs from
 // the Tauri build; accepting any non-empty hash would allow silent drift.
-const EXPECTED_CAPABILITY_HASH: &str = "f99fca378bb72ee30313ccc9da98ce4eb353c9b41eff230726186fd16446b67f";
+const EXPECTED_CAPABILITY_HASH: &str = "612319c1e6048355cc469bb7ad1efb1a2b01afe34ea585897cbad9fd028e1d26";
 const EXPECTED_SCHEMA_VERSION: u64 = 18;
 
 fn validate_runtime_hello(frame: &serde_json::Value) -> Result<(), String> {

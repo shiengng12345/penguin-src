@@ -3,7 +3,7 @@
     "schemaVersion": "18",
     "contractVersion": "2",
     "buildId": "local",
-    "capabilityHash": "f99fca378bb72ee30313ccc9da98ce4eb353c9b41eff230726186fd16446b67f",
+    "capabilityHash": "612319c1e6048355cc469bb7ad1efb1a2b01afe34ea585897cbad9fd028e1d26",
     "modelHash": "4193e4f88c3f16239a6853400ae2765b4b0903e97c80fcbfd814af24dd2a01e5",
     "capabilities": [
       {
@@ -305,8 +305,7 @@
         "coreOperation": "knowledge.semantic_status",
         "requiredOn": [
           "cli",
-          "mcp",
-          "wiki"
+          "mcp"
         ],
         "supportsCompact": false,
         "supportsCursor": false,
@@ -328,8 +327,7 @@
         "coreOperation": "knowledge.semantic_control",
         "requiredOn": [
           "cli",
-          "mcp",
-          "wiki"
+          "mcp"
         ],
         "supportsCompact": false,
         "supportsCursor": false,
@@ -5008,7 +5006,7 @@
     "schemaVersion": "18",
     "contractVersion": "2",
     "buildId": "local",
-    "capabilityHash": "f99fca378bb72ee30313ccc9da98ce4eb353c9b41eff230726186fd16446b67f",
+    "capabilityHash": "612319c1e6048355cc469bb7ad1efb1a2b01afe34ea585897cbad9fd028e1d26",
     "modelHash": "unknown",
     "capabilities": [
       {
@@ -5310,8 +5308,7 @@
         "coreOperation": "knowledge.semantic_status",
         "requiredOn": [
           "cli",
-          "mcp",
-          "wiki"
+          "mcp"
         ],
         "supportsCompact": false,
         "supportsCursor": false,
@@ -5333,8 +5330,7 @@
         "coreOperation": "knowledge.semantic_control",
         "requiredOn": [
           "cli",
-          "mcp",
-          "wiki"
+          "mcp"
         ],
         "supportsCompact": false,
         "supportsCursor": false,

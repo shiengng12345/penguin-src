@@ -112,10 +112,13 @@ test("semantic capabilities are canonical and controls require confirmation", ()
   const control = contracts.CAPABILITIES.find((capability) => capability.id === "knowledge.semantic_control");
   assert.equal(status?.mutating, false);
   assert.equal(status?.confirmation, "not_required");
-  assert.equal(status?.requiredOn.includes("wiki"), true);
+  // Wiki no longer uses (or requires) the semantic status/control
+  // capabilities — they stay declared and callable (per the disclosed
+  // exception), just no longer associated with the wiki surface.
+  assert.equal(status?.requiredOn.includes("wiki"), false);
   assert.equal(control?.mutating, true);
   assert.equal(control?.confirmation, "required");
-  assert.equal(control?.requiredOn.includes("wiki"), true);
+  assert.equal(control?.requiredOn.includes("wiki"), false);
   assert.equal(contracts.canonicalInputSchema("knowledge.semantic_status").additionalProperties, false);
   const schema = contracts.canonicalInputSchema("knowledge.semantic_control");
   assert.deepEqual(schema.required, ["action", "scopeKey", "operationToken"]);
