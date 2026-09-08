@@ -111,36 +111,6 @@ function openStore(directory, name = "knowledge") {
   });
 }
 
-function insertSemanticFixture(store, repoId, snapshotId, prefix, sharedVectorRowId = null) {
-  const now = "2026-09-01T00:00:00.000Z";
-  const modelHash = `${prefix}-model`.padEnd(64, "0").slice(0, 64);
-  const spaceId = `${prefix}-space`;
-  store.db.prepare(
-    "INSERT OR IGNORE INTO embedding_models(model_hash,provider_id,model_id,dimensions,vec_table_name,installed_at) VALUES (?,?,?,?,?,?)",
-  ).run(modelHash, "fixture", "fixture-model", 2, `${prefix}_vec`, now);
-  store.db.prepare(
-    "INSERT INTO embedding_spaces(id,identity_hash,provider_id,model_id,weights_digest,tokenizer_digest,preprocessing_digest,dimensions,pooling,normalization,chunker_version,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-  ).run(spaceId, `${prefix}-identity`, "fixture", "fixture-model", "weights", "tokenizer", "preprocess", 2, "mean", "l2", "chunker-1", now);
-  store.db.prepare(
-    "INSERT INTO embedding_generations(id,space_id,snapshot_id,scope_key,status,expected_chunks,created_at) VALUES (?,?,?,?,?,?,?)",
-  ).run(`${prefix}-generation`, spaceId, snapshotId, `repo:${store.db.prepare("SELECT repo_id FROM revision_snapshots WHERE id=?").get(snapshotId)?.repo_id ?? prefix}`, "active", 1, now);
-
-  const ownVector = store.db.prepare(
-    "INSERT INTO semantic_vector_values(model_hash,dimensions,vector_json,created_at) VALUES (?,?,?,?)",
-  ).run(modelHash, 2, "[0.1,0.2]", now).lastInsertRowid;
-  const sharedVector = sharedVectorRowId ?? store.db.prepare(
-    "INSERT INTO semantic_vector_values(model_hash,dimensions,vector_json,created_at) VALUES (?,?,?,?)",
-  ).run(modelHash, 2, "[0.3,0.4]", now).lastInsertRowid;
-  const chunkId = `${prefix}-chunk`;
-  store.db.prepare(
-    "INSERT INTO semantic_chunks(id,content_hash,source_blob_id,node_id,repo_id,snapshot_id,canonical_file_path,identity_hash,chunker_version,start_byte,end_byte,chunk_kind,text_hash,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-  ).run(chunkId, `${prefix}-content`, null, null, repoId, snapshotId, "src.ts", `${prefix}-chunk-identity`, "chunker-1", 0, 10, "file", `${prefix}-text`, now);
-  store.db.prepare(
-    "INSERT INTO semantic_embedding_refs(model_hash,chunk_id,vec_rowid,status,error,embedded_at,generation_id,space_id) VALUES (?,?,?,?,?,?,?,?)",
-  ).run(modelHash, chunkId, ownVector, "ready", null, now, `${prefix}-generation`, spaceId);
-  return { modelHash, ownVector: Number(ownVector), sharedVector: Number(sharedVector), chunkId };
-}
-
 function seedRepo(store, repo, name) {
   const repoId = store.registerRepo({ name, rootPath: repo.path });
   const branchId = store.registerBranch({ repoId, name: "main", headCommit: repo.head, status: "live" });
@@ -248,23 +218,7 @@ function seedRepo(store, repo, name) {
     "INSERT INTO source_blob_line_offsets(source_blob_id,line_count,total_chars,total_bytes,start_chars,start_bytes) VALUES (?,?,?,?,?,?)",
   ).run(sourceBlob, 1, 12, 12, Buffer.from(new Uint32Array([0]).buffer), Buffer.from(new Uint32Array([0]).buffer));
 
-  const targetVector = insertSemanticFixture(store, repoId, snapshotId, name);
-  store.db.prepare(
-    "INSERT INTO semantic_active_spaces(scope_key,generation_id,previous_generation_id,activated_at) VALUES (?,?,?,?)",
-  ).run(`repo:${repoId}`, `${name}-generation`, null, "2026-09-01T00:00:00.000Z");
-  return { name, repoId, branchId, parserNode, parserTarget, noteNode, secondNote, snapshotId, sourceBlob: Number(sourceBlob), ...targetVector };
-}
-
-function addSharedOutsideVector(store, outside, sharedVector) {
-  const outsideRepoId = outside.repoId;
-  const outsideSnapshotId = `${outside.name}-snapshot`;
-  store.db.prepare(
-    "INSERT INTO semantic_chunks(id,content_hash,source_blob_id,node_id,repo_id,snapshot_id,canonical_file_path,identity_hash,chunker_version,start_byte,end_byte,chunk_kind,text_hash,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-  ).run(`${outside.name}-shared-chunk`, `${outside.name}-shared-content`, null, null, null, outsideSnapshotId, "src.ts", `${outside.name}-shared-identity`, "chunker-1", 0, 10, "file", `${outside.name}-shared-text`, "2026-09-01T00:00:00.000Z");
-  store.db.prepare(
-    "INSERT INTO semantic_embedding_refs(model_hash,chunk_id,vec_rowid,status,error,embedded_at,generation_id,space_id) VALUES (?,?,?,?,?,?,?,?)",
-  ).run(outside.modelHash, `${outside.name}-shared-chunk`, sharedVector, "ready", null, "2026-09-01T00:00:00.000Z", `${outside.name}-generation`, `${outside.name}-space`);
-  void outsideRepoId;
+  return { name, repoId, branchId, parserNode, parserTarget, noteNode, secondNote, snapshotId, sourceBlob: Number(sourceBlob) };
 }
 
 async function fixture() {
@@ -278,7 +232,6 @@ async function fixture() {
   const a = seedRepo(store, targetA, "target-a");
   const b = seedRepo(store, targetB, "target-b");
   const outsideSeed = seedRepo(store, outside, "outside");
-  addSharedOutsideVector(store, outsideSeed, a.sharedVector);
   return {
     directory,
     projects,
@@ -713,10 +666,6 @@ test("full reset writer fence is fail-closed and token is single-use", async () 
   assert.equal(f.store.db.prepare("SELECT COUNT(*) AS n FROM nodes WHERE id=?").get(f.a.noteNode).n, 1);
   assert.equal(f.store.db.prepare("SELECT COUNT(*) AS n FROM edges WHERE origin='parser' AND branch_id IN (?,?)").get(f.a.branchId, f.b.branchId).n, 0);
   assert.equal(f.store.db.prepare("SELECT COUNT(*) AS n FROM edges WHERE origin<>'parser'").get().n, 3);
-  assert.equal(f.store.db.prepare("SELECT COUNT(*) AS n FROM semantic_embedding_refs WHERE chunk_id=?").get(f.a.chunkId).n, 0);
-  assert.equal(f.store.db.prepare("SELECT COUNT(*) AS n FROM semantic_embedding_refs WHERE chunk_id=?").get("outside-shared-chunk").n, 1);
-  assert.equal(f.store.db.prepare("SELECT COUNT(*) AS n FROM semantic_vector_values WHERE vec_rowid=?").get(f.a.sharedVector).n, 1);
-  assert.equal(f.store.db.prepare("SELECT COUNT(*) AS n FROM semantic_vector_values WHERE vec_rowid=?").get(f.a.ownVector).n, 0);
   assert.equal(f.store.db.prepare("SELECT COUNT(*) AS n FROM source_blobs WHERE id=?").get(f.a.sourceBlob).n, 0);
   const manifest = readResetManifest(f.manifestPath);
   assert.equal(manifest.tokenConsumed, true);

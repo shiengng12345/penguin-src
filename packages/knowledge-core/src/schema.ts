@@ -105,26 +105,6 @@ CREATE INDEX IF NOT EXISTS idx_unresolved_reference_items_revision_reason
   ON unresolved_reference_items(repo_id, revision_id, reason_code, file_path, start_line, id);
 `;
 
-const SEMANTIC_REUSE_INDEX_NAMES = [
-  "idx_semantic_chunks_snapshot",
-  "idx_semantic_chunks_reuse",
-  "idx_semantic_embedding_refs_reuse",
-] as const;
-
-// Embedding backfill plans reuse in one snapshot-wide join. These indexes
-// keep that join proportional to the current snapshot instead of repeatedly
-// scanning every historical semantic chunk and generation.
-const SEMANTIC_REUSE_INDEX_DDL = `
-CREATE INDEX IF NOT EXISTS idx_semantic_chunks_snapshot
-  ON semantic_chunks(snapshot_id, id);
-
-CREATE INDEX IF NOT EXISTS idx_semantic_chunks_reuse
-  ON semantic_chunks(repo_id, canonical_file_path, content_hash, chunker_version, id);
-
-CREATE INDEX IF NOT EXISTS idx_semantic_embedding_refs_reuse
-  ON semantic_embedding_refs(model_hash, space_id, status, chunk_id, generation_id);
-`;
-
 export type SchemaMaintenanceEvent =
   | {
       operation: "edge-replacement-indexes";
@@ -137,12 +117,6 @@ export type SchemaMaintenanceEvent =
       phase: "start" | "complete";
       symbolRows?: number;
       identifierRows?: number;
-      elapsedMs?: number;
-    }
-  | {
-      operation: "semantic-reuse-indexes";
-      phase: "start" | "complete";
-      indexes: readonly string[];
       elapsedMs?: number;
     }
   | {
@@ -1030,115 +1004,6 @@ CREATE TABLE IF NOT EXISTS search_feedback (
   capability_hash TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
-CREATE TABLE IF NOT EXISTS semantic_chunks (
-  id TEXT PRIMARY KEY,
-  content_hash TEXT NOT NULL,
-  source_blob_id INTEGER,
-  node_id TEXT,
-  repo_id TEXT,
-  snapshot_id TEXT,
-  canonical_file_path TEXT,
-  identity_hash TEXT,
-  chunker_version TEXT,
-  start_byte INTEGER,
-  end_byte INTEGER,
-  chunk_kind TEXT NOT NULL,
-  text_hash TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS embedding_models (
-  model_hash TEXT PRIMARY KEY,
-  provider_id TEXT NOT NULL,
-  model_id TEXT NOT NULL,
-  dimensions INTEGER NOT NULL,
-  vec_table_name TEXT NOT NULL UNIQUE,
-  installed_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS semantic_embedding_refs (
-  model_hash TEXT NOT NULL,
-  chunk_id TEXT NOT NULL,
-  vec_rowid INTEGER,
-  status TEXT NOT NULL,
-  error TEXT,
-  embedded_at TEXT,
-  generation_id TEXT,
-  space_id TEXT,
-  PRIMARY KEY (model_hash, chunk_id)
-);
-CREATE TABLE IF NOT EXISTS semantic_vector_values (
-  vec_rowid INTEGER PRIMARY KEY AUTOINCREMENT,
-  model_hash TEXT NOT NULL,
-  dimensions INTEGER NOT NULL,
-  vector_json TEXT NOT NULL,
-  vector_table_name TEXT,
-  created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_semantic_vector_values_model ON semantic_vector_values(model_hash);
-CREATE TABLE IF NOT EXISTS embedding_spaces (
-  id TEXT PRIMARY KEY,
-  identity_hash TEXT NOT NULL UNIQUE,
-  provider_id TEXT NOT NULL,
-  model_id TEXT NOT NULL,
-  weights_digest TEXT NOT NULL,
-  tokenizer_digest TEXT NOT NULL,
-  preprocessing_digest TEXT NOT NULL,
-  dimensions INTEGER NOT NULL,
-  pooling TEXT NOT NULL,
-  normalization TEXT NOT NULL,
-  chunker_version TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS embedding_generations (
-  id TEXT PRIMARY KEY,
-  space_id TEXT NOT NULL REFERENCES embedding_spaces(id),
-  snapshot_id TEXT NOT NULL,
-  scope_key TEXT NOT NULL,
-  status TEXT NOT NULL CHECK (status IN ('staging','active','retired','failed')),
-  expected_chunks INTEGER NOT NULL,
-  created_at TEXT NOT NULL,
-  activated_at TEXT,
-  retired_at TEXT,
-  failure_reason TEXT,
-  UNIQUE (space_id, snapshot_id, scope_key)
-);
-CREATE INDEX IF NOT EXISTS idx_embedding_generations_scope_status
-  ON embedding_generations(scope_key, status, created_at);
-CREATE TABLE IF NOT EXISTS embedding_jobs (
-  id TEXT PRIMARY KEY,
-  generation_id TEXT NOT NULL REFERENCES embedding_generations(id),
-  chunk_id TEXT NOT NULL REFERENCES semantic_chunks(id),
-  status TEXT NOT NULL CHECK (status IN ('pending','running','ready','failed','deleting')),
-  attempts INTEGER NOT NULL DEFAULT 0,
-  error TEXT,
-  lease_owner TEXT,
-  lease_expires_at TEXT,
-  next_attempt_at TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  UNIQUE (generation_id, chunk_id)
-);
-CREATE INDEX IF NOT EXISTS idx_embedding_jobs_generation_status
-  ON embedding_jobs(generation_id, status, chunk_id);
-CREATE TABLE IF NOT EXISTS semantic_worker_leases (
-  lock_name TEXT PRIMARY KEY,
-  owner_id TEXT NOT NULL,
-  owner_pid INTEGER NOT NULL,
-  build_id TEXT NOT NULL,
-  heartbeat_at TEXT NOT NULL,
-  lease_expires_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS semantic_controls (
-  scope_key TEXT PRIMARY KEY,
-  pause_requested INTEGER NOT NULL DEFAULT 0 CHECK (pause_requested IN (0,1)),
-  cancelled_generation_id TEXT,
-  updated_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS semantic_active_spaces (
-  scope_key TEXT PRIMARY KEY,
-  generation_id TEXT NOT NULL REFERENCES embedding_generations(id),
-  previous_generation_id TEXT REFERENCES embedding_generations(id),
-  activated_at TEXT NOT NULL
-);
 CREATE TABLE IF NOT EXISTS reflection_suggestions (
   id TEXT PRIMARY KEY,
   status TEXT NOT NULL,
@@ -1333,23 +1198,8 @@ function databaseLogicalDigest(db: Database.Database): string {
   const repos = tables.has("repos")
     ? db.prepare("SELECT id,name,root_path,remote_url,created_at FROM repos ORDER BY id").all()
     : [];
-  const semanticTables = [
-    "embedding_generations",
-    "embedding_jobs",
-    "semantic_chunks",
-    "semantic_embedding_refs",
-    "semantic_vector_values",
-    "semantic_active_spaces",
-    "knowledge_audit_events",
-  ];
-  const semanticCounts = semanticTables
-    .filter((table) => tables.has(table))
-    .map((table) => ({
-      table,
-      count: Number((db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count),
-    }));
   return createHash("sha256")
-    .update(JSON.stringify({ schema, meta, repos, semanticCounts }))
+    .update(JSON.stringify({ schema, meta, repos }))
     .digest("hex");
 }
 
@@ -2462,77 +2312,6 @@ function migrate(db: Database.Database, _from: number): void {
   if (unresolvedItemCols.length > 0 && !unresolvedItemCols.includes("classification")) {
     db.exec("ALTER TABLE unresolved_reference_items ADD COLUMN classification TEXT NOT NULL DEFAULT 'missing_internal'");
   }
-  const semanticChunkCols = (db.prepare("PRAGMA table_info(semantic_chunks)").all() as { name: string }[]).map((c) => c.name);
-  for (const [column, definition] of [
-    ["repo_id", "TEXT"],
-    ["snapshot_id", "TEXT"],
-    ["canonical_file_path", "TEXT"],
-    ["identity_hash", "TEXT"],
-    ["chunker_version", "TEXT"],
-  ] as const) {
-    if (semanticChunkCols.length > 0 && !semanticChunkCols.includes(column)) db.exec(`ALTER TABLE semantic_chunks ADD COLUMN ${column} ${definition}`);
-  }
-  const semanticRefCols = (db.prepare("PRAGMA table_info(semantic_embedding_refs)").all() as { name: string }[]).map((c) => c.name);
-  for (const [column, definition] of [["generation_id", "TEXT"], ["space_id", "TEXT"]] as const) {
-    if (semanticRefCols.length > 0 && !semanticRefCols.includes(column)) db.exec(`ALTER TABLE semantic_embedding_refs ADD COLUMN ${column} ${definition}`);
-  }
-  // Vector rows may now live in a generation-partitioned vec0 table. Keep the
-  // physical table name beside the JSON sidecar so delete/GC can remove the
-  // correct partition after the relational reference is gone. This is an
-  // additive migration: old null values are the legacy model-global table.
-  const semanticVectorValueCols = (db.prepare("PRAGMA table_info(semantic_vector_values)").all() as { name: string }[]).map((c) => c.name);
-  if (semanticVectorValueCols.length > 0 && !semanticVectorValueCols.includes("vector_table_name")) {
-    db.exec("ALTER TABLE semantic_vector_values ADD COLUMN vector_table_name TEXT");
-  }
-  // This index cannot live in the base DDL: on a v15/v16 database the table
-  // already exists without generation_id, so CREATE TABLE IF NOT EXISTS is a
-  // no-op and CREATE INDEX would run before the additive columns above.
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_semantic_embedding_refs_generation
-    ON semantic_embedding_refs(generation_id, status, chunk_id)`);
-  const embeddingSpaceCols = (db.prepare("PRAGMA table_info(embedding_spaces)").all() as { name: string }[]).map((c) => c.name);
-  if (embeddingSpaceCols.length > 0 && !embeddingSpaceCols.includes("preprocessing_digest")) {
-    db.exec("ALTER TABLE embedding_spaces ADD COLUMN preprocessing_digest TEXT");
-    db.prepare("UPDATE embedding_spaces SET preprocessing_digest=? WHERE preprocessing_digest IS NULL")
-      .run("0".repeat(64));
-  }
-  const embeddingJobCols = (db.prepare("PRAGMA table_info(embedding_jobs)").all() as { name: string }[]).map((c) => c.name);
-  for (const [column, definition] of [
-    ["lease_owner", "TEXT"],
-    ["lease_expires_at", "TEXT"],
-    ["next_attempt_at", "TEXT"],
-  ] as const) {
-    if (embeddingJobCols.length > 0 && !embeddingJobCols.includes(column)) {
-      db.exec(`ALTER TABLE embedding_jobs ADD COLUMN ${column} ${definition}`);
-    }
-  }
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_embedding_jobs_claim
-    ON embedding_jobs(status, next_attempt_at, lease_expires_at, generation_id, chunk_id)`);
-  // Existing semantic rows were created with content-only chunk IDs and model
-  // hashes. They are retained for rollback/inspection, but are explicitly
-  // quarantined so a v17 reader can never mistake them for an active generation.
-  const legacySemanticCount = (db.prepare(`
-    SELECT COUNT(*) AS n
-    FROM semantic_chunks
-    WHERE repo_id IS NULL
-       OR snapshot_id IS NULL
-       OR canonical_file_path IS NULL
-       OR identity_hash IS NULL
-       OR chunker_version IS NULL
-  `).get() as { n: number } | undefined)?.n ?? 0;
-  const legacyRefCount = (db.prepare("SELECT COUNT(*) AS n FROM semantic_embedding_refs WHERE generation_id IS NULL").get() as { n: number } | undefined)?.n ?? 0;
-  if (legacySemanticCount > 0 || legacyRefCount > 0) {
-    db.prepare(`
-      INSERT OR IGNORE INTO embedding_spaces
-        (id,identity_hash,provider_id,model_id,weights_digest,tokenizer_digest,preprocessing_digest,dimensions,pooling,normalization,chunker_version,created_at)
-      VALUES ('space_legacy_v16','legacy-v16-semantic-space','legacy','legacy','legacy','legacy','0000000000000000000000000000000000000000000000000000000000000000',0,'unknown','unknown','legacy',?)
-    `).run(new Date().toISOString());
-    db.prepare(`
-      INSERT OR IGNORE INTO embedding_generations
-        (id,space_id,snapshot_id,scope_key,status,expected_chunks,created_at,failure_reason)
-      VALUES ('generation_legacy_v16','space_legacy_v16','legacy-v16','legacy','retired',?,?,?)
-    `).run(legacySemanticCount, new Date().toISOString(), "legacy semantic rows are not activation-eligible");
-    db.prepare("UPDATE semantic_embedding_refs SET status='legacy', error=COALESCE(error,'legacy generation is not queryable') WHERE generation_id IS NULL").run();
-  }
   const edgeCols = (db.prepare("PRAGMA table_info(edges)").all() as { name: string }[]).map(
     (c) => c.name,
   );
@@ -2810,15 +2589,6 @@ function isSchemaCurrent(
   if (!["parser_status", "parser_language", "parser_version", "parser_error"].every((column) => coverageCols.includes(column))) return false;
   const unresolvedItemCols = (db.prepare("PRAGMA table_info(unresolved_reference_items)").all() as { name: string }[]).map((c) => c.name);
   if (!unresolvedItemCols.includes("classification")) return false;
-  const semanticChunkCols = (db.prepare("PRAGMA table_info(semantic_chunks)").all() as { name: string }[]).map((c) => c.name);
-  if (!["repo_id", "snapshot_id", "canonical_file_path", "identity_hash", "chunker_version"].every((column) => semanticChunkCols.includes(column))) return false;
-  const semanticRefCols = (db.prepare("PRAGMA table_info(semantic_embedding_refs)").all() as { name: string }[]).map((c) => c.name);
-  if (!["generation_id", "space_id"].every((column) => semanticRefCols.includes(column))) return false;
-  const semanticVectorValueCols = (db.prepare("PRAGMA table_info(semantic_vector_values)").all() as { name: string }[]).map((c) => c.name);
-  if (!semanticVectorValueCols.includes("vector_table_name")) return false;
-  const embeddingJobCols = (db.prepare("PRAGMA table_info(embedding_jobs)").all() as { name: string }[]).map((c) => c.name);
-  if (!["lease_owner", "lease_expires_at", "next_attempt_at"].every((column) => embeddingJobCols.includes(column))) return false;
-  if (!have.has("idx_embedding_jobs_claim")) return false;
   const savedQueryCols = (db.prepare("PRAGMA table_info(saved_queries)").all() as { name: string }[]).map((c) => c.name);
   if (!savedQueryCols.includes("contract_version")) return false;
   // A NOT NULL raw_bytes is the old shape that stored every source file twice.
@@ -2866,57 +2636,14 @@ function installEdgeReplacementIndexes(
   });
 }
 
-function missingSemanticReuseIndexes(db: Database.Database): string[] {
-  const have = new Set(
-    (db.prepare("SELECT name FROM sqlite_master WHERE type='index'").all() as Array<{ name: string }>).map((row) => row.name),
-  );
-  return SEMANTIC_REUSE_INDEX_NAMES.filter((name) => !have.has(name));
-}
-
-function installSemanticReuseIndexes(
-  db: Database.Database,
-  missingIndexes: readonly string[],
-  onSchemaMaintenance?: (event: SchemaMaintenanceEvent) => void,
-): void {
-  if (missingIndexes.length === 0) return;
-  const indexes = [...missingIndexes];
-  const startedAt = Date.now();
-  onSchemaMaintenance?.({ operation: "semantic-reuse-indexes", phase: "start", indexes });
-  db.transaction(() => db.exec(SEMANTIC_REUSE_INDEX_DDL))();
-  onSchemaMaintenance?.({
-    operation: "semantic-reuse-indexes",
-    phase: "complete",
-    indexes,
-    elapsedMs: Date.now() - startedAt,
-  });
-}
-
 /** Recreate the current schema after a guarded structural reset. This is kept
  * separate from openDatabase so reset can drop only rebuildable tables inside
  * its own transaction without reopening the database or running startup
  * maintenance. */
 export function recreateCurrentSchemaObjects(db: Database.Database): void {
   db.exec(DDL);
-  // These two indexes are additive migration objects: their columns were
-  // introduced after the base DDL was originally published, so restoring the
-  // DDL alone is not enough for a read-only current-schema probe.
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_semantic_embedding_refs_generation
-    ON semantic_embedding_refs(generation_id, status, chunk_id);
-    CREATE INDEX IF NOT EXISTS idx_embedding_jobs_claim
-    ON embedding_jobs(status, next_attempt_at, lease_expires_at, generation_id, chunk_id);`);
   db.exec(EDGE_REPLACEMENT_INDEX_DDL);
-  db.exec(SEMANTIC_REUSE_INDEX_DDL);
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_semantic_embedding_refs_vec_rowid
-    ON semantic_embedding_refs(vec_rowid, chunk_id);`);
   ensureDatabaseInstanceId(db);
-}
-
-/** Index used only by guarded full-reset shared-vector checks. Keep it out of
- * the mandatory schema-version gate so an older resident database remains
- * readable; reset creates it transactionally before its first use. */
-export function ensureResetPerformanceObjects(db: Database.Database): void {
-  db.exec(`CREATE INDEX IF NOT EXISTS idx_semantic_embedding_refs_vec_rowid
-    ON semantic_embedding_refs(vec_rowid, chunk_id);`);
 }
 
 export function openDatabase(
@@ -3067,10 +2794,6 @@ export function openDatabase(
     if (missingIndexes.length > 0) {
       installEdgeReplacementIndexes(db, missingIndexes, options?.onSchemaMaintenance);
     }
-    const missingSemanticIndexes = missingSemanticReuseIndexes(db);
-    if (missingSemanticIndexes.length > 0) {
-      installSemanticReuseIndexes(db, missingSemanticIndexes, options?.onSchemaMaintenance);
-    }
     // Retired tables are EXTRA objects, so isSchemaCurrent stays true and
     // migrate() never runs for this DB — the cleanup must happen here on the
     // write path, same contract as the performance indexes above.
@@ -3126,11 +2849,6 @@ export function openDatabase(
       installEdgeReplacementIndexes(
         db,
         missingEdgeReplacementIndexes(db),
-        preexisting ? options?.onSchemaMaintenance : undefined,
-      );
-      installSemanticReuseIndexes(
-        db,
-        missingSemanticReuseIndexes(db),
         preexisting ? options?.onSchemaMaintenance : undefined,
       );
 

@@ -66,9 +66,9 @@ export const PROTECTED_ASSET_TABLES = [
  * must use the selectors below instead of deleting the whole table. */
 export const MIXED_ASSET_TABLES = ["nodes", "edges"] as const;
 
-/** Parser, resolver, source-cache, and semantic data can be regenerated from
- * Git plus the model manifest. Keeping this list explicit makes a reset plan
- * auditable and prevents a new table from silently becoming deletable. */
+/** Parser, resolver, and source-cache data can be regenerated from Git.
+ * Keeping this list explicit makes a reset plan auditable and prevents a
+ * new table from silently becoming deletable. */
 export const REBUILDABLE_ASSET_TABLES = [
   "git_commits",
   "revision_snapshots",
@@ -106,16 +106,6 @@ export const REBUILDABLE_ASSET_TABLES = [
   "unresolved_reference_items",
   "markdown_sections",
   "pending_frontend_edges",
-  "semantic_chunks",
-  "embedding_models",
-  "semantic_embedding_refs",
-  "semantic_vector_values",
-  "embedding_spaces",
-  "embedding_generations",
-  "embedding_jobs",
-  "semantic_worker_leases",
-  "semantic_controls",
-  "semantic_active_spaces",
   "external_calls",
   "source_path_fts",
 ] as const;

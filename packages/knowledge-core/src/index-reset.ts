@@ -48,7 +48,7 @@ import {
   type ResetManifest,
   writeResetManifest,
 } from "./reset-manifest.js";
-import { ensureResetPerformanceObjects, recreateCurrentSchemaObjects } from "./schema.js";
+import { recreateCurrentSchemaObjects } from "./schema.js";
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -149,10 +149,6 @@ interface ResetScope {
   sourceBlobIds: number[];
   resolutionSetIds: string[];
   nodeIds: string[];
-  chunkIds: string[];
-  generationIds: string[];
-  vectorRowIds: number[];
-  scopeKeys: string[];
   protectedNodeIds: string[];
   allRepositoriesSelected: boolean;
   allTargetRepositoriesSelected: boolean;
@@ -241,7 +237,6 @@ export function fullCorpusNodeSelectionMode(
 }
 
 const REBUILDABLE_ASSET_TABLE_SET = new Set<string>(REBUILDABLE_ASSET_TABLES);
-const FULL_CORPUS_RETAINED_TABLES = new Set(["embedding_models", "embedding_spaces"]);
 
 /** A complete-corpus reset must stay inside SQLite. Materializing every node,
  * chunk, source blob, and vector ID in JavaScript makes reset memory scale with
@@ -258,7 +253,6 @@ export function fullCorpusResetPredicate(
       : { sql: "id NOT IN (SELECT value FROM json_each(?))", args: [jsonSet(protectedIds)] };
   }
   if (table === "edges") return { sql: "origin='parser'", args: [] };
-  if (FULL_CORPUS_RETAINED_TABLES.has(table)) return null;
   if (REBUILDABLE_ASSET_TABLE_SET.has(table)) return { sql: "1", args: [] };
   return null;
 }
@@ -281,10 +275,6 @@ function buildResetScope(
       sourceBlobIds: [],
       resolutionSetIds: [],
       nodeIds: [],
-      chunkIds: [],
-      generationIds: [],
-      vectorRowIds: [],
-      scopeKeys: repoIds.map((repoId) => `repo:${repoId}`).sort(),
       protectedNodeIds: [...new Set(protectedNodeIds)].sort(),
       allRepositoriesSelected: true,
       allTargetRepositoriesSelected: false,
@@ -294,7 +284,7 @@ function buildResetScope(
   // by that plan is a target even when unrelated repositories are registered
   // elsewhere in the same database. Keep the outside repositories intact,
   // but use SQL relationship predicates instead of materializing their full
-  // node/chunk/vector ID sets in JavaScript.
+  // node ID sets in JavaScript.
   if (options.allTargetRepositoriesSelected) {
     const branches = repoIds.length > 0
       ? ids(db, `SELECT id FROM branches WHERE repo_id IN (${placeholders(repoIds)})`, repoIds)
@@ -347,10 +337,6 @@ function buildResetScope(
       sourceBlobIds: [...new Set(safeBlobs)].sort((a, b) => a - b),
       resolutionSetIds: resolutionSets.sort(),
       nodeIds: [],
-      chunkIds: [],
-      generationIds: [],
-      vectorRowIds: [],
-      scopeKeys: repoIds.map((repoId) => `repo:${repoId}`).sort(),
       protectedNodeIds: [...new Set(protectedNodeIds)].sort(),
       allRepositoriesSelected: false,
       allTargetRepositoriesSelected: true,
@@ -421,26 +407,6 @@ function buildResetScope(
   }
   const protectedNodes = new Set(protectedNodeIds);
   const nodeIds = [...candidateNodes].filter((id) => !protectedNodes.has(id)).sort();
-  const chunkIds = (repoIds.length > 0 || snapshots.length > 0)
-    ? ids(db, `SELECT id FROM semantic_chunks WHERE repo_id IN (${placeholders(repoIds)}) OR snapshot_id IN (${placeholders(snapshots)})`, [...repoIds, ...snapshots])
-    : [];
-  const scopeKeys = repoIds.map((repoId) => `repo:${repoId}`);
-  const generationIds = (snapshots.length > 0 || scopeKeys.length > 0)
-    ? ids(db, `SELECT id FROM embedding_generations WHERE snapshot_id IN (${placeholders(snapshots)}) OR scope_key IN (${placeholders(scopeKeys)})`, [...snapshots, ...scopeKeys])
-    : [];
-  const vectorRowIds = chunkIds.length > 0
-    ? numberIds(db, `
-        SELECT DISTINCT r.vec_rowid AS id
-          FROM semantic_embedding_refs r
-         WHERE r.chunk_id IN (SELECT value FROM json_each(?))
-           AND r.vec_rowid IS NOT NULL
-           AND NOT EXISTS (
-             SELECT 1 FROM semantic_embedding_refs other
-              WHERE other.vec_rowid=r.vec_rowid
-                AND other.chunk_id NOT IN (SELECT value FROM json_each(?))
-           )
-      `, [jsonSet(chunkIds), jsonSet(chunkIds)])
-    : [];
   return {
     repoIds: [...repoIds].sort(),
     branchIds: branches.sort(),
@@ -450,10 +416,6 @@ function buildResetScope(
     sourceBlobIds: [...new Set(safeBlobs)].sort((a, b) => a - b),
     resolutionSetIds: resolutionSets.sort(),
     nodeIds,
-    chunkIds: chunkIds.sort(),
-    generationIds: generationIds.sort(),
-    vectorRowIds: [...new Set(vectorRowIds)].sort((a, b) => a - b),
-    scopeKeys,
     protectedNodeIds: [...new Set(protectedNodeIds)].sort(),
     allRepositoriesSelected,
     allTargetRepositoriesSelected: false,
@@ -483,7 +445,6 @@ function targetedFullResetPredicate(
   const repoIds = jsonSet(scope.repoIds);
   const branchIds = jsonSet(scope.branchIds);
   const snapshotIds = jsonSet(scope.snapshotIds);
-  const scopeKeys = jsonSet(scope.scopeKeys);
   const targetRepo = (column: string): { sql: string; args: unknown[] } => ({
     sql: `${quoteIdentifier(column)} IN (SELECT value FROM json_each(?))`,
     args: [repoIds],
@@ -496,7 +457,6 @@ function targetedFullResetPredicate(
     sql: `${quoteIdentifier(column)} IN (SELECT value FROM json_each(?))`,
     args: [snapshotIds],
   });
-  if (table === "embedding_models" || table === "embedding_spaces" || table === "semantic_worker_leases") return null;
   if (table === "nodes") {
     const target = targetRepo("repo_id");
     if (scope.protectedNodeIds.length === 0) return target;
@@ -517,28 +477,6 @@ function targetedFullResetPredicate(
   if (table === "global_resolved_edges") {
     return { sql: "json_extract(provenance,'$.repo') IN (SELECT value FROM json_each(?))", args: [repoIds] };
   }
-  if (table === "semantic_controls" || table === "semantic_active_spaces") {
-    return { sql: "scope_key IN (SELECT value FROM json_each(?))", args: [scopeKeys] };
-  }
-  if (table === "semantic_vector_values") {
-    return {
-      sql: `vec_rowid IN (
-        SELECT r.vec_rowid
-          FROM semantic_embedding_refs r
-          JOIN semantic_chunks c ON c.id=r.chunk_id
-         WHERE (c.repo_id IN (SELECT value FROM json_each(?)) OR c.snapshot_id IN (SELECT value FROM json_each(?)))
-           AND r.vec_rowid IS NOT NULL
-           AND NOT EXISTS (
-             SELECT 1
-               FROM semantic_embedding_refs other
-               JOIN semantic_chunks outside_chunk ON outside_chunk.id=other.chunk_id
-              WHERE other.vec_rowid=r.vec_rowid
-                AND NOT (outside_chunk.repo_id IN (SELECT value FROM json_each(?)) OR outside_chunk.snapshot_id IN (SELECT value FROM json_each(?)))
-           )
-      )`,
-      args: [repoIds, snapshotIds, repoIds, snapshotIds],
-    };
-  }
   if (table === "source_blobs") return inPredicate("id", scope.sourceBlobIds);
   if (table === "endpoint_aliases") {
     return {
@@ -556,27 +494,6 @@ function targetedFullResetPredicate(
   if (available.has("source_fact_id") && scope.sourceFactIds.length > 0) relationCandidates.push(inPredicate("source_fact_id", scope.sourceFactIds)!);
   if (available.has("source_blob_id") && scope.sourceBlobIds.length > 0) relationCandidates.push(inPredicate("source_blob_id", scope.sourceBlobIds)!);
   if (available.has("resolution_set_id") && scope.resolutionSetIds.length > 0) relationCandidates.push(inPredicate("resolution_set_id", scope.resolutionSetIds)!);
-  if (available.has("generation_id")) {
-    relationCandidates.push({
-      sql: `generation_id IN (
-        SELECT id FROM embedding_generations
-         WHERE snapshot_id IN (SELECT value FROM json_each(?))
-            OR scope_key IN (SELECT value FROM json_each(?))
-      )`,
-      args: [snapshotIds, scopeKeys],
-    });
-  }
-  if (available.has("chunk_id")) {
-    relationCandidates.push({
-      sql: `chunk_id IN (
-        SELECT id FROM semantic_chunks
-         WHERE repo_id IN (SELECT value FROM json_each(?))
-            OR snapshot_id IN (SELECT value FROM json_each(?))
-      )`,
-      args: [repoIds, snapshotIds],
-    });
-  }
-  if (available.has("scope_key")) relationCandidates.push({ sql: "scope_key IN (SELECT value FROM json_each(?))", args: [scopeKeys] });
   if (available.has("node_id")) {
     relationCandidates.push({
       sql: "node_id IN (SELECT id FROM nodes WHERE repo_id IN (SELECT value FROM json_each(?)))",
@@ -609,12 +526,7 @@ function resetPredicate(db: Database.Database, table: string, scope: ResetScope)
       ],
     };
   }
-  if (table === "semantic_vector_values") return inPredicate("vec_rowid", scope.vectorRowIds);
-  if (table === "embedding_generations") return inPredicate("id", scope.generationIds);
-  if (table === "semantic_controls" || table === "semantic_active_spaces") return inPredicate("scope_key", scope.scopeKeys);
-  if (table === "semantic_worker_leases") return scope.allRepositoriesSelected ? { sql: "1", args: [] } : null;
   if (table === "source_backfill_checkpoints") return scope.allRepositoriesSelected ? { sql: "1", args: [] } : null;
-  if (table === "embedding_models") return null; // shared installed model registry, not corpus rows
   if (table === "global_resolved_edges") {
     return scope.repoIds.length > 0
       ? { sql: "json_extract(provenance,'$.repo') IN (SELECT value FROM json_each(?))", args: [jsonSet(scope.repoIds)] }
@@ -631,11 +543,8 @@ function resetPredicate(db: Database.Database, table: string, scope: ResetScope)
     ["source_fact_id", scope.sourceFactIds],
     ["source_blob_id", scope.sourceBlobIds],
     ["resolution_set_id", scope.resolutionSetIds],
-    ["generation_id", scope.generationIds],
-    ["chunk_id", scope.chunkIds],
     ["node_id", scope.nodeIds],
     ["source_node_id", scope.nodeIds],
-    ["vec_rowid", scope.vectorRowIds],
   ];
   for (const [column, values] of byColumn) if (available.has(column)) {
     const predicate = inPredicate(column, values);
@@ -736,17 +645,6 @@ function deleteTargetRows(
     "source_facts",
     "source_blobs",
     "source_backfill_checkpoints",
-    // Vector rows are deleted before refs/chunks so the target predicate can
-    // still prove that a vector is not shared with an outside repository.
-    "semantic_vector_values",
-    "semantic_embedding_refs",
-    "embedding_jobs",
-    "semantic_active_spaces",
-    "semantic_controls",
-    "semantic_vector_values",
-    "semantic_chunks",
-    "embedding_generations",
-    "semantic_worker_leases",
     ...(scope.allTargetRepositoriesSelected ? [] : ["nodes"]),
     "git_commits",
     ...(scope.allTargetRepositoriesSelected ? ["edges"] : []),
@@ -757,7 +655,6 @@ function deleteTargetRows(
   const recreatedMixedTables: string[] = [];
   const tx = db.transaction(() => {
     const startedAt = Date.now();
-    if (scope.allTargetRepositoriesSelected) ensureResetPerformanceObjects(db);
     // `nodes` and `edges` mix durable user/ledger assets with parser output.
     // For the full-corpus lane, drop their B-trees once and restore the
     // signed durable subset from the sidecar instead of scanning/deleting
@@ -786,9 +683,7 @@ function deleteTargetRows(
       // their protected predicates below.
       if (
         scope.allRepositoriesSelected &&
-        REBUILDABLE_ASSET_TABLE_SET.has(table) &&
-        table !== "embedding_models" &&
-        table !== "embedding_spaces"
+        REBUILDABLE_ASSET_TABLE_SET.has(table)
       ) {
         db.prepare(`DROP TABLE IF EXISTS ${quoteIdentifier(table)}`).run();
         droppedRebuildableTables.push(table);
@@ -990,14 +885,6 @@ function countRepositoryPlanRows(db: Database.Database, repoId: string): Record<
     `, repoId, repoId),
     endpoint_memberships: scalarCount(db, "SELECT COUNT(*) AS n FROM endpoint_memberships WHERE repo_id=?", repoId),
     coverage_records: scalarCount(db, "SELECT COUNT(*) AS n FROM coverage_records WHERE repo_id=?", repoId),
-    semantic_chunks: scalarCount(db, `
-      SELECT COUNT(*) AS n FROM semantic_chunks
-       WHERE repo_id=? OR snapshot_id IN (SELECT id FROM revision_snapshots WHERE repo_id=?)
-    `, repoId, repoId),
-    embedding_generations: scalarCount(db, `
-      SELECT COUNT(*) AS n FROM embedding_generations
-       WHERE scope_key=? OR snapshot_id IN (SELECT id FROM revision_snapshots WHERE repo_id=?)
-    `, `repo:${repoId}`, repoId),
   };
 }
 
