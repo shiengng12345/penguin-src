@@ -5,7 +5,7 @@ export type KnowledgeDslExpression = { kind: "predicate"; predicate: KnowledgeDs
 export interface CompiledKnowledgeDsl { request: SearchRequest; expression: KnowledgeDslExpression; propertyPredicates: KnowledgeDslPredicate[]; markdownPredicates: KnowledgeDslPredicate[]; }
 
 const FIELDS = new Set(["path", "file", "content", "tag", "property", "line", "section", "block", "task", "regex", "repo", "branch", "kind"]);
-const MODES = new Set<SearchMode>(["auto", "exact", "phrase", "substring", "path", "regex", "lexical", "semantic", "structural"]);
+const MODES = new Set<SearchMode>(["auto", "exact", "phrase", "substring", "path", "regex", "lexical", "structural"]);
 
 function tokenize(input: string): Array<{ value: string; position: number }> {
   const out: Array<{ value: string; position: number }> = [];

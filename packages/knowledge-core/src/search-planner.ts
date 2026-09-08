@@ -48,9 +48,7 @@ export function planSearch(request: NormalizedSearchRequest | SearchRequest): Se
   const normalized = request as NormalizedSearchRequest;
   const mode = normalized.mode ?? "auto";
   const parsed = parseKnowledgeQuery(normalized);
-  const semantic = mode === "semantic" && (normalized.options?.semantic ?? "off") === "off"
-    ? "blend"
-    : normalized.options?.semantic ?? "off";
+  const semantic = normalized.options?.semantic ?? "off";
   // Explicit path mode is authoritative. Heuristics are only safe in auto:
   // exact/phrase/substring must accept punctuation such as `//`, URL paths,
   // regex-like source text and JSX without accidentally invoking path

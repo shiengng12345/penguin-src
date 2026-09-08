@@ -8,7 +8,6 @@ export type SearchMode =
   | "path"
   | "regex"
   | "lexical"
-  | "semantic"
   | "structural";
 
 export type SearchLane =
@@ -111,7 +110,7 @@ export interface SearchLocator {
 }
 
 export interface SearchEvidence {
-  source: "source" | "graph" | "note" | "runtime" | "semantic";
+  source: "source" | "graph" | "note" | "runtime";
   locator: SearchLocator;
   excerpt?: string;
   contentHash?: string;
@@ -245,7 +244,6 @@ const SEARCH_MODES = new Set<SearchMode>([
   "path",
   "regex",
   "lexical",
-  "semantic",
   "structural",
 ]);
 

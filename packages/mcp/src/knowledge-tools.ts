@@ -736,8 +736,7 @@ async function runKnowledgeToolUnsafe(name: string, a: Record<string, unknown>, 
     }
     const nestedSearchOptions = inputRecord(a.options);
     if (store && routedName === "knowledge_search" && (
-      a.mode === "semantic"
-      || a.semantic === "fallback"
+      a.semantic === "fallback"
       || a.semantic === "blend"
       || nestedSearchOptions.semantic === "fallback"
       || nestedSearchOptions.semantic === "blend"
@@ -770,7 +769,7 @@ async function runSemanticSearchAdapter(input: Record<string, unknown>, store: K
       : repoId ? [{ repoId }] : undefined;
   return searchKnowledgeAsync({
     query: String(normalized.query ?? ""),
-    mode: (normalized.mode as "auto" | "exact" | "phrase" | "substring" | "path" | "regex" | "lexical" | "semantic" | "structural" | undefined) ?? "auto",
+    mode: (normalized.mode as "auto" | "exact" | "phrase" | "substring" | "path" | "regex" | "lexical" | "structural" | undefined) ?? "auto",
     scope: { ...(revisions ? { revisions } : {}), ...(Array.isArray(scope.paths) ? { paths: scope.paths.map(String) } : {}) },
     options: {
       semantic: normalized.semantic === "fallback" || normalized.semantic === "blend" ? normalized.semantic : "blend",
@@ -1545,7 +1544,7 @@ function handleKnowledgeToolUnsafe(
             ? (store.db.prepare("SELECT current_snapshot_id FROM branches WHERE repo_id=? AND status='live' AND current_snapshot_id IS NOT NULL ORDER BY default_branch DESC, name LIMIT 1").get(resolvedRepoId) as { current_snapshot_id: string | null } | undefined)?.current_snapshot_id ?? null
             : null);
       const repoId = revision.context?.repoId ?? resolvedRepoId;
-      const mode = String(a.mode ?? "auto") as "exact" | "phrase" | "substring" | "auto" | "path" | "regex" | "lexical" | "semantic" | "structural";
+      const mode = String(a.mode ?? "auto") as "exact" | "phrase" | "substring" | "auto" | "path" | "regex" | "lexical" | "structural";
       const revisionScopes = canonicalRevisionContexts.length > 0
         ? canonicalRevisionContexts.map((context) => ({ repoId: context.repoId, snapshotId: context.snapshotId }))
         : revision.context
@@ -1568,7 +1567,7 @@ function handleKnowledgeToolUnsafe(
             includeGenerated: a.include_generated === true,
             includeVendor: a.include_vendor === true,
             includeExcludedMetadata: a.include_excluded_metadata === true,
-            semantic: mode === "semantic" ? "blend" : a.semantic === "fallback" || a.semantic === "blend" ? a.semantic : "off",
+            semantic: a.semantic === "fallback" || a.semantic === "blend" ? a.semantic : "off",
             compact: a.compact !== false,
             explain: a.explain === true,
           },

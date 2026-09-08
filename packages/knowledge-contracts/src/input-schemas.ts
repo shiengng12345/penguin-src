@@ -76,7 +76,7 @@ const SCHEMAS: Record<string, KnowledgeInputSchema> = {
   "knowledge.index": ownerRootMutationSchema(),
   "knowledge.rebuild": ownerRootMutationSchema(),
   "knowledge.capabilities": object({ contract_version: string(), compact: boolean() }),
-  "knowledge.search": object({ query: string("Non-empty deterministic or semantic query"), mode: { type: "string", enum: ["auto", "exact", "phrase", "substring", "path", "regex", "lexical", "semantic", "structural"] }, scope: searchScope, options: searchOptions, page: searchPage }, ["query"]),
+  "knowledge.search": object({ query: string("Non-empty deterministic or semantic query"), mode: { type: "string", enum: ["auto", "exact", "phrase", "substring", "path", "regex", "lexical", "structural"] }, scope: searchScope, options: searchOptions, page: searchPage }, ["query"]),
   "knowledge.get_hit": object({ snapshot_id: string(), file_path: string(), start_line: number(), end_line: number(), start_byte: number(), context_lines: number(), original_revision_id: string(), caller_workspace_id: string() }, ["snapshot_id", "file_path"]),
   "knowledge.graph.query": object({ request: { type: "object" }, start: { type: "object" }, traverse: { type: "array" }, project: { type: "array" }, limit: number(), scope: { type: "object" } }, ["start", "traverse", "project", "limit"]),
   "knowledge.context": object({ target: string(), repo: string(), branch: string(), commit_sha: string(), snapshot_id: string(), depth: number(), limit: number(), cursor: string(), allow_fallback: boolean() }, ["target"]),

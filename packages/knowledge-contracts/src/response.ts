@@ -74,7 +74,7 @@ function validateLocator(value: unknown, path: string): SearchLocator {
 
 function validateEvidence(value: unknown, path: string): SearchEvidence {
   if (!isRecord(value)) invalid(path, path + " must be an object");
-  if (!["source", "graph", "note", "runtime", "semantic"].includes(String(value.source))) {
+  if (!["source", "graph", "note", "runtime"].includes(String(value.source))) {
     invalid(path + ".source", path + ".source is invalid");
   }
   if (!["verified", "observed", "reviewed", "inference"].includes(String(value.status))) {
