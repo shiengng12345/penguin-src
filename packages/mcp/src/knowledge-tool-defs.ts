@@ -129,7 +129,7 @@ export const KNOWLEDGE_TOOL_DEFS = [
       required: ["query"],
       properties: {
         query: { type: "string" },
-        mode: { type: "string", enum: ["auto", "exact", "phrase", "substring", "path", "regex", "lexical", "semantic", "structural"] },
+        mode: { type: "string", enum: ["auto", "exact", "phrase", "substring", "path", "regex", "lexical", "structural"] },
         semantic: { type: "string", enum: ["off", "fallback", "blend"], description: "Optional semantic lane. If unavailable, the response is NO_MATCH_INCOMPLETE with SEMANTIC_LANE_UNAVAILABLE rather than a false verified miss." },
         contract_version: { type: "string", enum: ["2"] },
         type: { type: "array", items: { type: "string" } },

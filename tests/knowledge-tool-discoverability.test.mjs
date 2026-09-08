@@ -33,8 +33,6 @@ test("the primitives an agent needs are all discoverable", () => {
     "knowledge_context",
     "knowledge_search",
     "knowledge_get_hit",
-    "knowledge_semantic_status",
-    "knowledge_semantic_control",
     "get_node",
   ]) {
     assert.ok(listed.has(name), `${name} must be discoverable from tools/list`);

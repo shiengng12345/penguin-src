@@ -719,8 +719,7 @@ async function runKnowledgeToolUnsafe(name: string, a: Record<string, unknown>, 
         rootPath: confirmedRoot,
         mode: routedName === "knowledge_rebuild" ? "rebuild" : "incremental",
       });
-      const worker = await invokeLocalCli(["semantic", "wake", "--json"]);
-      return { ...report, semanticWorker: worker };
+      return report;
     }
     if (routedName === "knowledge_snapshot_materialize") {
       const repoSelector = String(a.repo ?? a.repo_id ?? "");
