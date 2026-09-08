@@ -1,10 +1,9 @@
 import { createInterface } from "node:readline";
 import { randomUUID } from "node:crypto";
 import { Worker } from "node:worker_threads";
-import { CAPABILITIES, capabilityHash, validateSemanticStatusResponse } from "@penguin/knowledge-contracts";
-import { executeSemanticControl, getSourceHit, compactIndexStatus, buildStatusPanel, buildStorageReport, listSemanticStatuses, resolveSemanticScopeKey, applySemanticRuntimeState, runStorageMaintenance, SCHEMA_VERSION } from "@penguin/knowledge-core";
+import { CAPABILITIES, capabilityHash } from "@penguin/knowledge-contracts";
+import { getSourceHit, compactIndexStatus, buildStatusPanel, buildStorageReport, runStorageMaintenance, SCHEMA_VERSION } from "@penguin/knowledge-core";
 import { runCli, type CliDeps } from "./index.js";
-import { ensureSemanticWorker } from "./semantic-worker.js";
 import { runtimeIdentity } from "./runtime-identity.js";
 import { dispatchQueryFrame, encodeFrame, parseFrame, queryHello } from "./query-protocol.js";
 
@@ -495,31 +494,6 @@ export async function runQueryServer(deps: CliDeps, input = process.stdin, outpu
     if (capabilityId === "knowledge.index_status") return compactIndexStatus(store);
     if (capabilityId === "knowledge.status_panel") return buildStatusPanel(store);
     if (capabilityId === "knowledge.storage_report") return buildStorageReport(store);
-    if (capabilityId === "knowledge.semantic_status") {
-      const request = value as { scopeKey?: string } | undefined;
-      const scope = request?.scopeKey ? resolveSemanticScopeKey(store, request.scopeKey) : undefined;
-      if (scope && !scope.resolvedScopeKey) {
-        throw Object.assign(new Error(`semantic scope was not found: ${request?.scopeKey}`), {
-          code: scope.ambiguousRepoIds?.length ? "SCOPE_AMBIGUOUS" : "SCOPE_NOT_FOUND",
-          details: { requestedScopeKey: request?.scopeKey, validScopeKeys: scope.validScopeKeys, validRepositoryNames: scope.validRepositoryNames },
-        });
-      }
-      return validateSemanticStatusResponse({
-        statuses: applySemanticRuntimeState(
-          listSemanticStatuses(store, scope?.resolvedScopeKey),
-          runtimeIdentity().generation,
-        ),
-        ...(scope ? { requestedScopeKey: scope.requestedScopeKey, resolvedScopeKey: scope.resolvedScopeKey } : {}),
-      });
-    }
-    if (capabilityId === "knowledge.semantic_control") {
-      return executeSemanticControl({
-        store,
-        request: value,
-        runtimeState: runtimeIdentity().generation,
-        wake: () => ensureSemanticWorker({ store, cwd: deps.cwd }),
-      });
-    }
     if (capabilityId === "knowledge.maintenance") {
       const action = (value as { action?: string } | undefined)?.action;
       if (action !== "collect" && action !== "vacuum" && action !== "analyze") {

@@ -11,15 +11,6 @@ export type { CliDeps } from "./command-dispatch.js";
 export { parseCliArguments, type ParsedCliArguments } from "./args.js";
 export { listCliRegistrations } from "@penguin/knowledge-contracts";
 export { LarkDocumentBindingStore, type LarkDocumentBinding, type ExplicitBindingInput, type LarkBindingCandidate } from "./api-doc-binding-store.js";
-export {
-  runSemanticWorker,
-  ensureSemanticWorker,
-  readSemanticWorkerRuntimeState,
-  type SemanticWorkerResult,
-  type SemanticWorkerStartResult,
-  type SemanticRuntimeIdentity,
-  type SemanticWorkerRuntimeState,
-} from "./semantic-worker.js";
 
 export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
   return dispatchCliCommand(argv, deps, parseCliArguments(argv));

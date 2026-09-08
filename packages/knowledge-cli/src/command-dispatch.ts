@@ -79,11 +79,7 @@ import {
   resolveTarget,
   TargetResolutionError,
   reconcileCorpus,
-  openBundledEmbeddingProvider,
   resolveBundledEmbeddingSpaceIdentity,
-  listSemanticStatuses,
-  resolveSemanticScopeKey,
-  applySemanticRuntimeState,
   createFullResetPlan,
   executeFullReset,
   finalizeFullReset,
@@ -91,13 +87,11 @@ import {
   recoverFullReset,
   reissueFullResetPlan,
   rollbackFullReset,
-  executeSemanticControl,
   SCHEMA_VERSION,
   HmacOperationCursorCodec,
   resolveLocalCursorSecret,
   type GraphMode,
   type KnowledgeStore,
-  type VerifiedLocalEmbeddingProvider,
 } from "@penguin/knowledge-core";
 import { indexRepo, indexRevision, RevisionIndexCoordinator, KNOWLEDGE_PARSER_VERSION, KNOWLEDGE_RESOLVER_VERSION, prepareWorkingTreeOverlay, startWatcher, createNote, createIncident, appendNote, writeNoteBody, readNote, listNotes, reindexNotesDir, listDanglingNoteLinks, listEvidenceNotes, setEvidenceStatus, evidenceDoctor, repairEvidence, readGitContext, collectIndependentCorpusOracle, discoverFullCorpusRepositories, readFullCorpusJob, requestFullCorpusCancel, requestFullCorpusPause, requestFullCorpusResume, retryFullCorpus, runFullCorpus, type EvidenceLifecycle } from "@penguin/knowledge-indexer";
 import { listPublicNotes, publicEvidenceSummaries } from "@penguin/knowledge-indexer/notes";
@@ -109,22 +103,13 @@ import { runApiDocCommand } from "./api-doc-command.js";
 import { runCallCommand } from "./call-command.js";
 import { createKnowledgeApiDocAdapter, currentApiDocRevisionIds } from "./api-doc-knowledge-adapter.js";
 import { createLarkProcessRunner, LarkCliDocumentClient, type LarkProcessRunner } from "./lark-document-client.js";
-import { CAPABILITIES, capabilityHash, knowledgeErrorEnvelope, listCliRegistrations, scopeResolutionErrorEnvelope, validateSemanticControlRequest, validateSemanticStatusResponse, warning, type EndpointProvenanceKind, type ScopeEnvelope } from "@penguin/knowledge-contracts";
+import { CAPABILITIES, capabilityHash, knowledgeErrorEnvelope, listCliRegistrations, scopeResolutionErrorEnvelope, warning, type EndpointProvenanceKind, type ScopeEnvelope } from "@penguin/knowledge-contracts";
 import { runQueryServer } from "./query-server.js";
 import { parseCliArguments } from "./args.js";
 import { runtimeIdentity } from "./runtime-identity.js";
-import { ensureSemanticWorker, runSemanticWorkerWithProcessSignals } from "./semantic-worker.js";
 export { listCliRegistrations } from "@penguin/knowledge-contracts";
 export { LarkDocumentBindingStore, type LarkDocumentBinding, type ExplicitBindingInput, type LarkBindingCandidate } from "./api-doc-binding-store.js";
 export { parseCliArguments, type ParsedCliArguments } from "./args.js";
-
-async function optionalBundledSemanticProvider(): Promise<VerifiedLocalEmbeddingProvider | undefined> {
-  try { return await openBundledEmbeddingProvider(); }
-  catch (error) {
-    if (String((error as Error).message ?? error) === "LOCAL_EMBEDDING_MODEL_NOT_INSTALLED") return undefined;
-    throw error;
-  }
-}
 
 function semanticIndexOptions() {
   try { return { enabled: true, space: resolveBundledEmbeddingSpaceIdentity() }; }
@@ -642,132 +627,6 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
     return 3;
   }
 
-  if (verb === "semantic") {
-    if (!deps.storeExists()) return emitCliError(deps, json, "KNOWLEDGE_DB_UNAVAILABLE", "no knowledge database — run `penguin init` first", 3);
-    const action = pos[0] ?? "status";
-    let store: KnowledgeStore;
-    try {
-      store = deps.openStore();
-    } catch {
-      return emitCliError(
-        deps,
-        json,
-        "KNOWLEDGE_DB_OPEN_FAILED",
-        "KNOWLEDGE_DB_OPEN_FAILED: knowledge database could not be opened; restore it from a valid backup or rebuild the local index",
-        3,
-      );
-    }
-    try {
-      if (action === "worker") {
-        const availableRuntime = runtimeIdentity();
-        // The stable launcher pins PENGUIN_BUILD_ID before it executes this
-        // bundle. Read availability separately so an activation that flips
-        // `current` cannot let the running generation certify itself.
-        const availableBuildId = availableRuntime.generation.availableBuildId;
-        const pinnedBuildId = process.env.PENGUIN_BUILD_ID?.trim() || "unproven:PENGUIN_BUILD_ID";
-        const runningRuntime = runtimeIdentity({
-          manifest: null,
-          runningBuildId: pinnedBuildId,
-          availableBuildId,
-        });
-        const result = await runSemanticWorkerWithProcessSignals({
-          store,
-          runtimeIdentity: {
-            buildId: runningRuntime.buildId,
-            capabilityHash: runningRuntime.capabilityHash,
-            schemaVersion: runningRuntime.schemaVersion,
-            modelHash: runningRuntime.modelHash,
-          },
-          expectedRuntimeIdentity: {
-            buildId: availableBuildId,
-            capabilityHash: availableRuntime.capabilityHash,
-            schemaVersion: availableRuntime.schemaVersion,
-            modelHash: availableRuntime.modelHash,
-          },
-          ...(numberOption("batch") !== undefined ? { batchSize: numberOption("batch") } : {}),
-        });
-        emit(deps, json, `semantic worker: ${result.status}`, result);
-        return result.status === "version_mismatch" ? 5 : result.status === "model_unavailable" ? 3 : 0;
-      }
-      if (action === "wake") {
-        const result = ensureSemanticWorker({ store, cwd: deps.cwd });
-        emit(deps, json, `semantic worker: ${result.status}`, result);
-        return result.status === "start_failed" || result.status === "version_mismatch" ? 5 : 0;
-      }
-      if (action === "status") {
-        const requestedScopeKey = optionValue("scope");
-        const scope = requestedScopeKey ? resolveSemanticScopeKey(store, requestedScopeKey) : undefined;
-        if (scope && !scope.resolvedScopeKey) {
-          return emitCliError(
-            deps,
-            json,
-            scope.ambiguousRepoIds?.length ? "SCOPE_AMBIGUOUS" : "SCOPE_NOT_FOUND",
-            `semantic scope was not found: ${requestedScopeKey}; valid scopes: ${scope.validScopeKeys.join(", ") || "none"}; repositories: ${scope.validRepositoryNames.join(", ") || "none"}`,
-            2,
-          );
-        }
-        const statuses = applySemanticRuntimeState(
-          listSemanticStatuses(store, scope?.resolvedScopeKey),
-          runtimeIdentity().generation,
-        );
-        const response = validateSemanticStatusResponse({
-          statuses,
-          ...(scope ? { requestedScopeKey: scope.requestedScopeKey, resolvedScopeKey: scope.resolvedScopeKey } : {}),
-        });
-        emit(deps, json, statuses.length ? statuses.map((status) => `${status.scopeKey}: ${status.state} ${status.ready}/${status.expected}`).join("\n") : "semantic: no generations", response);
-        return 0;
-      }
-      if (!["pause", "resume", "retry", "cancel"].includes(action)) {
-        return emitCliError(deps, json, "INVALID_ARGUMENT", "usage: penguin semantic status|wake|worker|pause|resume|retry|cancel", 2);
-      }
-      const scopeKey = optionValue("scope");
-      const generationId = optionValue("generation") ?? pos[1];
-      if (!scopeKey || ((action === "retry" || action === "cancel") && !generationId)) {
-        return emitCliError(deps, json, "INVALID_ARGUMENT", `${action} requires --scope${action === "retry" || action === "cancel" ? " and --generation" : ""}`, 2);
-      }
-      const operationScope = { action, scopeKey, ...(generationId ? { generationId } : {}) };
-      const issuedOperationToken = operationToken(`semantic.${action}`, operationScope);
-      let controlRequest;
-      try {
-        controlRequest = validateSemanticControlRequest({
-          ...operationScope,
-          operationToken: flags.includes("--dry-run")
-            ? issuedOperationToken
-            : (confirmationValue(argv) ?? issuedOperationToken),
-        });
-      } catch (error) {
-        const contractError = error as Error & { code?: string; details?: Record<string, unknown> };
-        return emitCliError(deps, json, contractError.code ?? "INVALID_SEMANTIC_CONTRACT", contractError.message, 2, contractError.details);
-      }
-      if (flags.includes("--dry-run")) {
-        emit(deps, json, `dry-run semantic ${action}`, { ...operationScope, operationToken: issuedOperationToken, mutated: false });
-        return 0;
-      }
-      if (!requireOperationToken(deps, argv, `semantic.${action}`, operationScope)) return 6;
-      try {
-        const result = await executeSemanticControl({
-          store,
-          request: controlRequest,
-          runtimeState: runtimeIdentity().generation,
-          wake: () => ensureSemanticWorker({ store, cwd: deps.cwd }),
-        });
-        emit(deps, json, `semantic ${action}: ${result.status.state}`, result);
-        return 0;
-      } catch (error) {
-        const operationalError = error as Error & { code?: string; details?: Record<string, unknown> };
-        return emitCliError(
-          deps,
-          json,
-          operationalError.code ?? "SEMANTIC_CONTROL_FAILED",
-          operationalError.message,
-          operationalError.code === "OPERATION_TOKEN_CONFLICT" ? 2 : 1,
-          operationalError.details,
-        );
-      }
-    } finally {
-      store.close();
-    }
-  }
   // Secret material must never be placed in argv. CI/automation can pass the
   // name of an environment variable or an already-open file descriptor.
   const artifactPassphrase = (): string | undefined => {
@@ -1565,7 +1424,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
       // stderr (TTY only — bin.ts gates the sink on isTTY).
       const emitEvents = flags.includes("--progress-events") || flags.includes("--events-jsonl");
       const mode = verb === "rebuild" ? "rebuild" : "incremental";
-      for (const [targetIndex, target] of targets.entries()) {
+      for (const target of targets) {
         const renderer = !emitEvents && !json && deps.progress
           ? createIndexRenderer({
               write: deps.progress,
@@ -1588,13 +1447,9 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
             ? (p) => renderer.handle(p)
             : undefined,
         });
-        const semanticWorker = targetIndex === targets.length - 1
-          ? ensureSemanticWorker({ store, cwd: deps.cwd })
-          : undefined;
-        const outputReport = semanticWorker ? { ...report, semanticWorker } : report;
-        renderer?.finish(outputReport);
+        renderer?.finish(report);
         if (emitEvents) {
-          emitProgress(deps, { phase: "complete", rootPath: target, report: outputReport });
+          emitProgress(deps, { phase: "complete", rootPath: target, report });
         }
         // Agent guidance (penguin usage tips for AI coding agents) is written
         // ONLY to the user's global CLAUDE.md/AGENTS.md (the "AI 集成" setup),
@@ -1602,8 +1457,8 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
         // changes in every single indexed repo just from running `init`.
         if (!renderer) {
           emit(deps, json,
-            `${verb}: ${report.branchName} — ${report.parsed} parsed, ${report.skipped} skipped, ${report.deleted} deleted, ${report.renamed} renamed, ${report.errors} errors; semantic ${report.semantic.status}${report.semantic.status === "queued" ? ` (${report.semantic.chunks} chunks queued)` : ""}${semanticWorker?.status === "start_failed" || semanticWorker?.status === "version_mismatch" ? `; worker ${semanticWorker.status}: ${semanticWorker.reason ?? "unknown"}; run penguin semantic wake after repairing the installed runtime` : ""}`,
-            outputReport);
+            `${verb}: ${report.branchName} — ${report.parsed} parsed, ${report.skipped} skipped, ${report.deleted} deleted, ${report.renamed} renamed, ${report.errors} errors`,
+            report);
         }
         // Auto-GC: the retention framework existed but only ran via the
         // manual `penguin revisions gc` verb, so unreferenced resolution sets
@@ -2386,10 +2241,6 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
               : null);
           const useV2Search = !flags.includes("--legacy-search");
           if (useV2Search || optionValue("mode") || flags.includes("--compact") || optionValue("cursor")) {
-            const semanticMode = optionValue("semantic");
-            if (semanticMode && !["off", "fallback", "blend"].includes(semanticMode)) {
-              return emitCliError(deps, json, "INVALID_ARGUMENT", `invalid semantic mode: ${semanticMode}`, 2, { semantic: semanticMode, remediation: "use one of: off, fallback, blend" });
-            }
             const revisions = sourceSnapshotId
               ? [{ ...(repoId ? { repoId } : {}), snapshotId: sourceSnapshotId }]
               : selectedRepoIds.length > 0
@@ -2397,7 +2248,7 @@ export async function dispatchCliCommand(argv: string[], deps: CliDeps, parsed =
               : undefined;
             let response;
             try {
-              response = await searchKnowledgeAsync({ query: queryText, mode: mode as never, scope: { ...(revisions ? { revisions } : {}), ...(optionValue("workspace") ? { workspaceId: optionValue("workspace") } : {}), ...((optionValues("path").length || dslPaths.length) ? { paths: [...optionValues("path"), ...dslPaths] } : {}), ...(optionValues("language").length ? { languages: optionValues("language") } : {}), ...(optionValues("kind").length ? { kinds: optionValues("kind") } : {}) }, options: { caseSensitive: flags.includes("--case-sensitive") || !flags.includes("--case-insensitive"), wholeWord: flags.includes("--whole-word"), includeGenerated: flags.includes("--include-generated"), includeVendor: flags.includes("--include-vendor"), includeExcludedMetadata: flags.includes("--include-excluded-metadata"), semantic: (semanticMode as "off" | "fallback" | "blend" | undefined) ?? "off", compact: flags.includes("--compact"), explain: flags.includes("--explain") }, page: { limit: numberOption("limit") ?? 50, ...(optionValue("cursor") ? { cursor: optionValue("cursor") } : {}) } }, { store, scopes: sourceSnapshotId ? [{ snapshotId: sourceSnapshotId, repoId }] : undefined, ...(semanticMode && semanticMode !== "off" ? { semanticProviderFactory: optionalBundledSemanticProvider } : {}) });
+              response = await searchKnowledgeAsync({ query: queryText, mode: mode as never, scope: { ...(revisions ? { revisions } : {}), ...(optionValue("workspace") ? { workspaceId: optionValue("workspace") } : {}), ...((optionValues("path").length || dslPaths.length) ? { paths: [...optionValues("path"), ...dslPaths] } : {}), ...(optionValues("language").length ? { languages: optionValues("language") } : {}), ...(optionValues("kind").length ? { kinds: optionValues("kind") } : {}) }, options: { caseSensitive: flags.includes("--case-sensitive") || !flags.includes("--case-insensitive"), wholeWord: flags.includes("--whole-word"), includeGenerated: flags.includes("--include-generated"), includeVendor: flags.includes("--include-vendor"), includeExcludedMetadata: flags.includes("--include-excluded-metadata"), compact: flags.includes("--compact"), explain: flags.includes("--explain") }, page: { limit: numberOption("limit") ?? 50, ...(optionValue("cursor") ? { cursor: optionValue("cursor") } : {}) } }, { store, scopes: sourceSnapshotId ? [{ snapshotId: sourceSnapshotId, repoId }] : undefined });
             } catch (error) {
               const code = typeof (error as { code?: unknown }).code === "string" ? String((error as { code: string }).code) : "INVALID_QUERY";
               return emitCliError(deps, json, code, String((error as Error).message ?? error), 2);
