@@ -1365,7 +1365,7 @@ fn write_launcher_script(target: &std::path::Path, script: &str) -> std::io::Res
 mod tests {
     use super::{
         ensure_zshrc_path, reconcile_claude_hooks, reconcile_guidance_block,
-        note_runtime_crash, runtime_source_fingerprint, semantic_control_input,
+        note_runtime_crash, runtime_source_fingerprint,
         validate_runtime_hello, write_launcher_script, QueryRuntimeState,
     };
     use std::path::PathBuf;
@@ -1406,20 +1406,6 @@ mod tests {
         assert!(!note_runtime_crash(&state).unwrap());
         assert!(!note_runtime_crash(&state).unwrap());
         assert!(note_runtime_crash(&state).unwrap());
-    }
-
-    #[test]
-    fn semantic_control_transport_forwards_unvalidated_canonical_payload() {
-        let payload = semantic_control_input(
-            "pause".to_string(),
-            None,
-            Some("generation-forwarded-to-canonical-validator".to_string()),
-            "  token  ".to_string(),
-        );
-        assert_eq!(payload["action"], "pause");
-        assert_eq!(payload.get("scopeKey"), None);
-        assert_eq!(payload["generationId"], "generation-forwarded-to-canonical-validator");
-        assert_eq!(payload["operationToken"], "  token  ");
     }
 
     #[test]
@@ -1868,26 +1854,6 @@ pub(crate) fn prewarm<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
     });
 }
 
-/// Best-effort startup wake for durable semantic work. The CLI supervisor is
-/// intentionally short lived and detached; Tauri only asks it to resume any
-/// queued generation and never waits for model loading or embedding work.
-pub(crate) fn wake_semantic_worker_on_startup<R: tauri::Runtime>(app: tauri::AppHandle<R>) {
-    std::thread::spawn(move || {
-        use tauri::Emitter;
-        if !knowledge_db_path().map(|path| path.exists()).unwrap_or(false) { return; }
-        let args = vec![
-            "semantic".to_string(),
-            "wake".to_string(),
-            "--json".to_string(),
-        ];
-        let payload = run_cli(&app, &args)
-            .ok()
-            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-            .unwrap_or_else(|| serde_json::json!({ "reason": "STARTUP_WAKE_BEST_EFFORT_FAILED" }));
-        let _ = app.emit("knowledge-semantic-status-changed", payload);
-    });
-}
-
 // Like run_cli but streams stderr: lines `PENGUIN_PROGRESS {json}` (emitted by
 // the CLI under --progress-events) become `knowledge-index-progress` Tauri
 // events so the Wiki can show a live bar; stdout is collected as the final
@@ -2017,79 +1983,6 @@ pub(crate) async fn knowledge_query_canonical<R: tauri::Runtime>(
     tauri::async_runtime::spawn_blocking(move || resident_query(&app, &capability_id, input, request_id).map(|result| result.to_string()))
         .await
         .map_err(|error| format!("canonical knowledge query task failed: {error}"))?
-}
-
-/// Canonical semantic status transport for the webview. Rust deliberately
-/// forwards the JSON payload unchanged so Tauri, CLI and MCP cannot invent
-/// different lifecycle meanings.
-#[tauri::command]
-pub(crate) async fn knowledge_semantic_status<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    scope_key: Option<String>,
-) -> Result<String, String> {
-    let input = scope_key.map_or_else(
-        || serde_json::json!({}),
-        |scope_key| serde_json::json!({ "scopeKey": scope_key }),
-    );
-    tauri::async_runtime::spawn_blocking(move || {
-        resident_query(&app, "knowledge.semantic_status", input, None)
-            .map(|result| result.to_string())
-    })
-    .await
-    .map_err(|error| format!("semantic status task failed: {error}"))?
-}
-
-/// Owner-local semantic controls. `operation_token` is canonical idempotency
-/// data inside the request payload; resident transport correlation uses a
-/// separate per-request id so concurrent replays cannot overwrite each other.
-fn semantic_control_input(
-    action: String,
-    scope_key: Option<String>,
-    generation_id: Option<String>,
-    operation_token: String,
-) -> serde_json::Value {
-    let mut input = serde_json::json!({
-        "action": action,
-        "operationToken": operation_token,
-    });
-    if let Some(scope_key) = scope_key {
-        input["scopeKey"] = serde_json::Value::String(scope_key);
-    }
-    if let Some(generation_id) = generation_id {
-        input["generationId"] = serde_json::Value::String(generation_id);
-    }
-    input
-}
-
-#[tauri::command]
-pub(crate) async fn knowledge_semantic_control<R: tauri::Runtime>(
-    app: tauri::AppHandle<R>,
-    action: String,
-    scope_key: Option<String>,
-    generation_id: Option<String>,
-    operation_token: String,
-) -> Result<String, String> {
-    use tauri::Emitter;
-    let input = semantic_control_input(action, scope_key, generation_id, operation_token);
-    let app_for_query = app.clone();
-    let raw = tauri::async_runtime::spawn_blocking(move || {
-        resident_query(
-            &app_for_query,
-            "knowledge.semantic_control",
-            input,
-            // Correlation IDs are per request. operationToken remains inside
-            // the canonical payload for idempotency, so concurrent replays do
-            // not overwrite each other's pending response channel.
-            None,
-        )
-        .map(|result| result.to_string())
-    })
-    .await
-    .map_err(|error| format!("semantic control task failed: {error}"))??;
-    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&raw) {
-        let _ = app.emit("knowledge-semantic-status-changed", payload);
-    }
-    Ok(raw)
 }
 
 // One-shot incremental index of a repo (headless), returns the JSON report.
