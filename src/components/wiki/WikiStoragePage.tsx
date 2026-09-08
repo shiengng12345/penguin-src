@@ -140,7 +140,7 @@ export function WikiStoragePage() {
     );
   }
 
-  const { files, health, growth, tables, gc, maintenance, repos, semantic } = report;
+  const { files, health, growth, tables, gc, maintenance, repos } = report;
   const deltaText = formatDelta(growth.weeklyDeltaBytes);
   const totalTableBytes = tables ? tables.categories.reduce((sum, category) => sum + category.bytes, 0) : 0;
   const running = busyAction != null || maintenance.running;
@@ -185,20 +185,6 @@ export function WikiStoragePage() {
               </div>
             ))}
           </div>
-        </Card>
-
-        <Card title="语义向量（独立统计）">
-          <div className="grid gap-x-6 gap-y-1.5 text-sm sm:grid-cols-2">
-            <div className="flex justify-between gap-3"><span className="text-muted-foreground">可查询状态</span><span className={semantic.ready ? "text-emerald-300" : "text-amber-300"}>{semantic.ready ? "可用" : "尚未激活"}</span></div>
-            <div className="flex justify-between gap-3"><span className="text-muted-foreground">后端</span><span className="text-foreground">{semantic.backend}</span></div>
-            <div className="flex justify-between gap-3"><span className="text-muted-foreground">当前进度</span><span className="tabular-nums text-foreground">{semantic.readyJobs}/{semantic.expectedChunks}</span></div>
-            <div className="flex justify-between gap-3"><span className="text-muted-foreground">等待 / 失败</span><span className={semantic.failedJobs > 0 ? "tabular-nums text-red-300" : "tabular-nums text-foreground"}>{semantic.pendingJobs} / {semantic.failedJobs}</span></div>
-            <div className="flex justify-between gap-3"><span className="text-muted-foreground">活跃 / 构建中世代</span><span className="tabular-nums text-foreground">{semantic.activeGenerations} / {semantic.stagingGenerations}</span></div>
-            <div className="flex justify-between gap-3"><span className="text-muted-foreground">向量引用 / 实体</span><span className="tabular-nums text-foreground">{semantic.readyRefs}/{semantic.vectorRows}</span></div>
-            <div className="flex justify-between gap-3"><span className="text-muted-foreground">向量数据库占用</span><span className="tabular-nums text-foreground">{formatBytes(semantic.modelDiskBytes)}</span></div>
-            <div className="flex justify-between gap-3"><span className="text-muted-foreground">最后写入</span><span className="text-foreground">{formatRelativeTime(semantic.lastCheckpoint)}</span></div>
-          </div>
-          {semantic.reason && <p className="mt-2 text-[11px] text-muted-foreground">{semantic.reason}。Graph 与 lexical 搜索不受影响；只有完整并验证后的向量世代才会切换为可查询。</p>}
         </Card>
 
         <div className="grid gap-4 md:grid-cols-2">

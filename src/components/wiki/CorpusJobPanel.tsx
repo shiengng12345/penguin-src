@@ -17,7 +17,7 @@ import {
 const STATUS_STORAGE_KEY = APP_VALUE_KEYS.fullCorpusStatusPath;
 
 function phaseLabel(phase: KnowledgeCorpusJob["phase"]): string {
-  return phase === "index" ? "代码索引" : phase === "rebuild" ? "完整重建" : phase === "semantic" ? "语义队列" : "校验收尾";
+  return phase === "index" ? "代码索引" : phase === "rebuild" ? "完整重建" : "校验收尾";
 }
 
 function stateLabel(state: KnowledgeCorpusJob["state"]): string {
@@ -29,7 +29,7 @@ function progressPercent(job: KnowledgeCorpusJob): number {
   const fraction = job.totalRepos > 0 ? Math.min(1, job.completedRepos / job.totalRepos) : 0;
   if (job.mode !== "both") return Math.round(fraction * 100);
   if (job.phase === "rebuild") return Math.round(50 + fraction * 50);
-  if (job.phase === "semantic" || job.phase === "verify") return 100;
+  if (job.phase === "verify") return 100;
   return Math.round(fraction * 50);
 }
 
