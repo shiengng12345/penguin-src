@@ -419,8 +419,6 @@ const TOOL_TIERS: ReadonlyArray<readonly [prefix: string, names: readonly string
     "knowledge_files",
     "get_architecture",
     "index_status",
-    "knowledge_semantic_status",
-    "knowledge_semantic_control",
     "knowledge_repository_register",
     "knowledge_index",
     "knowledge_rebuild",
