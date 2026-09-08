@@ -210,8 +210,6 @@ export { classifyEdgeTrust, type EdgeProofKind, type EdgeProofInput, type EdgeTr
 export { graphEdgeEvidence, unresolvedGraphEdgeEvidence, isExecutionEdge, isReferenceEdge, EXECUTION_EDGE_TYPES, REFERENCE_EDGE_TYPES, type RawGraphEdgeEvidence } from "./graph-evidence.js";
 export { compileKnowledgeDsl, type CompiledKnowledgeDsl, type KnowledgeDslExpression, type KnowledgeDslPredicate } from "./knowledge-dsl.js";
 export { filterHitsByPropertyPredicates, filterHitsByMarkdownPredicates } from "./property-search.js";
-export { UnavailableEmbeddingProvider, inspectLocalModelDirectory, inspectLocalEmbeddingDirectory, createRemoteEmbeddingProvider, type EmbeddingProvider, type LocalModelManifest, type LocalModelDescriptor, type LocalEmbeddingManifest, type LocalEmbeddingDescriptor, type RemoteEmbeddingProviderOptions } from "./embedding-provider.js";
-export { searchPersistedVectors, fuseHybridHits, type HybridSearchConfig, type PersistedVectorSearchInput, type PersistedVectorSearchResult, type RetrievalProvenance } from "./hybrid-search.js";
 export { recordSearchFeedback, listSearchFeedback, deleteSearchFeedback, exportSearchFeedback, type FeedbackVerdict } from "./search-feedback.js";
 export { SavedQueryStore, writeSavedQueryMarkdown, type SavedQuery } from "./saved-query.js";
 export { reflectSearchFeedback, listReflectionSuggestions, reviewReflectionSuggestion, type ReflectionSuggestion } from "./reflection.js";

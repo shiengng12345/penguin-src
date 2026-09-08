@@ -10,8 +10,6 @@ import { buildEvidenceEnvelope, searchLegacyRows } from "./query.js";
 import { HmacSearchCursorCodec, resolveLocalCursorSecret } from "./search-cursor.js";
 import { LANE_WEIGHTS, rankSearchHits, SEARCH_RANKER_VERSION } from "./search-ranking.js";
 import { planSearch, SEARCH_PLANNER_VERSION } from "./search-planner.js";
-import { fuseHybridHits, searchPersistedVectors } from "./hybrid-search.js";
-import type { EmbeddingProvider } from "./embedding-provider.js";
 import { sanitizeUntrustedText } from "./content-safety.js";
 import { OntologyStore } from "./ontology.js";
 import { isWorkingTreeOverlaySnapshotKey, workingTreeRevisionKind } from "./working-tree-overlay.js";
@@ -21,8 +19,6 @@ export interface SearchContext {
   scopes?: ResolvedRevisionScope[];
   cursorSecret?: string;
   now?: () => Date;
-  semanticProvider?: EmbeddingProvider;
-  semanticProviderFactory?: () => Promise<EmbeddingProvider | undefined>;
   signal?: AbortSignal;
 }
 const DEFAULT_CURSOR_SECRET = resolveLocalCursorSecret();
@@ -66,7 +62,6 @@ const MAX_SEARCH_CANDIDATES = 5_000;
 const MAX_TOTAL_SNIPPET_BYTES = 32_000;
 const MAX_GLOBAL_SEARCH_SCOPES = 4;
 const DEFAULT_GLOBAL_SEARCH_BUDGET_MS = 10_000;
-const LOW_VECTOR_SIMILARITY_THRESHOLD = 0.2;
 
 function publicSearchError(code: string, message: string, details: Record<string, unknown>): Error & { code: string; details: Record<string, unknown>; retryable: false } {
   return Object.assign(new Error(message), { code, details, retryable: false as const });
@@ -784,219 +779,15 @@ export function searchKnowledge(input: SearchRequest | NormalizedSearchRequest, 
   return response;
 }
 
-/** Async companion for the optional semantic lane. Deterministic search remains
- * the source of truth; semantic hits are explicitly marked as inference and
- * are only blended when the caller opts in and supplies a provider. */
+/** Async companion kept for callers (CLI compact/cursor/mode search, saved
+ * queries, the resident Tauri query worker) that invoke search through the
+ * async surface. The semantic/hybrid vector lane has been removed from the
+ * knowledge-core engine; this now always resolves to the deterministic
+ * `searchKnowledge()` result — any caller still requesting `options.semantic`
+ * or `mode: "semantic"` silently gets deterministic-only results instead of
+ * a hybrid-fused response. */
 export async function searchKnowledgeAsync(input: SearchRequest | NormalizedSearchRequest, context: SearchContext): Promise<SearchResponse> {
-  const request = validatePublicSearchRequest(input);
-  const parsedQuery = planSearch(request).parsed;
-  if (request.options.semantic === "off") {
-    return searchKnowledge(request, context);
-  }
-  // Hybrid pagination is ranked over a stable bounded candidate window. The
-  // deterministic pass must not consume the hybrid cursor or page at the
-  // caller's tiny limit, otherwise vector hits 4..N are structurally lost.
-  const candidateWindow = Math.max(50, request.page.limit);
-  const deterministic = searchKnowledge({
-    ...request,
-    options: { ...request.options, semantic: "off" },
-    page: { limit: candidateWindow },
-  }, context);
-  // Scope failures are terminal. Starting a model for a missing workspace is
-  // both expensive and misleading because no semantic lane can make the
-  // requested scope valid.
-  if (deterministic.error) return deterministic;
-  const resolvedScopeKeys = new Set(deterministic.diagnostics.resolvedScope.map((scope) => `${scope.repoId}|${scope.snapshotId}`));
-  const scopes = (context.scopes?.length ? context.scopes : scopeRows(context.store))
-    .filter((scope) => resolvedScopeKeys.has(`${scope.repoId ?? ""}|${scope.snapshotId}`));
-  const warnings = [...deterministic.diagnostics.warnings];
-  const semanticProgress = semanticProgressForScopes(context.store, scopes);
-  const semanticPartial = semanticProgress.expected > 0 && semanticProgress.ready < semanticProgress.expected;
-  if (semanticPartial) {
-    warnings.push({
-      code: "SEMANTIC_PARTIAL_INDEX",
-      message: `semantic vectors are available for ${semanticProgress.ready}/${semanticProgress.expected} indexed chunks; results are a lower bound while the background worker continues`,
-    });
-  }
-  const skippedSemantic = (reason: string, message: string): SearchResponse => {
-    // The candidate pass intentionally widens to at least 50 for hybrid RRF.
-    // A skipped semantic lane must instead return the caller's original
-    // deterministic page (including its cursor and exact requested limit).
-    const fallback = searchKnowledge({
-      ...request,
-      options: { ...request.options, semantic: "off" },
-    }, context);
-    return {
-    ...fallback,
-    diagnostics: {
-      ...fallback.diagnostics,
-      searchedLanes: fallback.diagnostics.searchedLanes.filter((lane) => lane !== "semantic"),
-      skippedLanes: [
-        ...fallback.diagnostics.skippedLanes.filter((lane) => lane.lane !== "semantic"),
-        { lane: "semantic", reason },
-      ],
-      warnings: [...fallback.diagnostics.warnings, { code: "SEMANTIC_LANE_UNAVAILABLE", message }],
-      queryStatus: fallback.hits.length > 0 ? "MATCH" : "NO_MATCH_INCOMPLETE",
-      semantic: {
-        requested: true,
-        applied: false,
-        reason,
-        ready: semanticProgress.ready,
-        expected: semanticProgress.expected,
-        activeGenerationIds: semanticProgress.activeGenerationIds,
-        lanesUsed: fallback.diagnostics.searchedLanes.filter((lane) => lane !== "semantic" && lane !== "vector"),
-      },
-    },
-    ...(request.mode === "semantic" ? { error: { code: "MODE_UNAVAILABLE" as const, message, details: { reason }, retryable: false } } : {}),
-    };
-  };
-  if (semanticProgress.activeGenerationIds.length === 0) {
-    return skippedSemantic("no_active_space", "semantic search has no active embedding generation for the resolved scope");
-  }
-  const semanticProvider = context.semanticProvider ?? await context.semanticProviderFactory?.();
-  if (!semanticProvider) {
-    return skippedSemantic("provider_not_configured", "semantic search was requested but no embedding provider is configured; deterministic lanes are partial results");
-  }
-  try {
-    const providerHealth = await Promise.race([
-      semanticProvider.health(),
-      new Promise<never>((_, reject) => setTimeout(() => reject(Object.assign(new Error("SEMANTIC_LANE_TIMEOUT"), { code: "SEMANTIC_LANE_TIMEOUT" })), 1_000)),
-    ]);
-    if (!providerHealth.ok) {
-      return skippedSemantic("provider_unhealthy", providerHealth.reason ?? "embedding provider is unhealthy; deterministic lanes are partial results");
-    }
-  } catch (error) {
-    return skippedSemantic((error as { code?: string }).code === "SEMANTIC_LANE_TIMEOUT" ? "timeout" : "provider_error", String((error as Error).message ?? error));
-  }
-  const requestedRevisions = request.scope.revisions;
-  const semanticScopes = requestedRevisions?.length
-    ? scopes.filter((scope) => requestedRevisions.some((revision) => {
-        if (revision.snapshotId) return revision.snapshotId === scope.snapshotId;
-        if (revision.repoId) return revision.repoId === scope.repoId;
-        if (revision.repoName && scope.repoId) return revision.repoName.toLocaleLowerCase() === repoName(context.store, scope.repoId).toLocaleLowerCase();
-        if (revision.branch && scope.repoId) return Boolean(context.store.db.prepare("SELECT 1 FROM branches WHERE repo_id=? AND name=? AND current_snapshot_id=?").get(scope.repoId, revision.branch, scope.snapshotId));
-        return true;
-      }))
-    : scopes;
-  if (semanticScopes.length !== scopes.length) warnings.push({ code: "SEMANTIC_SCOPE_FILTERED", message: "semantic documents were restricted to the requested repository/revision scope" });
-  let persisted;
-  try {
-    persisted = await searchPersistedVectors({ store: context.store, provider: semanticProvider, query: request.query, scopes: semanticScopes, pathPrefixes: request.scope.paths, limit: Math.max(50, request.page.limit), signal: context.signal });
-  } catch (error) {
-    return skippedSemantic("provider_error", String((error as Error).message ?? error));
-  }
-  if (!persisted.activeGenerations.length) return skippedSemantic("no_active_space", "semantic search has no active embedding generation for the resolved scope");
-  const cursorCodec = new HmacSearchCursorCodec(context.cursorSecret ?? DEFAULT_CURSOR_SECRET, () => (context.now?.() ?? new Date()).getTime());
-  const semanticRequestHash = hash({
-    kind: "semantic-hybrid-page-v1",
-    ...request,
-    page: { limit: request.page.limit },
-  });
-  const semanticScopeHash = hash(request.scope);
-  let afterHitId: string | undefined;
-  if (request.page.cursor) {
-    try {
-      const decoded = cursorCodec.decode(request.page.cursor);
-      if (decoded.normalizedRequestHash !== semanticRequestHash
-        || decoded.scopeHash !== semanticScopeHash
-        || decoded.capabilityHash !== capabilityHash(CAPABILITIES)
-        || decoded.mode !== request.mode) {
-        throw new Error("CURSOR_STALE");
-      }
-      afterHitId = decoded.lastHitId;
-    } catch (error) {
-      const message = String((error as Error).message);
-      const code = message.includes("OPERATION_MISMATCH") ? "CURSOR_OPERATION_MISMATCH" : message.includes("EXPIRED") ? "CURSOR_EXPIRED" : message.includes("STALE") ? "CURSOR_STALE" : "CURSOR_INVALID";
-      throw Object.assign(new Error(code), {
-        code,
-        retryable: false,
-        details: { remediation: "restart semantic search pagination from the first page using the same scope, query, mode, options, and limit" },
-      });
-    }
-  }
-  const merged = fuseHybridHits(deterministic.hits, persisted.hits, { rrfK: 60, lexicalLimit: Math.max(50, request.page.limit), vectorLimit: Math.max(50, request.page.limit), exactPin: true, rankerVersion: SEARCH_RANKER_VERSION });
-  let pageStart = 0;
-  if (afterHitId) {
-    const priorIndex = merged.findIndex((hit) => hit.hitId === afterHitId);
-    if (priorIndex < 0) throw Object.assign(new Error("CURSOR_STALE"), { code: "CURSOR_STALE" });
-    pageStart = priorIndex + 1;
-  }
-  const hits = merged.slice(pageStart, pageStart + request.page.limit);
-  const returnedCount = hits.length;
-  // The deterministic pass deliberately reports the semantic stage as deferred.
-  // Once the async vector lane has run, every public envelope field must be
-  // rebuilt from the merged result; otherwise consumers see hits alongside a
-  // false NO_MATCH/returnedCount=0 result.
-  const candidateCount = merged.length;
-  const truncated = pageStart + returnedCount < merged.length;
-  const last = hits.at(-1);
-  const proofStatus = returnedCount > 0
-    ? hits.some((hit) => hit.lane !== "vector" && hit.lane !== "semantic")
-      ? deterministic.proofStatus ?? "candidate" as const
-      : "candidate" as const
-    : deterministic.proofStatus ?? "not_proven" as const;
-  const searchedLanes = [...new Set([...deterministic.diagnostics.searchedLanes, "vector" as const])];
-  const bestVectorSimilarity = persisted.hits.reduce((best, hit) => Math.max(best, Number.isFinite(hit.score) ? hit.score : -1), -1);
-  const mergedWarnings = [
-    ...warnings.filter((warning) => warning.code !== "SEMANTIC_LANE_UNAVAILABLE" && (returnedCount === 0 || warning.code !== "NO_MATCH")),
-    ...(persisted.hits.length > 0 && bestVectorSimilarity < LOW_VECTOR_SIMILARITY_THRESHOLD
-      ? [{
-          code: "LOW_SIMILARITY",
-          message: `best vector similarity ${bestVectorSimilarity.toFixed(4)} is below ${LOW_VECTOR_SIMILARITY_THRESHOLD.toFixed(2)}; treat semantic hits as weak candidate leads, not evidence`,
-        }]
-      : []),
-  ];
-  const nextCursor = truncated && last
-    ? cursorCodec.encode({
-        schemaVersion: "1",
-        queryHash: hash(request.query),
-        normalizedRequestHash: semanticRequestHash,
-        scopeHash: semanticScopeHash,
-        capabilityHash: capabilityHash(CAPABILITIES),
-        mode: request.mode,
-        lanes: searchedLanes,
-        lastRank: last.score,
-        lastHitId: last.hitId,
-        expiresAt: new Date((context.now?.() ?? new Date()).getTime() + 15 * 60_000).toISOString(),
-      })
-    : undefined;
-  return validateSearchResponse({
-    ...deterministic,
-    hits,
-    proofStatus,
-    candidateCount,
-    returnedCount,
-    truncated,
-    cursor: nextCursor ?? null,
-    evidence: {
-      ...deterministic.evidence,
-      proofStatus,
-      candidateCount,
-      returnedCount,
-      truncated,
-      cursor: nextCursor ?? null,
-    },
-    diagnostics: {
-      ...deterministic.diagnostics,
-      queryStatus: returnedCount > 0 ? "MATCH" : deterministic.diagnostics.queryStatus,
-      searchedLanes,
-      skippedLanes: deterministic.diagnostics.skippedLanes.filter((lane) => lane.lane !== "semantic"),
-      warnings: mergedWarnings,
-      suggestions: returnedCount > 0 ? [] : deterministic.diagnostics.suggestions,
-      candidateCount,
-      truncated,
-      semantic: {
-        requested: true,
-        applied: true,
-        reason: semanticPartial ? "partial_index" : null,
-        ready: semanticProgress.ready,
-        expected: semanticProgress.expected,
-        activeGenerationIds: persisted.activeGenerations,
-        lanesUsed: searchedLanes,
-      },
-    },
-    page: { limit: request.page.limit, ...(nextCursor ? { nextCursor } : {}), totalIsExact: false },
-  });
+  return searchKnowledge(input, context);
 }
 
 function storeBranch(store: KnowledgeStore, snapshotId: string): string | undefined {
