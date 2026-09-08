@@ -292,7 +292,14 @@ export interface KnowledgeSearchV2Response {
   page: { limit: number; nextCursor?: string; totalIsExact: boolean };
 }
 
-export function knowledgeSearchV2(queryText: string, mode: string = "auto", options: { cursor?: string; limit?: number; repo?: string; branch?: string; snapshot?: string; path?: string; language?: string; kind?: string; includeGenerated?: boolean; includeVendor?: boolean; signal?: AbortSignal } = {}): Promise<KnowledgeSearchV2Response> {
+// Mirrors @penguin/knowledge-contracts's SearchMode enum. Kept as a local
+// union (rather than importing the contracts package into the frontend)
+// so the valid mode set is checked at compile time without adding a new
+// cross-package dependency — see knowledge.search's input schema for the
+// canonical list this must stay in sync with.
+export type KnowledgeSearchMode = "auto" | "exact" | "phrase" | "substring" | "path" | "regex" | "lexical" | "structural";
+
+export function knowledgeSearchV2(queryText: string, mode: KnowledgeSearchMode = "auto", options: { cursor?: string; limit?: number; repo?: string; branch?: string; snapshot?: string; path?: string; language?: string; kind?: string; includeGenerated?: boolean; includeVendor?: boolean; signal?: AbortSignal } = {}): Promise<KnowledgeSearchV2Response> {
   const revision = options.repo || options.branch || options.snapshot ? [{ ...(options.repo ? { repoName: options.repo } : {}), ...(options.branch ? { branch: options.branch } : {}), ...(options.snapshot ? { snapshotId: options.snapshot } : {}) }] : undefined;
   return canonicalQuery<KnowledgeSearchV2Response>("knowledge.search", {
     query: queryText,

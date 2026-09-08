@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, Search, Network, Bookmark, ClipboardList } from "lucide-react";
-import { knowledgeContext, knowledgeEvidenceList, knowledgeExplore, knowledgeGetHit, knowledgeGraph, knowledgeIndexStatus, knowledgeReindex, knowledgeSavedQueryList, knowledgeSavedQueryRun, knowledgeSavedQueryWrite, knowledgeSearchV2, ScopeBlockedError, type ContextPack, type KnowledgeEvidenceNote, type KnowledgeGraphResult, type KnowledgeGraphView, type KnowledgeHitDetail, type KnowledgeSavedQuery, type KnowledgeSearchV2Response } from "@/lib/knowledge-client";
+import { knowledgeContext, knowledgeEvidenceList, knowledgeExplore, knowledgeGetHit, knowledgeGraph, knowledgeIndexStatus, knowledgeReindex, knowledgeSavedQueryList, knowledgeSavedQueryRun, knowledgeSavedQueryWrite, knowledgeSearchV2, ScopeBlockedError, type ContextPack, type KnowledgeEvidenceNote, type KnowledgeGraphResult, type KnowledgeGraphView, type KnowledgeHitDetail, type KnowledgeSavedQuery, type KnowledgeSearchMode, type KnowledgeSearchV2Response } from "@/lib/knowledge-client";
 import { getPersistedValue, setPersistedValue } from "@/lib/app-persistence";
 import { APP_VALUE_KEYS } from "@/lib/persistence-keys";
 import { ScopeBadge } from "@/components/wiki/ScopeBadge";
@@ -18,11 +18,11 @@ const errText = (e: unknown) =>
   (e as Error)?.name === "AbortError" ? null : String((e as Error)?.message ?? e);
 
 function initialSearchState() {
-  if (typeof window === "undefined") return { query: "", mode: "auto", repo: "", branch: "", snapshot: "", path: "", language: "", kind: "" };
+  if (typeof window === "undefined") return { query: "", mode: "auto" as KnowledgeSearchMode, repo: "", branch: "", snapshot: "", path: "", language: "", kind: "" };
   const params = new URLSearchParams(window.location.search);
   return {
     query: params.get("q") ?? "",
-    mode: params.get("mode") ?? "auto",
+    mode: (params.get("mode") ?? "auto") as KnowledgeSearchMode,
     repo: params.get("repo") ?? "",
     branch: params.get("branch") ?? "",
     snapshot: params.get("snapshot") ?? "",
@@ -318,8 +318,8 @@ export function WikiSearchPage() {
     <div className="flex items-center gap-2 border-b border-border p-4">
       <Search className="h-4 w-4 text-cyan-300" />
       <input data-wiki-search autoFocus value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") setQuery((value) => value.trim()); }} placeholder="搜索代码、路径、知识… (⌘K)" className="min-w-0 flex-1 bg-transparent text-sm text-foreground outline-none placeholder:text-muted-foreground" />
-      <select value={mode} onChange={(event) => setMode(event.target.value)} className="rounded border border-border bg-card px-2 py-1 text-xs text-foreground">
-        {(["auto", "exact", "phrase", "path", "regex", "structural", "semantic"] as const).map((value) => <option key={value}>{value}</option>)}
+      <select value={mode} onChange={(event) => setMode(event.target.value as KnowledgeSearchMode)} className="rounded border border-border bg-card px-2 py-1 text-xs text-foreground">
+        {(["auto", "exact", "phrase", "path", "regex", "lexical", "structural"] as const).map((value) => <option key={value}>{value}</option>)}
       </select>
       <select aria-label="筛选检索通道" value={laneFilter} onChange={(event) => setLaneFilter(event.target.value)} className="rounded border border-border bg-card px-2 py-1 text-xs text-foreground">
         <option value="all">全部通道</option>
@@ -362,7 +362,7 @@ export function WikiSearchPage() {
         <button type="button" onClick={() => void reindexScope()} disabled={reindexBusy} className="mt-3 rounded border border-yellow-400/30 px-2.5 py-1 text-xs text-yellow-100 hover:bg-yellow-400/10 disabled:opacity-50">{reindexBusy ? "重新索引中…" : "确认后重新索引此范围"}</button>
       </div> : <div style={{ contain: "layout paint", minHeight: `${visibleHits.length * ROW_HEIGHT}px` }}>
         <div aria-hidden="true" style={{ height: `${virtualWindow.top}px` }} />
-        {visibleHits.slice(virtualWindow.start, virtualWindow.end).map((hit, offset) => { const index = virtualWindow.start + offset; return <div key={hit.hitId} style={{ height: ROW_HEIGHT }} className="pb-2"><article role="button" tabIndex={0} aria-selected={selectedHitIndex === index} onClick={() => { setSelectedHitIndex(index); void openContext(hit); }} onFocus={() => setSelectedHitIndex(index)} onKeyDown={(event) => { if (event.key === "Enter" && event.metaKey) { event.preventDefault(); void openCodeLocation(hit); } else if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedHitIndex(index); void openContext(hit); } }} className={`flex h-full flex-col overflow-hidden cursor-pointer rounded-lg border bg-background/35 p-3 ${selectedHitIndex === index ? "border-cyan-400/80 ring-1 ring-cyan-400/30" : hit.lane === "semantic" ? "border-violet-500/30" : "border-border hover:border-cyan-500/40"}`}>
+        {visibleHits.slice(virtualWindow.start, virtualWindow.end).map((hit, offset) => { const index = virtualWindow.start + offset; return <div key={hit.hitId} style={{ height: ROW_HEIGHT }} className="pb-2"><article role="button" tabIndex={0} aria-selected={selectedHitIndex === index} onClick={() => { setSelectedHitIndex(index); void openContext(hit); }} onFocus={() => setSelectedHitIndex(index)} onKeyDown={(event) => { if (event.key === "Enter" && event.metaKey) { event.preventDefault(); void openCodeLocation(hit); } else if (event.key === "Enter" || event.key === " ") { event.preventDefault(); setSelectedHitIndex(index); void openContext(hit); } }} className={`flex h-full flex-col overflow-hidden cursor-pointer rounded-lg border bg-background/35 p-3 ${selectedHitIndex === index ? "border-cyan-400/80 ring-1 ring-cyan-400/30" : "border-border hover:border-cyan-500/40"}`}>
           <div className="flex shrink-0 items-center gap-2 text-xs"><span className="truncate font-semibold text-cyan-200">{hit.title}</span><span className="shrink-0 rounded bg-muted px-1.5 py-0.5 text-muted-foreground">{hit.lane}</span><span className="shrink-0 text-muted-foreground">{hit.evidence[0]?.status}</span></div>
           <div className="mt-1 shrink-0 truncate font-mono text-[11px] text-muted-foreground">{hit.locator.repoName} / {hit.locator.filePath}{hit.locator.startLine ? `:${hit.locator.startLine}` : ""} · {hit.locator.revisionId}</div>
           {hit.snippet && <pre className="mt-2 min-h-0 flex-1 overflow-hidden whitespace-pre-wrap text-xs text-foreground">{hit.snippet}</pre>}
