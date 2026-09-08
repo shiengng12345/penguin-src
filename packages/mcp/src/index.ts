@@ -95,7 +95,6 @@ const MCP_FAST_KNOWLEDGE_TOOLS = new Set([
   "index_status",
   "knowledge_status_panel",
   "status_panel",
-  "knowledge_semantic_status",
 ]);
 
 let mcpQueryPool: QueryWorkerPool | undefined;
@@ -1254,23 +1253,3 @@ export type { EnvironmentEntry };
 
 const transport = new StdioServerTransport();
 await server.connect(transport);
-
-// MCP-only users may never open Tauri or run a CLI command after installation.
-// Wake is detached and best-effort so initialize/tools/list stay responsive;
-// the CLI supervisor performs the durable queue/lease checks and logs errors.
-if (existsSync(knowledgeDbPath())) {
-  const launcher = process.env.PENGUIN_CLI_LAUNCHER ?? join(homedir(), ".local", "bin", "penguin");
-  if (existsSync(launcher)) {
-    try {
-      const child = spawn(launcher, ["semantic", "wake", "--json"], {
-        detached: true,
-        stdio: "ignore",
-        env: process.env,
-      });
-      child.unref();
-    } catch {
-      // A failed wake is visible through knowledge_semantic_status; it must
-      // never break the MCP protocol handshake or non-semantic tools.
-    }
-  }
-}

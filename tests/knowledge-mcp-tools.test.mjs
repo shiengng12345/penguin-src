@@ -691,88 +691,6 @@ test("MCP mutations are disabled by default and require an operation-scoped toke
   if (oldSecret === undefined) delete process.env.PENGUIN_MCP_CONFIRMATION_SECRET; else process.env.PENGUIN_MCP_CONFIRMATION_SECRET = oldSecret;
 });
 
-test("semantic control wire contract requires correlation and MCP confirmation tokens", async () => {
-  const oldMode = process.env.PENGUIN_MCP_MUTATIONS;
-  const oldSecret = process.env.PENGUIN_MCP_CONFIRMATION_SECRET;
-  process.env.PENGUIN_MCP_MUTATIONS = "enabled";
-  process.env.PENGUIN_MCP_CONFIRMATION_SECRET = "semantic-confirmation-secret";
-  const { store, repoId } = seed();
-  const space = createEmbeddingSpace(store, embeddingSpaceIdentity({
-    providerId: "fixture", modelId: "mcp-control", weightsDigest: "a".repeat(64),
-    tokenizerDigest: "b".repeat(64), dimensions: 2, pooling: "mean",
-    normalization: "none", chunkerVersion: "v1",
-  }));
-  const generation = new EmbeddingLifecycle(store).createGeneration({
-    spaceId: space.id, snapshotId: "snapshot-control", scopeKey: `repo:${repoId}`, expectedChunks: 1,
-  });
-  const base = { action: "cancel", scopeKey: `repo:${repoId}`, generationId: generation.id, operationToken: "semantic-operation-123" };
-
-  const schema = MCP_LISTED_TOOL_DEFS.find((tool) => tool.name === "knowledge_semantic_control").inputSchema;
-  assert.deepEqual(schema.required, ["action", "scopeKey", "operationToken", "confirmation_token"]);
-  assert.ok(schema.properties.confirmation_token);
-
-  const withoutConfirmation = await runKnowledgeTool("knowledge_semantic_control", base, { store });
-  assert.equal(withoutConfirmation.error.code, "CONFIRMATION_TOKEN_REQUIRED");
-
-  const confirmationToken = createMutationConfirmationToken("knowledge.semantic_control", base, { secret: "semantic-confirmation-secret" });
-  const accepted = await runKnowledgeTool("knowledge_semantic_control", { ...base, confirmation_token: confirmationToken }, { store });
-  assert.equal(accepted.accepted, true);
-  assert.equal(accepted.operationToken, base.operationToken);
-  const replayed = await runKnowledgeTool("knowledge_semantic_control", { ...base, confirmation_token: confirmationToken }, { store });
-  assert.equal(replayed.accepted, true, "same operation token must not execute cancel twice");
-  assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM knowledge_audit_events WHERE capability_id='knowledge.semantic_control'").get().n, 1);
-
-  const conflicting = { action: "pause", scopeKey: base.scopeKey, operationToken: base.operationToken };
-  const conflictingConfirmation = createMutationConfirmationToken("knowledge.semantic_control", conflicting, { secret: "semantic-confirmation-secret" });
-  const conflict = await runKnowledgeTool("knowledge_semantic_control", { ...conflicting, confirmation_token: conflictingConfirmation }, { store });
-  assert.equal(conflict.error.code, "OPERATION_TOKEN_CONFLICT");
-
-  const missingOperation = { action: "resume", scopeKey: "repo:repo" };
-  const missingOperationToken = createMutationConfirmationToken("knowledge.semantic_control", missingOperation, { secret: "semantic-confirmation-secret" });
-  const rejected = await runKnowledgeTool("knowledge_semantic_control", { ...missingOperation, confirmation_token: missingOperationToken }, { store });
-  assert.equal(rejected.error.code, "INVALID_SEMANTIC_CONTRACT");
-
-  store.close();
-  if (oldMode === undefined) delete process.env.PENGUIN_MCP_MUTATIONS; else process.env.PENGUIN_MCP_MUTATIONS = oldMode;
-  if (oldSecret === undefined) delete process.env.PENGUIN_MCP_CONFIRMATION_SECRET; else process.env.PENGUIN_MCP_CONFIRMATION_SECRET = oldSecret;
-});
-
-test("semantic resume replay retries wake after a post-commit failure", async () => {
-  const oldMode = process.env.PENGUIN_MCP_MUTATIONS;
-  const oldSecret = process.env.PENGUIN_MCP_CONFIRMATION_SECRET;
-  process.env.PENGUIN_MCP_MUTATIONS = "enabled";
-  process.env.PENGUIN_MCP_CONFIRMATION_SECRET = "semantic-replay-secret";
-  const { store, repoId } = seed();
-  const space = createEmbeddingSpace(store, embeddingSpaceIdentity({
-    providerId: "fixture", modelId: "mcp-replay", weightsDigest: "c".repeat(64),
-    tokenizerDigest: "d".repeat(64), dimensions: 2, pooling: "mean",
-    normalization: "none", chunkerVersion: "v1",
-  }));
-  new EmbeddingLifecycle(store).createGeneration({
-    spaceId: space.id, snapshotId: "snapshot-replay", scopeKey: `repo:${repoId}`, expectedChunks: 1,
-  });
-  const request = { action: "resume", scopeKey: `repo:${repoId}`, operationToken: "semantic-replay-operation" };
-  const confirmationToken = createMutationConfirmationToken("knowledge.semantic_control", request, { secret: "semantic-replay-secret" });
-  let wakes = 0;
-  const options = {
-    store,
-    invokeLocalCli: async () => {
-      wakes += 1;
-      if (wakes === 1) throw new Error("simulated MCP wake failure");
-      return { status: "started", pid: 123, reason: null, logPath: "/tmp/semantic-worker.log" };
-    },
-  };
-  const first = await runKnowledgeTool("knowledge_semantic_control", { ...request, confirmation_token: confirmationToken }, options);
-  const recovered = await runKnowledgeTool("knowledge_semantic_control", { ...request, confirmation_token: confirmationToken }, options);
-  assert.match(first.error.message, /simulated MCP wake failure/);
-  assert.equal(recovered.worker.status, "started");
-  assert.equal(wakes, 2);
-  assert.equal(store.db.prepare("SELECT COUNT(*) AS n FROM knowledge_audit_events WHERE capability_id='knowledge.semantic_control'").get().n, 1);
-  store.close();
-  if (oldMode === undefined) delete process.env.PENGUIN_MCP_MUTATIONS; else process.env.PENGUIN_MCP_MUTATIONS = oldMode;
-  if (oldSecret === undefined) delete process.env.PENGUIN_MCP_CONFIRMATION_SECRET; else process.env.PENGUIN_MCP_CONFIRMATION_SECRET = oldSecret;
-});
-
 test("MCP set_master_branch explicitly replaces the canonical branch", () => {
   const { store, repoId } = seed();
   const feature = store.registerBranch({ repoId, name: "feature/x", status: "snapshot" });
@@ -1031,14 +949,11 @@ test("MCP read capabilities expose root total timing consistently", async () => 
   const responses = await Promise.all([
     runKnowledgeTool("knowledge_endpoints", { repo: "r", limit: 5 }, { store }),
     runKnowledgeTool("knowledge_affected", { repo: "r", node: caller }, { store }),
-    runKnowledgeTool("knowledge_semantic_status", {}, { store }),
   ]);
-  for (const response of responses.slice(0, 2)) {
+  for (const response of responses) {
     assert.equal(typeof response.timingsMs?.total, "number", JSON.stringify(response).slice(0, 500));
     assert.ok(response.timingsMs.total >= 0);
   }
-  assert.equal(responses[2].timingsMs, undefined, "closed semantic status contract must not receive transport-only fields");
-  assert.deepEqual(validateCapabilityOutput("knowledge.semantic_status", responses[2]), responses[2]);
   store.close();
 });
 

@@ -416,9 +416,6 @@ function normalizeMcpToolResult(result: unknown): unknown {
 function withReadCapabilityTiming(name: string, result: unknown, startedAt: number): unknown {
   const capabilityId = capabilityForTool(name);
   const capability = CAPABILITIES.find((candidate) => candidate.id === capabilityId);
-  // semantic_status has a deliberately closed canonical response schema shared
-  // by CLI/MCP/Tauri. Transport diagnostics must not mutate that wire object.
-  if (capabilityId === "knowledge.semantic_status") return result;
   if (!capability || capability.mutating || result === null || typeof result !== "object" || Array.isArray(result)) return result;
   const record = result as Record<string, unknown>;
   const prior = record.timingsMs && typeof record.timingsMs === "object" && !Array.isArray(record.timingsMs)
@@ -594,41 +591,6 @@ async function runKnowledgeToolUnsafe(name: string, a: Record<string, unknown>, 
         capabilities: CAPABILITIES,
         registrations,
       };
-    }
-    if (routedName === "knowledge_semantic_status") {
-      if (!store) return { error: "knowledge not initialized — open Penguin; the owner may register a repository with knowledge_repository_register" };
-      const requestedScopeKey = typeof a.scopeKey === "string" ? a.scopeKey : undefined;
-      const scope = requestedScopeKey ? resolveSemanticScopeKey(store, requestedScopeKey) : undefined;
-      if (scope && !scope.resolvedScopeKey) {
-        return { error: knowledgeErrorEnvelope(
-          scope.ambiguousRepoIds?.length ? "SCOPE_AMBIGUOUS" : "SCOPE_NOT_FOUND",
-          scope.ambiguousRepoIds?.length ? `semantic scope is ambiguous: ${requestedScopeKey}` : `semantic scope was not found: ${requestedScopeKey}`,
-          { requestedScopeKey, validScopeKeys: scope.validScopeKeys, validRepositoryNames: scope.validRepositoryNames, ...(scope.ambiguousRepoIds ? { candidateRepoIds: scope.ambiguousRepoIds } : {}) },
-          false,
-          "retry knowledge_semantic_status with a listed scope key or repository name",
-        ) };
-      }
-      return validateSemanticStatusResponse({
-        statuses: applySemanticRuntimeState(
-          listSemanticStatuses(store, scope?.resolvedScopeKey),
-          { restartRequired: options.restartRequired === true },
-        ),
-        ...(scope ? { requestedScopeKey: scope.requestedScopeKey, resolvedScopeKey: scope.resolvedScopeKey } : {}),
-      });
-    }
-    if (routedName === "knowledge_semantic_control") {
-      if (!store) return { error: "knowledge not initialized — open Penguin; the owner may register a repository with knowledge_repository_register" };
-      return executeSemanticControl({
-        store,
-        request: {
-          action: a.action,
-          scopeKey: a.scopeKey,
-          ...(a.generationId === undefined ? {} : { generationId: a.generationId }),
-          operationToken: a.operationToken,
-        },
-        runtimeState: { restartRequired: options.restartRequired === true },
-        wake: () => (options.invokeLocalCli ?? invokeLocalCli)(["semantic", "wake", "--json"]),
-      });
     }
     if (routedName === "knowledge_doctor" && a.reconcile != null) {
       if (!store) return { error: "knowledge not initialized — open Penguin; the owner may register a repository with knowledge_repository_register" };
