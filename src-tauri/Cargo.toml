@@ -65,6 +65,11 @@ async-trait = "0.1"
 # Typed error enums for the broker module's parsers and adapters.
 thiserror = "2"
 
+# Binary protocol client. Required because Admin REST cannot produce (405) and
+# its peek cannot serve as a continuous event stream — see spec V-C1/V-E5.
+# `compression` is off: we only need the plain path for Phase 0.
+pulsar = { version = "6.9", default-features = false, features = ["tokio-runtime"] }
+
 # (REST module secrets now live in app_kv via SqliteKeychain — see
 # src/rest/keychain.rs. The old `keyring` dependency was removed because
 # the OS-keychain prompt loop in dev was unacceptable UX and Postman /
