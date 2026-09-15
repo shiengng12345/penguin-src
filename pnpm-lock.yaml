@@ -56,6 +56,9 @@ importers:
       '@lezer/highlight':
         specifier: ^1.2.3
         version: 1.2.3
+      '@penguin/broker-contracts':
+        specifier: workspace:*
+        version: link:packages/broker-contracts
       '@penguin/broker-core':
         specifier: workspace:*
         version: link:packages/broker-core
