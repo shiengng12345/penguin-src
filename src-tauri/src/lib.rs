@@ -327,6 +327,11 @@ pub fn run() {
             runtime::commands::runtime_unregister_source,
             wallpaper::wallpaper_set_enabled,
             wallpaper::wallpaper_get_status,
+            broker::commands::broker_list_connections,
+            broker::commands::broker_upsert_connection,
+            broker::commands::broker_delete_connection,
+            broker::commands::broker_test_connection,
+            broker::commands::broker_list_topics,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

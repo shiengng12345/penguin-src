@@ -24,6 +24,11 @@ export interface CapabilitySnapshot {
   webSocketEnabled: boolean;         // V-C1 — informational only, not a code path
   canProduce: boolean;               // V-E5 — only ever via binary
   canWrite: boolean;                 // V-E8 — what the server allows
+  /** True only when the write probe actually ran and returned a conclusive
+   *  answer. False both when it was skipped (read-only connection) and when
+   *  it could not complete (e.g. broker unreachable for that one call) — in
+   *  either case `canWrite` must not be trusted as a measured fact. */
+  canWriteProbed: boolean;
   hasMetrics: boolean;
   warnings: string[];
   source: BrokerSource;
