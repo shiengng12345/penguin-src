@@ -62,6 +62,9 @@ futures = "0.3"
 # Runtime Manager — async trait objects for the SleepController abstraction.
 async-trait = "0.1"
 
+# Typed error enums for the broker module's parsers and adapters.
+thiserror = "2"
+
 # (REST module secrets now live in app_kv via SqliteKeychain — see
 # src/rest/keychain.rs. The old `keyring` dependency was removed because
 # the OS-keychain prompt loop in dev was unacceptable UX and Postman /

@@ -2,6 +2,7 @@ use std::fs;
 use std::path::PathBuf;
 use tauri::Manager;
 
+mod broker;
 mod db;
 mod inline_webview;
 mod knowledge;
