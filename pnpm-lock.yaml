@@ -167,6 +167,12 @@ importers:
         specifier: ^22.10.0
         version: 22.19.19
 
+  packages/broker-contracts:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.10.0
+        version: 22.19.19
+
   packages/core:
     dependencies:
       '@connectrpc/connect':

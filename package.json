@@ -20,7 +20,7 @@
     "knowledge:capability:gate": "node scripts/knowledge-product-capability-gate.mjs",
     "knowledge:capability:closure": "pnpm test && pnpm knowledge:capability:gate",
     "dev": "vite",
-    "build": "pnpm -F @penguin/core build && pnpm -F @penguin/knowledge-contracts build && pnpm -F @penguin/knowledge-core build && pnpm -F @penguin/knowledge-indexer build && pnpm -F @penguin/api-doc-generator build && pnpm -F @penguin/knowledge-cli build && pnpm knowledge:bundle && tsc -b && vite build",
+    "build": "pnpm -F @penguin/core build && pnpm -F @penguin/knowledge-contracts build && pnpm -F @penguin/broker-contracts build && pnpm -F @penguin/knowledge-core build && pnpm -F @penguin/knowledge-indexer build && pnpm -F @penguin/api-doc-generator build && pnpm -F @penguin/knowledge-cli build && pnpm knowledge:bundle && tsc -b && vite build",
     "knowledge:bundle": "pnpm -F @penguin/core build && pnpm -F @penguin/knowledge-contracts build && pnpm -F @penguin/knowledge-core build && pnpm -F @penguin/knowledge-indexer build && pnpm -F @penguin/api-doc-generator build && pnpm -F @penguin/knowledge-cli build && pnpm -F @penguin/mcp build:dist && node scripts/bundle-knowledge-cli.mjs && node scripts/vendor-knowledge-runtime.mjs",
     "knowledge:release-bundle:gate": "node scripts/knowledge-release-bundle-gate.mjs",
     "knowledge:baseline": "node scripts/knowledge-baseline-snapshot.mjs --json",
@@ -43,7 +43,7 @@
     "test": "node scripts/with-temp-sandbox.mjs node --test --test-concurrency=1 --test-reporter=dot tests/*.test.mjs",
     "test:verbose": "node scripts/with-temp-sandbox.mjs node --test --test-concurrency=1 --test-reporter=spec tests/*.test.mjs",
     "test:coverage": "node scripts/with-temp-sandbox.mjs node --test --test-concurrency=1 --test-reporter=dot --experimental-test-coverage tests/*.test.mjs",
-    "typecheck": "pnpm -F @penguin/core build && pnpm -F @penguin/knowledge-contracts build && pnpm -F @penguin/knowledge-core build && pnpm -F @penguin/knowledge-indexer build && pnpm -F @penguin/api-doc-generator build && pnpm -F @penguin/knowledge-cli build && pnpm knowledge:bundle && tsc -b",
+    "typecheck": "pnpm -F @penguin/core build && pnpm -F @penguin/knowledge-contracts build && pnpm -F @penguin/broker-contracts build && pnpm -F @penguin/knowledge-core build && pnpm -F @penguin/knowledge-indexer build && pnpm -F @penguin/api-doc-generator build && pnpm -F @penguin/knowledge-cli build && pnpm knowledge:bundle && tsc -b",
     "tauri": "tauri",
     "set-version": "node scripts/set-version.mjs"
   },
