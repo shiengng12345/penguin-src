@@ -4,6 +4,7 @@ version = "1.16.0"
 description = "gRPC/gRPC-Web API Client"
 authors = ["Penguin"]
 edition = "2021"
+default-run = "penguin"
 
 [lib]
 name = "penguin_lib"
