@@ -3089,6 +3089,7 @@ version = "1.16.0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "chrono",
  "dirs",
  "fred",
  "futures",

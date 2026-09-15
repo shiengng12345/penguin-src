@@ -46,7 +46,7 @@ impl<T> ResultEnvelope<T> {
         Self {
             data: Some(data),
             source: source.to_string(),
-            observed_at: now_iso8601(),
+            observed_at: now_rfc3339(),
             freshness_ms: 0,
             warnings: Vec::new(),
             error: None,
@@ -57,7 +57,7 @@ impl<T> ResultEnvelope<T> {
         Self {
             data: None,
             source: source.to_string(),
-            observed_at: now_iso8601(),
+            observed_at: now_rfc3339(),
             freshness_ms: 0,
             warnings: Vec::new(),
             error: Some(error),
@@ -65,12 +65,12 @@ impl<T> ResultEnvelope<T> {
     }
 }
 
-fn now_iso8601() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!("{secs}")
+/// RFC-3339 / ISO-8601 UTC timestamp, e.g. `2026-09-16T12:34:56.789+00:00`.
+/// The TypeScript layer (`packages/broker-contracts/src/envelope.ts`) parses
+/// `observedAt` with `new Date(...)`, which requires this shape — a bare Unix
+/// seconds string like "1770000000" parses as Invalid Date.
+fn now_rfc3339() -> String {
+    chrono::Utc::now().to_rfc3339()
 }
 
 /// Pulsar uses 200 for reads, 202 for the schema compatibility check, and 204
@@ -98,7 +98,13 @@ fn is_schema_incompatibility(status: u16, reason: Option<&str>, path: &str) -> b
     if status != 500 || !path.contains("/schemas/") {
         return false;
     }
-    reason.is_some_and(|r| r.contains("SchemaValidationException") || r.contains("IncompatibleSchemaException"))
+    // Case-insensitive, matching the TypeScript reference
+    // (`/SchemaValidationException|IncompatibleSchemaException/i`) exactly —
+    // Rust is made to match TypeScript here, not the reverse.
+    reason.is_some_and(|r| {
+        let lower = r.to_lowercase();
+        lower.contains("schemavalidationexception") || lower.contains("incompatibleschemaexception")
+    })
 }
 
 /// A reasoned, non-empty fallback message for when no `reason` could be
@@ -122,7 +128,11 @@ fn fallback_message(status: u16) -> String {
 /// decide whether a `reason` is plausible; always prefer it when non-empty,
 /// and degrade to `fallback_message` only when it is not.
 pub fn map_http_error(status: u16, reason: Option<&str>, path: &str) -> BrokerError {
-    let reason = reason.map(str::trim).filter(|r| !r.is_empty());
+    // Matches error-map.ts: `reason && reason.trim().length > 0 ? reason : fallback`.
+    // A whitespace-only reason counts as absent, but a genuinely present reason
+    // is used verbatim, untrimmed — the two layers must show the operator the
+    // exact same string, whitespace included.
+    let reason = reason.filter(|r| !r.trim().is_empty());
     let message = reason.map(str::to_string).unwrap_or_else(|| fallback_message(status));
 
     if is_schema_incompatibility(status, reason, path) {
@@ -247,5 +257,45 @@ mod tests {
         let err = map_http_error(401, None, "/admin/v2/tenants");
         assert_eq!(err.code, BrokerErrorCode::AuthenticationFailed);
         assert!(err.message.contains("does not distinguish"));
+    }
+
+    /// A whitespace-only reason must count as absent, matching
+    /// `reason.trim().length > 0` in error-map.ts.
+    #[test]
+    fn a_whitespace_only_reason_falls_back_like_no_reason_at_all() {
+        let err = map_http_error(401, Some("   \n\t  "), "/admin/v2/tenants");
+        assert_eq!(err.code, BrokerErrorCode::AuthenticationFailed);
+        assert!(err.message.contains("does not distinguish"));
+    }
+
+    /// The message shown to the user must match TypeScript's exactly,
+    /// including any surrounding whitespace in a genuinely present reason —
+    /// error-map.ts does not trim it before using it as the message.
+    #[test]
+    fn a_present_reason_is_used_untrimmed_as_the_message() {
+        let err = map_http_error(409, Some("  conflict detail  "), "/x");
+        assert_eq!(err.message, "  conflict detail  ");
+    }
+
+    /// TypeScript matches the exception class names case-insensitively
+    /// (`/SchemaValidationException|IncompatibleSchemaException/i`). Rust must
+    /// agree, or the UI and backend classify the same response differently.
+    #[test]
+    fn schema_incompatibility_match_is_case_insensitive() {
+        let reason = "error during schema compatibility check: \
+                      org.apache.avro.schemavalidationexception: unable to read schema";
+        let err = map_http_error(500, Some(reason), "/admin/v2/schemas/public/default/t/compatibility");
+        assert_eq!(err.code, BrokerErrorCode::SchemaIncompatible);
+        assert!(!err.retryable);
+    }
+
+    /// `observedAt` is parsed by the TypeScript layer with `new Date(...)`,
+    /// which requires a real ISO-8601/RFC-3339 string, not a bare Unix
+    /// seconds count.
+    #[test]
+    fn observed_at_is_a_valid_rfc3339_timestamp() {
+        let envelope = ResultEnvelope::ok(42, "test");
+        chrono::DateTime::parse_from_rfc3339(&envelope.observed_at)
+            .expect("observed_at should parse as RFC-3339");
     }
 }

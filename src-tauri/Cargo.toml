@@ -65,6 +65,11 @@ async-trait = "0.1"
 # Typed error enums for the broker module's parsers and adapters.
 thiserror = "2"
 
+# RFC-3339 / ISO-8601 timestamps for the broker result envelope's `observedAt`
+# field, which the TypeScript layer parses as `Date`. Already present
+# transitively via the `pulsar` crate; promoted to a direct dependency here.
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
 # Binary protocol client. Required because Admin REST cannot produce (405) and
 # its peek cannot serve as a continuous event stream — see spec V-C1/V-E5.
 # `compression` is off: we only need the plain path for Phase 0.
