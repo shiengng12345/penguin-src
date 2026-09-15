@@ -121,7 +121,11 @@ const SCHEMA: &str = r#"
         -- Broker module (Phase 0). Two tables:
         --   broker_connections       — one row per configured broker. NEVER holds a
         --                              plaintext credential: `secret_handle_id` is a
-        --                              keychain reference (DEC #195).
+        --                              keychain-adapter reference (DEC #195). The
+        --                              plaintext itself lives in this same database,
+        --                              in `app_kv` (see `rest::keychain::SqliteKeychain`),
+        --                              not in an OS-level keychain — this table just
+        --                              never holds it.
         --   broker_topology_snapshots — cached topology. Exists because Pulsar's Admin
         --                              REST ignores pagination entirely, so we page in
         --                              Rust over a snapshot rather than per request.
@@ -208,10 +212,19 @@ fn unix_millis() -> i64 {
 
 const SENSITIVE_APP_VALUE_PREFIXES: &[&str] = &["rest:secret:", "redis:secret:"];
 
+/// Broker secrets happen to also start with `rest:secret:` today, because
+/// `SqliteKeychain::kv_key` hardcodes a `rest:` prefix for every service
+/// (see `rest::keychain`). That's an implementation detail, not a
+/// guarantee, so broker keys get their own explicit, prefix-independent
+/// check — a future refactor that namespaced keys per service must not
+/// silently stop excluding them here.
+const BROKER_SECRET_KEY_MARKER: &str = "penguin-broker";
+
 fn is_sensitive_app_value_key(key: &str) -> bool {
     SENSITIVE_APP_VALUE_PREFIXES
         .iter()
         .any(|prefix| key.starts_with(prefix))
+        || key.contains(BROKER_SECRET_KEY_MARKER)
 }
 
 fn reject_sensitive_app_value_key(key: &str) -> Result<(), String> {
@@ -273,13 +286,20 @@ pub(crate) fn db_get_app_value(key: String) -> Result<Option<String>, String> {
 #[tauri::command]
 pub(crate) fn db_list_app_values() -> Result<HashMap<String, String>, String> {
     let conn = open_product_db()?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT key, value FROM app_kv \
-             WHERE key NOT LIKE 'rest:secret:%' \
-             AND key NOT LIKE 'redis:secret:%'",
-        )
-        .map_err(|e| e.to_string())?;
+    // The `rest:secret:%` guard below happens to also cover broker tokens
+    // today, because `SqliteKeychain::kv_key` hardcodes a `rest:` prefix for
+    // every service including `penguin-broker` (see `rest::keychain`).
+    // That's an implementation detail, not a guarantee, so `penguin-broker`
+    // (`BROKER_SECRET_KEY_MARKER`) gets its own explicit clause — a future
+    // refactor that namespaced keys per service must not silently start
+    // streaming broker tokens to the webview.
+    let query = format!(
+        "SELECT key, value FROM app_kv \
+         WHERE key NOT LIKE 'rest:secret:%' \
+         AND key NOT LIKE 'redis:secret:%' \
+         AND key NOT LIKE '%{BROKER_SECRET_KEY_MARKER}%'"
+    );
+    let mut stmt = conn.prepare(&query).map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -782,12 +802,20 @@ mod product_db_tests {
     }
 
     #[test]
-    fn app_kv_sensitive_prefix_guard_covers_rest_and_redis_secrets() {
+    fn app_kv_sensitive_key_guard_covers_rest_redis_and_broker_secrets() {
         assert!(is_sensitive_app_value_key("rest:secret:penguin-rest::req-1"));
         assert!(is_sensitive_app_value_key("redis:secret:redis-123"));
+        // Broker secrets are shaped `rest:secret:penguin-broker::conn:<id>` today
+        // (see `BROKER_SECRET_KEY_MARKER`'s doc comment) — asserted independent of
+        // that `rest:` prefix so the guard doesn't silently regress if the shape
+        // changes.
+        assert!(is_sensitive_app_value_key(
+            "rest:secret:penguin-broker::conn:1"
+        ));
         assert!(!is_sensitive_app_value_key("penguin-theme"));
         assert!(reject_sensitive_app_value_key("rest:secret:x").is_err());
         assert!(reject_sensitive_app_value_key("redis:secret:x").is_err());
+        assert!(reject_sensitive_app_value_key("rest:secret:penguin-broker::conn:1").is_err());
         assert!(reject_sensitive_app_value_key("penguin-history").is_ok());
     }
 

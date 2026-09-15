@@ -1,8 +1,12 @@
 // ConnectionForm — the only place a broker token is ever typed.
 //
 // THE PROPERTY THIS FILE EXISTS TO PROTECT: the plaintext of a token crosses
-// the JS/Rust boundary exactly once, on its way to the OS keychain via
+// the JS/Rust boundary exactly once, on its way to the keychain adapter via
 // `broker_upsert_connection`'s `secret` parameter, and never comes back.
+// (The adapter's production implementation, `SqliteKeychain`, holds that
+// plaintext in the app's own SQLite `app_kv` table, not an OS-level
+// keychain — see `src-tauri/src/rest/keychain.rs`. This component never
+// sees or stores the value either way.)
 // Concretely:
 //  - a brand-new connection defaults to `readOnly: true` — this project
 //    measured that the broker accepts every write from anyone,
@@ -12,7 +16,8 @@
 //    ("jwt" / "oauth2"); it starts (and on every re-render of an existing
 //    connection, stays) empty — `secret` is local component state, never
 //    seeded from `initial.secretHandleId`, because the plaintext lives only
-//    in the keychain and this component has no way to read it back.
+//    behind the keychain adapter and this component has no way to read it
+//    back.
 //  - `onSave` receives the token as a separate `secret` field on the draft;
 //    every other field on that draft is safe to log, persist, or round-trip
 //    through app_kv.

@@ -2,9 +2,13 @@
 //! connection is a UI concept and never an implicit backend default.
 //!
 //! Secrets follow DEC #195: the plaintext arrives once on upsert, goes
-//! straight to the keychain, and is never returned. The frontend only ever
-//! sees `secretHandleId` — `ConnectionDto` has no plaintext field at all, so
-//! there is no field to accidentally serialize across IPC.
+//! straight to the keychain adapter, and is never returned. (The adapter's
+//! production implementation, `SqliteKeychain`, holds that plaintext in the
+//! app's own SQLite `app_kv` table — see `crate::rest::keychain` — not an
+//! OS-level keychain.) DEC #195's actual guarantee is narrower and holds
+//! regardless: the frontend only ever sees `secretHandleId` —
+//! `ConnectionDto` has no plaintext field at all, so there is no field to
+//! accidentally serialize across IPC.
 //!
 //! Divergence from the Task 14 brief: commands here don't take a
 //! `tauri::AppHandle` parameter — nothing in this module needs one (the

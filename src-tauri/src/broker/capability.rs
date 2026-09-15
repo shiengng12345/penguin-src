@@ -1,8 +1,18 @@
 //! Capability discovery — measures what a broker actually allows.
 //!
-//! Every field here is observed, never configured. `can_write` is what the
-//! server permits; `read_only` (on the connection) is what the user permits.
-//! Collapsing the two removes the only real write guard we have.
+//! Most fields here are observed per-connection, never configured — in
+//! particular `can_write` is what the server permits; `read_only` (on the
+//! connection) is what the user permits, and collapsing the two removes the
+//! only real write guard we have. Five fields are the exception: `can_peek`,
+//! `peek_requires_subscription`, `peek_on_partitioned_allowed`,
+//! `web_socket_enabled`, and `batch_frame_seen` are currently constants,
+//! measured once against local Pulsar 4.2.4 and baked in rather than probed
+//! per connection (see the note at each assignment below, and the mirrored
+//! doc comment on `CapabilitySnapshot` in
+//! `packages/broker-contracts/src/capability.ts`). That's fine for now —
+//! nothing renders them yet — but Phase B must probe them per-connection
+//! before treating them as measurements; don't read the struct's presence
+//! as proof they already are.
 //!
 //! CONTROLLER RULING on the Task 14 brief: the brief's `probe_write` created
 //! a scratch topic and deleted it to learn `can_write`, unconditionally —
@@ -225,12 +235,12 @@ pub async fn discover(
         broker_version: Some(broker_version),
         clusters,
         endpoints,
-        can_peek: true,
-        peek_requires_subscription: true,  // V-B3 — constant for Pulsar's Admin REST
-        peek_on_partitioned_allowed: false, // V-B4 — 405 on 4.2.4
-        batch_frame_seen: false,            // set by Phase B when a batch is actually met
+        can_peek: true, // V-B1 — constant: measured once against local Pulsar 4.2.4, not probed per connection
+        peek_requires_subscription: true,  // V-B3 — constant for Pulsar's Admin REST; measured once against 4.2.4, not probed per connection
+        peek_on_partitioned_allowed: false, // V-B4 — 405 on 4.2.4; constant, measured once, not probed per connection
+        batch_frame_seen: false,            // V-B5 — constant until Phase B actually probes for a batch frame; not yet measured per connection
         binary_protocol_reachable,
-        web_socket_enabled: false, // informational; not a code path (V-C1)
+        web_socket_enabled: false, // V-C1 — informational; not a code path; constant, measured once against 4.2.4, not probed per connection
         can_produce: binary_protocol_reachable, // produce only ever goes over binary (V-E5)
         can_write,
         can_write_probed,

@@ -16,7 +16,11 @@ export interface BrokerConnection {
   adminUrl: string;
   brokerUrl: string;
   authType: "none" | "jwt" | "oauth2" | "tls";
-  /** Keychain reference. The token itself never lives here. */
+  /** Keychain-adapter reference (an opaque handle id), not the credential
+   *  itself. The adapter's production implementation stores the plaintext
+   *  in the app's own SQLite `app_kv` table, not an OS-level keychain —
+   *  either way, the token itself never lives in this field or crosses
+   *  back over IPC. */
   secretHandleId: string | null;
   defaultTenant: string;
   defaultNamespace: string;

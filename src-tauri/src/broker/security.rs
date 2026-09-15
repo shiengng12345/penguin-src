@@ -170,10 +170,18 @@ impl EndpointGuard {
 const SENSITIVE_QUERY_KEYS: &[&str] =
     &["token", "apikey", "api_key", "access_token", "refresh_token", "password", "secret"];
 
-/// Strips credentials from any string headed for a log, an error message, or
-/// error_log. This is the full extent of what it covers — anything else
-/// that looks like a secret but isn't one of these shapes will pass through
-/// unredacted:
+/// Strips credentials from any string a caller passes through it. This
+/// function exists for callers that handle credential-bearing text headed
+/// for a log, an error message, or `error_log` — but it currently has no
+/// production callers: the broker token travels only in an Authorization
+/// header, never in a URL, and `EndpointGuard` rejects URLs carrying
+/// userinfo, so `EndpointProbe.reason` and `warnings` carry raw error text
+/// today without a live leak. Any future logging path that carries
+/// user-supplied or error text which could contain a credential should
+/// route through this function rather than assuming the current call sites
+/// are the only ones that ever will. Within what it does cover, this is the
+/// full extent of it — anything else that looks like a secret but isn't one
+/// of these shapes will pass through unredacted:
 ///
 /// - `Authorization: Bearer <token>` / `bearer <token>` (case-insensitive
 ///   scheme, matched even lowercase since the header value is just as

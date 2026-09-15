@@ -26,7 +26,10 @@ export function listConnections(): Promise<BrokerConnection[]> {
   return invoke("broker_list_connections");
 }
 
-/** `secret` is sent once and goes straight to the keychain. It is never returned. */
+/** `secret` is sent once and goes straight to the keychain adapter (whose
+ *  production implementation stores the plaintext in the app's own SQLite
+ *  `app_kv` table, not an OS-level keychain). It is never returned — this
+ *  module only ever sees `secretHandleId`. */
 export function upsertConnection(
   id: string,
   draft: BrokerConnectionDraft,
