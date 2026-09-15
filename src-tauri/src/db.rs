@@ -9,18 +9,7 @@ fn penguin_db_path() -> Result<PathBuf, String> {
     Ok(home.join(".penguin").join("penguin.sqlite3"))
 }
 
-fn open_product_db_at(path: &Path) -> Result<Connection, String> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let conn = Connection::open(path).map_err(|e| e.to_string())?;
-    // Wait for writer locks instead of failing instantly with SQLITE_BUSY —
-    // the startup wal_checkpoint(TRUNCATE) can hold the writer lock for a
-    // while on a large WAL, and every command opens its own connection.
-    conn.busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(|e| e.to_string())?;
-    conn.execute_batch(
-        r#"
+const SCHEMA: &str = r#"
         PRAGMA journal_mode = WAL;
         -- Auto-truncate the WAL at checkpoint time. Without a limit it once
         -- grew to 4x the main DB (167MB vs 40MB) under checkpoint starvation.
@@ -129,9 +118,64 @@ fn open_product_db_at(path: &Path) -> Result<Connection, String> {
         );
         CREATE INDEX IF NOT EXISTS idx_error_log_timestamp
             ON error_log(timestamp DESC);
-        "#,
-    )
-    .map_err(|e| e.to_string())?;
+        -- Broker module (Phase 0). Two tables:
+        --   broker_connections       — one row per configured broker. NEVER holds a
+        --                              plaintext credential: `secret_handle_id` is a
+        --                              keychain reference (DEC #195).
+        --   broker_topology_snapshots — cached topology. Exists because Pulsar's Admin
+        --                              REST ignores pagination entirely, so we page in
+        --                              Rust over a snapshot rather than per request.
+        CREATE TABLE IF NOT EXISTS broker_connections (
+            id                TEXT PRIMARY KEY,
+            kind              TEXT NOT NULL,
+            name              TEXT NOT NULL,
+            color             TEXT NOT NULL,
+            admin_url         TEXT NOT NULL,
+            broker_url        TEXT NOT NULL,
+            auth_type         TEXT NOT NULL,
+            secret_handle_id  TEXT,
+            default_tenant    TEXT NOT NULL,
+            default_namespace TEXT NOT NULL,
+            read_only         INTEGER NOT NULL DEFAULT 1,
+            tls_verify        INTEGER NOT NULL DEFAULT 1,
+            timeout_ms        INTEGER NOT NULL DEFAULT 10000,
+            last_status       TEXT NOT NULL DEFAULT 'unknown',
+            last_checked_at   INTEGER,
+            broker_version    TEXT,
+            capabilities_json TEXT,
+            created_at        INTEGER NOT NULL,
+            updated_at        INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_broker_connections_updated
+            ON broker_connections(updated_at DESC);
+        CREATE TABLE IF NOT EXISTS broker_topology_snapshots (
+            id            TEXT PRIMARY KEY,
+            connection_id TEXT NOT NULL,
+            scope         TEXT NOT NULL,
+            scope_key     TEXT NOT NULL,
+            payload_json  TEXT NOT NULL,
+            observed_at   INTEGER NOT NULL
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_broker_snapshot_key
+            ON broker_topology_snapshots(connection_id, scope, scope_key);
+        "#;
+
+/// Applies the full schema. Idempotent — every statement is CREATE ... IF NOT EXISTS.
+pub fn apply_schema(conn: &rusqlite::Connection) -> Result<(), String> {
+    conn.execute_batch(SCHEMA).map_err(|e| e.to_string())
+}
+
+fn open_product_db_at(path: &Path) -> Result<Connection, String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    // Wait for writer locks instead of failing instantly with SQLITE_BUSY —
+    // the startup wal_checkpoint(TRUNCATE) can hold the writer lock for a
+    // while on a large WAL, and every command opens its own connection.
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|e| e.to_string())?;
+    apply_schema(&conn)?;
     Ok(conn)
 }
 

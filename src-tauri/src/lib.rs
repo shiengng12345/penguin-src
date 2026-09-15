@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use tauri::Manager;
 
 pub mod broker;
-mod db;
+pub mod db;
 mod inline_webview;
 mod knowledge;
 mod mcp;
