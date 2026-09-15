@@ -1,0 +1,31 @@
+# infra/broker/docker-compose.secure.yml
+# local-secure profile: JWT auth on. Used to observe real 401/403/429 shapes,
+# which the unauthenticated local-open profile can never produce.
+# Separate from the local-open profile (docker-compose.local.yml): different
+# container name and ports (8081/6651 vs 8080/6650) so both can run at once
+# without colliding, and this profile never touches the open broker's topics.
+services:
+  pulsar-secure:
+    image: apachepulsar/pulsar@sha256:cd5d4a64a32c0770d5d2dbb526169a70081605bbec4b59b73471b68d0a451fb4
+    container_name: broker-pulsar-secure
+    # This pinned image has no ENTRYPOINT that auto-applies PULSAR_PREFIX_
+    # env vars to standalone.conf — `bin/pulsar standalone` alone ignores
+    # them. Apply them explicitly before starting (observed while bringing
+    # this profile up: without this, auth stayed disabled and every request
+    # returned 200 regardless of token).
+    command: >
+      bash -c "bin/apply-config-from-env.py conf/standalone.conf &&
+      exec bin/pulsar standalone"
+    environment:
+      PULSAR_PREFIX_authenticationEnabled: "true"
+      PULSAR_PREFIX_authorizationEnabled: "true"
+      PULSAR_PREFIX_authenticationProviders: "org.apache.pulsar.broker.authentication.AuthenticationProviderToken"
+      PULSAR_PREFIX_tokenPublicKey: "file:///pulsar/secure/public.key"
+      PULSAR_PREFIX_superUserRoles: "admin"
+      PULSAR_PREFIX_brokerClientAuthenticationPlugin: "org.apache.pulsar.client.impl.auth.AuthenticationToken"
+      PULSAR_PREFIX_brokerClientAuthenticationParameters: "file:///pulsar/secure/admin.jwt"
+    volumes:
+      - ./secure:/pulsar/secure:ro
+    ports:
+      - "8081:8080"
+      - "6651:6650"

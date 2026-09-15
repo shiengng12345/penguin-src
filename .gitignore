@@ -66,3 +66,7 @@ packages/mcp/bundle/
 packages/*/src/*.js
 packages/*/src/*.js.map
 /-R
+
+# Local-only JWT keys for the Broker local-secure profile. Never commit.
+infra/broker/secure/*.key
+infra/broker/secure/*.jwt

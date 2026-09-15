@@ -1,9 +1,11 @@
 // tests/broker-capability.test.mjs
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { probe } from "../scripts/broker-capability-probe.mjs";
+import { readFile } from "node:fs/promises";
+import { probe, probeAuth } from "../scripts/broker-capability-probe.mjs";
 
 const ADMIN = process.env.BROKER_ADMIN_URL ?? "http://localhost:8080";
+const SECURE = process.env.BROKER_SECURE_URL ?? "http://localhost:8081";
 
 test("broker capability probe reproduces the Phase 0 findings", async () => {
   const report = await probe(ADMIN);
@@ -66,4 +68,36 @@ test("cleanup runs even when the probe throws mid-run (forced non-JSON response)
   const tenants = await tenantsRes.json();
   assert.equal(tenants.includes("broker-probe-t"), false,
     "the scratch tenant survived a mid-probe failure");
+});
+
+// Decode a JWT's `exp` claim (seconds since epoch) without verifying the
+// signature — we only need to know when the token lapses, not validate it.
+function decodeExp(jwt) {
+  const payload = JSON.parse(Buffer.from(jwt.split(".")[1], "base64url").toString("utf8"));
+  return payload.exp ?? null;
+}
+
+test("local-secure profile produces real 401, 403, and expired-token shapes", async () => {
+  // V-F1 / V-F2 — the local-open broker has no auth provider, so it can never
+  // produce these rejections. This is the only place in the module these
+  // shapes are ever observed, which is why Task 8's error map is built from
+  // the exact status/reason recorded here rather than from documentation.
+  const nobody = (await readFile(new URL("../infra/broker/secure/nobody.jwt", import.meta.url), "utf8")).trim();
+  const expired = (await readFile(new URL("../infra/broker/secure/expired.jwt", import.meta.url), "utf8")).trim();
+
+  // The expired token is minted with a 1s TTL by generate-keys.sh. Wait for
+  // it to actually lapse instead of assuming enough wall-clock time has
+  // passed between key generation and this test running.
+  const exp = decodeExp(expired);
+  if (exp !== null) {
+    const waitMs = exp * 1000 - Date.now() + 1000; // +1s margin past expiry
+    if (waitMs > 0) await new Promise((resolve) => setTimeout(resolve, waitMs));
+  }
+
+  const shapes = await probeAuth(SECURE, { nobody, expired });
+
+  assert.equal(shapes.noToken.status, 401, "no token must be rejected, not silently allowed");
+  assert.equal(shapes.badToken.status, 401, "a malformed token must be 401");
+  assert.equal(shapes.forbidden.status, 403, "a valid token without permission must be 403");
+  assert.equal(shapes.expiredToken.status, 401, "an expired token must be rejected as unauthenticated");
 });

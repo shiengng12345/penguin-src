@@ -170,6 +170,28 @@ export async function probe(adminUrl) {
   }
 }
 
+// V-F1 / V-F2 — auth failure shapes. Only observable on the local-secure
+// profile: the local-open broker has no auth provider, so every one of these
+// requests would return 200 there instead of a real rejection.
+export async function probeAuth(adminUrl, tokens = {}) {
+  const url = `${adminUrl}/admin/v2/tenants`;
+  const shape = async (headers) => {
+    const r = await req(url, { headers });
+    return { status: r.status, reason: r.reason, body: r.text.slice(0, 200) };
+  };
+  return {
+    noToken: await shape({}),
+    badToken: await shape({ Authorization: "Bearer not-a-real-token" }),
+    forbidden: tokens.nobody ? await shape({ Authorization: `Bearer ${tokens.nobody}` }) : null,
+    // Controller addition: a token that was valid but has lapsed. This shape
+    // is distinct from badToken (malformed/unsigned) — the module's error map
+    // needs to tell an operator "your credential expired" apart from "your
+    // credential is wrong", and only an expired-but-otherwise-valid token can
+    // demonstrate that distinction.
+    expiredToken: tokens.expired ? await shape({ Authorization: `Bearer ${tokens.expired}` }) : null,
+  };
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
   const report = await probe(process.argv[2] ?? "http://localhost:8080");
   console.log(JSON.stringify(report, null, 2));
