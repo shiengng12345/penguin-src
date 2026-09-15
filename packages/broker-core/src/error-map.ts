@@ -12,7 +12,15 @@ export function isSuccess(status: number): boolean {
 function isSchemaIncompatibility(status: number, reason: string | null, path: string): boolean {
   if (status !== 500 || !reason) return false;
   if (!path.includes("/schemas/")) return false;
-  return /SchemaValidationException|IncompatibleSchemaException|schema compatibility check/i.test(reason);
+  // Require an actual exception class, not the loose phrase "schema compatibility
+  // check" alone -- that phrase also appears in genuine infrastructure faults
+  // (e.g. "Error during schema compatibility check: connection to zookeeper lost"),
+  // which would otherwise be misclassified as SCHEMA_INCOMPATIBLE/non-retryable
+  // and send the operator to fix a schema that was never wrong. The real
+  // incompatibility response body carries both the phrase and one of these
+  // class names, so nothing true is lost; a future shape with the phrase but no
+  // class name safely falls back to SOURCE_UNAVAILABLE/retryable instead.
+  return /SchemaValidationException|IncompatibleSchemaException/i.test(reason);
 }
 
 /**

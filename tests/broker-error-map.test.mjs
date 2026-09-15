@@ -1,7 +1,10 @@
 // tests/broker-error-map.test.mjs
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { readFile } from "node:fs/promises";
 import { isSuccess, mapHttpError, mapTransportError } from "@penguin/broker-core";
+
+const FIXTURES_DIR = new URL("./fixtures/broker/", import.meta.url);
 
 test("success spans 200, 202 and 204", () => {
   // 202 is the schema compatibility endpoint's success code; 204 is every write.
@@ -19,6 +22,18 @@ test("an incompatible schema is a result, not a server fault", () => {
   const err = mapHttpError(500, reason, "/admin/v2/schemas/public/default/t/compatibility");
   assert.equal(err.code, "SCHEMA_INCOMPATIBLE");
   assert.equal(err.retryable, false, "retrying an incompatible schema never helps");
+});
+
+test("an infrastructure fault mentioning schema compatibility is retryable, not an incompatible schema", () => {
+  // The loose phrase "schema compatibility check" appears in genuine infra
+  // faults too (e.g. a zookeeper outage encountered while doing the check).
+  // Only an actual exception class name is specific enough to mean the
+  // schema itself is the problem; the phrase alone must fall through to the
+  // generic 500 handling (SOURCE_UNAVAILABLE, retryable) instead.
+  const reason = "Error during schema compatibility check: connection to zookeeper lost";
+  const err = mapHttpError(500, reason, "/admin/v2/schemas/public/default/t/compatibility");
+  assert.equal(err.code, "SOURCE_UNAVAILABLE");
+  assert.equal(err.retryable, true);
 });
 
 test("a genuine 500 stays retryable", () => {
@@ -107,4 +122,28 @@ test("AUTHENTICATION_FAILED never claims the credential itself is wrong", () => 
   assert.match(err.message, /malformed/i);
   assert.match(err.message, /expired/i);
   assert.match(err.message, /privilege/i);
+});
+
+// --- Captured-evidence tests: real responses from the unauthenticated `pulsar`
+// container (Admin REST http://localhost:8080), probed against a real
+// `broker-probe-schema` topic. See task-8-report.md fix round 1 for the
+// verbatim capture steps, both observed status codes, and cleanup
+// confirmation. The `reason` used below comes from the fixture file, not a
+// hand-copied string literal.
+
+test("the captured incompatible-schema fixture (real 500) maps to SCHEMA_INCOMPATIBLE", async () => {
+  const raw = await readFile(new URL("schema-incompatible-500.json", FIXTURES_DIR), "utf8");
+  const { reason } = JSON.parse(raw);
+  assert.ok(reason && reason.length > 0, "fixture must carry a non-empty reason");
+
+  const err = mapHttpError(500, reason, "/admin/v2/schemas/public/default/broker-probe-schema/compatibility");
+  assert.equal(err.code, "SCHEMA_INCOMPATIBLE");
+  assert.equal(err.retryable, false);
+});
+
+test("the captured compatible-schema fixture (real 202) is a success status", async () => {
+  const raw = await readFile(new URL("schema-compatible-202.json", FIXTURES_DIR), "utf8");
+  const body = JSON.parse(raw);
+  assert.equal(body.compatibility, true);
+  assert.equal(isSuccess(202), true);
 });
