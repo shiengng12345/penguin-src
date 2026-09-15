@@ -47,3 +47,13 @@ test("an empty source yields an empty page", () => {
   assert.deepEqual(page.items, []);
   assert.equal(page.total, 0);
 });
+
+test("a zero or negative limit is clamped up to 1, not thrown", () => {
+  const zero = paginate(items, { offset: 0, limit: 0 }, searchOf, sortOf);
+  assert.equal(zero.limit, 1);
+  assert.equal(zero.items.length, 1);
+
+  const negative = paginate(items, { offset: 0, limit: -5 }, searchOf, sortOf);
+  assert.equal(negative.limit, 1);
+  assert.equal(negative.items.length, 1);
+});

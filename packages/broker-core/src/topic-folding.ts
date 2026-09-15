@@ -49,13 +49,27 @@ export function foldTopics(allTopics: string[], partitionedTopics: string[]): To
   }));
 
   for (const parent of parents) {
+    // Rust port: this relies on Array.prototype.sort being a STABLE sort
+    // (guaranteed by spec since ES2019). Use `sort_by`, not `sort_unstable_by`.
     const partitionNames = (byParent.get(parent) ?? []).sort((a, b) => {
       const ai = Number(a.match(PARTITION_SUFFIX)?.[1] ?? 0);
       const bi = Number(b.match(PARTITION_SUFFIX)?.[1] ?? 0);
       return ai - bi;
     });
+    // A `/partitioned` entry with no matching expanded partitions in
+    // `allTopics` (e.g. Admin REST returned it but the topic list call raced
+    // or was scoped differently) still gets a row here, with partitions: 0
+    // and partitionNames: []. This is deliberate: it surfaces the mismatch
+    // instead of silently dropping the logical topic. The Rust port must
+    // reproduce this rather than filtering such parents out.
     folded.push({ ...parse(parent), partitions: partitionNames.length, partitionNames });
   }
 
+  // `localeCompare` is locale-aware collation, not byte order. Rust's default
+  // `Ord` on `String` IS byte order. The Rust port must pick one explicitly
+  // (most likely byte order, to match Rust idiom) and both sides must agree
+  // on which one is "the" order, since callers may depend on it.
+  // Also relies on `Array.prototype.sort`'s stability guarantee (ES2019+) —
+  // Rust must use `sort_by`, not `sort_unstable_by`.
   return folded.sort((a, b) => a.fullName.localeCompare(b.fullName));
 }
