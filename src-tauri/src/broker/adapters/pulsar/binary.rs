@@ -13,6 +13,18 @@
 //! confirmed against its real docs, not assumed from memory. Notably `Reader`
 //! has no `ack` method at all — structurally it cannot acknowledge, which is
 //! exactly the property `read_without_ack` needs.
+//!
+//! Connection cleanup (checked against the 6.9.0 source, not the docs site):
+//! `Producer<Exe>` exposes an explicit, awaitable `close()` that sends
+//! `close_producer` to the broker, and `produce_one` calls it. `Reader` has
+//! **no public close method at all** — checked its full method list in
+//! `reader.rs`. Its cleanup instead comes from `Drop` on the internal
+//! `ConsumerEngine`, which spawns a fire-and-forget async task that sends
+//! `close_consumer` to the broker; `Connection`'s own `Drop` additionally
+//! signals its receiver task to shut down. So the underlying connection is
+//! not simply abandoned, but for `Reader` specifically the close is
+//! best-effort and un-awaited by our code — there is nothing in the public
+//! API to await instead.
 
 use futures::StreamExt;
 use pulsar::{consumer::InitialPosition, ConsumerOptions, Pulsar, TokioExecutor};
@@ -66,7 +78,12 @@ pub async fn read_without_ack(
         .await
         .map_err(|e| BinaryError::Read(e.to_string()))?;
 
-    let mut out = Vec::with_capacity(max);
+    // `max` is caller-supplied and may originate in the webview (the timeline
+    // phase's Tauri command). Growing is cheap; a huge pre-allocation is an
+    // uncatchable abort. Only the allocation hint is clamped — `max` itself
+    // stays the real loop bound below.
+    const MAX_PREALLOC: usize = 4096;
+    let mut out = Vec::with_capacity(max.min(MAX_PREALLOC));
     while out.len() < max {
         match reader.next().await {
             Some(Ok(msg)) => {
@@ -121,9 +138,28 @@ pub async fn produce_one(
         .await
         .map_err(|e| BinaryError::Produce(e.to_string()))?;
 
-    let id = receipt
-        .message_id
-        .map(|m| format!("{}:{}", m.ledger_id, m.entry_id))
-        .unwrap_or_default();
+    // The broker's send receipt may omit a message id (e.g. on a degraded
+    // ack). Do not fabricate one — the replay phase writes this id into an
+    // audit trail, so an inferred placeholder would present as a real
+    // confirmation when the broker gave none.
+    let id = match receipt.message_id {
+        Some(m) => format!("{}:{}", m.ledger_id, m.entry_id),
+        None => {
+            return Err(BinaryError::Produce(
+                "broker acknowledged send but returned no message id".to_string(),
+            ))
+        }
+    };
+
+    // Explicit, awaited close: `Producer::close()` sends `close_producer` to
+    // the broker synchronously, unlike relying on `Drop` (which only spawns
+    // a fire-and-forget cleanup task — see the module-level Drop note).
+    // A close failure doesn't invalidate the id we already have, so it's
+    // logged via the error return rather than silently discarded — but the
+    // produce itself already succeeded, so we still return the id.
+    if let Err(e) = producer.close().await {
+        eprintln!("broker/pulsar/binary: producer close failed (non-fatal): {e}");
+    }
+
     Ok(id)
 }
