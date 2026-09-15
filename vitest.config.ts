@@ -15,6 +15,12 @@ export default defineConfig({
     exclude: ["node_modules", "dist", "tests/**"],
   },
   resolve: {
-    alias: { "@": path.resolve(__dirname, "./src") },
+    // Keep this alias map in step with vite.config.ts's `resolve.alias` —
+    // if one changes, change the other, so tests resolve the same modules
+    // the app build does.
+    alias: {
+      "@": path.resolve(__dirname, "./src"),
+      "@penguin/core": path.resolve(__dirname, "./packages/core/src/index.ts"),
+    },
   },
 });
