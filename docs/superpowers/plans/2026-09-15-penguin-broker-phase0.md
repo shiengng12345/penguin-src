@@ -147,7 +147,7 @@ first check run against SRE nonprod.
 - Produces: `probe(adminUrl) -> CapabilityReport`, where
   `CapabilityReport = { brokerVersion: string, clusters: string[], findings: Record<string, Finding> }`
   and `Finding = { id: string, ok: boolean, status: number | null, detail: string }`.
-  Task 13 reuses this shape for `CapabilitySnapshot`.
+  Task 14 reuses this shape for `CapabilitySnapshot`.
 
 - [ ] **Step 1: Write the probe harness**
 
@@ -1438,7 +1438,7 @@ implementation wrong: a `500` carrying `SchemaValidationException` is a *result*
   - `isSuccess(status: number): boolean`
   - `mapHttpError(status: number, reason: string | null, path: string): BrokerError`
   - `mapTransportError(err: { kind: "timeout" | "tls" | "connect" | "parse"; message: string }): BrokerError`
-  Task 10's Rust adapter mirrors this table; Task 16's UI renders `BrokerError.code`.
+  Task 10's Rust envelope mirrors this table; Task 17's UI renders `BrokerError.code`.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1631,7 +1631,7 @@ than logical topics (V-A6).
 - Produces:
   - `foldTopics(allTopics: string[], partitionedTopics: string[]): TopicSummary[]`
   - `paginate<T>(items: T[], query: PageQuery, searchOf: (item: T) => string, sortOf: (item: T, key: string) => string | number): Page<T>`
-  Task 12's Rust store mirrors both; Task 17's UI consumes `Page<TopicSummary>`.
+  Task 14's Rust command mirrors both; Task 18's UI consumes `Page<TopicSummary>`.
 
 - [ ] **Step 1: Write the failing folding test**
 
@@ -2226,7 +2226,7 @@ real if our own code refuses to send.
   - `EndpointGuard::new(base_url: &str) -> Result<Self, BrokerError>` and `.check(url: &str) -> Result<(), BrokerError>`
   - `WriteGuard::new(read_only: bool)` and `.authorize(action: &str) -> Result<(), BrokerError>`
   - `redact(text: &str) -> String`
-  Task 10's adapter calls `EndpointGuard`; Task 13's commands call `WriteGuard`; Task 13's logging calls `redact`.
+  Task 12's adapter calls `EndpointGuard`; Task 14's commands call `WriteGuard`; Task 14's logging calls `redact`.
 
 - [ ] **Step 1: Write all five failing tests**
 
@@ -2564,7 +2564,7 @@ git commit -m "feat(broker): Admin REST adapter implementing BrokerAdmin"
 - Create: `src-tauri/tests/broker_store.rs`
 
 **Interfaces:**
-- Consumes: `BrokerError` (Task 10).
+- Consumes: `BrokerError` (Task 10); `apply_schema` is introduced here.
 - Produces:
   - `upsert_connection(conn: &rusqlite::Connection, row: &ConnectionRow) -> Result<(), BrokerError>`
   - `list_connections(conn) -> Result<Vec<ConnectionRow>, BrokerError>`
@@ -2572,7 +2572,7 @@ git commit -m "feat(broker): Admin REST adapter implementing BrokerAdmin"
   - `delete_connection(conn, id: &str) -> Result<(), BrokerError>`
   - `put_snapshot(conn, connection_id, scope, scope_key, payload_json) -> Result<(), BrokerError>`
   - `get_snapshot(conn, connection_id, scope, scope_key) -> Result<Option<(String, i64)>, BrokerError>`
-  Task 13 calls all of these.
+  Task 14 calls all of these.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -2942,14 +2942,14 @@ git commit -m "feat(broker): connection and snapshot tables with keychain-only c
 - Create: `src-tauri/tests/broker_capability_discovery.rs`
 
 **Interfaces:**
-- Consumes: `PulsarAdminRest` (Task 10), `binary` (Task 5), `store` (Task 12), `WriteGuard` (Task 11).
+- Consumes: `PulsarAdminRest` (Task 12), `binary` (Task 5), `store` (Task 13), `WriteGuard` (Task 11).
 - Produces these Tauri commands, all taking `connectionId` explicitly:
   - `broker_list_connections() -> Vec<ConnectionDto>`
   - `broker_upsert_connection(draft: ConnectionDto, secret: Option<String>) -> ConnectionDto`
   - `broker_delete_connection(connectionId: String)`
   - `broker_test_connection(connectionId: String) -> ResultEnvelope<CapabilitySnapshot>`
   - `broker_list_topics(connectionId: String, tenant: String, namespace: String, query: PageQueryDto) -> ResultEnvelope<PageDto<TopicSummaryDto>>`
-  Task 16 and Task 17 call these from `src/lib/broker-client.ts`.
+  Task 17 and Task 18 call these from `src/lib/broker-client.ts`.
 
 - [ ] **Step 1: Write the failing discovery test**
 
@@ -3238,7 +3238,7 @@ including the `my-partition-plan` guard: membership is decided by the
 `partitioned` list, never by the name suffix alone.
 
 Implement `load_row`, `resolve_secret`, and `persist_probe_result` against
-`store` (Task 12) and the existing keychain adapter in `src-tauri/src/rest/keychain.rs`.
+`store` (Task 13) and the existing keychain adapter in `src-tauri/src/rest/keychain.rs`.
 `resolve_secret` returns the plaintext only inside this process and never puts it
 into a return value that crosses IPC.
 
@@ -3605,7 +3605,7 @@ git commit -m "feat(ui): DataTable with five states, expandable rows, virtualise
 - Create: `src/components/broker/__tests__/ConnectionTable.test.tsx`
 
 **Interfaces:**
-- Consumes: the Tauri commands from Task 13; `DataTable` from Task 15; types from `@penguin/broker-contracts`.
+- Consumes: the Tauri commands from Task 14; `DataTable` from Task 16; types from `@penguin/broker-contracts`.
 - Produces: `useBrokerConnections()` returning `{ connections, activeId, setActive, save, remove, test, state, error }`. Task 17 consumes `activeId`.
 
 - [ ] **Step 1: Write the failing form test**
@@ -3851,7 +3851,7 @@ real local broker.
 - Create: `public/nav/broker.png`
 
 **Interfaces:**
-- Consumes: `listTopics` (Task 16), `DataTable` (Task 15), `useBrokerConnections` (Task 16).
+- Consumes: `listTopics` (Task 17), `DataTable` (Task 16), `useBrokerConnections` (Task 17).
 - Produces: the `broker` value on `MainModule`.
 
 - [ ] **Step 1: Write the failing test**
