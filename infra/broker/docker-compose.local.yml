@@ -1,0 +1,15 @@
+# local-open profile: no auth, no TLS. Development only.
+# Image is pinned by digest — `latest` drifts and is forbidden (see COMPATIBILITY.md).
+services:
+  pulsar:
+    image: apachepulsar/pulsar@sha256:cd5d4a64a32c0770d5d2dbb526169a70081605bbec4b59b73471b68d0a451fb4
+    container_name: broker-pulsar-local
+    command: bin/pulsar standalone
+    ports:
+      - "8080:8080"   # Admin REST
+      - "6650:6650"   # binary protocol
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/admin/v2/brokers/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
