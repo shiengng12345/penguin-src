@@ -39,6 +39,7 @@
     "knowledge:round19:gate": "node scripts/knowledge-round19-acceptance.mjs --gate",
     "preview": "vite preview",
     "broker:probe": "node scripts/broker-capability-probe.mjs",
+    "broker:gate": "node scripts/broker-phase0-gate.mjs",
     "test": "node scripts/with-temp-sandbox.mjs node --test --test-concurrency=1 --test-reporter=dot tests/*.test.mjs",
     "test:verbose": "node scripts/with-temp-sandbox.mjs node --test --test-concurrency=1 --test-reporter=spec tests/*.test.mjs",
     "test:coverage": "node scripts/with-temp-sandbox.mjs node --test --test-concurrency=1 --test-reporter=dot --experimental-test-coverage tests/*.test.mjs",

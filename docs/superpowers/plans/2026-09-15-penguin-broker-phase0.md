@@ -1185,11 +1185,15 @@ git commit -m "test(broker): observe real retry/DLQ properties via consumer simu
 Do not start Part 2 until all of these hold:
 
 - [ ] `node --test tests/broker-capability.test.mjs` passes against both the local-open and local-secure profiles
-- [ ] `node --test tests/broker-dlq-properties.test.mjs` passes
+- [ ] `pnpm broker:gate` passes — it seeds the `broker-sim-*` fixtures via `cargo run --bin broker_sim`, runs `tests/broker-dlq-properties.test.mjs` requiring zero skipped, then deletes those fixtures and confirms the broker's topic list matches the baseline it recorded before the run started, with no `broker-sim-` residue
 - [ ] `cd src-tauri && cargo test` passes, including `--test broker_binary` against live Pulsar
 - [ ] `docs/broker/retry-dlq-contract.md` contains observed names, with no placeholder rows
 - [ ] The real 401 / 403 status codes and `reason` bodies from Task 3 are written down — Task 8's error map is built from them
-- [ ] No scratch topic remains: `curl -s http://localhost:8080/admin/v2/persistent/public/default | grep -c broker-` returns `0`
+
+A bare `node --test tests/broker-dlq-properties.test.mjs` run skips both of its tests unless the
+`broker-sim-*` fixtures already exist on the broker, and a skipped test is "Not run" under this
+project's spec — which never satisfies a gate — so this suite must only ever be run through
+`pnpm broker:gate`, which seeds those fixtures first and then removes them.
 
 If any validation came back ⛔, stop and revise the affected phase's design in the
 spec before continuing. Recording a blocker and proceeding as planned is not allowed.
