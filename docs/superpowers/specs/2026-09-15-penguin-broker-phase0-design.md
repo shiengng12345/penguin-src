@@ -185,6 +185,7 @@ WebSocket **不进主路径**——V-C1 证明它在真实 broker 上默认关�
 | F2 | **连接 CRUD** | SQLite 表 + Rust commands + Keychain（DEC #195）+ 表单 + Test Connection |
 | F3 | **`DataTable` 原语** | 通用、虚拟滚动、可展开行、五态 |
 | F4 | **端到端穿刺** | 只读 topic 列表页，实地跑通 V-A5（Rust 侧分页）与 V-A6（分区折叠） |
+| F5 | **Vitest + Testing Library 基建** | 本模块新引入，仅覆盖 Broker UI；见 7.1 |
 
 F4 刻意只做列表。它的存在是**验证链路**，不是交付功能。
 
@@ -358,13 +359,30 @@ FE 表单输入 Token
 | **安全（关键）** | ① 明文不进 SQLite ② 不进 IPC ③ 不进日志/`error_log` ④ `read_only=true` 时 Rust **根本不发写请求** ⑤ endpoint allowlist 生效 | 每条一个**先红后绿**的失败测试 |
 | SQLite | migration 幂等、并发读写、快照唯一键冲突、崩溃恢复、过期清理 | 隔离 SQLite 集成测试 |
 | Tauri commands | allowlist、错误 envelope 形状、取消、超时、连接不存在 | Tauri 集成测试 |
-| React | DataTable 五态、虚拟滚动、可展开行、表单校验、Test Connection 流程 | Vitest + Testing Library |
-| 可访问性 | 键盘、focus、label、对比度、状态不依赖颜色 | axe |
+| React | DataTable 五态、虚拟滚动、可展开行、表单校验、Test Connection 流程 | **Vitest + Testing Library（本模块新引入）** |
 | 真实集成 | 对本机 Pulsar 4.2.4 跑通全部 V-* | Docker 集成报告 |
 | 故障注入 | 停容器、断网、错端口、错 URL、超时、非 JSON 响应 | fault-injection 报告 |
 
 测试状态分四类独立记录：`Implemented` / `Verified` / `Not run` / `Blocked`。
 **单元测试全绿不能替代真实 Pulsar 集成测试。**
+
+### 7.1 关于测试栈的现状与决策
+
+本仓库现有 **331 个测试文件**，全部是 `node:test` + `node:assert/strict`，位于 `tests/*.test.mjs`。
+前端 TS 的测法是：用 `typescript` 编译器 API 在测试时转译 `.ts` 源码，再通过字符串替换注入
+mock（范例：`tests/app-persistence.test.mjs`）。
+
+**仓库目前没有 vitest、没有 Testing Library、没有 Playwright、没有 axe，
+也没有任何一个 React 组件渲染测试。**
+
+决策：**Broker 模块引入 Vitest + Testing Library**，用于 DataTable 与 Broker UI 的渲染行为
+（五态、可展开行、虚拟滚动、键盘导航）。理由是这些行为无法靠把逻辑下沉到 `broker-core`
+来覆盖，而组件测试缺失属于应当改进的现状，不是应当继承的约定。
+
+边界：
+- 新测试栈**只用于本模块**，不改写现有 331 个 `node:test` 测试
+- `broker-core` 的纯逻辑仍用 `node:test`，与仓库主流保持一致
+- Playwright / 桌面 E2E **不在 Phase 0**，留待 Phase F 统一决策
 
 ---
 
@@ -385,6 +403,7 @@ FE 表单输入 Token
 - [ ] 连接 CRUD 端到端可用：加连接 → Test → 看到 `4.2.4 / peek ✅ / binary ✅ / write ✅`
 - [ ] 端到端穿刺：Topics 页列出本机 10 个真实 topic，分区折叠正确，Rust 侧分页可翻页
 - [ ] 5 条安全测试先红后绿
+- [ ] Vitest + Testing Library 基建可用，且**不影响现有 331 个 `node:test` 测试**
 - [ ] `DataTable` 原语五态 + 可展开行 + 虚拟滚动测试通过
 
 **全局**
