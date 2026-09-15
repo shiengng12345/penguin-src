@@ -42,12 +42,13 @@
 // row data is lost or skipped either way — this only ever affects *how many
 // rows are mounted and where*, never which rows exist in `rows` or whether
 // they're reachable by scrolling once the container has a real size.
-import { useEffect, useMemo, useRef, useState, useCallback, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback, type HTMLAttributes, type ReactNode } from "react";
 import { useVirtualizer, observeElementRect, type Rect } from "@tanstack/react-virtual";
 import { ResizableColumn } from "./resizable-column";
 import { DataTableStatusRegion } from "./data-table-status";
 import { DataTablePagination } from "./data-table-pagination";
 import type { DataTableState } from "./data-table-types";
+import { mergeRowProps } from "./data-table-row-props";
 import { cn } from "@/lib/utils";
 
 export interface DataTableColumn<T> {
@@ -70,6 +71,10 @@ export interface DataTableProps<T> {
   onPageChange: (offset: number) => void;
   onSortChange?: (key: string, dir: "asc" | "desc") => void;
   expandedContent?: (row: T) => ReactNode;
+  /** Per-row attributes (e.g. `aria-current`, `aria-expanded`, `data-*`) to
+   *  merge onto that row's own `role="row"` div — see
+   *  `data-table-row-props.ts` for the merge policy. */
+  rowProps?: (row: T) => HTMLAttributes<HTMLDivElement>;
 }
 
 const DEFAULT_COLUMN_WIDTH = 160;
@@ -109,6 +114,7 @@ export function DataTable<T>(props: DataTableProps<T>) {
     onPageChange,
     onSortChange,
     expandedContent,
+    rowProps,
   } = props;
 
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(() =>
@@ -233,6 +239,7 @@ export function DataTable<T>(props: DataTableProps<T>) {
                           expandable={Boolean(expandedContent)}
                           expanded={expandedKeys.has(rowKey(entry.row))}
                           onToggleExpand={toggleExpand}
+                          rowProps={rowProps?.(entry.row)}
                         />
                       ) : (
                         <div
@@ -264,6 +271,7 @@ function DataRow<T>({
   expandable,
   expanded,
   onToggleExpand,
+  rowProps,
 }: {
   row: T;
   columns: DataTableColumn<T>[];
@@ -272,9 +280,17 @@ function DataRow<T>({
   expandable: boolean;
   expanded: boolean;
   onToggleExpand: (key: string) => void;
+  rowProps?: HTMLAttributes<HTMLDivElement>;
 }) {
+  // See data-table-row-props.ts for the merge policy: the caller can
+  // decorate this row (aria-current, aria-expanded, data-*, ...) but the
+  // row's own role/className/style are never simply overwritten.
+  const rowAttrs = mergeRowProps<HTMLDivElement>(
+    { role: "row", className: "flex items-stretch border-b border-border text-sm" },
+    rowProps,
+  );
   return (
-    <div role="row" className="flex items-stretch border-b border-border text-sm">
+    <div {...rowAttrs}>
       {expandable && (
         <div style={{ width: EXPAND_COLUMN_WIDTH }} className="flex shrink-0 items-center justify-center">
           <button

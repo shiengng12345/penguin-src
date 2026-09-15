@@ -167,4 +167,28 @@ describe("DataTable behaviour", () => {
     expect(screen.queryByText("name-10")).not.toBeInTheDocument();
     expect(screen.queryByText("name-17")).not.toBeInTheDocument();
   });
+
+  it("merges caller-supplied rowProps onto a row without losing the row's own attributes", () => {
+    // A caller-supplied attribute (aria-current) must reach the row, a
+    // conflicting className must be added rather than replace the built-in
+    // one, and an attempted role override must NOT survive — the merge
+    // policy in data-table-row-props.ts keeps `role` component-owned so a
+    // caller can never turn a table row into something else.
+    setup({
+      rowProps: (row: Row) =>
+        row.id === "b" ? { role: "menuitem", "aria-current": "true", className: "ring-2" } : {},
+    });
+
+    const rows = screen.getAllByRole("row");
+    const eventsRow = rows.find((row) => row.textContent?.includes("events"));
+    expect(eventsRow).toBeDefined();
+    expect(eventsRow).toHaveAttribute("aria-current", "true");
+    expect(eventsRow).toHaveAttribute("role", "row");
+    expect(eventsRow?.className).toContain("border-b");
+    expect(eventsRow?.className).toContain("ring-2");
+
+    // The other row got no rowProps at all — its own attributes are untouched.
+    const ordersRow = rows.find((row) => row.textContent?.includes("orders"));
+    expect(ordersRow).not.toHaveAttribute("aria-current");
+  });
 });
