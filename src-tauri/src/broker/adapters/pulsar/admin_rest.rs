@@ -19,6 +19,15 @@ pub struct PulsarAdminRest {
     guard: EndpointGuard,
 }
 
+/// Generous upper bound on an Admin REST response body. Pulsar's admin
+/// endpoints return topology lists and per-topic stats JSON; even a large
+/// production cluster's `/stats` payload or a tenant/namespace/topic listing
+/// stays in the low megabytes. 16 MiB leaves comfortable headroom above any
+/// real response while still bounding how much memory a misbehaving or
+/// compromised broker — or an enormous `/stats` call — can force this
+/// process to buffer.
+const MAX_RESPONSE_BYTES: u64 = 16 * 1024 * 1024;
+
 /// Manual `Debug`: the derived form would print `token` verbatim. Bearer
 /// tokens must never appear in a `Debug` dump, a log line, or an error
 /// message — this is the one place a `derive` would have silently defeated
@@ -47,6 +56,14 @@ impl PulsarAdminRest {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_millis(timeout_ms))
             .danger_accept_invalid_certs(!tls_verify)
+            // Redirects are refused, never followed. `admin_url` is whatever
+            // a user typed into a connection form — untrusted input — and
+            // `EndpointGuard::check` only ever validates the URL this
+            // adapter itself built. A `Location` header points somewhere the
+            // guard never saw, which is exactly the SSRF shape the guard
+            // exists to prevent. Do not re-enable redirects without giving
+            // the guard a way to see and approve the target first.
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| map_reqwest_error(&e))?;
         let guard = EndpointGuard::new(&admin_url)?;
@@ -84,9 +101,69 @@ impl PulsarAdminRest {
             req = req.bearer_auth(token);
         }
 
-        let res = req.send().await.map_err(|e| map_reqwest_error(&e))?;
+        let mut res = req.send().await.map_err(|e| map_reqwest_error(&e))?;
         let status = res.status().as_u16();
-        let body = res.text().await.map_err(|e| map_reqwest_error(&e))?;
+
+        // Belt-and-suspenders alongside `redirect::Policy::none()` on the
+        // client (see `new`): a 3xx reaches us as an ordinary response
+        // rather than being silently followed, so refuse it explicitly here
+        // too rather than letting it fall through the generic non-2xx path
+        // below as if it were an ordinary failure. The guard never saw the
+        // `Location` this would point to.
+        if (300..400).contains(&status) {
+            return Err(BrokerError {
+                code: BrokerErrorCode::Forbidden,
+                message: format!(
+                    "endpoint refused: server responded with a redirect ({status}) for {path}; \
+                     this module does not follow redirects because the endpoint guard cannot \
+                     validate a target it never sees"
+                ),
+                retryable: false,
+            });
+        }
+
+        // Reject up front when the server is honest about an oversized body.
+        if let Some(len) = res.content_length() {
+            if len > MAX_RESPONSE_BYTES {
+                return Err(BrokerError {
+                    code: BrokerErrorCode::MalformedResponse,
+                    message: format!(
+                        "response exceeded {MAX_RESPONSE_BYTES} bytes (Content-Length: {len}) for {path}"
+                    ),
+                    retryable: false,
+                });
+            }
+        }
+
+        // Enforce the bound on the actual bytes read regardless: chunked
+        // responses carry no Content-Length at all, and a lying or
+        // compromised server could under-declare it, so the header check
+        // above is an optimization, not the real guarantee.
+        let mut body = Vec::new();
+        while let Some(chunk) = res.chunk().await.map_err(|e| map_reqwest_error(&e))? {
+            if body.len() + chunk.len() > MAX_RESPONSE_BYTES as usize {
+                return Err(BrokerError {
+                    code: BrokerErrorCode::MalformedResponse,
+                    message: format!("response exceeded {MAX_RESPONSE_BYTES} bytes for {path}"),
+                    retryable: false,
+                });
+            }
+            body.extend_from_slice(&chunk);
+        }
+
+        // Validate UTF-8 explicitly instead of `Response::text()`'s lossy
+        // decode. Lossy decoding would turn a garbled body into a
+        // plausible-looking string with replacement characters — harmless
+        // for the JSON paths (the parse just fails with MalformedResponse),
+        // but `broker_version` only trims its body and returns it as fact.
+        // A corrupted version string presented as the broker's real version
+        // is exactly the "inference presented as fact" this project's spec
+        // forbids, so an invalid body must become an error, not a string.
+        let body = String::from_utf8(body).map_err(|_| BrokerError {
+            code: BrokerErrorCode::MalformedResponse,
+            message: format!("response body for {path} was not valid UTF-8"),
+            retryable: false,
+        })?;
 
         if !is_success(status) {
             let reason = Self::extract_reason(&body);
