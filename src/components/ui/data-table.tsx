@@ -29,16 +29,19 @@
 //
 // Rather than weaken the tests, drop virtualisation, or reach into the test
 // setup file, this component wraps the library's own `observeElementRect`
-// with a fallback: only when the *measured* rect is degenerate (0x0 — never
-// a legitimate size for a mounted, visible scroll container) does it
-// substitute a fixed estimate. Real browsers report a real, non-zero rect
-// immediately and take that branch never; jsdom always reports 0x0 and
-// always takes the fallback. So production sizing is untouched, and tests
-// get a deterministic ~420px viewport worth of rows instead of zero. The one
-// behavioural difference from production is exactly that pre-rendered row
-// count under test (bounded by the fallback size) rather than the container's
-// real on-screen size — every row in `rows` is still reachable by scrolling
-// either way.
+// with a fallback: whenever the *measured* rect comes back 0x0, it
+// substitutes a fixed estimate instead of feeding the virtualiser a
+// zero-height viewport. This exists for jsdom, which always measures 0x0 —
+// but it is not jsdom-exclusive: a genuinely collapsed container in a real
+// browser (`display: none`, a zero-height flex parent, a closed panel) hits
+// the same branch and gets the same substitute rect. When that happens the
+// virtualiser computes its range against a phantom ~800x420 viewport instead
+// of the container's real (zero) size, so it may mount some extra rows into
+// something invisible or mispositioned until the container's next real,
+// non-zero measurement corrects it via the normal ResizeObserver path. No
+// row data is lost or skipped either way — this only ever affects *how many
+// rows are mounted and where*, never which rows exist in `rows` or whether
+// they're reachable by scrolling once the container has a real size.
 import { useEffect, useMemo, useRef, useState, useCallback, type ReactNode } from "react";
 import { useVirtualizer, observeElementRect, type Rect } from "@tanstack/react-virtual";
 import { ResizableColumn } from "./resizable-column";
@@ -79,8 +82,9 @@ const VIEWPORT_HEIGHT = 420;
 const FALLBACK_VIEWPORT_RECT: Rect = { width: 800, height: VIEWPORT_HEIGHT };
 
 // See the file header note: substitutes a fixed estimate only when the
-// scroll container reports a degenerate 0x0 rect (jsdom), and otherwise
-// passes the library's own, real measurement straight through.
+// scroll container's measured rect is 0x0 (always true in jsdom; also true
+// for a genuinely collapsed container in a real browser), and otherwise
+// passes the library's own, real measurement straight through unmodified.
 const observeElementRectWithFallback: typeof observeElementRect = (instance, cb) =>
   observeElementRect(instance, (rect) => {
     cb(rect.width > 0 && rect.height > 0 ? rect : FALLBACK_VIEWPORT_RECT);
