@@ -1922,22 +1922,27 @@ webview cannot be trusted with.
 
 ---
 
-### Task 10: Ports and the Admin REST adapter
+### Task 10: Result envelope and ports
+
+The dependency order in this part is envelope → security → adapter: the security
+guards return `BrokerError`, and the adapter uses both. This task delivers the
+bottom layer only.
 
 **Files:**
-- Create: `src-tauri/src/broker/ports.rs`
 - Create: `src-tauri/src/broker/envelope.rs`
-- Create: `src-tauri/src/broker/adapters/pulsar/admin_rest.rs`
+- Create: `src-tauri/src/broker/ports.rs`
 - Modify: `src-tauri/src/broker/mod.rs`
-- Modify: `src-tauri/src/broker/adapters/pulsar/mod.rs`
+- Modify: `src-tauri/Cargo.toml`
 
 **Interfaces:**
-- Consumes: `BatchFrameError` (Task 4), `binary` (Task 5).
+- Consumes: nothing from earlier tasks — this is the base layer.
 - Produces:
-  - `trait BrokerAdmin` with `discover_capabilities`, `list_tenants`, `list_namespaces`, `list_topics`, `get_topic_stats`, `list_subscriptions`
-  - `PulsarAdminRest::new(admin_url: String, timeout_ms: u64, token: Option<String>) -> Self`
+  - `BrokerErrorCode` enum, `BrokerError { code, message, retryable }`, `ResultEnvelope<T>` with `ok()` / `failed()`
+  - `is_success(status: u16) -> bool` — accepts 200, 202 and 204
   - `map_http_error(status: u16, reason: Option<&str>, path: &str) -> BrokerError` — the Rust mirror of Task 8
-  Task 12 stores what these return; Task 13 exposes them as commands.
+  - `map_reqwest_error(err: &reqwest::Error) -> BrokerError`
+  - `trait BrokerAdmin`, `TopicRef { tenant, namespace, topic, persistent }` with `rest_path()`
+  Task 11's guards return `BrokerError`; Task 12 implements `BrokerAdmin`; Tasks 13 and 14 consume both.
 
 - [ ] **Step 1: Write the failing error-map test**
 
@@ -2180,135 +2185,28 @@ Add to `src-tauri/Cargo.toml`:
 async-trait = "0.1"
 ```
 
-- [ ] **Step 5: Write the Admin REST adapter**
-
-```rust
-// src-tauri/src/broker/adapters/pulsar/admin_rest.rs
-//! Pulsar Admin REST transport. Handles topology, stats, schema and ops actions.
-//! It cannot produce (405) and its peek cannot serve as an event stream — those
-//! live in `binary.rs`.
-
-use crate::broker::envelope::{is_success, map_http_error, map_reqwest_error, BrokerError};
-use crate::broker::ports::{BrokerAdmin, TopicRef};
-use crate::broker::security::EndpointGuard;
-
-pub struct PulsarAdminRest {
-    client: reqwest::Client,
-    base: String,
-    token: Option<String>,
-    guard: EndpointGuard,
-}
-
-impl PulsarAdminRest {
-    pub fn new(admin_url: String, timeout_ms: u64, tls_verify: bool, token: Option<String>) -> Result<Self, BrokerError> {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_millis(timeout_ms))
-            .danger_accept_invalid_certs(!tls_verify)
-            .build()
-            .map_err(|e| map_reqwest_error(&e))?;
-        let guard = EndpointGuard::new(&admin_url)?;
-        Ok(Self { client, base: admin_url.trim_end_matches('/').to_string(), token, guard })
-    }
-
-    async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, BrokerError> {
-        let url = format!("{}{}", self.base, path);
-        self.guard.check(&url)?;
-
-        let mut req = self.client.get(&url);
-        if let Some(token) = &self.token {
-            req = req.bearer_auth(token);
-        }
-
-        let res = req.send().await.map_err(|e| map_reqwest_error(&e))?;
-        let status = res.status().as_u16();
-        let body = res.text().await.map_err(|e| map_reqwest_error(&e))?;
-
-        if !is_success(status) {
-            let reason = serde_json::from_str::<serde_json::Value>(&body)
-                .ok()
-                .and_then(|v| v.get("reason").and_then(|r| r.as_str()).map(str::to_string));
-            return Err(map_http_error(status, reason.as_deref(), path));
-        }
-
-        serde_json::from_str(&body).map_err(|e| BrokerError {
-            code: crate::broker::envelope::BrokerErrorCode::MalformedResponse,
-            message: e.to_string(),
-            retryable: false,
-        })
-    }
-}
-
-#[async_trait::async_trait]
-impl BrokerAdmin for PulsarAdminRest {
-    async fn broker_version(&self) -> Result<String, BrokerError> {
-        // This endpoint returns a bare string, not JSON — handled separately.
-        let url = format!("{}/admin/v2/brokers/version", self.base);
-        self.guard.check(&url)?;
-        let mut req = self.client.get(&url);
-        if let Some(token) = &self.token {
-            req = req.bearer_auth(token);
-        }
-        let res = req.send().await.map_err(|e| map_reqwest_error(&e))?;
-        let status = res.status().as_u16();
-        let body = res.text().await.map_err(|e| map_reqwest_error(&e))?;
-        if !is_success(status) {
-            return Err(map_http_error(status, None, "/admin/v2/brokers/version"));
-        }
-        Ok(body.trim().to_string())
-    }
-
-    async fn list_clusters(&self) -> Result<Vec<String>, BrokerError> {
-        self.get_json("/admin/v2/clusters").await
-    }
-
-    async fn list_tenants(&self) -> Result<Vec<String>, BrokerError> {
-        self.get_json("/admin/v2/tenants").await
-    }
-
-    async fn list_namespaces(&self, tenant: &str) -> Result<Vec<String>, BrokerError> {
-        self.get_json(&format!("/admin/v2/namespaces/{tenant}")).await
-    }
-
-    async fn list_topics(&self, tenant: &str, namespace: &str) -> Result<Vec<String>, BrokerError> {
-        // Returns expanded partitions (V-A6). Callers fold with list_partitioned_topics.
-        self.get_json(&format!("/admin/v2/persistent/{tenant}/{namespace}")).await
-    }
-
-    async fn list_partitioned_topics(&self, tenant: &str, namespace: &str) -> Result<Vec<String>, BrokerError> {
-        self.get_json(&format!("/admin/v2/persistent/{tenant}/{namespace}/partitioned")).await
-    }
-
-    async fn get_topic_stats(&self, topic: &TopicRef) -> Result<serde_json::Value, BrokerError> {
-        self.get_json(&format!("/admin/v2/{}/stats", topic.rest_path())).await
-    }
-
-    async fn list_subscriptions(&self, topic: &TopicRef) -> Result<Vec<String>, BrokerError> {
-        self.get_json(&format!("/admin/v2/{}/subscriptions", topic.rest_path())).await
-    }
-}
-```
-
-- [ ] **Step 6: Update the module tree and run**
+- [ ] **Step 5: Wire the module tree and run**
 
 ```rust
 // src-tauri/src/broker/mod.rs
 pub mod adapters;
 pub mod envelope;
 pub mod ports;
-pub mod security;
 ```
 
 ```bash
 cd src-tauri && cargo test broker::envelope
 ```
 
-Expected: PASS, 5 tests. (`security` comes from Task 11 — write that first if the build fails on the missing module, or stub `EndpointGuard` and complete it in Task 11.)
+Expected: PASS, 5 tests. `security` and `adapters::pulsar::admin_rest` are not
+declared here — they arrive in Tasks 11 and 12.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
-git add src-tauri/src/broker/ src-tauri/Cargo.toml src-tauri/Cargo.lock
-git commit -m "feat(broker): ports and Admin REST adapter with shared error map"
+git add src-tauri/src/broker/envelope.rs src-tauri/src/broker/ports.rs \
+        src-tauri/src/broker/mod.rs src-tauri/Cargo.toml src-tauri/Cargo.lock
+git commit -m "feat(broker): result envelope, error map, and transport ports"
 ```
 
 ---
@@ -2504,7 +2402,161 @@ git commit -m "feat(broker): read-only gate, endpoint allowlist, and redaction"
 
 ---
 
-### Task 12: SQLite tables and the store
+### Task 12: Admin REST adapter
+
+Implements `BrokerAdmin` over Pulsar's Admin REST. It deliberately does NOT
+produce — Admin REST answers produce with 405 (spec V-E5) — and its peek cannot
+serve as an event stream, so both live on the binary transport from Task 5.
+
+**Files:**
+- Create: `src-tauri/src/broker/adapters/pulsar/admin_rest.rs`
+- Modify: `src-tauri/src/broker/adapters/pulsar/mod.rs`
+- Modify: `src-tauri/src/broker/mod.rs` — declare `pub mod security;` if Task 11 has not already
+
+**Interfaces:**
+- Consumes: `is_success`, `map_http_error`, `map_reqwest_error`, `BrokerError`, `BrokerAdmin`, `TopicRef` (Task 10); `EndpointGuard` (Task 11).
+- Produces: `PulsarAdminRest::new(admin_url: String, timeout_ms: u64, tls_verify: bool, token: Option<String>) -> Result<Self, BrokerError>` implementing `BrokerAdmin`.
+  Task 14 constructs this for capability discovery and for `broker_list_topics`.
+
+- [ ] **Step 1: Write the adapter**
+
+```rust
+// src-tauri/src/broker/adapters/pulsar/admin_rest.rs
+//! Pulsar Admin REST transport. Handles topology, stats, schema and ops actions.
+//! It cannot produce (405) and its peek cannot serve as an event stream — those
+//! live in `binary.rs`.
+
+use crate::broker::envelope::{is_success, map_http_error, map_reqwest_error, BrokerError};
+use crate::broker::ports::{BrokerAdmin, TopicRef};
+use crate::broker::security::EndpointGuard;
+
+pub struct PulsarAdminRest {
+    client: reqwest::Client,
+    base: String,
+    token: Option<String>,
+    guard: EndpointGuard,
+}
+
+impl PulsarAdminRest {
+    pub fn new(admin_url: String, timeout_ms: u64, tls_verify: bool, token: Option<String>) -> Result<Self, BrokerError> {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(timeout_ms))
+            .danger_accept_invalid_certs(!tls_verify)
+            .build()
+            .map_err(|e| map_reqwest_error(&e))?;
+        let guard = EndpointGuard::new(&admin_url)?;
+        Ok(Self { client, base: admin_url.trim_end_matches('/').to_string(), token, guard })
+    }
+
+    async fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, BrokerError> {
+        let url = format!("{}{}", self.base, path);
+        self.guard.check(&url)?;
+
+        let mut req = self.client.get(&url);
+        if let Some(token) = &self.token {
+            req = req.bearer_auth(token);
+        }
+
+        let res = req.send().await.map_err(|e| map_reqwest_error(&e))?;
+        let status = res.status().as_u16();
+        let body = res.text().await.map_err(|e| map_reqwest_error(&e))?;
+
+        if !is_success(status) {
+            let reason = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|v| v.get("reason").and_then(|r| r.as_str()).map(str::to_string));
+            return Err(map_http_error(status, reason.as_deref(), path));
+        }
+
+        serde_json::from_str(&body).map_err(|e| BrokerError {
+            code: crate::broker::envelope::BrokerErrorCode::MalformedResponse,
+            message: e.to_string(),
+            retryable: false,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl BrokerAdmin for PulsarAdminRest {
+    async fn broker_version(&self) -> Result<String, BrokerError> {
+        // This endpoint returns a bare string, not JSON — handled separately.
+        let url = format!("{}/admin/v2/brokers/version", self.base);
+        self.guard.check(&url)?;
+        let mut req = self.client.get(&url);
+        if let Some(token) = &self.token {
+            req = req.bearer_auth(token);
+        }
+        let res = req.send().await.map_err(|e| map_reqwest_error(&e))?;
+        let status = res.status().as_u16();
+        let body = res.text().await.map_err(|e| map_reqwest_error(&e))?;
+        if !is_success(status) {
+            return Err(map_http_error(status, None, "/admin/v2/brokers/version"));
+        }
+        Ok(body.trim().to_string())
+    }
+
+    async fn list_clusters(&self) -> Result<Vec<String>, BrokerError> {
+        self.get_json("/admin/v2/clusters").await
+    }
+
+    async fn list_tenants(&self) -> Result<Vec<String>, BrokerError> {
+        self.get_json("/admin/v2/tenants").await
+    }
+
+    async fn list_namespaces(&self, tenant: &str) -> Result<Vec<String>, BrokerError> {
+        self.get_json(&format!("/admin/v2/namespaces/{tenant}")).await
+    }
+
+    async fn list_topics(&self, tenant: &str, namespace: &str) -> Result<Vec<String>, BrokerError> {
+        // Returns expanded partitions (V-A6). Callers fold with list_partitioned_topics.
+        self.get_json(&format!("/admin/v2/persistent/{tenant}/{namespace}")).await
+    }
+
+    async fn list_partitioned_topics(&self, tenant: &str, namespace: &str) -> Result<Vec<String>, BrokerError> {
+        self.get_json(&format!("/admin/v2/persistent/{tenant}/{namespace}/partitioned")).await
+    }
+
+    async fn get_topic_stats(&self, topic: &TopicRef) -> Result<serde_json::Value, BrokerError> {
+        self.get_json(&format!("/admin/v2/{}/stats", topic.rest_path())).await
+    }
+
+    async fn list_subscriptions(&self, topic: &TopicRef) -> Result<Vec<String>, BrokerError> {
+        self.get_json(&format!("/admin/v2/{}/subscriptions", topic.rest_path())).await
+    }
+}
+```
+
+- [ ] **Step 2: Declare the module**
+
+```rust
+// src-tauri/src/broker/adapters/pulsar/mod.rs
+pub mod admin_rest;
+pub mod batch_frame;
+pub mod binary;
+```
+
+- [ ] **Step 3: Build and run the existing suite**
+
+```bash
+cd src-tauri && cargo build && cargo test broker
+```
+
+Expected: compiles clean, and Tasks 10 and 11's tests still pass. This adapter has
+no unit test of its own — it is a thin HTTP shell over already-tested pieces, and
+Task 14's live discovery test exercises it end to end against the real broker.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src-tauri/src/broker/adapters/pulsar/admin_rest.rs \
+        src-tauri/src/broker/adapters/pulsar/mod.rs src-tauri/src/broker/mod.rs
+git commit -m "feat(broker): Admin REST adapter implementing BrokerAdmin"
+```
+
+---
+
+
+### Task 13: SQLite tables and the store
 
 **Files:**
 - Modify: `src-tauri/src/db.rs` — two new tables in the existing `execute_batch`
@@ -2880,7 +2932,7 @@ git commit -m "feat(broker): connection and snapshot tables with keychain-only c
 
 ---
 
-### Task 13: Capability discovery, keychain, and Tauri commands
+### Task 14: Capability discovery, keychain, and Tauri commands
 
 **Files:**
 - Create: `src-tauri/src/broker/capability.rs`
@@ -3250,7 +3302,7 @@ git commit -m "feat(broker): capability discovery and Tauri commands"
 
 ---
 
-### Task 14: Vitest and Testing Library
+### Task 15: Vitest and Testing Library
 
 The repo has 331 `node:test` files and zero component-render tests. This task adds a
 second runner scoped to the Broker module. The existing suite must be untouched and
@@ -3364,7 +3416,7 @@ git commit -m "test(broker): add Vitest + Testing Library scoped to UI component
 
 ---
 
-### Task 15: `DataTable` primitive
+### Task 16: `DataTable` primitive
 
 Every later phase lists something. Building it now, with the five states and
 expandable rows the findings demand, means the problems surface in Phase 0.
@@ -3541,7 +3593,7 @@ git commit -m "feat(ui): DataTable with five states, expandable rows, virtualise
 
 ---
 
-### Task 16: Connection CRUD
+### Task 17: Connection CRUD
 
 **Files:**
 - Create: `src/lib/broker-client.ts`
@@ -3784,7 +3836,7 @@ git commit -m "feat(broker): connection CRUD with keychain-only secret handling"
 
 ---
 
-### Task 17: Topic list, rail wiring, and the end-to-end proof
+### Task 18: Topic list, rail wiring, and the end-to-end proof
 
 The task that proves the whole chain: React → Tauri command → Rust adapter →
 Admin REST → SQLite, with Rust-side pagination and partition folding working on the
