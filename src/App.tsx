@@ -16,6 +16,7 @@ import { VaultPage } from "@/components/vault/VaultPage";
 import { ApiDocsPage } from "@/components/docs/ApiDocsPage";
 import { RestPage } from "@/components/rest/RestPage";
 import { WikiPage } from "@/components/wiki/WikiPage";
+import { BrokerPage } from "@/components/broker/BrokerPage";
 import { MainSidebar, type MainModule } from "@/components/layout/MainSidebar";
 import { getPersistedValue, setPersistedValue } from "@/lib/app-persistence";
 import { APP_VALUE_KEYS } from "@/lib/persistence-keys";
@@ -31,6 +32,7 @@ const VALID_MODULES: ReadonlySet<MainModule> = new Set([
   "rest",
   "docs",
   "wiki",
+  "broker",
 ]);
 function loadInitialActiveModule(): MainModule | null {
   if (typeof window === "undefined") return null;
@@ -153,6 +155,7 @@ export default function App() {
   const [docsOpen, setDocsOpen] = useState(initialModule === "docs");
   const [restOpen, setRestOpen] = useState(initialModule === "rest");
   const [wikiOpen, setWikiOpen] = useState(initialModule === "wiki");
+  const [brokerOpen, setBrokerOpen] = useState(initialModule === "broker");
   const openSettings = useCallback(() => {
     setSettingsInitialSection(null);
     setSettingsOpen(true);
@@ -163,6 +166,7 @@ export default function App() {
   }, []);
   const closeVault = useCallback(() => setVaultOpen(false), []);
   const closeWiki = useCallback(() => setWikiOpen(false), []);
+  const closeBroker = useCallback(() => setBrokerOpen(false), []);
   // Returns to the API Client — the default module now that the Home hub
   // is gone. Used by the rail's fallback, the "go home" event, and the
   // back/close buttons in Docs / REST.
@@ -171,17 +175,20 @@ export default function App() {
     setDocsOpen(false);
     setRestOpen(false);
     setWikiOpen(false);
+    setBrokerOpen(false);
   }, []);
   const selectVaultFromHome = useCallback(() => {
     setDocsOpen(false);
     setRestOpen(false);
     setWikiOpen(false);
+    setBrokerOpen(false);
     setVaultOpen(true);
   }, []);
   const selectDocsFromHome = useCallback(() => {
     setVaultOpen(false);
     setRestOpen(false);
     setWikiOpen(false);
+    setBrokerOpen(false);
     setDocsOpen(true);
   }, []);
   // Sprint 10 — REST module entry. Mirrors vault/docs pattern + new in 10A.
@@ -189,13 +196,22 @@ export default function App() {
     setVaultOpen(false);
     setDocsOpen(false);
     setWikiOpen(false);
+    setBrokerOpen(false);
     setRestOpen(true);
   }, []);
   const selectWiki = useCallback(() => {
     setVaultOpen(false);
     setDocsOpen(false);
     setRestOpen(false);
+    setBrokerOpen(false);
     setWikiOpen(true);
+  }, []);
+  const selectBroker = useCallback(() => {
+    setVaultOpen(false);
+    setDocsOpen(false);
+    setRestOpen(false);
+    setWikiOpen(false);
+    setBrokerOpen(true);
   }, []);
   // Sidebar derives a single "active module" enum from the boolean page
   // flags. Clicking a rail item dispatches to the matching selector.
@@ -207,6 +223,8 @@ export default function App() {
     ? "rest"
     : wikiOpen
     ? "wiki"
+    : brokerOpen
+    ? "broker"
     : "client";
   // Three-tier gating (Sprint 8.5):
   //   - Vault requires any valid dev token (enabled && hasValidToken)
@@ -228,6 +246,8 @@ export default function App() {
   // user inside Vault but kicks them out of Docs.
   // Only Vault stays at the token tier.
   const canAccessWiki = devModeEnabled && isSuperAdmin;
+  // Broker is gated the same as Docs / Wiki (super-admin tier).
+  const canAccessBroker = devModeEnabled && isSuperAdmin;
   useEffect(() => {
     // Wait for the dev-mode token to finish loading before deciding to
     // revoke access. Pre-hydration, hasValidToken / isSuperAdmin are
@@ -238,7 +258,20 @@ export default function App() {
     if (docsOpen && !canAccessDocs) setDocsOpen(false);
     if (restOpen && !canAccessRest) setRestOpen(false);
     if (wikiOpen && !canAccessWiki) setWikiOpen(false);
-  }, [devModeHydrated, canAccessVault, canAccessDocs, canAccessRest, canAccessWiki, vaultOpen, docsOpen, restOpen, wikiOpen]);
+    if (brokerOpen && !canAccessBroker) setBrokerOpen(false);
+  }, [
+    devModeHydrated,
+    canAccessVault,
+    canAccessDocs,
+    canAccessRest,
+    canAccessWiki,
+    canAccessBroker,
+    vaultOpen,
+    docsOpen,
+    restOpen,
+    wikiOpen,
+    brokerOpen,
+  ]);
   const handleModuleSelect = useCallback(
     (m: MainModule) => {
       // Picking a primary module exits the Extras page (which overlays content).
@@ -248,9 +281,10 @@ export default function App() {
       else if (m === "docs") selectDocsFromHome();
       else if (m === "rest") selectRest();
       else if (m === "wiki") selectWiki();
+      else if (m === "broker") selectBroker();
       else selectApiClient();
     },
-    [selectApiClient, selectVaultFromHome, selectDocsFromHome, selectRest, selectWiki],
+    [selectApiClient, selectVaultFromHome, selectDocsFromHome, selectRest, selectWiki, selectBroker],
   );
   const appUpdate = useAppUpdateScheduler(openSettings);
   // Background registry refresh for admins/super-admins — keeps the cache warm
@@ -728,6 +762,8 @@ export default function App() {
               <RestPage onClose={selectApiClient} />
             ) : wikiOpen ? (
               <WikiPage onClose={closeWiki} />
+            ) : brokerOpen ? (
+              <BrokerPage onClose={closeBroker} />
             ) : (
               <>
                 <TabBar

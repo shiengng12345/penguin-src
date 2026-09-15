@@ -1,9 +1,18 @@
-// ConnectionActions — wires ConnectionTable + ConnectionForm to
-// useBrokerConnections, so a page mounting the broker connections surface
-// only needs to render this one component.
+// ConnectionActions — wires ConnectionTable + ConnectionForm to whatever
+// `useBrokerConnections` state the caller hands it, so a page mounting the
+// broker connections surface only needs to render this one component.
+//
+// Takes that state as props rather than calling the hook itself: the hook's
+// own header calls it "the single source of truth for the connection list",
+// and `BrokerPage` also needs the active connection's tenant/namespace to
+// drive `TopicTable`. Two independent hook instances (one here, one in
+// BrokerPage) would each fetch and hold their own copy, so a connection
+// added/edited/activated on this screen would not be visible to the Topics
+// tab until something forced a second fetch. Lifting the hook to BrokerPage
+// and passing its result down keeps there being exactly one.
 import { useState } from "react";
 import type { BrokerConnection, BrokerConnectionDraft } from "@penguin/broker-contracts";
-import { useBrokerConnections } from "@/hooks/useBrokerConnections";
+import type { UseBrokerConnectionsResult } from "@/hooks/useBrokerConnections";
 import { ConnectionTable } from "./ConnectionTable";
 import { ConnectionForm } from "./ConnectionForm";
 import { Button } from "@/components/ui/button";
@@ -26,8 +35,21 @@ function toDraft(connection: BrokerConnection): BrokerConnectionDraft {
   return draft;
 }
 
-export function ConnectionActions() {
-  const { connections, activeId, setActive, save, remove, test, state, error } = useBrokerConnections();
+export type ConnectionActionsProps = Pick<
+  UseBrokerConnectionsResult,
+  "connections" | "activeId" | "setActive" | "save" | "remove" | "test" | "state" | "error"
+>;
+
+export function ConnectionActions({
+  connections,
+  activeId,
+  setActive,
+  save,
+  remove,
+  test,
+  state,
+  error,
+}: ConnectionActionsProps) {
   const [formOpen, setFormOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);

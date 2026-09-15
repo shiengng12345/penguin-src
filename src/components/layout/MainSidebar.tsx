@@ -9,10 +9,11 @@
 //   "super-admin" — needs Dev Mode + super-admin token (Home / REST / Docs)
 // Super-admin implies token, so super-admin users see everything.
 
+import { Waypoints } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { ThemedMascotImg } from "@/components/common/ThemedMascotImg";
 
-export type MainModule = "client" | "rest" | "vault" | "docs" | "wiki";
+export type MainModule = "client" | "rest" | "vault" | "docs" | "wiki" | "broker";
 
 export interface MainSidebarProps {
   active: MainModule;
@@ -28,8 +29,13 @@ type GateTier = "none" | "token" | "super-admin";
 interface RailItem {
   kind: MainModule;
   // Mascot tile in /public/nav — full-color illustration, so active state is
-  // shown with a ring + saturation instead of a currentColor tint.
-  img: string;
+  // shown with a ring + saturation instead of a currentColor tint. Exactly
+  // one of `img` / `icon` is set per item.
+  img?: string;
+  // Placeholder for modules with no mascot tile yet (see `broker` below) —
+  // a plain lucide-react icon instead, tinted with currentColor like the
+  // rest of the rail's non-active/active states.
+  icon?: typeof Waypoints;
   label: string;
   longLabel: string;
   requires: GateTier;
@@ -42,6 +48,12 @@ const ITEMS: RailItem[] = [
   { kind: "docs", img: "/nav/docs.png", label: "Docs", longLabel: "Knowledge Base / 知识库 (Super Admin)", requires: "super-admin" },
   // Penguin Knowledge Wiki — notes + code graph. Super-admin (dev-token) tier.
   { kind: "wiki", img: "/nav/wiki.png", label: "Wiki", longLabel: "Knowledge Wiki / 知识图谱 (Super Admin)", requires: "super-admin" },
+  // Broker — message-queue operations console. Pulsar is the first adapter;
+  // the module name stays vendor-neutral for future broker kinds. No
+  // `/nav/broker.png` mascot tile exists yet (see task-18 report) — a
+  // lucide icon stands in until one is supplied, so the rail never shows
+  // another module's mascot on this tile.
+  { kind: "broker", icon: Waypoints, label: "Broker", longLabel: "Message Broker / 消息中间件 (Super Admin)", requires: "super-admin" },
 ];
 
 export function MainSidebar({ active, onSelect, hasValidToken, isSuperAdmin }: MainSidebarProps) {
@@ -73,17 +85,29 @@ export function MainSidebar({ active, onSelect, hasValidToken, isSuperAdmin }: M
                 : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
             )}
           >
-            <ThemedMascotImg
-              base={item.img}
-              alt=""
-              draggable={false}
-              className={cn(
-                "h-8 w-8 rounded-[22%] transition-all",
-                isActive
-                  ? "ring-2 ring-primary shadow-sm"
-                  : "opacity-75 saturate-[0.6] hover:opacity-100 hover:saturate-100",
-              )}
-            />
+            {item.icon ? (
+              <item.icon
+                aria-hidden="true"
+                className={cn(
+                  "h-8 w-8 rounded-[22%] p-1.5 transition-all",
+                  isActive
+                    ? "bg-primary/15 ring-2 ring-primary shadow-sm"
+                    : "opacity-75 hover:bg-accent/50 hover:opacity-100",
+                )}
+              />
+            ) : (
+              <ThemedMascotImg
+                base={item.img!}
+                alt=""
+                draggable={false}
+                className={cn(
+                  "h-8 w-8 rounded-[22%] transition-all",
+                  isActive
+                    ? "ring-2 ring-primary shadow-sm"
+                    : "opacity-75 saturate-[0.6] hover:opacity-100 hover:saturate-100",
+                )}
+              />
+            )}
             <span className="text-[10px] font-medium leading-tight">{item.label}</span>
           </button>
         );

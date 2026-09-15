@@ -75,6 +75,14 @@ export interface DataTableProps<T> {
    *  merge onto that row's own `role="row"` div — see
    *  `data-table-row-props.ts` for the merge policy. */
   rowProps?: (row: T) => HTMLAttributes<HTMLDivElement>;
+  /** Per-row noun for the expand/collapse toggle's accessible name — e.g.
+   *  `(t) => t.shortName` produces "Expand events" / "Collapse events"
+   *  instead of the generic "Expand row" / "Collapse row". Needed whenever a
+   *  consumer has more than one expandable row and a test or screen-reader
+   *  user must be able to target one by name (see TopicTable, whose rows are
+   *  otherwise indistinguishable by button name alone). Omit to keep the
+   *  generic label. */
+  expandLabel?: (row: T) => string;
 }
 
 const DEFAULT_COLUMN_WIDTH = 160;
@@ -115,6 +123,7 @@ export function DataTable<T>(props: DataTableProps<T>) {
     onSortChange,
     expandedContent,
     rowProps,
+    expandLabel,
   } = props;
 
   const [columnWidths, setColumnWidths] = useState<Record<string, number>>(() =>
@@ -240,6 +249,7 @@ export function DataTable<T>(props: DataTableProps<T>) {
                           expanded={expandedKeys.has(rowKey(entry.row))}
                           onToggleExpand={toggleExpand}
                           rowProps={rowProps?.(entry.row)}
+                          expandLabel={expandLabel?.(entry.row)}
                         />
                       ) : (
                         <div
@@ -272,6 +282,7 @@ function DataRow<T>({
   expanded,
   onToggleExpand,
   rowProps,
+  expandLabel,
 }: {
   row: T;
   columns: DataTableColumn<T>[];
@@ -281,6 +292,7 @@ function DataRow<T>({
   expanded: boolean;
   onToggleExpand: (key: string) => void;
   rowProps?: HTMLAttributes<HTMLDivElement>;
+  expandLabel?: string;
 }) {
   // See data-table-row-props.ts for the merge policy: the caller can
   // decorate this row (aria-current, aria-expanded, data-*, ...) but the
@@ -295,7 +307,13 @@ function DataRow<T>({
         <div style={{ width: EXPAND_COLUMN_WIDTH }} className="flex shrink-0 items-center justify-center">
           <button
             type="button"
-            aria-label={expanded ? "Collapse row" : "Expand row"}
+            aria-label={
+              expandLabel
+                ? `${expanded ? "Collapse" : "Expand"} ${expandLabel}`
+                : expanded
+                ? "Collapse row"
+                : "Expand row"
+            }
             onClick={() => onToggleExpand(rowKeyValue)}
             className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-accent-foreground"
           >
