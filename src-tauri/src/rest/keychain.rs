@@ -29,7 +29,9 @@ use std::sync::OnceLock;
 pub trait KeychainAdapter: Send + Sync {
     fn save(&self, service: &str, account: &str, plaintext: &str) -> Result<(), String>;
     fn get(&self, service: &str, account: &str) -> Result<Option<String>, String>;
-    #[cfg(test)]
+    /// Removes the entry entirely — a later `get` must report absence
+    /// (`Ok(None)`), not `Ok(Some(""))`. Deleting an entry that was never
+    /// saved (or was already deleted) is not an error.
     fn delete(&self, service: &str, account: &str) -> Result<(), String>;
 }
 
@@ -72,7 +74,6 @@ impl KeychainAdapter for MockKeychain {
         Ok(items.get(&Self::key(service, account)).cloned())
     }
 
-    #[cfg(test)]
     fn delete(&self, service: &str, account: &str) -> Result<(), String> {
         let mut items = self.items.lock().map_err(|e| e.to_string())?;
         items.remove(&Self::key(service, account));
@@ -110,8 +111,9 @@ impl KeychainAdapter for SqliteKeychain {
         crate::db::app_value_get_internal(Self::kv_key(service, account))
     }
 
-    #[cfg(test)]
     fn delete(&self, service: &str, account: &str) -> Result<(), String> {
+        // `DELETE ... WHERE key = ?` affects 0 rows and still returns `Ok`
+        // when the key never existed — no separate "not found" branch needed.
         crate::db::app_value_delete_internal(Self::kv_key(service, account))
     }
 }

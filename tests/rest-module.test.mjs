@@ -1095,13 +1095,29 @@ test("Rust dev build hygiene — test-only helpers do not leak into normal build
   // (auth_popover.rs was removed together with the Browser module.)
   const keychain = await loadSource("../src-tauri/src/rest/keychain.rs");
   assert.match(keychain, /#\[cfg\(test\)\]\s*pub struct MockKeychain\b/);
-  assert.match(
+});
+
+test("keychain.rs — KeychainAdapter::delete is a real production method, not test-only", async () => {
+  // Broker module Task 14 fix round 1: `delete` used to be `#[cfg(test)]`
+  // on both the trait and SqliteKeychain's impl, so `broker_delete_connection`
+  // could only overwrite a secret with an empty string — every deleted
+  // connection left a named `conn:{id}` entry behind in the user's keychain
+  // forever. Promoted to a real method so a deleted connection's secret is
+  // actually removed, not just emptied. The REST module still never calls
+  // it (unaffected by this change) — only the broker module does.
+  const keychain = await loadSource("../src-tauri/src/rest/keychain.rs");
+  assert.match(keychain, /pub trait KeychainAdapter[\s\S]*?\n\s*fn delete\(/);
+  assert.doesNotMatch(
     keychain,
-    /pub trait KeychainAdapter[\s\S]*?#\[cfg\(test\)\]\s*fn delete\(/,
+    /pub trait KeychainAdapter[\s\S]*?#\[cfg\(test\)\]\s*\n\s*fn delete\(/,
   );
   assert.match(
     keychain,
-    /impl KeychainAdapter for SqliteKeychain[\s\S]*?#\[cfg\(test\)\]\s*fn delete\(/,
+    /impl KeychainAdapter for SqliteKeychain[\s\S]*?fn delete\([\s\S]*?app_value_delete_internal\(/,
+  );
+  assert.doesNotMatch(
+    keychain,
+    /impl KeychainAdapter for SqliteKeychain[\s\S]*?#\[cfg\(test\)\]\s*\n\s*fn delete\(/,
   );
 });
 

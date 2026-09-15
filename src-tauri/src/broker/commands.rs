@@ -209,17 +209,25 @@ pub async fn broker_upsert_connection(draft: ConnectionDto, secret: Option<Strin
 #[tauri::command]
 pub async fn broker_delete_connection(connection_id: String) -> Result<(), String> {
     let conn = crate::db::open_product_db_shared()?;
-    // Best-effort: neutralize the keychain entry so no plaintext secret is
-    // left orphaned once the connection row is gone. `KeychainAdapter::delete`
-    // is test-only (see rest/keychain.rs) — overwriting with an empty string
-    // is the closest production-safe equivalent without adding a second
-    // secrets-adapter shape.
+    // Remove the keychain entry entirely — not an empty-string overwrite —
+    // so deleting a connection never leaves a named `conn:{id}` entry
+    // behind in the user's keychain forever. Best-effort: a keychain
+    // failure here must not block the connection row itself from being
+    // removed.
     if let Ok(Some(row)) = store::get_connection(&conn, &connection_id) {
-        if let Some(handle) = &row.secret_handle_id {
-            let _ = crate::rest::keychain::active_adapter().save(KEYCHAIN_SERVICE, handle, "");
-        }
+        purge_secret(row.secret_handle_id.as_deref());
     }
     store::delete_connection(&conn, &connection_id).map_err(|e| e.message)
+}
+
+/// Deletes a connection's keychain entry outright. A handle that was never
+/// saved (`None`) is a no-op; `KeychainAdapter::delete` itself treats a
+/// missing/already-deleted entry as success, not an error (see
+/// `rest/keychain.rs`).
+fn purge_secret(secret_handle_id: Option<&str>) {
+    if let Some(handle) = secret_handle_id {
+        let _ = crate::rest::keychain::active_adapter().delete(KEYCHAIN_SERVICE, handle);
+    }
 }
 
 #[tauri::command]
@@ -286,5 +294,45 @@ mod tests {
         assert_eq!(status_for_error(BrokerErrorCode::TlsError), "tls_error");
         assert_eq!(status_for_error(BrokerErrorCode::Timeout), "unreachable");
         assert_eq!(status_for_error(BrokerErrorCode::SourceUnavailable), "unreachable");
+    }
+
+    /// Proves `broker_delete_connection`'s keychain cleanup removes the
+    /// entry entirely rather than merely emptying it — reading it back must
+    /// report absence (`None`), not `Some("")`. Exercises `purge_secret`
+    /// directly (the same call `broker_delete_connection` makes) against an
+    /// injected `MockKeychain`, since the full command also touches the
+    /// real product SQLite connections table with no test seam to redirect
+    /// it — the row-deletion half of `broker_delete_connection` is already
+    /// covered in-memory by `broker_store.rs`'s `deleting_a_connection_reports_gone`.
+    ///
+    /// NOTE: `active_adapter()`'s backing `OnceLock` is process-wide and can
+    /// only be set once; this test is written assuming it is the sole
+    /// caller of `set_adapter_for_tests` in this binary (true today — grep
+    /// confirms no other test calls it). If a future test starts calling
+    /// `active_adapter()`/`set_adapter_for_tests` first, this test would
+    /// silently start running the SqliteKeychain adapter against the real
+    /// product database instead of the mock.
+    #[test]
+    fn deleting_a_connection_removes_the_keychain_entry_not_just_empties_it() {
+        crate::rest::keychain::set_adapter_for_tests(Box::new(crate::rest::keychain::MockKeychain::default()));
+        let adapter = crate::rest::keychain::active_adapter();
+
+        let handle = "conn:test-purge-secret";
+        adapter.save(KEYCHAIN_SERVICE, handle, "s3cr3t").unwrap();
+        assert_eq!(adapter.get(KEYCHAIN_SERVICE, handle).unwrap(), Some("s3cr3t".to_string()));
+
+        purge_secret(Some(handle));
+
+        assert_eq!(
+            adapter.get(KEYCHAIN_SERVICE, handle).unwrap(),
+            None,
+            "the entry must be gone (None), not present-but-empty (Some(\"\"))"
+        );
+    }
+
+    #[test]
+    fn purging_a_connection_that_never_had_a_secret_is_a_no_op() {
+        // No handle at all — must not panic or error.
+        purge_secret(None);
     }
 }
