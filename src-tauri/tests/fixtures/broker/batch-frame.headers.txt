@@ -1,0 +1,17 @@
+HTTP/1.1 200 OK
+Server: Jetty(12.1.11)
+Date: Tue, 15 Sep 2026 16:20:42 GMT
+Vary: Accept-Encoding
+X-Pulsar-Message-ID: 250:1
+X-Pulsar-PROPERTY: {}
+X-Pulsar-publish-time: 2026-09-15T16:20:23.387Z
+X-Pulsar-num-batch-message: 29
+X-Pulsar-batch-size: 2098
+X-Pulsar-Is-Encrypted: false
+X-Pulsar-producer-name: standalone-242-0
+X-Pulsar-sequence-id: 25
+X-Pulsar-highest-sequence-id: 53
+X-Pulsar-txn-uncommitted: false
+Content-Type: application/json
+Content-Length: 2088
+
