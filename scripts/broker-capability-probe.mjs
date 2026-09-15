@@ -173,22 +173,48 @@ export async function probe(adminUrl) {
 // V-F1 / V-F2 — auth failure shapes. Only observable on the local-secure
 // profile: the local-open broker has no auth provider, so every one of these
 // requests would return 200 there instead of a real rejection.
+//
+// Controller ruling A: 401-vs-403 is endpoint-dependent, not credential-
+// dependent. The same no-permission token gets 401 from a superuser-gated
+// admin operation (list tenants) and 403 from a namespace/topic-scoped one
+// (get topics) — so both are captured as separate shapes rather than
+// picking one URL and asserting a single status.
+const TENANTS_URL = (adminUrl) => `${adminUrl}/admin/v2/tenants`;
+const SCOPED_URL = (adminUrl) => `${adminUrl}/admin/v2/persistent/public/default`;
+
 export async function probeAuth(adminUrl, tokens = {}) {
-  const url = `${adminUrl}/admin/v2/tenants`;
-  const shape = async (headers) => {
+  const shape = async (url, headers) => {
     const r = await req(url, { headers });
-    return { status: r.status, reason: r.reason, body: r.text.slice(0, 200) };
+    // Controller ruling B: record the body SHAPE (not just the status) by
+    // actually attempting to parse it, rather than assuming HTML for 401 and
+    // JSON for 403 — the next task's error map depends on knowing where
+    // `reason` extraction actually succeeds.
+    let bodyKind = "html";
+    try { JSON.parse(r.text); bodyKind = "json"; } catch { /* not JSON */ }
+    return { status: r.status, reason: r.reason, bodyKind, body: r.text.slice(0, 200) };
   };
   return {
-    noToken: await shape({}),
-    badToken: await shape({ Authorization: "Bearer not-a-real-token" }),
-    forbidden: tokens.nobody ? await shape({ Authorization: `Bearer ${tokens.nobody}` }) : null,
+    noToken: await shape(TENANTS_URL(adminUrl), {}),
+    badToken: await shape(TENANTS_URL(adminUrl), { Authorization: "Bearer not-a-real-token" }),
     // Controller addition: a token that was valid but has lapsed. This shape
-    // is distinct from badToken (malformed/unsigned) — the module's error map
-    // needs to tell an operator "your credential expired" apart from "your
-    // credential is wrong", and only an expired-but-otherwise-valid token can
-    // demonstrate that distinction.
-    expiredToken: tokens.expired ? await shape({ Authorization: `Bearer ${tokens.expired}` }) : null,
+    // is distinct from badToken (malformed/unsigned) — in principle the
+    // module's error map would want to tell an operator "your credential
+    // expired" apart from "your credential is wrong"; in practice (see the
+    // report) Pulsar returns an identical body to noToken/badToken, so that
+    // distinction is not observable at the HTTP layer.
+    expiredToken: tokens.expired
+      ? await shape(TENANTS_URL(adminUrl), { Authorization: `Bearer ${tokens.expired}` })
+      : null,
+    // Superuser-gated operation (list tenants): a valid token with no
+    // permission is rejected as 401, not 403.
+    forbiddenSuperuser: tokens.nobody
+      ? await shape(TENANTS_URL(adminUrl), { Authorization: `Bearer ${tokens.nobody}` })
+      : null,
+    // Namespace/topic-scoped operation (get topics): the same token, same
+    // kind of no-permission rejection, is 403 with a JSON reason here.
+    forbiddenScoped: tokens.nobody
+      ? await shape(SCOPED_URL(adminUrl), { Authorization: `Bearer ${tokens.nobody}` })
+      : null,
   };
 }
 

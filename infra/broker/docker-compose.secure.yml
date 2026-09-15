@@ -8,11 +8,15 @@ services:
   pulsar-secure:
     image: apachepulsar/pulsar@sha256:cd5d4a64a32c0770d5d2dbb526169a70081605bbec4b59b73471b68d0a451fb4
     container_name: broker-pulsar-secure
-    # This pinned image has no ENTRYPOINT that auto-applies PULSAR_PREFIX_
-    # env vars to standalone.conf — `bin/pulsar standalone` alone ignores
-    # them. Apply them explicitly before starting (observed while bringing
-    # this profile up: without this, auth stayed disabled and every request
-    # returned 200 regardless of token).
+    # LOAD-BEARING: this pinned image has no ENTRYPOINT that applies
+    # PULSAR_PREFIX_* env vars to standalone.conf, so a bare
+    # `bin/pulsar standalone` silently ignores every PULSAR_PREFIX_* var
+    # below — authentication stays off, and every auth probe returns 200
+    # while *appearing* to pass (no error, just the wrong, permissive
+    # result). `bin/apply-config-from-env.py conf/standalone.conf` must run
+    # first to actually write those vars into standalone.conf. Do not
+    # "simplify" this back to `bin/pulsar standalone` — that turns this
+    # whole profile into a test that proves nothing.
     command: >
       bash -c "bin/apply-config-from-env.py conf/standalone.conf &&
       exec bin/pulsar standalone"
