@@ -1,0 +1,105 @@
+import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
+import { DataTable, type DataTableColumn } from "../data-table";
+
+interface Row { id: string; name: string; partitions: number }
+
+const columns: DataTableColumn<Row>[] = [
+  { key: "name", header: "Name", render: (r) => r.name, sortable: true },
+  { key: "partitions", header: "Partitions", render: (r) => String(r.partitions) },
+];
+
+const rows: Row[] = [
+  { id: "a", name: "orders", partitions: 0 },
+  { id: "b", name: "events", partitions: 3 },
+];
+
+function setup(overrides = {}) {
+  const props = {
+    columns, rows, total: 2, offset: 0, limit: 25,
+    rowKey: (r: Row) => r.id,
+    state: "ready" as const,
+    onPageChange: vi.fn(),
+    ...overrides,
+  };
+  render(<DataTable {...props} />);
+  return props;
+}
+
+describe("DataTable states", () => {
+  it("shows a loading state instead of an empty table", () => {
+    setup({ state: "loading", rows: [], total: 0 });
+    expect(screen.getByRole("status")).toHaveTextContent(/loading/i);
+  });
+
+  it("distinguishes empty from error", () => {
+    setup({ state: "empty", rows: [], total: 0 });
+    expect(screen.getByRole("status")).toHaveTextContent(/no .*(rows|results)/i);
+  });
+
+  it("shows the error message when state is error", () => {
+    setup({ state: "error", rows: [], total: 0, errorMessage: "Namespace does not exist" });
+    expect(screen.getByRole("alert")).toHaveTextContent("Namespace does not exist");
+  });
+
+  it("marks stale data without hiding it", () => {
+    setup({ state: "stale" });
+    expect(screen.getByText("orders")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(/stale|cached/i);
+  });
+
+  it("marks partial data without hiding it", () => {
+    setup({ state: "partial" });
+    expect(screen.getByText("orders")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(/partial/i);
+  });
+});
+
+describe("DataTable behaviour", () => {
+  it("renders one row per item", () => {
+    setup();
+    expect(screen.getByText("orders")).toBeInTheDocument();
+    expect(screen.getByText("events")).toBeInTheDocument();
+  });
+
+  it("expands a row to reveal its detail", async () => {
+    const user = userEvent.setup();
+    render(
+      <DataTable
+        columns={columns} rows={rows} total={2} offset={0} limit={25}
+        rowKey={(r) => r.id} state="ready" onPageChange={vi.fn()}
+        expandedContent={(r) => <div>{r.partitions} partitions for {r.name}</div>}
+      />,
+    );
+    expect(screen.queryByText("3 partitions for events")).not.toBeInTheDocument();
+    await user.click(screen.getAllByRole("button", { name: /expand/i })[1]);
+    expect(screen.getByText("3 partitions for events")).toBeInTheDocument();
+  });
+
+  it("reports page changes rather than paging itself", async () => {
+    const user = userEvent.setup();
+    const props = setup({ total: 100, offset: 0, limit: 25 });
+    await user.click(screen.getByRole("button", { name: /next page/i }));
+    expect(props.onPageChange).toHaveBeenCalledWith(25);
+  });
+
+  it("disables previous on the first page", () => {
+    setup({ total: 100, offset: 0, limit: 25 });
+    expect(screen.getByRole("button", { name: /previous page/i })).toBeDisabled();
+  });
+
+  it("reports sort changes", async () => {
+    const user = userEvent.setup();
+    const onSortChange = vi.fn();
+    setup({ onSortChange });
+    await user.click(screen.getByRole("button", { name: /sort by name/i }));
+    expect(onSortChange).toHaveBeenCalledWith("name", "asc");
+  });
+
+  it("does not convey state by colour alone", () => {
+    // Accessibility: every state must carry text, not just a coloured dot.
+    setup({ state: "stale" });
+    expect(screen.getByRole("status").textContent?.trim()).not.toBe("");
+  });
+});
