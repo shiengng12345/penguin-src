@@ -39,6 +39,12 @@ dirs = "6"
 # Use rustls so gRPC-Web requests can negotiate HTTP/2 via ALPN on macOS.
 # Native-tls reached this CDN but failed when the request was pinned to h2.
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "http2"] }
+# Used by broker::security::EndpointGuard so the guard's notion of a URL's
+# origin agrees with what reqwest itself will actually connect to — a
+# hand-rolled parser and reqwest's own url-crate-based parser can disagree on
+# malformed/crafted URLs, which is exactly the SSRF gap this guard exists to
+# close (see src-tauri/src/broker/security.rs).
+url = "2"
 tokio = { version = "1", features = ["full"] }
 base64 = "0.22"
 # Set-Cookie `Expires=` HTTP-date parsing (zero-dep; many servers send only
