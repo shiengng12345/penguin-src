@@ -38,6 +38,16 @@ impl CacheScope {
             CacheScope::Topics => "topics",
         }
     }
+
+    /// The singular noun for prose. Distinct from `scope_name()`, which is the
+    /// database key and must not change to suit a sentence.
+    pub fn subject(&self) -> &'static str {
+        match self {
+            CacheScope::Tenants => "tenant",
+            CacheScope::Namespaces => "namespace",
+            CacheScope::Topics => "topic",
+        }
+    }
 }
 
 /// How old a cached entry is relative to its scope's TTL.

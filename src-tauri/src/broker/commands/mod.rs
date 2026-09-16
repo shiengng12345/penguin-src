@@ -32,6 +32,7 @@
 //! helpers genuinely shared across submodules (`now_ms`, `load_row`,
 //! `resolve_secret`, `KEYCHAIN_SERVICE`).
 
+mod cache_read;
 mod connection;
 mod topic;
 mod topology;
