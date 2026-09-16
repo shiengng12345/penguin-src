@@ -22,7 +22,7 @@
 // see `formatConsumerTimestamp` below. "Unknown" remains the one word for
 // every other null on this screen: numbers, text, and the diagnostic
 // `blockedOnUnackedMsgs` boolean alike.
-import type { ConsumerTimestamp } from "@penguin/broker-contracts";
+import type { BacklogAge, ConsumerTimestamp, Position } from "@penguin/broker-contracts";
 
 export const UNKNOWN = "Unknown";
 
@@ -67,4 +67,34 @@ export function formatConsumerCount(consumers: unknown[] | null): string {
   if (consumers === null) return UNKNOWN;
   if (consumers.length === 0) return "No consumers";
   return consumers.length === 1 ? "1 consumer" : `${consumers.length} consumers`;
+}
+
+/** `oldestBacklogMessageAge` (Task 12). Three states, three distinct words —
+ *  `"noBacklog"` (a determinate, healthy fact: no backlog has ever existed)
+ *  must never collapse into the same word as `"unknown"` (the broker did
+ *  not report the field at all). Rendering both as the same placeholder is
+ *  the exact mistake this type was built to prevent: a healthy, empty
+ *  topic would then look indistinguishable from one nobody could measure. */
+export function formatBacklogAge(value: BacklogAge): string {
+  switch (value.state) {
+    case "unknown":
+      return UNKNOWN;
+    case "noBacklog":
+      return "No backlog";
+    case "seconds":
+      return `${value.seconds}s`;
+  }
+}
+
+/** A cursor `Position` (`markDeletePosition`, `readPosition`,
+ *  `lastConfirmedEntry`) as Pulsar's own `"ledgerId:entryId"` wire text.
+ *  `entryId: -1` is rendered verbatim, never blanked or normalized — it is
+ *  the documented fact "this subscription has acknowledged nothing in this
+ *  ledger yet", not a missing value. Accepts `null` only because
+ *  `InternalStats.lastConfirmedEntry` is the one `Position` field that can
+ *  genuinely be absent; `markDeletePosition`/`readPosition` are never
+ *  null on `CursorPosition` but pass through the same formatter for one
+ *  consistent rendering of the shape. */
+export function formatPosition(value: Position | null): string {
+  return value === null ? UNKNOWN : `${value.ledgerId}:${value.entryId}`;
 }
