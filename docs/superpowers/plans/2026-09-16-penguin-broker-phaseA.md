@@ -218,7 +218,10 @@ Pure logic, no I/O. This is what decides whether a screen shows `ready` or `stal
 - Consumes: `BrokerError` (Phase 0), `BrokerSource` (Task 1).
 - Produces:
   - `enum CacheScope { Tenants, Namespaces, Topics }` with `fn ttl(&self) -> Duration` and `fn scope_name(&self) -> &'static str`
-  - `enum Freshness { Fresh { age_ms: u64 }, Stale { age_ms: u64 }, Absent }`
+  - `enum Freshness { Fresh { age_ms: u64 }, Stale { age_ms: u64 }, Skewed { ahead_ms: u64 }, Absent }`
+    (`Skewed` added during Task 2 review: a row stamped ahead of our clock has no
+    computable age, and folding it into `Fresh { age_ms: 0 }` erased the only
+    evidence a clock was wrong. Tasks 3/4 must handle the variant.)
   - `fn assess(scope: CacheScope, observed_at_ms: Option<i64>, now_ms: i64) -> Freshness`
 
 - [ ] **Step 1: Write the failing tests**
