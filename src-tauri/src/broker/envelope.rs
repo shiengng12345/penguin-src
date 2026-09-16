@@ -28,12 +28,29 @@ pub struct BrokerError {
     pub retryable: bool,
 }
 
+/// Which transport produced a result. A closed set, mirroring
+/// `BrokerSource` in packages/broker-contracts/src/envelope.ts — the two
+/// must agree, and the test below pins the wire strings.
+///
+/// This is an enum rather than a String deliberately: Phase 0 shipped a
+/// `"cache"` value that nothing could ever produce, and a String made that
+/// invisible. With an enum, an unused variant is a compiler warning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BrokerSource {
+    #[serde(rename = "pulsar-admin-rest")]
+    AdminRest,
+    #[serde(rename = "pulsar-binary")]
+    Binary,
+    #[serde(rename = "cache")]
+    Cache,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResultEnvelope<T> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<T>,
-    pub source: String,
+    pub source: BrokerSource,
     pub observed_at: String,
     pub freshness_ms: u64,
     pub warnings: Vec<String>,
@@ -42,10 +59,10 @@ pub struct ResultEnvelope<T> {
 }
 
 impl<T> ResultEnvelope<T> {
-    pub fn ok(data: T, source: &str) -> Self {
+    pub fn ok(data: T, source: BrokerSource) -> Self {
         Self {
             data: Some(data),
-            source: source.to_string(),
+            source,
             observed_at: now_rfc3339(),
             freshness_ms: 0,
             warnings: Vec::new(),
@@ -53,10 +70,10 @@ impl<T> ResultEnvelope<T> {
         }
     }
 
-    pub fn failed(error: BrokerError, source: &str) -> Self {
+    pub fn failed(error: BrokerError, source: BrokerSource) -> Self {
         Self {
             data: None,
-            source: source.to_string(),
+            source,
             observed_at: now_rfc3339(),
             freshness_ms: 0,
             warnings: Vec::new(),
@@ -294,8 +311,32 @@ mod tests {
     /// seconds count.
     #[test]
     fn observed_at_is_a_valid_rfc3339_timestamp() {
-        let envelope = ResultEnvelope::ok(42, "test");
+        let envelope = ResultEnvelope::ok(42, BrokerSource::AdminRest);
         chrono::DateTime::parse_from_rfc3339(&envelope.observed_at)
             .expect("observed_at should parse as RFC-3339");
+    }
+
+    #[test]
+    fn broker_source_serialises_to_the_typescript_union_values() {
+        // packages/broker-contracts/src/envelope.ts declares:
+        //   type BrokerSource = "pulsar-admin-rest" | "pulsar-binary" | "cache"
+        // These three strings are the contract; a rename on either side breaks the
+        // other silently, so pin them here.
+        assert_eq!(
+            serde_json::to_string(&BrokerSource::AdminRest).unwrap(),
+            "\"pulsar-admin-rest\""
+        );
+        assert_eq!(
+            serde_json::to_string(&BrokerSource::Binary).unwrap(),
+            "\"pulsar-binary\""
+        );
+        assert_eq!(serde_json::to_string(&BrokerSource::Cache).unwrap(), "\"cache\"");
+    }
+
+    #[test]
+    fn envelope_carries_the_source_it_was_built_with() {
+        let env = ResultEnvelope::ok(42u32, BrokerSource::Cache);
+        let json = serde_json::to_value(&env).unwrap();
+        assert_eq!(json["source"], "cache");
     }
 }

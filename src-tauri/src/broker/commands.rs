@@ -21,7 +21,7 @@
 //! fallible commands (see `db.rs`).
 
 use crate::broker::capability::{self, CapabilitySnapshot};
-use crate::broker::envelope::{BrokerError, BrokerErrorCode, ResultEnvelope};
+use crate::broker::envelope::{BrokerError, BrokerErrorCode, BrokerSource, ResultEnvelope};
 use crate::broker::ports::BrokerAdmin;
 use crate::broker::store::{self, ConnectionRow};
 use crate::broker::topic_folding::{self, PageDto, PageQueryDto, TopicSummaryDto};
@@ -244,11 +244,11 @@ pub async fn broker_test_connection(connection_id: String) -> Result<ResultEnvel
     {
         Ok(snapshot) => {
             persist_probe_result(&row, &snapshot)?;
-            Ok(ResultEnvelope::ok(snapshot, "pulsar-admin-rest"))
+            Ok(ResultEnvelope::ok(snapshot, BrokerSource::AdminRest))
         }
         Err(err) => {
             persist_probe_failure(&row, &err)?;
-            Ok(ResultEnvelope::failed(err, "pulsar-admin-rest"))
+            Ok(ResultEnvelope::failed(err, BrokerSource::AdminRest))
         }
     }
 }
@@ -269,7 +269,7 @@ pub async fn broker_list_topics(
         token,
     ) {
         Ok(a) => a,
-        Err(e) => return Ok(ResultEnvelope::failed(e, "pulsar-admin-rest")),
+        Err(e) => return Ok(ResultEnvelope::failed(e, BrokerSource::AdminRest)),
     };
 
     // Admin REST ignores paging, so fetch the full lists, fold partitions,
@@ -279,12 +279,12 @@ pub async fn broker_list_topics(
         admin.list_partitioned_topics(&tenant, &namespace).await,
     ) {
         (Ok(a), Ok(p)) => (a, p),
-        (Err(e), _) | (_, Err(e)) => return Ok(ResultEnvelope::failed(e, "pulsar-admin-rest")),
+        (Err(e), _) | (_, Err(e)) => return Ok(ResultEnvelope::failed(e, BrokerSource::AdminRest)),
     };
 
     let folded = topic_folding::fold_topics(&all, &partitioned);
     let page = topic_folding::paginate(folded, &query);
-    Ok(ResultEnvelope::ok(page, "pulsar-admin-rest"))
+    Ok(ResultEnvelope::ok(page, BrokerSource::AdminRest))
 }
 
 #[cfg(test)]

@@ -37,7 +37,7 @@
 //! — the client's own connection handshake, which touches no topic at all —
 //! giving the same V-C3 signal with zero side effects.
 
-use crate::broker::envelope::{is_success, map_reqwest_error, BrokerError};
+use crate::broker::envelope::{is_success, map_reqwest_error, BrokerError, BrokerSource};
 use crate::broker::ports::BrokerAdmin;
 use crate::broker::security::{EndpointGuard, WriteGuard, WritePermit};
 use serde::{Deserialize, Serialize};
@@ -80,7 +80,7 @@ pub struct CapabilitySnapshot {
     pub can_write_probed: bool,
     pub has_metrics: bool,
     pub warnings: Vec<String>,
-    pub source: String,
+    pub source: BrokerSource,
 }
 
 /// Outcome of attempting (or deliberately not attempting) the write probe.
@@ -246,7 +246,7 @@ pub async fn discover(
         can_write_probed,
         has_metrics,
         warnings,
-        source: "pulsar-admin-rest".to_string(),
+        source: BrokerSource::AdminRest,
     })
 }
 
