@@ -86,6 +86,14 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # `compression` is off: we only need the plain path for Phase 0.
 pulsar = { version = "6.9", default-features = false, features = ["tokio-runtime"] }
 
+# Already resolved transitively via `pulsar`; promoted to a direct dependency
+# so tests/broker_secure_tls.rs (Stage 0, task 6) can install a logger and
+# capture the `pulsar` crate's own `error!`/`warn!` diagnostics — its
+# `Connection::new` collapses several distinct fatal causes (TLS cert
+# mismatch, bad token, ...) into one generic io::Error unless you read its
+# log line for the real cause. Not used by the shipped app itself.
+log = { version = "0.4", features = ["std"] }
+
 # (REST module secrets now live in app_kv via SqliteKeychain — see
 # src/rest/keychain.rs. The old `keyring` dependency was removed because
 # the OS-keychain prompt loop in dev was unacceptable UX and Postman /

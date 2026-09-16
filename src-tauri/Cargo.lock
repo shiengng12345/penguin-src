@@ -3096,6 +3096,7 @@ dependencies = [
  "glob",
  "httpdate",
  "image",
+ "log",
  "notify",
  "objc2",
  "objc2-app-kit",
