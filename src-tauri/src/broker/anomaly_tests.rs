@@ -4,7 +4,7 @@
 //! no `mod tests { ... }` wrapper here.
 
 use super::*;
-use crate::broker::stats::{BacklogAge, ConsumerStats, SubscriptionStats, TopicStats};
+use crate::broker::stats::{BacklogAge, ConsumerStats, SubscriptionStats, SubscriptionType, TopicStats};
 
 fn sub(name: &str, backlog: Option<u64>, consumers: Option<Vec<ConsumerStats>>) -> SubscriptionStats {
     SubscriptionStats {
@@ -12,7 +12,7 @@ fn sub(name: &str, backlog: Option<u64>, consumers: Option<Vec<ConsumerStats>>) 
         msg_backlog: backlog,
         unacked_messages: None,
         msg_rate_out: None,
-        sub_type: Some("Shared".into()),
+        sub_type: SubscriptionType::Named { name: "Shared".into() },
         consumers,
     }
 }

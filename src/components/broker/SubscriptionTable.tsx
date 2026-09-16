@@ -2,12 +2,15 @@
 // the expanded row. This is the screen an operator lands on when a queue is
 // backing up, so every number on it has to mean exactly what it says.
 //
-// Built on `DataTable`, same as `TopicTable`/`ConnectionTable`. `subType`,
-// `msgBacklog`, `unackedMessages` and `msgRateOut` are all `T | null` on
+// Built on `DataTable`, same as `TopicTable`/`ConnectionTable`. `msgBacklog`,
+// `unackedMessages` and `msgRateOut` are all `T | null` on
 // `SubscriptionStats` (`packages/broker-contracts/src/topic-detail.ts`) — a
 // null backlog means "we do not know", not "the queue is clear" — so every
 // cell goes through `broker-value.ts`'s single "Unknown" presentation
-// instead of falling back to `0`, `false`, or a blank cell. The "Consumers"
+// instead of falling back to `0`, `false`, or a blank cell. `subType` is a
+// three-state `SubscriptionType` (fix: Phase A final review, finding 2) —
+// Pulsar's own "unset" sentinel must not collapse into the same word as a
+// genuinely withheld field. The "Consumers"
 // column additionally distinguishes `consumers: null` ("Unknown" — Pulsar
 // omitted the key) from `consumers: []` ("No consumers" — Pulsar confirmed
 // nobody is attached); `ConsumerTable` carries that same distinction into
@@ -27,7 +30,7 @@ import type { DataTableState } from "@/components/ui/data-table-types";
 import { Button } from "@/components/ui/button";
 import { DeliveryNotice } from "./DeliveryNotice";
 import { ConsumerTable } from "./ConsumerTable";
-import { formatConsumerCount, formatNumber, formatText } from "./broker-value";
+import { formatConsumerCount, formatNumber, formatSubscriptionType } from "./broker-value";
 
 export interface SubscriptionTableProps {
   subscriptions: SubscriptionStats[];
@@ -68,7 +71,7 @@ export function SubscriptionTable({
       render: (s) => <span title={s.name}>{s.name}</span>,
       sortable: true,
     },
-    { key: "subType", header: "Type", width: 100, render: (s) => formatText(s.subType) },
+    { key: "subType", header: "Type", width: 100, render: (s) => formatSubscriptionType(s.subType) },
     {
       key: "msgBacklog",
       header: "Backlog",

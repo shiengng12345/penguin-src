@@ -255,20 +255,80 @@ fn an_unknown_field_inside_a_consumer_does_not_break_the_parse() {
 
 /// Both of `fpms_topup`'s real subscriptions send exactly `"type": "None"`
 /// today (see the captured fixture, unmodified) — this is live on the
-/// user's own data, not a hypothetical. `"None"` is Pulsar's serialization
-/// of "no subscription type is set," not a genuine member of
-/// `SubscriptionType`; passed through verbatim it would print the literal
-/// word "None" as if it were a considered answer about the subscription's
-/// mode.
+/// user's own data, not a hypothetical. Finding 2 of the Phase A final
+/// review: `"None"` is Pulsar's own determinate answer — "no consumer has
+/// ever claimed a dispatcher type for this subscription" — not a missing
+/// value, and not a genuine dispatcher type either. An earlier version of
+/// `normalize_sub_type` collapsed it into the same `None` a withheld field
+/// produces, which is exactly the mistake `BacklogAge` (fix round 1) and
+/// `ConsumerTimestamp` (fix round 1, task 11) were each built to fix for a
+/// different field — this is the third occurrence of the identical bug. It
+/// must land on its own determinate state, `SubscriptionType::Unset`, never
+/// merged with genuine absence.
 #[test]
-fn pulsars_none_subscription_type_sentinel_becomes_unknown_not_a_real_type() {
+fn pulsars_none_subscription_type_sentinel_becomes_unset_not_unknown() {
     let stats = parse_topic_stats(&real_fixture()).expect("parses");
     let sub = stats
         .subscriptions
         .iter()
         .find(|s| s.name == "rg_deposit_accumulate_LOCAL")
         .unwrap();
-    assert_eq!(sub.sub_type, None);
+    assert_eq!(sub.sub_type, SubscriptionType::Unset);
+}
+
+/// A genuinely absent `type` key — the field was withheld, never sent, as
+/// opposed to Pulsar's own `"None"` sentinel above — must land on
+/// `Unknown`, distinct from `Unset`. Synthetic: the live fixture always
+/// carries the key today.
+#[test]
+fn an_absent_subscription_type_is_unknown_not_unset() {
+    let mut raw = real_fixture();
+    raw["subscriptions"]["rg_deposit_accumulate_LOCAL"]
+        .as_object_mut()
+        .unwrap()
+        .remove("type");
+    let stats = parse_topic_stats(&raw).expect("parses");
+    let sub = stats
+        .subscriptions
+        .iter()
+        .find(|s| s.name == "rg_deposit_accumulate_LOCAL")
+        .unwrap();
+    assert_eq!(sub.sub_type, SubscriptionType::Unknown);
+}
+
+/// A real, named dispatcher type is carried through verbatim — the
+/// ordinary case neither sentinel nor absence touches.
+#[test]
+fn a_real_subscription_type_is_carried_through_as_named() {
+    let mut raw = real_fixture();
+    raw["subscriptions"]["rg_deposit_accumulate_LOCAL"]["type"] = serde_json::json!("Shared");
+    let stats = parse_topic_stats(&raw).expect("parses");
+    let sub = stats
+        .subscriptions
+        .iter()
+        .find(|s| s.name == "rg_deposit_accumulate_LOCAL")
+        .unwrap();
+    assert_eq!(sub.sub_type, SubscriptionType::Named { name: "Shared".to_string() });
+}
+
+#[test]
+fn subscription_type_serialises_to_the_pinned_wire_shape() {
+    // packages/broker-contracts/src/topic-detail.ts mirrors this
+    // three-state discriminated union; a rename on either side breaks the
+    // other silently, so pin the wire shape here, the way `BacklogAge` and
+    // `ConsumerTimestamp` are pinned above.
+    assert_eq!(
+        serde_json::to_value(SubscriptionType::Named { name: "Shared".to_string() }).unwrap(),
+        serde_json::json!({"state": "named", "name": "Shared"})
+    );
+    assert_eq!(
+        serde_json::to_value(SubscriptionType::Unset).unwrap(),
+        serde_json::json!({"state": "unset"})
+    );
+    assert_eq!(
+        serde_json::to_value(SubscriptionType::Unknown).unwrap(),
+        serde_json::json!({"state": "unknown"})
+    );
 }
 
 /// This cannot be observed on the live broker today — no topic has a

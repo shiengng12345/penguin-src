@@ -19,12 +19,15 @@
 //!   0 here would tell an operator the queue is drained or idle when we
 //!   simply could not read the number — worse than an error, because 0
 //!   looks like an answer.
-//! - **Identity/diagnostic strings (consumer name, address, client version,
-//!   subscription type)** are `Option<String>`. An empty string is a
-//!   plausible real value for some of these upstream, so defaulting a
-//!   missing field to `""` would be indistinguishable from a real empty
-//!   value. Subscription type additionally has an in-band sentinel on top
-//!   of ordinary absence — see "Sentinel values" below.
+//! - **Identity/diagnostic strings (consumer name, address, client
+//!   version)** are `Option<String>`. An empty string is a plausible real
+//!   value for some of these upstream, so defaulting a missing field to `""`
+//!   would be indistinguishable from a real empty value.
+//! - **`sub_type`** (subscription type) is [`SubscriptionType`], not
+//!   `Option<String>` — it carries an in-band sentinel on top of ordinary
+//!   absence, the same shape of problem as `oldest_backlog_message_age` and
+//!   the consumer timestamps below; see "Sentinel values" below and
+//!   `SubscriptionType`'s own doc.
 //! - **`last_acked_timestamp` / `last_consumed_timestamp`** (consumer-level)
 //!   are [`ConsumerTimestamp`], not `Option<i64>`. Epoch 0 is a real, very
 //!   different instant (1970) from "never acked/consumed" — and (fix round
@@ -72,29 +75,31 @@
 //!
 //! `Option<T>` solves *absence* — a missing key. It does not by itself
 //! solve Pulsar encoding "this doesn't apply" as an in-band value that
-//! still type-checks. Three field groups carry exactly this problem. One of
-//! them is normalized to plain `None` at the parse boundary — the only
-//! place that knows Pulsar's wire conventions — so no downstream consumer
-//! has to remember it:
-//!
-//! - **`type`** (subscription type, mapped as `sub_type`): Pulsar serializes
-//!   an unset subscription type as the literal string `"None"` — not a
-//!   member of its own `SubscriptionType` enum
-//!   (`Exclusive`/`Shared`/`Failover`/`Key_Shared`). `"None"` is a sentinel
-//!   wearing a string's clothing, and worse than `-1` in one respect: `-1`
-//!   at least looks wrong, whereas "None" looks like a considered answer.
-//!   The literal string `"None"` is normalized to `None`. Evidenced
-//!   directly: **both** of `fpms_topup`'s real subscriptions send exactly
-//!   `"type": "None"` today (captured, unmodified, in the fixture) — this
-//!   was live on the user's own data, not a hypothetical.
-//!
-//! The other two field groups do **not** collapse to plain `None`: each
+//! still type-checks. Three field groups carry exactly this problem, and
+//! (Phase A final review, finding 2) all three turned out to need the same
+//! treatment: none of them collapses to plain `None`/absence, because each
 //! carries a *determinate*, in-band fact that is a different thing entirely
-//! from absence, so collapsing either into `None` would make a healthy,
+//! from absence. Collapsing any of them into `None` would make a healthy,
 //! observed answer indistinguishable from "we could not tell" — exactly
 //! backwards for a module whose whole purpose is telling those two apart.
 //! Each is mapped as its own three-state type instead:
 //!
+//! - **`type`** (subscription type, mapped as `sub_type`): Pulsar serializes
+//!   an unset subscription type as the literal string `"None"` — not a
+//!   member of its own dispatcher-type vocabulary
+//!   (`Exclusive`/`Shared`/`Failover`/`Key_Shared`), but a determinate fact
+//!   in its own right: no consumer has ever claimed a dispatcher type for
+//!   this subscription. Worse than `-1` in one respect: `-1` at least looks
+//!   wrong, whereas "None" looks like a considered answer, and happens to be
+//!   our own vocabulary for absence. An earlier version of this module
+//!   normalized the literal string `"None"` straight to `None`, merging it
+//!   with a genuinely withheld field — the identical mistake fixed for
+//!   `oldestBacklogMessageAgeSeconds` below and for the consumer timestamps,
+//!   left uncorrected here until now. Mapped as [`SubscriptionType`] (see its
+//!   own doc). Evidenced directly: **both** of `fpms_topup`'s real
+//!   subscriptions send exactly `"type": "None"` today (captured,
+//!   unmodified, in the fixture) — this was live on the user's own data, not
+//!   a hypothetical.
 //! - `oldestBacklogMessageAgeSeconds`: `-1` means "no backlog has ever
 //!   existed," a determinate, healthy fact, not an absent value or a
 //!   negative duration one second short of zero. Mapped as [`BacklogAge`]
@@ -201,6 +206,43 @@ pub enum ConsumerTimestamp {
     Unknown,
 }
 
+/// A subscription's dispatcher `type`, as Pulsar's wire value actually
+/// distinguishes three cases a bare `Option<String>` cannot: a real, named
+/// dispatcher type (`Exclusive`/`Shared`/`Failover`/`Key_Shared`), Pulsar's
+/// own documented `"None"` sentinel ("no consumer has ever claimed a
+/// dispatcher type for this subscription" — a determinate fact, not a
+/// missing value), and genuine absence (the field was withheld). Phase A
+/// final review, finding 2: this is the third field group with exactly the
+/// shape [`BacklogAge`] and [`ConsumerTimestamp`] were each built to fix —
+/// an earlier version of this module folded the `"None"` sentinel into
+/// plain absence via `Option::filter`, so both printed as "Unknown" and
+/// "the broker withheld this field" became indistinguishable from "the
+/// broker answered: nobody has claimed a type." Mirrors `BacklogAge` and
+/// `ConsumerTimestamp` field-for-field, including the wire shape (an
+/// internally-tagged `{"state": ...}` object), pinned by
+/// `subscription_type_serialises_to_the_pinned_wire_shape` in
+/// `stats_tests.rs`. Mirrored in
+/// `packages/broker-contracts/src/topic-detail.ts` as `SubscriptionType`.
+///
+/// Deliberately not unified with `BacklogAge`/`ConsumerTimestamp` behind a
+/// generic `Tri<T>`: three occurrences is a pattern, but the three carry
+/// different payloads (`u64` seconds, `i64` millis, a `String` name) and
+/// different domain meanings, and a generic would obscure both.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum SubscriptionType {
+    /// A real, named dispatcher type exactly as Pulsar reports it (e.g.
+    /// `"Shared"`, `"Exclusive"`, `"Failover"`, `"Key_Shared"`).
+    Named { name: String },
+    /// Pulsar's `"None"`: no consumer has ever claimed a dispatcher type for
+    /// this subscription. A determinate fact — there is nothing here for an
+    /// anomaly check to be unsure about — not the same thing as the field
+    /// being withheld.
+    Unset,
+    /// The field was absent. We do not know.
+    Unknown,
+}
+
 /// The parsed subset of one entry in the `subscriptions` map of a topic's
 /// `stats` payload. `name` is not a field of the wire object itself — it is
 /// the map key the object was found under.
@@ -211,7 +253,7 @@ pub struct SubscriptionStats {
     pub msg_backlog: Option<u64>,
     pub unacked_messages: Option<u64>,
     pub msg_rate_out: Option<f64>,
-    pub sub_type: Option<String>,
+    pub sub_type: SubscriptionType,
     /// `None` when Pulsar omitted the `consumers` key entirely — we do not
     /// know who, if anyone, is attached. `Some(vec![])` is a different,
     /// determinate fact: Pulsar sent the key with zero entries, i.e.
@@ -270,7 +312,7 @@ pub fn parse_topic_stats(raw: &serde_json::Value) -> Result<TopicStats, BrokerEr
             msg_backlog: sub.msg_backlog,
             unacked_messages: sub.unacked_messages,
             msg_rate_out: sub.msg_rate_out,
-            sub_type: normalize_sub_type(sub.sub_type),
+            sub_type: normalize_subscription_type(sub.sub_type),
             consumers: sub.consumers.map(|consumers| {
                 consumers
                     .into_iter()
@@ -325,13 +367,24 @@ fn normalize_backlog_age(age: Option<i64>) -> BacklogAge {
 }
 
 /// Pulsar serializes an unset subscription type as the literal string
-/// `"None"` — not a member of its own `SubscriptionType` enum. Both of
+/// `"None"` — a determinate fact ("no consumer has ever claimed a
+/// dispatcher type for this subscription"), not a genuine dispatcher type
+/// and not the same thing as the field being withheld. Both of
 /// `fpms_topup`'s real subscriptions send exactly this today; passing it
-/// through would print the word "None" as if it were a real subscription
-/// type. Normalized to `None` here, at the one place that knows the wire
-/// convention.
-fn normalize_sub_type(sub_type: Option<String>) -> Option<String> {
-    sub_type.filter(|value| value != "None")
+/// through would print the word "None" as if it were a considered answer.
+/// The two real inputs distinguished here are `None` (the key was absent —
+/// genuinely unknown) and `Some("None")` (Pulsar's own sentinel, mapped to
+/// [`SubscriptionType::Unset`]); mirrors `normalize_backlog_age` and
+/// `normalize_consumer_timestamp` above. Phase A final review, finding 2:
+/// an earlier version of this function used `Option::filter` to drop the
+/// sentinel straight to `None`, merging it with genuine absence — the same
+/// mistake fixed for the other two sentinel groups, left standing here.
+fn normalize_subscription_type(sub_type: Option<String>) -> SubscriptionType {
+    match sub_type {
+        None => SubscriptionType::Unknown,
+        Some(value) if value == "None" => SubscriptionType::Unset,
+        Some(name) => SubscriptionType::Named { name },
+    }
 }
 
 /// Pulsar sends `0` for `lastAckedTimestamp` / `lastConsumedTimestamp` when

@@ -22,7 +22,7 @@
 // see `formatConsumerTimestamp` below. "Unknown" remains the one word for
 // every other null on this screen: numbers, text, and the diagnostic
 // `blockedOnUnackedMsgs` boolean alike.
-import type { BacklogAge, ConsumerTimestamp, Position } from "@penguin/broker-contracts";
+import type { BacklogAge, ConsumerTimestamp, Position, SubscriptionType } from "@penguin/broker-contracts";
 
 export const UNKNOWN = "Unknown";
 
@@ -32,7 +32,7 @@ export function formatNumber(value: number | null): string {
   return value === null ? UNKNOWN : String(value);
 }
 
-/** For `subType`, `consumerName`, `address`, `clientVersion`. */
+/** For `consumerName`, `address`, `clientVersion`. */
 export function formatText(value: string | null): string {
   return value === null ? UNKNOWN : value;
 }
@@ -83,6 +83,26 @@ export function formatBacklogAge(value: BacklogAge): string {
       return "No backlog";
     case "seconds":
       return `${value.seconds}s`;
+  }
+}
+
+/** `subType` (Phase A final review, finding 2). Three states, three
+ *  distinct words — `"unset"` (Pulsar's own determinate "no consumer has
+ *  ever claimed a dispatcher type" sentinel) must never collapse into the
+ *  same word as `"unknown"` (the field was withheld). Collapsing them was
+ *  the exact defect this fix corrected: it claimed the broker withheld the
+ *  field on every subscription where the broker had, in fact, answered.
+ *  The switch is exhaustive over `SubscriptionType["state"]` — an
+ *  unhandled future state is a compile error here, not a silent
+ *  fallthrough to a default string. */
+export function formatSubscriptionType(value: SubscriptionType): string {
+  switch (value.state) {
+    case "unknown":
+      return UNKNOWN;
+    case "unset":
+      return "Unset";
+    case "named":
+      return value.name;
   }
 }
 

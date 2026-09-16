@@ -58,8 +58,8 @@ const DETAIL: TopicDetail = {
     msgInCounter: 500,
     oldestBacklogMessageAge: { state: "noBacklog" },
     subscriptions: [
-      { name: "anti_addiction_deposit_limit_fpmsnt", msgBacklog: 3400, unackedMessages: 0, msgRateOut: 1, subType: "Shared", consumers: [] },
-      { name: "rg_deposit_accumulate_LOCAL", msgBacklog: 0, unackedMessages: 0, msgRateOut: 1, subType: "Shared", consumers: null },
+      { name: "anti_addiction_deposit_limit_fpmsnt", msgBacklog: 3400, unackedMessages: 0, msgRateOut: 1, subType: { state: "named", name: "Shared" }, consumers: [] },
+      { name: "rg_deposit_accumulate_LOCAL", msgBacklog: 0, unackedMessages: 0, msgRateOut: 1, subType: { state: "named", name: "Shared" }, consumers: null },
     ],
   },
   internal: { entriesAddedCounter: 10, numberOfEntries: 10, lastConfirmedEntry: { ledgerId: 1, entryId: -1 }, cursors: [] },

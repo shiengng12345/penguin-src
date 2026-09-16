@@ -9,7 +9,7 @@ const withConsumer: SubscriptionStats = {
   msgBacklog: 0,
   unackedMessages: 0,
   msgRateOut: 12.5,
-  subType: "Shared",
+  subType: { state: "named", name: "Shared" },
   consumers: [
     {
       consumerName: "Um8a4",
@@ -30,7 +30,7 @@ const stranded: SubscriptionStats = {
   msgBacklog: 3400,
   unackedMessages: 0,
   msgRateOut: 0,
-  subType: "Shared",
+  subType: { state: "named", name: "Shared" },
   consumers: [],
 };
 
@@ -192,5 +192,22 @@ describe("SubscriptionTable", () => {
     expect(screen.getAllByText(/^unknown$/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/^never$/i).length).toBeGreaterThan(0);
     expect(screen.getAllByText(/2023/).length).toBeGreaterThan(0);
+  });
+
+  // Finding 2 of the Phase A final review: `subType` is a three-state
+  // SubscriptionType, mirroring `BacklogAge`/`ConsumerTimestamp`. Pulsar's
+  // own "None" sentinel ("no consumer has ever claimed a dispatcher type")
+  // must render as its own word, distinct from "Unknown" (the field was
+  // withheld) — collapsing the two would claim the broker withheld the
+  // field when the broker actually answered.
+  it("renders a named type, Pulsar's unset sentinel, and a withheld type as three different things", () => {
+    const named: SubscriptionStats = { ...stranded, name: "named_sub", subType: { state: "named", name: "Shared" } };
+    const unset: SubscriptionStats = { ...stranded, name: "unset_sub", subType: { state: "unset" } };
+    const unknown: SubscriptionStats = { ...stranded, name: "unknown_sub", subType: { state: "unknown" } };
+    render(<SubscriptionTable subscriptions={[named, unset, unknown]} state="ready" onRefresh={vi.fn()} />);
+
+    expect(screen.getByText("Shared")).toBeInTheDocument();
+    expect(screen.getByText(/^unset$/i)).toBeInTheDocument();
+    expect(screen.getByText(/^unknown$/i)).toBeInTheDocument();
   });
 });

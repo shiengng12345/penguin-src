@@ -54,6 +54,29 @@ export type ConsumerTimestamp =
   | { state: "never" }
   | { state: "unknown" };
 
+/** A subscription's dispatcher `type`. Pulsar's wire value actually
+ *  distinguishes three cases a bare `string | null` cannot: a real, named
+ *  dispatcher type (`"Shared"`, `"Exclusive"`, `"Failover"`, `"Key_Shared"`),
+ *  Pulsar's own documented `"None"` sentinel ("no consumer has ever claimed
+ *  a dispatcher type for this subscription" — a determinate fact, not a
+ *  missing value), and genuine absence (the field was withheld).
+ *
+ *  Phase A final review, finding 2: this is the third field group with
+ *  exactly the shape `BacklogAge` and `ConsumerTimestamp` were each built to
+ *  fix. An earlier version of this field was `string | null` with Pulsar's
+ *  `"None"` normalized to `null` at the Rust parse boundary — merging "the
+ *  broker withheld this field" with "the broker answered: nobody has
+ *  claimed a type," the identical mistake fixed for `oldestBacklogMessageAge`
+ *  and the consumer timestamps. Mirrors `BacklogAge`/`ConsumerTimestamp`
+ *  field-for-field, including the wire shape (an internally-tagged
+ *  `{"state": ...}` object), pinned by
+ *  `subscription_type_serialises_to_the_pinned_wire_shape` in
+ *  `stats_tests.rs`. */
+export type SubscriptionType =
+  | { state: "named"; name: string }
+  | { state: "unset" }
+  | { state: "unknown" };
+
 /** One entry in a subscription's `consumers` array. Every field but
  *  `blockedOnUnackedMsgs`, `lastAckedTimestamp` and `lastConsumedTimestamp`
  *  is `Option` on the Rust side because an absent identity/diagnostic field
@@ -87,7 +110,7 @@ export interface SubscriptionStats {
   msgBacklog: number | null;
   unackedMessages: number | null;
   msgRateOut: number | null;
-  subType: string | null;
+  subType: SubscriptionType;
   consumers: ConsumerStats[] | null;
 }
 
