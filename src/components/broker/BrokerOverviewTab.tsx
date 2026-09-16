@@ -46,6 +46,7 @@ export function BrokerOverviewTab({ connectionId }: BrokerOverviewTabProps) {
       topicsSampled={report?.topicsSampled}
       topicsTotal={report?.topicsTotal}
       truncated={report?.truncated ?? false}
+      topicsUnavailable={report?.topicsUnavailable ?? 0}
       state={state}
       errorMessage={errorMessage}
       warnings={warnings}

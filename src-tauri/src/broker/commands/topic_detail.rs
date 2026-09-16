@@ -127,6 +127,17 @@ pub struct OverviewReportDto {
     pub truncated: bool,
     pub anomalies: Vec<Anomaly>,
     pub indeterminate: Vec<IndeterminateCheck>,
+    /// How many of the sampled topics' stats fetches failed (Phase A final
+    /// review, finding 1). Each failure already produces a free-text
+    /// warning ("topic \"X\": stats unavailable (...)") that a caller can
+    /// only display, never reason about — this is the determinate field a
+    /// caller (`AnomalyPanel`'s `FindingsSection`) can act on instead:
+    /// suppress the "every check ran" claim whenever this is non-zero,
+    /// rather than needing to parse warning text to know a sweep was
+    /// incomplete. `0` is a real answer ("every sampled topic's stats were
+    /// readable"), not an absence — never optional, mirroring
+    /// `indeterminate` (R23).
+    pub topics_unavailable: usize,
 }
 
 /// Fetches, parses, and derives anomalies for one topic's stats + internal
@@ -272,10 +283,20 @@ pub async fn build_overview(
     let admin = PulsarAdminRest::new(row.admin_url.clone(), row.timeout_ms as u64, row.tls_verify, token)
         .map_err(|e| e.message)?;
 
-    let (anomalies, indeterminate, sample_warnings) = sample_overview(&admin, &tenant, &namespace, &page.items).await;
+    let (anomalies, indeterminate, sample_warnings, topics_unavailable) =
+        sample_overview(&admin, &tenant, &namespace, &page.items).await;
     warnings.extend(sample_warnings);
 
-    let report = OverviewReportDto { tenant, namespace, topics_sampled, topics_total, truncated, anomalies, indeterminate };
+    let report = OverviewReportDto {
+        tenant,
+        namespace,
+        topics_sampled,
+        topics_total,
+        truncated,
+        anomalies,
+        indeterminate,
+        topics_unavailable,
+    };
     let mut envelope = ResultEnvelope::ok(report, BrokerSource::AdminRest);
     envelope.warnings = warnings;
     Ok(envelope)
@@ -298,10 +319,13 @@ async fn sample_overview(
     tenant: &str,
     namespace: &str,
     items: &[TopicSummaryDto],
-) -> (Vec<Anomaly>, Vec<IndeterminateCheck>, Vec<String>) {
+) -> (Vec<Anomaly>, Vec<IndeterminateCheck>, Vec<String>, usize) {
     let mut anomalies = Vec::new();
     let mut indeterminate = Vec::new();
     let mut warnings = Vec::new();
+    // Counted at the exact point the free-text warning below is pushed —
+    // see `OverviewReportDto::topics_unavailable`'s doc.
+    let mut topics_unavailable = 0usize;
 
     // A single, read-only capability probe, scoped to the whole namespace —
     // see the module doc for why this is `broker_version()` and not the
@@ -324,13 +348,18 @@ async fn sample_overview(
                 // the rest of the sample — see the module doc for why this
                 // is a warning, not an Anomaly/IndeterminateCheck.
                 warnings.push(format!("topic \"{}\": stats unavailable ({})", item.full_name, err.message));
+                topics_unavailable += 1;
             }
         }
     }
 
-    (anomalies, indeterminate, warnings)
+    (anomalies, indeterminate, warnings, topics_unavailable)
 }
 
 #[cfg(test)]
 #[path = "topic_detail_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "topic_detail_overview_tests.rs"]
+mod overview_tests;

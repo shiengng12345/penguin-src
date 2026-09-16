@@ -65,7 +65,17 @@ export interface IndeterminateCheck {
  *  individual checks within the topics that were sampled: it is never
  *  optional, because an empty array is itself a real, meaningful answer
  *  ("every check ran") and an optional field would let a caller forget to
- *  ask the question at all. */
+ *  ask the question at all.
+ *
+ *  `topicsUnavailable` (Phase A final review, finding 1) is the same kind
+ *  of guard for a third way a sweep can be incomplete: one sampled topic's
+ *  stats fetch can fail without failing the whole overview (see
+ *  `src-tauri/src/broker/commands/topic_detail.rs`'s `sample_overview`),
+ *  and that failure previously reached the UI only as free text buried in
+ *  `warnings` — something a panel could display but never reason about.
+ *  Non-optional for the same reason as `indeterminate`: `0` is a real
+ *  answer ("every sampled topic's stats were readable"), and an optional
+ *  field would let a caller forget to check. */
 export interface OverviewReport {
   tenant: string;
   namespace: string;
@@ -74,4 +84,5 @@ export interface OverviewReport {
   truncated: boolean;
   anomalies: Anomaly[];
   indeterminate: IndeterminateCheck[];
+  topicsUnavailable: number;
 }

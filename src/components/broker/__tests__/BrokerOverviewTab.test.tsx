@@ -27,6 +27,7 @@ function envelope(overrides: Partial<ResultEnvelope<OverviewReport>> = {}): Resu
       truncated: false,
       anomalies: [],
       indeterminate: [],
+      topicsUnavailable: 0,
     },
     source: "pulsar-admin-rest",
     observedAt: "2026-09-16T00:00:00.000Z",
@@ -66,6 +67,7 @@ describe("BrokerOverviewTab", () => {
             },
           ],
           indeterminate: [],
+          topicsUnavailable: 0,
         },
       }),
     );
@@ -94,6 +96,7 @@ describe("BrokerOverviewTab", () => {
               reason: "Pulsar did not report blockedOnUnackedMsgs for this consumer",
             },
           ],
+          topicsUnavailable: 0,
         },
       }),
     );
@@ -105,6 +108,11 @@ describe("BrokerOverviewTab", () => {
   });
 
   it("shows the truncation notice when the sample did not cover the whole namespace", async () => {
+    // `truncated: true` with no warnings is unreachable in production:
+    // `build_overview` always pushes a truncation warning when it
+    // truncates, which forces `deriveOverviewResult` to `"stale"`. The
+    // warning is included here so this test exercises the combination that
+    // can actually happen.
     getOverviewMock.mockResolvedValueOnce(
       envelope({
         data: {
@@ -115,20 +123,43 @@ describe("BrokerOverviewTab", () => {
           truncated: true,
           anomalies: [],
           indeterminate: [],
+          topicsUnavailable: 0,
         },
+        warnings: ["Sampled 100 of 250 topics in public/default (cap: 100)"],
       }),
     );
     render(<BrokerOverviewTab connectionId="conn-1" />);
     await waitFor(() => expect(screen.getByRole("note")).toHaveTextContent(/100 of 250/));
   });
 
-  it("keeps a partial sample's findings AND its warning on screen, not an error banner", async () => {
+  // Phase A final review, finding 1: a per-topic stats failure reaches the
+  // panel as a free-text warning, but that must no longer let the panel
+  // also claim "every check ran and found nothing wrong" underneath it —
+  // this test used to assert exactly that false claim was present. A real
+  // envelope carrying this warning also carries `topicsUnavailable: 1`
+  // (`sample_overview` increments it at the same point it pushes the
+  // warning), so the fixture reflects a real response, not a hand-picked
+  // partial one.
+  it("keeps a partial sample's findings AND its warning on screen, without claiming every check ran", async () => {
     getOverviewMock.mockResolvedValueOnce(
-      envelope({ warnings: ['topic "orders": stats unavailable (timed out)'] }),
+      envelope({
+        data: {
+          tenant: "public",
+          namespace: "default",
+          topicsSampled: 10,
+          topicsTotal: 10,
+          truncated: false,
+          anomalies: [],
+          indeterminate: [],
+          topicsUnavailable: 1,
+        },
+        warnings: ['topic "orders": stats unavailable (timed out)'],
+      }),
     );
     render(<BrokerOverviewTab connectionId="conn-1" />);
-    await waitFor(() => expect(screen.getByText(/no anomalies/i)).toBeInTheDocument());
-    expect(screen.getByText(/timed out/)).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByText(/timed out/)).toBeInTheDocument());
+    expect(screen.queryByText(/no anomalies found\. every check ran/i)).not.toBeInTheDocument();
+    expect(screen.getByText(/could not be checked/i)).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 

@@ -26,6 +26,17 @@
 // `DeliveryNotice` uses for a caveat on data already on screen, not an
 // alert about something wrong).
 //
+// `topicsUnavailable` (Phase A final review, finding 1) is a fifth trap,
+// distinct from `truncated`: one *sampled* topic's stats fetch can fail
+// without failing the whole overview (`sample_overview` in
+// `commands/topic_detail.rs`), and that failure previously reached this
+// panel only as free text buried in `warnings` — visible, but nothing
+// `FindingsSection` could reason about. So the all-clear sentence rendered
+// even while a warning right above it said a topic could not be checked.
+// `FindingsSection` now suppresses "every check ran" whenever
+// `topicsUnavailable > 0` or `truncated`, the same way it already
+// suppresses it for a non-empty `indeterminate`.
+//
 // Reused from `TopicDetailPanel.tsx`: the anomalies-vs-indeterminate visual
 // language (own heading each, amber non-alert styling for indeterminate,
 // rendered independently of `anomalies`) and the `formatNumber`/status/alert
@@ -52,6 +63,12 @@ export interface AnomalyPanelProps {
   topicsSampled?: number;
   topicsTotal?: number;
   truncated?: boolean;
+  /** How many sampled topics' stats fetches failed. Required, not optional,
+   *  for the same reason `indeterminate` is (R23/R31): `0` is a real answer
+   *  ("every sampled topic's stats were readable"), and an optional field
+   *  would let a caller forget to pass a real report's count, silently
+   *  restoring the exact claim this fix removes. See the module doc. */
+  topicsUnavailable: number;
   state: DataTableState;
   errorMessage?: string;
   /** Warnings attached to a `"stale"`/`"partial"` result, same shape as
@@ -66,6 +83,7 @@ export function AnomalyPanel({
   topicsSampled,
   topicsTotal,
   truncated = false,
+  topicsUnavailable,
   state,
   errorMessage,
   warnings = [],
@@ -104,7 +122,12 @@ export function AnomalyPanel({
           )}
 
           <TruncationNotice truncated={truncated} topicsSampled={topicsSampled} topicsTotal={topicsTotal} />
-          <FindingsSection anomalies={anomalies} indeterminate={indeterminate} />
+          <FindingsSection
+            anomalies={anomalies}
+            indeterminate={indeterminate}
+            truncated={truncated}
+            topicsUnavailable={topicsUnavailable}
+          />
         </>
       )}
     </div>
@@ -144,23 +167,49 @@ function TruncationNotice({
   );
 }
 
+/** Phase A final review, finding 1: says what actually happened instead of
+ *  claiming a sweep completed when it did not. `truncated` means the
+ *  namespace itself was only partially sampled; `topicsUnavailable > 0`
+ *  means a sampled topic's stats fetch failed. Either makes "every check
+ *  ran" false, so this never returns the all-clear sentence when it holds —
+ *  it names the specific reason instead. */
+function incompleteSweepReason(truncated: boolean, topicsUnavailable: number): string | null {
+  const reasons: string[] = [];
+  if (truncated) {
+    reasons.push("only a partial sample of the namespace was swept");
+  }
+  if (topicsUnavailable > 0) {
+    reasons.push(`${topicsUnavailable} sampled topic${topicsUnavailable === 1 ? "" : "s"} could not be checked`);
+  }
+  return reasons.length === 0 ? null : reasons.join(" and ");
+}
+
 /** The one place the three findings states (all-clear / could-not-tell /
  *  found problems) resolve into what's on screen. Collapses to a single
  *  `role="status"` node only when both `anomalies` and `indeterminate` are
  *  empty — the genuinely all-clear case. Any non-empty `indeterminate`
  *  suppresses that "no anomalies" wording entirely, everywhere on the
- *  panel, so it can never be misread as good news. */
+ *  panel, so it can never be misread as good news. Same treatment for
+ *  `truncated`/`topicsUnavailable` (finding 1): an incomplete sweep gets
+ *  its own honest sentence instead of "every check ran". */
 function FindingsSection({
   anomalies,
   indeterminate,
+  truncated,
+  topicsUnavailable,
 }: {
   anomalies: Anomaly[];
   indeterminate: IndeterminateCheck[];
+  truncated: boolean;
+  topicsUnavailable: number;
 }) {
   if (anomalies.length === 0 && indeterminate.length === 0) {
+    const incomplete = incompleteSweepReason(truncated, topicsUnavailable);
     return (
       <div role="status" className={STATUS_CLASS}>
-        No anomalies found. Every check ran and found nothing wrong.
+        {incomplete
+          ? `No anomalies found among the topics that were checked — ${incomplete}, so this is not a complete sweep.`
+          : "No anomalies found. Every check ran and found nothing wrong."}
       </div>
     );
   }

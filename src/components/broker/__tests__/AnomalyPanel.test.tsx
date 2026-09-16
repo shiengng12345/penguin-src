@@ -38,19 +38,19 @@ const indeterminate: IndeterminateCheck[] = [
 describe("AnomalyPanel", () => {
   it("shows the measured value, not just the rule that fired", () => {
     // "has a backlog" is a rule. "3400 messages" is what an operator acts on.
-    render(<AnomalyPanel anomalies={anomalies} indeterminate={[]} state="ready" onRefresh={vi.fn()} />);
+    render(<AnomalyPanel anomalies={anomalies} indeterminate={[]} topicsUnavailable={0} state="ready" onRefresh={vi.fn()} />);
     expect(screen.getByText(/3400 messages/)).toBeInTheDocument();
   });
 
   it("names the subscription and topic involved", () => {
-    render(<AnomalyPanel anomalies={anomalies} indeterminate={[]} state="ready" onRefresh={vi.fn()} />);
+    render(<AnomalyPanel anomalies={anomalies} indeterminate={[]} topicsUnavailable={0} state="ready" onRefresh={vi.fn()} />);
     expect(screen.getByText(/anti_addiction_deposit_limit_fpmsnt/)).toBeInTheDocument();
   });
 
   it("says no anomalies found rather than rendering nothing", () => {
     // A blank panel cannot be told apart from a failed query. The whole point
     // of this surface is that silence means something specific.
-    render(<AnomalyPanel anomalies={[]} indeterminate={[]} state="ready" onRefresh={vi.fn()} />);
+    render(<AnomalyPanel anomalies={[]} indeterminate={[]} topicsUnavailable={0} state="ready" onRefresh={vi.fn()} />);
     expect(screen.getByRole("status")).toHaveTextContent(/no anomalies/i);
   });
 
@@ -59,6 +59,7 @@ describe("AnomalyPanel", () => {
       <AnomalyPanel
         anomalies={[]}
         indeterminate={[]}
+        topicsUnavailable={0}
         state="error"
         errorMessage="Connection refused"
         onRefresh={vi.fn()}
@@ -74,7 +75,7 @@ describe("AnomalyPanel", () => {
   // distinction is the entire point of five backend tasks.
   it("does not read empty anomalies as all-clear when checks could not run", () => {
     render(
-      <AnomalyPanel anomalies={[]} indeterminate={indeterminate} state="ready" onRefresh={vi.fn()} />,
+      <AnomalyPanel anomalies={[]} indeterminate={indeterminate} topicsUnavailable={0} state="ready" onRefresh={vi.fn()} />,
     );
     expect(screen.queryByText(/no anomalies/i)).not.toBeInTheDocument();
     // The unrunnable check must be reported as a status, never an alarm —
@@ -87,7 +88,7 @@ describe("AnomalyPanel", () => {
 
   it("never uses role=alert for an indeterminate check — it is not an alarm", () => {
     render(
-      <AnomalyPanel anomalies={[]} indeterminate={indeterminate} state="ready" onRefresh={vi.fn()} />,
+      <AnomalyPanel anomalies={[]} indeterminate={indeterminate} topicsUnavailable={0} state="ready" onRefresh={vi.fn()} />,
     );
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
@@ -95,20 +96,29 @@ describe("AnomalyPanel", () => {
   // `truncated` plus the two counts are what stop "no anomalies" being
   // misread as "the namespace is clean" when only the first N of the
   // namespace's topics were actually sampled.
+  //
+  // Phase A final review, finding 1: `state="ready"` is unreachable here in
+  // production. `build_overview` (topic_detail.rs) always pushes a
+  // truncation warning when `truncated` is true, and `deriveOverviewResult`
+  // turns any non-empty `warnings` into `state: "stale"` — so a truncated,
+  // "ready" overview cannot actually happen. Uses the reachable combination.
   it("surfaces truncation so an empty result is not read as a full sweep", () => {
     render(
       <AnomalyPanel
         anomalies={[]}
         indeterminate={[]}
+        topicsUnavailable={0}
         truncated={true}
         topicsSampled={50}
         topicsTotal={120}
-        state="ready"
+        state="stale"
+        warnings={["Sampled 50 of 120 topics in public/default (cap: 100)"]}
         onRefresh={vi.fn()}
       />,
     );
-    expect(screen.getByText(/50/)).toBeInTheDocument();
-    expect(screen.getByText(/120/)).toBeInTheDocument();
+    const note = screen.getByRole("note");
+    expect(note).toHaveTextContent(/50/);
+    expect(note).toHaveTextContent(/120/);
   });
 
   it("does not mention truncation when the sample covered every topic", () => {
@@ -116,6 +126,7 @@ describe("AnomalyPanel", () => {
       <AnomalyPanel
         anomalies={[]}
         indeterminate={[]}
+        topicsUnavailable={0}
         truncated={false}
         topicsSampled={12}
         topicsTotal={12}
@@ -127,7 +138,7 @@ describe("AnomalyPanel", () => {
   });
 
   it("shows a loading status instead of rendering nothing while the query is in flight", () => {
-    render(<AnomalyPanel anomalies={[]} indeterminate={[]} state="loading" onRefresh={vi.fn()} />);
+    render(<AnomalyPanel anomalies={[]} indeterminate={[]} topicsUnavailable={0} state="loading" onRefresh={vi.fn()} />);
     expect(screen.getByRole("status")).toHaveTextContent(/loading/i);
   });
 
@@ -136,9 +147,37 @@ describe("AnomalyPanel", () => {
   // was nothing to check. Asserting a sweep happened is the same defect as
   // the indeterminate case, in different clothes.
   it("says no topics rather than claiming every check ran when the namespace is empty", () => {
-    render(<AnomalyPanel anomalies={[]} indeterminate={[]} state="empty" onRefresh={vi.fn()} />);
+    render(<AnomalyPanel anomalies={[]} indeterminate={[]} topicsUnavailable={0} state="empty" onRefresh={vi.fn()} />);
     const status = screen.getByRole("status");
     expect(status).toHaveTextContent(/no topics/i);
     expect(status).not.toHaveTextContent(/every check ran/i);
+  });
+
+  // Phase A final review, finding 1: a per-topic stats failure is a third
+  // way the sweep can be incomplete, alongside truncation and indeterminate
+  // checks. `topicsUnavailable > 0` must suppress "every check ran" exactly
+  // like those two already do, even though `anomalies` and `indeterminate`
+  // are both genuinely empty.
+  it("does not claim every check ran when a sampled topic's stats were unavailable", () => {
+    render(
+      <AnomalyPanel
+        anomalies={[]}
+        indeterminate={[]}
+        topicsUnavailable={1}
+        state="stale"
+        warnings={['topic "orders": stats unavailable (timed out)']}
+        onRefresh={vi.fn()}
+      />,
+    );
+    expect(screen.queryByText(/no anomalies found\. every check ran/i)).not.toBeInTheDocument();
+    const status = screen.getAllByRole("status").find((el) => /could not be checked/i.test(el.textContent ?? ""));
+    expect(status).toBeDefined();
+  });
+
+  it("still claims every check ran when nothing was truncated or unavailable", () => {
+    render(
+      <AnomalyPanel anomalies={[]} indeterminate={[]} topicsUnavailable={0} truncated={false} state="ready" onRefresh={vi.fn()} />,
+    );
+    expect(screen.getByRole("status")).toHaveTextContent(/every check ran/i);
   });
 });

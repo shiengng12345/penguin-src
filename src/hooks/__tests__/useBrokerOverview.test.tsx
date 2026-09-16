@@ -25,6 +25,7 @@ const REPORT: OverviewReport = {
   truncated: false,
   anomalies: [],
   indeterminate: [],
+  topicsUnavailable: 0,
 };
 
 function envelope(overrides: Partial<ResultEnvelope<OverviewReport>> = {}): ResultEnvelope<OverviewReport> {
