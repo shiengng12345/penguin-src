@@ -60,16 +60,26 @@ async fn build_topic_detail_propagates_a_stats_fetch_failure_instead_of_swallowi
 }
 
 /// A trait double that returns fixed, hand-built `stats`/`internalStats`
-/// payloads engineered to trip both a `BacklogWithNoConsumer` and a
-/// `BacklogOlderThanThreshold` anomaly. The live broker's own topics
-/// (see `tests/broker_topic_detail.rs`) currently carry no backlog at
-/// all, so an equality check against independently-derived anomalies
-/// there is always comparing two empty lists — it would not catch a
-/// wiring bug (wrong threshold, wrong topic name, a dropped
-/// `derive_indeterminate_checks` call) that happened to still produce
-/// an empty result. This canned payload is what actually exercises
-/// `build_topic_detail`'s wiring end to end, independent of what the
-/// live broker's business data happens to look like today.
+/// payloads engineered to trip a `BacklogWithNoConsumer` anomaly and (via
+/// `oldestBacklogMessageAgeSeconds: 7200`, above `OLDEST_BACKLOG_THRESHOLD_SECS`)
+/// exercise the `BacklogOlderThanThreshold` check. The live broker's own
+/// topics (see `tests/broker_topic_detail.rs`) currently carry no backlog at
+/// all, so an equality check against independently-derived anomalies there
+/// is always comparing two empty lists — it would not catch a wiring bug
+/// (wrong threshold, wrong topic name, a dropped
+/// `derive_indeterminate_checks` call) that happened to still produce an
+/// empty result. This canned payload is what actually exercises
+/// `build_topic_detail`'s wiring end to end, independent of what the live
+/// broker's business data happens to look like today.
+///
+/// Whole-stage review item 2: `build_topic_detail` always parses through the
+/// real `TOPIC_STATS_REQUEST_SCOPE`, which has `earliest_time_in_backlog:
+/// false` — so however old this payload's `oldestBacklogMessageAgeSeconds`
+/// claims to be, `derive_anomalies`/`derive_indeterminate_checks` must not
+/// trust it as measured. The `BacklogOlderThanThreshold` check therefore
+/// never fires through this real pipeline; it shows up as an
+/// `IndeterminateCheck` instead (see the test below) — that is the fix, not
+/// a gap in this double.
 struct CannedAdmin;
 
 #[async_trait::async_trait]
@@ -101,8 +111,10 @@ impl BrokerAdmin for CannedAdmin {
             "storageSize": 100,
             "backlogSize": 5,
             "msgInCounter": 20,
-            // Above OLDEST_BACKLOG_THRESHOLD_SECS (3600) — must trip
-            // BacklogOlderThanThreshold.
+            // Above OLDEST_BACKLOG_THRESHOLD_SECS (3600) — but
+            // TOPIC_STATS_REQUEST_SCOPE.earliest_time_in_backlog is false, so
+            // this must never be trusted as measured (whole-stage review
+            // item 2): it surfaces as an IndeterminateCheck, not an anomaly.
             "oldestBacklogMessageAgeSeconds": 7200,
             "subscriptions": {
                 "sub-a": {
@@ -131,7 +143,7 @@ impl BrokerAdmin for CannedAdmin {
 }
 
 #[tokio::test]
-async fn build_topic_detail_derives_both_anomalies_from_a_canned_payload() {
+async fn build_topic_detail_derives_an_anomaly_and_an_indeterminate_check_from_a_canned_payload() {
     let topic_ref = TopicRef { tenant: "public".into(), namespace: "default".into(), topic: "canned-topic".into(), persistent: true };
     let detail = build_topic_detail(&CannedAdmin, &topic_ref).await.expect("canned detail");
 
@@ -150,14 +162,26 @@ async fn build_topic_detail_derives_both_anomalies_from_a_canned_payload() {
         "got {:?}",
         detail.anomalies
     );
+    // Whole-stage review item 2: `oldestBacklogMessageAgeSeconds: 7200` in
+    // the canned payload above is past the threshold, but
+    // `TOPIC_STATS_REQUEST_SCOPE.earliest_time_in_backlog` is `false` on the
+    // real pipeline this test exercises — so that reading is never trusted
+    // as measured. `BacklogOlderThanThreshold` must not appear as an
+    // anomaly here...
     assert!(
-        detail.anomalies.iter().any(|a| a.kind == AnomalyKind::BacklogOlderThanThreshold),
-        "got {:?}",
+        !detail.anomalies.iter().any(|a| a.kind == AnomalyKind::BacklogOlderThanThreshold),
+        "an unrequested backlog age must never raise BacklogOlderThanThreshold, got {:?}",
         detail.anomalies
     );
+    // ...and the check must not silently vanish either: it has to appear as
+    // an indeterminate check instead, so an empty `indeterminate` never
+    // reads as "every check ran and found nothing" when this one never ran.
     assert!(
-        detail.indeterminate.is_empty(),
-        "every input here was known, not absent — nothing should be indeterminate: {:?}",
+        detail
+            .indeterminate
+            .iter()
+            .any(|c| c.kind == AnomalyKind::BacklogOlderThanThreshold && c.subscription.is_none()),
+        "got {:?}",
         detail.indeterminate
     );
 }

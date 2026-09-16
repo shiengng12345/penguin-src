@@ -101,6 +101,32 @@
 //! module never sees (see the module's own signature — it takes `TopicStats`
 //! only). Task 8's `broker_get_overview` command emits that variant, since
 //! it holds the connection.
+//!
+//! ## Whole-stage review item 2: `earliest_time_in_backlog` must be folded too
+//!
+//! `exclude_consumers` is folded into `None` for the two consumer checks
+//! above, but `oldest_backlog_message_age` used to be read straight off
+//! `TopicStats` in both [`derive_anomalies`] and
+//! [`derive_indeterminate_checks`], with no equivalent check of
+//! `stats_request_scope.earliest_time_in_backlog`. Under the scope this
+//! codebase actually ships (`earliest_time_in_backlog: false`), Pulsar
+//! returns `oldestBacklogMessageAgeSeconds: -1`, which normalizes to
+//! [`BacklogAge::NoBacklog`] — "a determinate, healthy fact" per that type's
+//! own doc. That made [`AnomalyKind::BacklogOlderThanThreshold`]
+//! structurally unreachable in the shipped configuration, and — because
+//! [`derive_indeterminate_checks`] deliberately never lists `NoBacklog` as
+//! indeterminate (it is a genuine, healthy reading when actually measured) —
+//! the check did not surface as indeterminate either. An empty result then
+//! read as "every check ran and found nothing" when this one check never
+//! ran at all, exactly the failure mode this module's own central rule
+//! forbids.
+//!
+//! [`effective_backlog_age`] fixes this the same way [`derive_anomalies`]
+//! already folds `exclude_consumers`: when `earliest_time_in_backlog` is
+//! `false`, the parsed `BacklogAge` — whatever it came out as — is not
+//! trusted as measured and is treated as [`BacklogAge::Unknown`] for both
+//! functions, so the check raises nothing **and** appears on the
+//! indeterminate list instead of vanishing silently.
 
 use crate::broker::stats::{BacklogAge, TopicStats};
 use serde::{Deserialize, Serialize};
@@ -146,6 +172,23 @@ pub struct IndeterminateCheck {
     pub topic: String,
     pub subscription: Option<String>,
     pub reason: String,
+}
+
+/// `stats.oldest_backlog_message_age`, folded through
+/// `stats_request_scope.earliest_time_in_backlog` exactly as
+/// `effective_consumers` (inline in [`derive_anomalies`] and
+/// [`derive_indeterminate_checks`]) folds `exclude_consumers` for the
+/// consumer checks beside it — see the module doc's "whole-stage review item
+/// 2" section. When the flag is `false`, the parsed value must not be
+/// trusted as measured, whatever it normalized to (a real `Seconds` age, or
+/// Pulsar's own `NoBacklog` sentinel), so this returns [`BacklogAge::Unknown`]
+/// instead.
+fn effective_backlog_age(stats: &TopicStats) -> BacklogAge {
+    if stats.stats_request_scope.earliest_time_in_backlog {
+        stats.oldest_backlog_message_age
+    } else {
+        BacklogAge::Unknown
+    }
 }
 
 /// Derives every anomaly [Task 5's `TopicStats`] gives this module enough
@@ -212,6 +255,10 @@ pub fn derive_anomalies(topic: &str, stats: &TopicStats, oldest_backlog_threshol
     // sentinel) — it must raise nothing here, exactly like a known-young
     // age. Only a known age at or past the threshold is an anomaly; Unknown
     // never raises one (see `derive_indeterminate_checks` for that case).
+    // `effective_backlog_age` folds this to Unknown outright when
+    // `earliest_time_in_backlog` was not requested (whole-stage review item
+    // 2), so a NoBacklog/Seconds reading this call never actually asked for
+    // cannot raise (or silently clear) this check either.
     //
     // The comparison is done entirely in `u64` space rather than casting
     // `age` down to `i64`: a `u64` age near its top end would silently wrap
@@ -220,7 +267,7 @@ pub fn derive_anomalies(topic: &str, stats: &TopicStats, oldest_backlog_threshol
     // negative` true for every known age, drowning the panel in false
     // positives. Widening the threshold up with `try_from` instead means a
     // negative threshold simply fails to convert and matches nothing.
-    if let BacklogAge::Seconds { seconds: age } = stats.oldest_backlog_message_age {
+    if let BacklogAge::Seconds { seconds: age } = effective_backlog_age(stats) {
         if u64::try_from(oldest_backlog_threshold_secs).is_ok_and(|threshold| age >= threshold) {
             anomalies.push(Anomaly {
                 kind: AnomalyKind::BacklogOlderThanThreshold,
@@ -327,7 +374,11 @@ pub fn derive_indeterminate_checks(topic: &str, stats: &TopicStats) -> Vec<Indet
     // BacklogAge::NoBacklog is deliberately excluded: it is Pulsar's own
     // determinate "no backlog has ever existed" fact, not an unknown, so it
     // must never appear on this list (fix round 1 — see the module doc).
-    if matches!(stats.oldest_backlog_message_age, BacklogAge::Unknown) {
+    // `effective_backlog_age` folds a genuinely-measured NoBacklog/Seconds
+    // reading to Unknown when `earliest_time_in_backlog` was not requested
+    // (whole-stage review item 2), so that case DOES appear here — it must:
+    // the check never actually ran, and silence must not read as "clear".
+    if matches!(effective_backlog_age(stats), BacklogAge::Unknown) {
         indeterminate.push(IndeterminateCheck {
             kind: AnomalyKind::BacklogOlderThanThreshold,
             topic: topic.to_string(),

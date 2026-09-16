@@ -51,11 +51,14 @@ fn a_failed_probe_produces_exactly_one_capability_probe_failed_anomaly_scoped_to
 
 // --- Fix round 1, item 1: prove `indeterminate` is not just carried in the
 // type signature but actually reaches the caller non-empty when a field is
-// genuinely absent. `CannedAdmin` (`topic_detail_tests.rs`) deliberately
-// makes every field known (so it always produces an empty `indeterminate`),
+// genuinely absent. `CannedAdmin` (`topic_detail_tests.rs`) makes every
+// consumer-side field known — though, as of whole-stage review item 2, it
+// (like every topic sampled through the real pipeline) still produces one
+// `BacklogOlderThanThreshold` indeterminate entry, since
+// `TOPIC_STATS_REQUEST_SCOPE.earliest_time_in_backlog` is always `false` —
 // and the live `fpms_topup` topic (see `tests/broker_topic_detail.rs`)
-// happens to report every field too — neither can distinguish the real
-// wiring from `indeterminate: Vec::new()` hardcoded and
+// happens to report every consumer-side field too — neither can distinguish
+// the real wiring from `indeterminate: Vec::new()` hardcoded and
 // `derive_indeterminate_checks` never called at all. This mock omits
 // `consumers` from a subscription entirely (not `consumers: []`, which is a
 // known, confirmed fact) so that check is genuinely un-answerable. ---
@@ -214,7 +217,15 @@ async fn sample_overview_reports_capability_probe_failed_through_the_real_await(
     assert_eq!(anomalies.len(), 1, "got {anomalies:?}");
     assert_eq!(anomalies[0].kind, AnomalyKind::CapabilityProbeFailed);
     assert_eq!(anomalies[0].topic, "public/default");
-    assert!(indeterminate.is_empty(), "got {indeterminate:?}");
+    // Whole-stage review item 2: the one sampled topic's stats go through
+    // the real `TOPIC_STATS_REQUEST_SCOPE` (earliest_time_in_backlog:
+    // false), so its `oldestBacklogMessageAgeSeconds: -1` reading is not
+    // trusted as measured and surfaces as indeterminate rather than
+    // silently vanishing — this is unrelated to the capability probe
+    // failure under test, but it is what the real pipeline now always does.
+    assert_eq!(indeterminate.len(), 1, "got {indeterminate:?}");
+    assert_eq!(indeterminate[0].kind, AnomalyKind::BacklogOlderThanThreshold);
+    assert_eq!(indeterminate[0].subscription, None);
     // The per-topic loop still ran normally around the failed probe: the
     // one sampled topic's stats succeeded, so there is no "stats
     // unavailable" warning either.
@@ -318,7 +329,15 @@ async fn sample_overview_counts_exactly_the_topics_whose_stats_fetch_failed() {
         sample_overview(&PartlyUnavailableAdmin, "public", "default", &items).await;
 
     assert!(anomalies.is_empty(), "got {anomalies:?}");
-    assert!(indeterminate.is_empty(), "got {indeterminate:?}");
+    // Whole-stage review item 2: the "ok" topic's stats go through the real
+    // `TOPIC_STATS_REQUEST_SCOPE` (earliest_time_in_backlog: false), so its
+    // `oldestBacklogMessageAgeSeconds: -1` reading is not trusted as
+    // measured and surfaces as indeterminate — unrelated to the "unavailable"
+    // topic under test here, but what the real pipeline now always does for
+    // any topic whose stats fetch succeeds.
+    assert_eq!(indeterminate.len(), 1, "got {indeterminate:?}");
+    assert_eq!(indeterminate[0].kind, AnomalyKind::BacklogOlderThanThreshold);
+    assert_eq!(indeterminate[0].topic, "ok");
     assert_eq!(warnings.len(), 1, "got {warnings:?}");
     assert!(warnings[0].contains("unavailable"), "got {warnings:?}");
     assert_eq!(topics_unavailable, 1, "exactly one of the two sampled topics failed");
