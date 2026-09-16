@@ -129,9 +129,6 @@ impl BrokerAdmin for MissingConsumersAdmin {
             }
         }))
     }
-    async fn list_subscriptions(&self, _topic: &TopicRef) -> Result<Vec<String>, BrokerError> {
-        Err(fail())
-    }
 }
 
 #[tokio::test]
@@ -193,9 +190,6 @@ impl BrokerAdmin for CapabilityFailingAdmin {
     }
     async fn get_topic_internal_stats(&self, _topic: &TopicRef) -> Result<serde_json::Value, BrokerError> {
         Ok(serde_json::json!({ "cursors": {} }))
-    }
-    async fn list_subscriptions(&self, _topic: &TopicRef) -> Result<Vec<String>, BrokerError> {
-        Ok(vec![])
     }
 }
 
@@ -291,9 +285,6 @@ impl BrokerAdmin for PartlyUnavailableAdmin {
     }
     async fn get_topic_internal_stats(&self, _topic: &TopicRef) -> Result<serde_json::Value, BrokerError> {
         Ok(serde_json::json!({ "cursors": {} }))
-    }
-    async fn list_subscriptions(&self, _topic: &TopicRef) -> Result<Vec<String>, BrokerError> {
-        Ok(vec![])
     }
 }
 

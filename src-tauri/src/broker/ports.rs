@@ -34,5 +34,4 @@ pub trait BrokerAdmin: Send + Sync {
     async fn list_partitioned_topics(&self, tenant: &str, namespace: &str) -> Result<Vec<String>, BrokerError>;
     async fn get_topic_stats(&self, topic: &TopicRef) -> Result<serde_json::Value, BrokerError>;
     async fn get_topic_internal_stats(&self, topic: &TopicRef) -> Result<serde_json::Value, BrokerError>;
-    async fn list_subscriptions(&self, topic: &TopicRef) -> Result<Vec<String>, BrokerError>;
 }

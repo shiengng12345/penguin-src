@@ -26,7 +26,7 @@
 | `list_partitioned_topics` | GET | `/admin/v2/persistent/{tenant}/{namespace}/partitioned` | 无 | 该 Namespace 下已分区 Topic 的名称列表，供列表页做"逻辑 Topic 归一化" | 是（"Partitioned Topics"一行，路径与用途逐字匹配） |
 | `get_topic_stats` | GET | `/admin/v2/persistent/{tenant}/{namespace}/{topic}/stats` | `getPreciseBacklog`、`subscriptionBacklogSize`、`getEarliestTimeInBacklog`、`excludePublishers`、`excludeConsumers`（全部显式 `false`，见第 3 节） | Topic/Subscription/Consumer/Producer 页面的主要数据来源 | 是（"普通 Topic Stats"一行） |
 | `get_topic_internal_stats` | GET | `/admin/v2/persistent/{tenant}/{namespace}/{topic}/internalStats` | 无 | 见下方「2. `internalStats`：调用了但 §12.2 没列」 | **未列出**（有意为之，理由见下节） |
-| `list_subscriptions` | GET | `/admin/v2/persistent/{tenant}/{namespace}/{topic}/subscriptions` | 无 | trait 方法存在、`PulsarAdminRest` 也实现了它，但**生产命令代码中从未调用**，见下方「5.1」 | 是（"已有订阅名称"一行），代码比规格的"使用规则"更保守——见「5.1」 |
+| ~~`list_subscriptions`~~ | — | ~~`/admin/v2/persistent/{tenant}/{namespace}/{topic}/subscriptions`~~ | — | **已删除**（Stage 0 任务 5 发现其为死代码，见 §5.1）。`stats` 响应已携带完整订阅列表，规格 §12.2 亦要求不重复请求。 |
 
 `TopicRef::rest_path()`（`ports.rs`）根据 `persistent: bool` 决定 domain 前缀（`persistent` 或 `non-persistent`），所以 `get_topic_stats`/`get_topic_internal_stats`/`list_subscriptions` 这三个按 Topic 寻址的调用理论上对 non-persistent Topic 同样可用；但由于 `list_topics`/`list_partitioned_topics` 只硬编码 `persistent`，实际上目前没有任何路径能发现一个 non-persistent Topic 并拿到它的 `TopicRef`——除非调用方已经从别处知道了它的坐标。这正是规格 §12.2 结尾那句"不能机械假设所有 Persistent 订阅/存储接口都适用"想要提醒的情形，只是方向反过来了：这里不是接口不适用，而是发现路径本身缺失。
 
@@ -99,11 +99,17 @@ GET /admin/v2/{domain}/{tenant}/{namespace}/{topic}/stats
 | 分区元数据（`/admin/v2/persistent/{tenant}/{namespace}/{topic}/partitions`） | **未实现** | 规格 §12.2 单独列了这一行（"已验证版本中显式禁用自动创建检查路径"）。注意这与 `list_partitioned_topics` 调用的 `/admin/v2/persistent/{tenant}/{namespace}/partitioned`（namespace 级、返回分区 Topic 名称列表）是两个不同的端点——后者已实现，前者（单个 Topic 的分区元数据）没有。 |
 | 分区 Topic Stats（`/admin/v2/persistent/{tenant}/{namespace}/{topic}/partitioned-stats`） | **未实现** | 规格 §12.2 列了这一行（"总览/分区视图按需调用"）；当前只有非分区的 `/stats` 被调用。 |
 
-### 5.1 `/subscriptions`：trait 里有、adapter 里有，生产代码从不调用它
+### 5.1 `/subscriptions`：本文档发现它是死代码，已随即删除
 
-规格 §12.2 对"已有订阅名称"一行的使用规则写的是"已有 Stats 包含时不重复请求"——也就是允许调用，但要避免和 `stats` 重复。核对 `src-tauri/src/broker/commands/topic_detail.rs` 的模块文档后发现代码走得比这更彻底：文件开头第 6-14 行有一段专门的说明——设计文档原本为这个任务规划了第五个命令 `broker_list_subscriptions`，**没有被构建**，理由是 Pulsar 的 `stats` 响应本身已经带着完整的订阅列表和每个订阅的 Consumer，单独一个命令只会多发一次一模一样的 HTTP 请求，返回调用方已经从 `TopicDetailDto.stats.subscriptions` 里拿到的子集。
+编写本文档时的核对结果：`BrokerAdmin::list_subscriptions`、`PulsarAdminRest` 对它的实现、以及 `/admin/v2/.../subscriptions` 这个端点，三者都存在于代码里并被测试替身实现，但**从任何生产命令到这个方法之间没有调用点**。
 
-结果是：`BrokerAdmin::list_subscriptions`、`PulsarAdminRest` 对它的实现、`/admin/v2/.../subscriptions` 这个端点，三者都存在于代码里（并且被测试替身实现和练到），但从生产命令到这个方法之间**没有任何调用点**（`grep -rn "\.list_subscriptions(" src-tauri/src/broker --include="*.rs"` 排除测试文件后零匹配）。这不是遗漏，是比规格要求更保守的选择：规格允许"有 stats 就不重复调用"，代码干脆把这条路径完全没有接上任何命令。记在这里是因为它是一个真实存在、编译进二进制、却在运行时路径上永远不会被触达的端点——对审阅代码或审核权限的人来说，"这个方法存在"和"这个方法会被执行"是两件需要分开确认的事。
+这正是引爆 Phase A 的那个缺陷形态的孪生：Phase 0 发布过一个 `source: "cache"` 值，而没有任何代码路径能产生它；这里是一段完整实现的代码，没有任何路径会执行到它。
+
+规格 §12.2 对「已有订阅名称」一行写的使用规则是「已有 Stats 包含时不重复请求」——**规格自己就认为不该调用它**，因为 `stats` 响应已经带着完整的订阅列表和每个订阅的 Consumer。`topic_detail.rs` 的模块文档也记录了同一判断：设计文档原本规划的第五个命令 `broker_list_subscriptions` 被刻意没有构建。
+
+所以它与 `WriteGuard`/`WritePermit` 的情况不同。后者同样暂无生产调用方，但有**明确的未来消费者**（Stage C 的 `send.execute`），因此裁决 R39 选择保留并在 `security.rs` 顶部写明原因。`list_subscriptions` 没有计划中的消费者，而且它的存在还向每一个测试替身征税——五个 mock 各写了一个没人调用的桩。
+
+**处置：已从 trait 与 adapter 中删除**（连同五个测试桩），`cargo test` 319 全数通过。若将来真的需要「不取 stats 只要订阅名」的能力，重新加一个 trait 方法是响亮的改动，比留着一个永不执行的实现诚实。
 
 ## 附：五个「不做」的硬性约束覆盖情况（规格 §1.3）
 
