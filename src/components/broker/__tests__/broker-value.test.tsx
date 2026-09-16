@@ -47,10 +47,12 @@ const ALL_REQUESTED: StatsRequestScope = {
   preciseBacklog: true,
   subscriptionBacklogSize: true,
   earliestTimeInBacklog: true,
+  excludePublishers: false,
+  excludeConsumers: false,
 };
 
 describe("wasFieldRequested — the R38 field<->flag mapping", () => {
-  const fields: ScopedStatsField[] = ["topicBacklogSize", "subscriptionMsgBacklog", "oldestBacklogMessageAge"];
+  const fields: ScopedStatsField[] = ["subscriptionMsgBacklog", "oldestBacklogMessageAge"];
 
   it("every field reads as requested when every flag is on", () => {
     for (const field of fields) {
@@ -60,27 +62,30 @@ describe("wasFieldRequested — the R38 field<->flag mapping", () => {
 
   // R38's own requirement: flipping exactly one flag off must change exactly
   // the field(s) that flag governs, and leave every other field's answer
-  // untouched. Written as three separate cases (one per flag) rather than a
-  // single loop so a mapping mistake names the specific flag it broke.
+  // untouched. Written as separate cases (one per flag) rather than a single
+  // loop so a mapping mistake names the specific flag it broke.
   it("flipping subscriptionBacklogSize off changes only subscriptionMsgBacklog", () => {
     const scope: StatsRequestScope = { ...ALL_REQUESTED, subscriptionBacklogSize: false };
     expect(wasFieldRequested(scope, "subscriptionMsgBacklog")).toBe(false);
-    expect(wasFieldRequested(scope, "topicBacklogSize")).toBe(true);
-    expect(wasFieldRequested(scope, "oldestBacklogMessageAge")).toBe(true);
-  });
-
-  it("flipping preciseBacklog off changes only topicBacklogSize", () => {
-    const scope: StatsRequestScope = { ...ALL_REQUESTED, preciseBacklog: false };
-    expect(wasFieldRequested(scope, "topicBacklogSize")).toBe(false);
-    expect(wasFieldRequested(scope, "subscriptionMsgBacklog")).toBe(true);
     expect(wasFieldRequested(scope, "oldestBacklogMessageAge")).toBe(true);
   });
 
   it("flipping earliestTimeInBacklog off changes only oldestBacklogMessageAge", () => {
     const scope: StatsRequestScope = { ...ALL_REQUESTED, earliestTimeInBacklog: false };
     expect(wasFieldRequested(scope, "oldestBacklogMessageAge")).toBe(false);
-    expect(wasFieldRequested(scope, "topicBacklogSize")).toBe(true);
     expect(wasFieldRequested(scope, "subscriptionMsgBacklog")).toBe(true);
+  });
+
+  // Fix round 1, item 1: `preciseBacklog` must not be able to affect either
+  // mapped field — it governs `backlogSize`'s precision only, and
+  // `backlogSize` is not (and must never become) a `ScopedStatsField` member.
+  // This is the negative-space guard: flipping the flag the old, wrong
+  // mapping used to key off of must be a complete no-op here.
+  it("flipping preciseBacklog off changes neither mapped field", () => {
+    const scope: StatsRequestScope = { ...ALL_REQUESTED, preciseBacklog: false };
+    for (const field of fields) {
+      expect(wasFieldRequested(scope, field)).toBe(true);
+    }
   });
 });
 

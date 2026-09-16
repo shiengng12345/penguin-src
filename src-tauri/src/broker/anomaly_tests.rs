@@ -5,7 +5,8 @@
 
 use super::*;
 use crate::broker::stats::{
-    BacklogAge, ConsumerStats, SubscriptionStats, SubscriptionType, TopicStats, TOPIC_STATS_REQUEST_SCOPE,
+    BacklogAge, ConsumerStats, StatsRequestScope, SubscriptionStats, SubscriptionType, TopicStats,
+    TOPIC_STATS_REQUEST_SCOPE,
 };
 
 fn sub(name: &str, backlog: Option<u64>, consumers: Option<Vec<ConsumerStats>>) -> SubscriptionStats {
@@ -31,6 +32,21 @@ fn topic_with(subs: Vec<SubscriptionStats>, oldest_backlog_age: BacklogAge) -> T
         oldest_backlog_message_age: oldest_backlog_age,
         subscriptions: subs,
         stats_request_scope: TOPIC_STATS_REQUEST_SCOPE,
+    }
+}
+
+/// Fix round 1, item 3: same as `topic_with`, but the stats carry a scope
+/// that says consumers were excluded from the request (`excludeConsumers`).
+/// Measured directly against the live broker: `?excludeConsumers=true`
+/// returns `consumers: []` — byte-identical to Pulsar's own "confirmed
+/// nobody attached" fact. Any subscription passed here should therefore be
+/// built with `Some(vec![])` (never `None`), the same way a real excluded
+/// response would parse — the point of these tests is that `derive_*` must
+/// still treat it as unknown, not that the input shape itself is unknown.
+fn topic_with_excluded_consumers(subs: Vec<SubscriptionStats>, oldest_backlog_age: BacklogAge) -> TopicStats {
+    TopicStats {
+        stats_request_scope: StatsRequestScope { exclude_consumers: true, ..TOPIC_STATS_REQUEST_SCOPE },
+        ..topic_with(subs, oldest_backlog_age)
     }
 }
 
@@ -308,4 +324,55 @@ fn a_fully_known_subscription_is_never_indeterminate() {
     let stats =
         topic_with(vec![sub("orders-sub", Some(5), Some(vec![consumer]))], BacklogAge::NoBacklog);
     assert!(derive_indeterminate_checks("orders", &stats).is_empty());
+}
+
+// --- Fix round 1 (Task 1), item 3: an excluded consumer list is not an
+// empty one. ---
+
+#[test]
+fn an_excluded_consumer_list_never_raises_backlog_with_no_consumer() {
+    // The exact false-positive fix round 1 exists to close: `excludeConsumers:
+    // true` makes Pulsar send `consumers: []`, which is byte-identical to a
+    // subscription genuinely confirmed to have nobody attached. Before this
+    // fix, this payload (a real backlog, an empty-but-excluded consumer
+    // list) raised `BacklogWithNoConsumer` — a fabricated outage at exactly
+    // the moment the caller chose the lightweight view. It must instead be
+    // treated exactly like `consumers: None` (see
+    // `no_consumers_reported_never_raises_and_marks_both_checks_indeterminate`
+    // above, which this test's expected shape deliberately matches): zero
+    // anomalies, and both consumer-dependent checks moved to indeterminate.
+    let stats =
+        topic_with_excluded_consumers(vec![sub("orders-sub", Some(3400), Some(vec![]))], BacklogAge::NoBacklog);
+
+    let found = derive_anomalies("orders", &stats, 3600);
+    assert!(
+        found.is_empty(),
+        "an excluded consumer list must never raise an anomaly, got {found:?}"
+    );
+    assert_eq!(
+        found.iter().filter(|a| a.kind == AnomalyKind::BacklogWithNoConsumer).count(),
+        0,
+        "BacklogWithNoConsumer must not fire from an excluded (not empty) consumer list"
+    );
+
+    let indeterminate = derive_indeterminate_checks("orders", &stats);
+    assert_eq!(
+        indeterminate.iter().filter(|c| c.kind == AnomalyKind::BacklogWithNoConsumer).count(),
+        1,
+        "got {indeterminate:?}"
+    );
+    assert!(indeterminate.iter().all(|c| c.subscription.as_deref() == Some("orders-sub")));
+}
+
+#[test]
+fn a_non_excluded_empty_consumer_list_is_unaffected_by_this_fix() {
+    // Guards against the fix over-correcting: when consumers were NOT
+    // excluded, Pulsar's own confirmed-empty list must still raise
+    // BacklogWithNoConsumer exactly as it always has (this is
+    // `backlog_with_no_consumer_is_an_anomaly` above, re-asserted here
+    // right next to the excluded-list test so the contrast is explicit).
+    let stats = topic_with(vec![sub("orders-sub", Some(3400), Some(vec![]))], BacklogAge::NoBacklog);
+    let found = derive_anomalies("orders", &stats, 3600);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].kind, AnomalyKind::BacklogWithNoConsumer);
 }

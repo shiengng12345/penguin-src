@@ -184,29 +184,41 @@ impl PulsarAdminRest {
     }
 
     /// The path + query string `get_topic_stats` requests. Pulled out as its
-    /// own function (Task 1, spec §12.3) so the exact three query
-    /// parameters can be pinned by a test without a live HTTP call: Pulsar
-    /// v4.0.0's REST `/stats` endpoint answers `subscriptionBacklogSize`
-    /// with real Ledger locks on a busy topic — its own source comments warn
-    /// about high-traffic topics — and the REST default for these three
-    /// flags is not the same as the Pulsar CLI's default. Sending no query
-    /// parameters at all (the previous behaviour) meant this module silently
+    /// own function (Task 1, spec §12.3) so the exact query parameters can
+    /// be pinned by a test without a live HTTP call: Pulsar v4.0.0's REST
+    /// `/stats` endpoint answers `subscriptionBacklogSize` with real Ledger
+    /// locks on a busy topic — its own source comments warn about
+    /// high-traffic topics — and the REST default for these flags is not
+    /// the same as the Pulsar CLI's default. Sending no query parameters at
+    /// all (the original, pre-Task-1 behaviour) meant this module silently
     /// inherited whichever default the broker happened to ship, on every
-    /// call, forever. All three are pinned to `false` explicitly instead,
-    /// using the same [`TOPIC_STATS_REQUEST_SCOPE`] constant
+    /// call, forever.
+    ///
+    /// Fix round 1: spec §12.3 actually lists five parameters, not the
+    /// three Task 1 originally sent — `excludePublishers`/
+    /// `excludeConsumers` were missing from the task brief's paraphrase.
+    /// Both default (per spec) to a lightweight view when `true`; this
+    /// codebase needs full instance detail, so both are sent `false`
+    /// explicitly for the same reason the other three are: an unfamiliar
+    /// broker version's REST default is not something to inherit silently.
+    ///
+    /// All five come from the same [`TOPIC_STATS_REQUEST_SCOPE`] constant
     /// `broker::stats::parse_topic_stats` stamps onto every `TopicStats` it
     /// produces — one source of truth, so the URL actually sent and the
-    /// scope the UI is told to trust can never drift apart (see that
-    /// constant's own doc, and `StatsRequestScope`'s, for why this exists at
-    /// all instead of a `quality` tag per field).
+    /// scope the UI (and `broker::anomaly`) are told to trust can never
+    /// drift apart (see that constant's own doc, and `StatsRequestScope`'s,
+    /// for why this exists at all instead of a `quality` tag per field).
     fn stats_request_path(topic: &TopicRef) -> String {
         let scope = TOPIC_STATS_REQUEST_SCOPE;
         format!(
-            "/admin/v2/{}/stats?getPreciseBacklog={}&subscriptionBacklogSize={}&getEarliestTimeInBacklog={}",
+            "/admin/v2/{}/stats?getPreciseBacklog={}&subscriptionBacklogSize={}&getEarliestTimeInBacklog={}&\
+             excludePublishers={}&excludeConsumers={}",
             topic.rest_path(),
             scope.precise_backlog,
             scope.subscription_backlog_size,
             scope.earliest_time_in_backlog,
+            scope.exclude_publishers,
+            scope.exclude_consumers,
         )
     }
 }

@@ -12,6 +12,8 @@ const ALL_REQUESTED: StatsRequestScope = {
   preciseBacklog: true,
   subscriptionBacklogSize: true,
   earliestTimeInBacklog: true,
+  excludePublishers: false,
+  excludeConsumers: false,
 };
 
 const withConsumer: SubscriptionStats = {
@@ -232,6 +234,8 @@ describe("SubscriptionTable", () => {
       preciseBacklog: true,
       subscriptionBacklogSize: false,
       earliestTimeInBacklog: true,
+      excludePublishers: false,
+      excludeConsumers: false,
     };
 
     it('renders "Not requested" when subscriptionBacklogSize was not asked for', () => {

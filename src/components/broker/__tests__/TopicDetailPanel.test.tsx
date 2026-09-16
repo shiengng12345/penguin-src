@@ -21,7 +21,13 @@ function makeDetail(overrides: Partial<TopicDetail> = {}): TopicDetail {
       msgInCounter: 0,
       oldestBacklogMessageAge: { state: "unknown" },
       subscriptions: [],
-      statsRequestScope: { preciseBacklog: true, subscriptionBacklogSize: true, earliestTimeInBacklog: true },
+      statsRequestScope: {
+        preciseBacklog: true,
+        subscriptionBacklogSize: true,
+        earliestTimeInBacklog: true,
+        excludePublishers: false,
+        excludeConsumers: false,
+      },
     },
     internal: {
       entriesAddedCounter: 0,
@@ -173,6 +179,26 @@ describe("TopicDetailPanel", () => {
       render(<TopicDetailPanel detail={detail} state="ready" onRefresh={vi.fn()} />);
       expect(screen.getByText(/unknown|not measured/i)).toBeInTheDocument();
       expect(screen.queryByText(/no backlog/i)).not.toBeInTheDocument();
+    });
+  });
+
+  // Fix round 1, item 1: measured directly against the live broker,
+  // `getPreciseBacklog=false` still returns a real `backlogSize` — the flag
+  // governs precision, not presence. `preciseBacklog` was wrongly folded
+  // into the R38 "not requested" mapping originally; this guards against
+  // that regressing.
+  describe("backlogSize — precision only, never Not requested (fix round 1, item 1)", () => {
+    it("renders the real backlogSize even when preciseBacklog is false", () => {
+      const detail = makeDetail({
+        stats: {
+          ...makeDetail().stats,
+          backlogSize: 12345,
+          statsRequestScope: { ...makeDetail().stats.statsRequestScope, preciseBacklog: false },
+        },
+      });
+      render(<TopicDetailPanel detail={detail} state="ready" onRefresh={vi.fn()} />);
+      expect(screen.getByText("12345")).toBeInTheDocument();
+      expect(screen.queryByText(/not requested/i)).not.toBeInTheDocument();
     });
   });
 

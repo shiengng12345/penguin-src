@@ -32,44 +32,57 @@ import type {
 
 export const UNKNOWN = "Unknown";
 
-/** `stats.backlogSize` / `subscriptions[].msgBacklog` /
- *  `stats.oldestBacklogMessageAge` when the flag that governs them was set
- *  to `false` (Task 1, ruling R34). Deliberately a different word from
- *  `UNKNOWN`: "Unknown" means the broker was asked and did not answer;
- *  "Not requested" means this application deliberately did not ask. Telling
- *  those apart is the entire reason `StatsRequestScope` exists — collapsing
- *  them back into one word is precisely the lie Task 1 was written to stop
- *  (see `formatScopedNumber`'s mutation-check test in
- *  `broker-value.test.tsx`, which pins that these two strings must render
- *  differently). */
+/** `subscriptions[].msgBacklog` / `stats.oldestBacklogMessageAge` when the
+ *  flag that governs them was set to `false` (Task 1, ruling R34).
+ *  Deliberately a different word from `UNKNOWN`: "Unknown" means the broker
+ *  was asked and did not answer; "Not requested" means this application
+ *  deliberately did not ask. Telling those apart is the entire reason
+ *  `StatsRequestScope` exists — collapsing them back into one word is
+ *  precisely the lie Task 1 was written to stop (see `formatScopedNumber`'s
+ *  mutation-check test in `broker-value.test.tsx`, which pins that these two
+ *  strings must render differently). */
 export const NOT_REQUESTED = "Not requested";
 
 /** The `TopicStats`/`SubscriptionStats` fields whose presence depends on a
  *  `StatsRequestScope` flag. A union of field names, not a raw string the
- *  UI free-associates with a flag — see `SCOPE_FLAG_FOR_FIELD` below. */
-export type ScopedStatsField = "topicBacklogSize" | "subscriptionMsgBacklog" | "oldestBacklogMessageAge";
+ *  UI free-associates with a flag — see `SCOPE_FLAG_FOR_FIELD` below.
+ *
+ *  Fix round 1, item 1: `stats.backlogSize` (governed by `preciseBacklog`)
+ *  is deliberately **not** a member of this union. Measured directly
+ *  against the live broker, `getPreciseBacklog=false` and `=true` both
+ *  return `backlogSize` — the flag governs the number's precision, not its
+ *  presence — so it must always render through plain `formatNumber`, never
+ *  "Not requested". An earlier version of this file mapped it here anyway,
+ *  which hid a real number the broker gave us; see
+ *  `TopicDetailPanel.test.tsx`'s "backlogSize — precision only" test, which
+ *  guards against that regressing. */
+export type ScopedStatsField = "subscriptionMsgBacklog" | "oldestBacklogMessageAge";
 
 /** Ruling R38: the field↔flag mapping must be code, not a comment. This is
  *  the one place that decides which `StatsRequestScope` flag governs which
  *  field — every formatter below goes through `wasFieldRequested` rather
  *  than inspecting `scope` directly, so a future field can only be wired up
  *  correctly (there is nowhere else to guess the mapping from), and
- *  `field_flag_mapping.test.tsx`'s R38 test proves flipping one flag here
- *  changes exactly the field(s) listed against it and none other.
+ *  `broker-value.test.tsx`'s R38 test proves flipping one flag here changes
+ *  exactly the field(s) listed against it and none other.
  *
- *  - `preciseBacklog` ("getPreciseBacklog"): governs `stats.backlogSize`'s
- *    precision. Pulsar always returns *a* number for this field regardless
- *    (an estimate when the flag is off), so this mapping exists to label
- *    that number "not requested precisely" rather than treat its absence —
- *    it is never actually absent — as unmeasured.
  *  - `subscriptionBacklogSize` ("subscriptionBacklogSize"): governs each
  *    subscription's `msgBacklog` — the parameter spec §12.3 singles out as
  *    unsafe to request unconditionally (it can take Ledger locks on a busy
  *    broker), and the reason Task 1 exists at all.
  *  - `earliestTimeInBacklog` ("getEarliestTimeInBacklog"): governs
- *    `stats.oldestBacklogMessageAge`. */
+ *    `stats.oldestBacklogMessageAge`.
+ *
+ *  `preciseBacklog` and the fix-round-1 `excludePublishers`/
+ *  `excludeConsumers` flags are deliberately absent: `preciseBacklog` never
+ *  makes a field absent (see `ScopedStatsField`'s doc); nothing on this
+ *  contract currently reads `publishers`; and an excluded `consumers` list
+ *  is handled where it actually matters — `derive_anomalies`/
+ *  `derive_indeterminate_checks` in `src-tauri/src/broker/anomaly.rs` — not
+ *  by a UI "Not requested" label, because presenting an excluded list as a
+ *  measured `0`-consumer fact is a backend anomaly-derivation risk, not a
+ *  single-cell rendering choice. */
 const SCOPE_FLAG_FOR_FIELD: Readonly<Record<ScopedStatsField, keyof StatsRequestScope>> = {
-  topicBacklogSize: "preciseBacklog",
   subscriptionMsgBacklog: "subscriptionBacklogSize",
   oldestBacklogMessageAge: "earliestTimeInBacklog",
 };

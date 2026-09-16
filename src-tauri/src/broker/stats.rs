@@ -161,13 +161,33 @@ use serde::{Deserialize, Serialize};
 /// duplicated here as a list of strings for the UI to match against: that
 /// is the exact defect the Overview panel was fixed for (a free-text list a
 /// panel can only display, never reason about).
+///
+/// (Fix round 1, item 1) `precise_backlog` is **not** in the R38 "not
+/// requested" mapping, on purpose: measured directly against the live
+/// broker, `?getPreciseBacklog=false` and `?getPreciseBacklog=true` both
+/// return `backlogSize` — the flag governs the number's *precision*, not
+/// its presence. Rendering "Not requested" for a field the broker actually
+/// answered would be the inverse of the lie this whole task exists to stop
+/// (hiding a real number rather than fabricating a missing one). The flag
+/// still belongs in this struct — it is a true, useful record of what was
+/// asked — just not in the field-presence mapping.
+///
+/// (Fix round 1, item 4) This struct records **what this call asked for,
+/// never what the broker actually did.** A 200 response does not prove the
+/// broker honoured every query parameter — an unfamiliar broker version may
+/// silently ignore a parameter it does not recognise (spec §12.3's closing
+/// caution) — so `StatsRequestScope` is a fact about the request this
+/// process sent, not a measurement of the broker's behaviour. Nothing in
+/// this codebase may present it as the latter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StatsRequestScope {
     /// `getPreciseBacklog` query parameter. Governs whether `backlogSize`
     /// was computed precisely (walking ledger metadata) or as a fast
-    /// estimate — Pulsar always returns *a* number either way, so this flag
-    /// affects the number's precision, not its presence.
+    /// estimate — Pulsar always returns *a* number either way (measured
+    /// directly — see the struct doc's fix-round-1 note), so this flag
+    /// affects the number's precision, not its presence. Deliberately
+    /// excluded from the R38 "not requested" field mapping for that reason.
     pub precise_backlog: bool,
     /// `subscriptionBacklogSize` query parameter. Per spec §12.3, computing
     /// this precisely can take ledger locks and is unsafe to request
@@ -177,20 +197,45 @@ pub struct StatsRequestScope {
     pub subscription_backlog_size: bool,
     /// `getEarliestTimeInBacklog` query parameter.
     pub earliest_time_in_backlog: bool,
+    /// `excludePublishers` query parameter. Spec §12.3's default policy is
+    /// "true for a lightweight view, false when instance detail is needed" —
+    /// this codebase needs instance detail, so it is requested `false`
+    /// explicitly (never left to the REST default, per the same §12.3
+    /// caution `subscription_backlog_size` follows). No mapped field
+    /// currently reads Pulsar's `publishers` array — nothing to gate on this
+    /// flag yet — but it is recorded here so that changes the day something
+    /// does.
+    pub exclude_publishers: bool,
+    /// `excludeConsumers` query parameter. Same default policy as
+    /// `exclude_publishers`, requested `false` for the same reason. Measured
+    /// directly against the live broker (fix round 1, item 3):
+    /// `?excludeConsumers=true` returns `consumers: []` — **byte-identical**
+    /// to a subscription Pulsar has confirmed has nobody attached. An
+    /// excluded list is not an empty list (spec §12.3: "被排除的列表不是「列表为空」").
+    /// `broker::anomaly` reads this flag directly off `TopicStats` and
+    /// treats an excluded consumer list exactly like a withheld one (`None`)
+    /// — see that module's doc for why `BacklogWithNoConsumer` must never
+    /// fire from data this call declined to receive.
+    pub exclude_consumers: bool,
 }
 
-/// The fixed `/stats` request scope this codebase sends today (Task 1):
-/// `PulsarAdminRest::get_topic_stats` builds its request URL from exactly
-/// these three values, and `parse_topic_stats` stamps every `TopicStats` it
-/// produces with this same constant. One source of truth, so the URL that
-/// was actually sent and the scope the UI is told to trust can never drift
-/// apart. All three are `false` — the REST defaults are not the same as the
-/// CLI defaults, so this phase asks explicitly rather than inheriting
-/// whatever the broker's REST default happens to be (spec §12.3).
+/// The fixed `/stats` request scope this codebase sends today (Task 1; fix
+/// round 1 added the last two fields): `PulsarAdminRest::get_topic_stats`
+/// builds its request URL from exactly these five values, and
+/// `parse_topic_stats` stamps every `TopicStats` it produces with this same
+/// constant. One source of truth, so the URL that was actually sent and the
+/// scope the UI (and `broker::anomaly`) are told to trust can never drift
+/// apart. All five are `false` — the REST defaults are not the same as the
+/// CLI defaults, and this codebase needs full instance detail (not the
+/// lightweight view `exclude_publishers`/`exclude_consumers: true` would
+/// give), so every flag is asked explicitly rather than inheriting whatever
+/// the broker's REST default happens to be (spec §12.3).
 pub const TOPIC_STATS_REQUEST_SCOPE: StatsRequestScope = StatsRequestScope {
     precise_backlog: false,
     subscription_backlog_size: false,
     earliest_time_in_backlog: false,
+    exclude_publishers: false,
+    exclude_consumers: false,
 };
 
 /// The parsed subset of a Pulsar topic's `stats` payload.

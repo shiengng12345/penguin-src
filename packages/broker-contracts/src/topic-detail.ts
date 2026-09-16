@@ -104,7 +104,15 @@ export interface ConsumerStats {
  *  i.e. "confirmed nobody attached". Collapsing the two (as a bare
  *  defaulted array would) lets `backlogWithNoConsumer` fire from data that
  *  was never actually observed — see `src-tauri/src/broker/anomaly.rs`'s
- *  module doc, "fix round 2". */
+ *  module doc, "fix round 2".
+ *
+ *  Fix round 1 (Task 1), item 3: `consumers: []` is **also** what Pulsar
+ *  sends when the request itself excluded consumer detail
+ *  (`?excludeConsumers=true`) — measured directly, that response is
+ *  byte-identical to the confirmed-empty case above. Check
+ *  `TopicStats.statsRequestScope.excludeConsumers` before treating an empty
+ *  `consumers` array here as "confirmed nobody attached"; `src-tauri/src/
+ *  broker/anomaly.rs` already does this for `backlogWithNoConsumer`. */
 export interface SubscriptionStats {
   name: string;
   msgBacklog: number | null;
@@ -133,8 +141,8 @@ export interface SubscriptionStats {
  *
  *  Mirrors `StatsRequestScope` in `src-tauri/src/broker/stats.rs`
  *  field-for-field; the wire shape (a plain object, not a `{ state: ... }`
- *  tagged union like `BacklogAge` — there is no sentinel here, only three
- *  plain booleans) is pinned there by
+ *  tagged union like `BacklogAge` — there is no sentinel here, only plain
+ *  booleans) is pinned there by
  *  `stats_request_scope_serialises_to_the_pinned_wire_shape` in
  *  `stats_tests.rs`.
  *
@@ -143,11 +151,37 @@ export interface SubscriptionStats {
  *  `SCOPE_FLAG_FOR_FIELD` in `src/components/broker/broker-value.ts`.
  *  Deliberately not a list of strings on this response for a panel to match
  *  against: that is the exact defect the Overview panel was fixed for (a
- *  free-text warning a panel can only display, never reason about). */
+ *  free-text warning a panel can only display, never reason about).
+ *
+ *  Fix round 1 corrected two things the original task brief got wrong about
+ *  §12.3's literal text:
+ *  - item 1: `preciseBacklog` is **not** in the R38 field mapping. Measured
+ *    directly against the live broker, `getPreciseBacklog=false` and `=true`
+ *    both return `backlogSize` — the flag governs precision, not presence,
+ *    so "Not requested" must never be shown for that field; the real number
+ *    the broker gave us must render.
+ *  - item 2: the spec actually lists five parameters, not three —
+ *    `excludePublishers`/`excludeConsumers` were missing from the original
+ *    paraphrase. Both are added below, requested `false` (this app needs
+ *    full instance detail, not the lightweight view `true` gives).
+ *
+ *  Fix round 1, item 4: this type records **what the request asked for**,
+ *  never a measurement of what the broker actually did — a 200 response
+ *  does not prove every parameter was honoured (an unfamiliar broker
+ *  version may silently ignore one it does not recognise, per §12.3's own
+ *  closing caution). Nothing may present this as broker behaviour. */
 export interface StatsRequestScope {
   preciseBacklog: boolean;
   subscriptionBacklogSize: boolean;
   earliestTimeInBacklog: boolean;
+  /** `excludePublishers` query parameter. No field on this contract
+   *  currently reads Pulsar's `publishers` array — recorded for when one
+   *  does. */
+  excludePublishers: boolean;
+  /** `excludeConsumers` query parameter. `SubscriptionStats.consumers`'s
+   *  own doc above explains why an excluded list must not be read as a
+   *  confirmed-empty one. */
+  excludeConsumers: boolean;
 }
 
 /** The parsed subset of a Pulsar topic's `stats` payload. `msgRateOut`

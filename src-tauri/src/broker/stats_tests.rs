@@ -432,12 +432,18 @@ fn consumer_timestamp_serialises_to_the_pinned_wire_shape() {
 /// carry, only "did this call ask or not".
 #[test]
 fn stats_request_scope_serialises_to_the_pinned_wire_shape() {
+    // Fix round 1: spec §12.3 lists five parameters, not three —
+    // `excludePublishers`/`excludeConsumers` were missing from the original
+    // task brief's paraphrase. Both are pinned here alongside the original
+    // three, all five `false` (this codebase needs full instance detail).
     assert_eq!(
         serde_json::to_value(TOPIC_STATS_REQUEST_SCOPE).unwrap(),
         serde_json::json!({
             "preciseBacklog": false,
             "subscriptionBacklogSize": false,
             "earliestTimeInBacklog": false,
+            "excludePublishers": false,
+            "excludeConsumers": false,
         })
     );
 }

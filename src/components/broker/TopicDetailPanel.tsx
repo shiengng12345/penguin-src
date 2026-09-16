@@ -39,7 +39,7 @@ import type { DataTableState } from "@/components/ui/data-table-types";
 import { Button } from "@/components/ui/button";
 import { DeliveryNotice } from "./DeliveryNotice";
 import { SubscriptionTable } from "./SubscriptionTable";
-import { formatNumber, formatPosition, formatScopedBacklogAge, formatScopedNumber } from "./broker-value";
+import { formatNumber, formatPosition, formatScopedBacklogAge } from "./broker-value";
 import { ALERT_CLASS, INDETERMINATE_CLASS, STATUS_CLASS } from "./broker-panel-styles";
 
 export interface TopicDetailPanelProps {
@@ -149,11 +149,14 @@ function StatsSection({ detail }: { detail: TopicDetail }) {
     ["Throughput in (bytes/s)", formatNumber(stats.msgThroughputIn)],
     ["Throughput out (bytes/s)", formatNumber(stats.msgThroughputOut)],
     ["Storage size (bytes)", formatNumber(stats.storageSize)],
-    // Backlog size and oldest-backlog-age are both governed by a
-    // `StatsRequestScope` flag (Task 1, R34/R38) — "Not requested" takes
-    // priority over whatever the raw value parsed to when this call
-    // deliberately did not ask for a precise answer.
-    ["Backlog size (bytes)", formatScopedNumber(stats.backlogSize, stats.statsRequestScope, "topicBacklogSize")],
+    // Fix round 1, item 1: `backlogSize` is plain `formatNumber`, never
+    // scoped. Measured directly against the live broker,
+    // `getPreciseBacklog=false` still returns a real number — the flag
+    // governs precision, not presence, so "Not requested" would hide a
+    // real answer rather than avoid fabricating a missing one. Only
+    // `oldestBacklogMessageAge` below is scoped (governed by
+    // `earliestTimeInBacklog`, which really can leave the field untrustworthy).
+    ["Backlog size (bytes)", formatNumber(stats.backlogSize)],
     ["Msg in counter", formatNumber(stats.msgInCounter)],
     [
       "Oldest backlog message age",

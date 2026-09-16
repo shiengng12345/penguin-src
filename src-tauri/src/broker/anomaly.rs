@@ -72,6 +72,22 @@
 //! `ConsumerBlockedOnUnacked`, since neither check has anything to look at
 //! without knowing who, if anyone, is attached).
 //!
+//! Task 1 fix round 1, item 3 reopened a variant of exactly this bug one
+//! level up, from the request side rather than the parse side: Pulsar's
+//! `excludeConsumers=true` REST parameter makes the broker send
+//! `consumers: []` — measured directly, this is **byte-identical** on the
+//! wire to Pulsar's own confirmed "nobody attached" fact. `broker::stats`
+//! cannot fix this by adding a fourth state to `consumers` (the JSON gives
+//! it nothing to distinguish), so this module reads
+//! `TopicStats::stats_request_scope.exclude_consumers` directly and, when
+//! it is `true`, treats every subscription's consumer list as if it were
+//! `None` for both checks below — regardless of what that list actually
+//! contains. An excluded list is not an empty list (spec §12.3); this is
+//! the same "we did not ask" vs. "we asked and got nothing" distinction
+//! Task 1's `StatsRequestScope` exists to preserve, applied to the one
+//! field where collapsing it would fabricate a specific, alarming claim
+//! (`BacklogWithNoConsumer`) rather than merely hide a number.
+//!
 //! ## Wording discipline
 //!
 //! `msgRateOut` (used nowhere in this file) proves delivery to a consumer,
@@ -142,10 +158,16 @@ pub fn derive_anomalies(topic: &str, stats: &TopicStats, oldest_backlog_threshol
     for sub in &stats.subscriptions {
         // `None` means Pulsar never sent `consumers` at all — we do not know
         // who, if anyone, is attached, so this check cannot run (it shows up
-        // via `derive_indeterminate_checks` instead). `Some(&[])` is Pulsar's
-        // own confirmed fact "nobody is attached", the only case that can
-        // combine with a known, positive `msg_backlog` to be an anomaly.
-        if let Some(consumers) = &sub.consumers {
+        // via `derive_indeterminate_checks` instead). `Some(&[])` is
+        // Pulsar's own confirmed fact "nobody is attached" — UNLESS this
+        // call excluded consumers from the request (`excludeConsumers=true`,
+        // fix round 1, item 3), in which case Pulsar sends the identical
+        // `[]` for a reason that carries no information at all. `effective_consumers`
+        // folds that case into `None` so every check below already knows
+        // how to handle it — see the module doc's fix-round-1 note.
+        let effective_consumers =
+            if stats.stats_request_scope.exclude_consumers { None } else { sub.consumers.as_ref() };
+        if let Some(consumers) = effective_consumers {
             if consumers.is_empty() {
                 if let Some(backlog) = sub.msg_backlog {
                     if backlog > 0 {
@@ -226,11 +248,19 @@ pub fn derive_indeterminate_checks(topic: &str, stats: &TopicStats) -> Vec<Indet
     let mut indeterminate = Vec::new();
 
     for sub in &stats.subscriptions {
-        match &sub.consumers {
-            // Pulsar never sent `consumers` at all: neither check that
-            // depends on it can run. This is one indeterminate entry per
-            // check, not one per consumer — there is no consumer to name,
-            // because whether any exist is itself the unknown.
+        // See `derive_anomalies` above: an excluded consumer list
+        // (`exclude_consumers`, fix round 1 item 3) is folded into `None`
+        // here too, so both branches below treat "excluded" exactly like
+        // "withheld" — never like the confirmed-empty fact `Some(&[])`
+        // means when this call actually asked.
+        let effective_consumers =
+            if stats.stats_request_scope.exclude_consumers { None } else { sub.consumers.as_ref() };
+        match effective_consumers {
+            // Pulsar never sent `consumers` at all (or this call excluded
+            // them): neither check that depends on it can run. This is one
+            // indeterminate entry per check, not one per consumer — there is
+            // no consumer to name, because whether any exist is itself the
+            // unknown.
             None => {
                 indeterminate.push(IndeterminateCheck {
                     kind: AnomalyKind::BacklogWithNoConsumer,
