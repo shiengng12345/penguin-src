@@ -131,7 +131,13 @@ Expected: FAIL to compile — `BrokerSource` is not defined and `ResultEnvelope:
 ///
 /// This is an enum rather than a String deliberately: Phase 0 shipped a
 /// `"cache"` value that nothing could ever produce, and a String made that
-/// invisible. With an enum, an unused variant is a compiler warning.
+/// invisible. What the enum buys is narrower than "the compiler warns about
+/// an unused variant" — it does not: `derive(Deserialize)` names every
+/// variant, which satisfies dead-code analysis on its own. What it does buy
+/// is that every `match` on a source is exhaustiveness-checked, a typo is a
+/// compile error instead of a value nothing matches, and the set is small
+/// enough to audit against the TypeScript union in one glance — which the
+/// test below does mechanically.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BrokerSource {
     #[serde(rename = "pulsar-admin-rest")]
