@@ -295,7 +295,22 @@ mod tests {
         let (can_write, probed, warning) = infer_write_capability(&Err(err(BrokerErrorCode::Timeout)));
         assert!(!can_write);
         assert!(!probed, "only a 401/403 refusal is conclusive; any other failure is inconclusive");
-        assert!(warning.is_some());
+        // The machine-readable guarantee is `probed == false`, asserted above.
+        // This only checks a warning accompanies it, deliberately WITHOUT
+        // matching on the wording.
+        //
+        // A substring assertion was tried here and rejected: the warning ends
+        // with `so this is "not measured", not "measured as unwritable"`, so
+        // a check for `contains("not measured")` passes even when the opening
+        // claim is mutated to the opposite meaning. That is the same defect
+        // this module exists to prevent — a test that looks like a guard and
+        // matches something incidental. The flag is the contract; the prose
+        // is for a human, and pinning prose here would give false confidence.
+        //
+        // The underlying failure reason reaches the operator separately:
+        // `discover` pushes `list_clusters failed: {message}` as its own
+        // warning entry before calling this function.
+        assert!(warning.is_some(), "an inconclusive probe must warn");
     }
 
     // The B-07/§11.9/§14.3 compile-level guard ("no HTTP PUT or DELETE call
