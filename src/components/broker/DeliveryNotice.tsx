@@ -5,9 +5,11 @@
 // operator. It isn't necessarily: these numbers come from Pulsar's own
 // stats, which count messages handed to a consumer connection, not
 // messages a consumer finished acting on. That distinction isn't visible
-// until a later phase (WritePermit-gated consumer-side evidence), so until
-// then every rate needs this notice next to it — in exactly one component,
-// so the wording is never forked across panels.
+// until Phase C, whose lifecycle timeline reads the topic without acking to
+// see what actually happened to a message. (That is a read, not a write —
+// it needs no WritePermit; writes are Phase E.) Until then every rate needs
+// this notice next to it — in exactly one component, so the wording is
+// never forked across panels.
 //
 // `variant="inline"` sits beside a number with no heading; `variant="block"`
 // stands alone as its own paragraph. Both render `role="note"` with the
