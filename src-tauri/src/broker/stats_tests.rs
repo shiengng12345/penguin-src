@@ -62,7 +62,10 @@ fn a_wrong_type_is_an_error_not_a_silent_zero() {
 #[test]
 fn a_subscription_with_no_consumers_parses_with_an_empty_list() {
     // This is the shape that matters most for the anomaly panel: backlog
-    // present, nobody consuming.
+    // present, nobody consuming. An *explicit* empty array is Pulsar's own
+    // confirmed fact, so it must parse to `Some(vec![])`, not `None` —
+    // `None` is reserved for the key being absent entirely (see the test
+    // immediately below, added in fix round 2).
     let mut raw = real_fixture();
     raw["subscriptions"]["rg_deposit_accumulate_LOCAL"]["consumers"] = serde_json::json!([]);
     let stats = parse_topic_stats(&raw).expect("parses");
@@ -71,7 +74,31 @@ fn a_subscription_with_no_consumers_parses_with_an_empty_list() {
         .iter()
         .find(|s| s.name == "rg_deposit_accumulate_LOCAL")
         .expect("subscription present");
-    assert!(sub.consumers.is_empty());
+    assert_eq!(sub.consumers, Some(vec![]));
+}
+
+/// Fix round 2: the last remaining path where an unknown could become a
+/// confident claim. An earlier version of this module used
+/// `#[serde(default)]` on `consumers`, so an omitted key and an explicit
+/// `[]` parsed identically to an empty `Vec` — meaning `derive_anomalies`
+/// would read a Pulsar payload that simply never sent `consumers` as
+/// "confirmed nobody attached" and raise `BacklogWithNoConsumer` from data
+/// that was never actually observed. Omitting the key entirely must parse
+/// to `None`, distinguishable from the confirmed-empty case above.
+#[test]
+fn a_subscription_with_the_consumers_key_omitted_parses_to_none_not_an_empty_list() {
+    let mut raw = real_fixture();
+    raw["subscriptions"]["rg_deposit_accumulate_LOCAL"]
+        .as_object_mut()
+        .unwrap()
+        .remove("consumers");
+    let stats = parse_topic_stats(&raw).expect("parses");
+    let sub = stats
+        .subscriptions
+        .iter()
+        .find(|s| s.name == "rg_deposit_accumulate_LOCAL")
+        .expect("subscription present");
+    assert_eq!(sub.consumers, None);
 }
 
 #[test]
@@ -86,7 +113,7 @@ fn blocked_on_unacked_is_carried_through_verbatim() {
     let stats = parse_topic_stats(&raw).expect("parses");
     let sub = stats.subscriptions.iter()
         .find(|s| s.name == "rg_deposit_accumulate_LOCAL").unwrap();
-    assert_eq!(sub.consumers[0].blocked_on_unacked_msgs, Some(true));
+    assert_eq!(sub.consumers.as_ref().unwrap()[0].blocked_on_unacked_msgs, Some(true));
 }
 
 /// Strengthens the inherited test above: that test only proves an
@@ -106,7 +133,7 @@ fn blocked_on_unacked_is_none_when_absent_not_defaulted_to_false() {
         .iter()
         .find(|s| s.name == "rg_deposit_accumulate_LOCAL")
         .unwrap();
-    assert_eq!(sub.consumers[0].blocked_on_unacked_msgs, None);
+    assert_eq!(sub.consumers.as_ref().unwrap()[0].blocked_on_unacked_msgs, None);
 }
 
 /// `msgRateOut` is the delivery signal Task 7's anomaly derivation reads
@@ -141,7 +168,7 @@ fn an_absent_rate_is_unknown_not_zero_because_zero_reads_as_a_dead_consumer() {
         .find(|s| s.name == "rg_deposit_accumulate_LOCAL")
         .unwrap();
     assert_eq!(sub.msg_rate_out, None);
-    assert_eq!(sub.consumers[0].msg_rate_out, None);
+    assert_eq!(sub.consumers.as_ref().unwrap()[0].msg_rate_out, None);
 }
 
 /// The live broker sends `-1` for this field on `fpms_topup` today
@@ -222,8 +249,8 @@ fn an_unknown_field_inside_a_consumer_does_not_break_the_parse() {
         .iter()
         .find(|s| s.name == "rg_deposit_accumulate_LOCAL")
         .unwrap();
-    assert_eq!(sub.consumers[0].consumer_name.as_deref(), Some("probe"));
-    assert_eq!(sub.consumers[0].unacked_messages, Some(7));
+    assert_eq!(sub.consumers.as_ref().unwrap()[0].consumer_name.as_deref(), Some("probe"));
+    assert_eq!(sub.consumers.as_ref().unwrap()[0].unacked_messages, Some(7));
 }
 
 /// Both of `fpms_topup`'s real subscriptions send exactly `"type": "None"`
@@ -265,6 +292,6 @@ fn pulsars_zero_timestamp_sentinel_becomes_unknown_not_the_unix_epoch() {
         .iter()
         .find(|s| s.name == "rg_deposit_accumulate_LOCAL")
         .unwrap();
-    assert_eq!(sub.consumers[0].last_acked_timestamp, None);
-    assert_eq!(sub.consumers[0].last_consumed_timestamp, None);
+    assert_eq!(sub.consumers.as_ref().unwrap()[0].last_acked_timestamp, None);
+    assert_eq!(sub.consumers.as_ref().unwrap()[0].last_consumed_timestamp, None);
 }

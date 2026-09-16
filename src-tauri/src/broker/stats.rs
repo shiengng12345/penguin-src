@@ -45,11 +45,22 @@
 //!   collapsing the two into a bare `0.0` would make "we lost the field"
 //!   indistinguishable from "delivery has stopped" during triage — sending
 //!   someone chasing an outage that does not exist.
-//! - **`subscriptions` / `consumers` collections** use `#[serde(default)]`
-//!   to an empty collection when the key itself is absent. An empty list of
-//!   consumers is meaningful and actionable on its own (see
-//!   `a_subscription_with_no_consumers_parses_with_an_empty_list`), unlike a
-//!   scalar count where 0 and "unknown" collide.
+//! - **`subscriptions`** uses `#[serde(default)]` to an empty collection
+//!   when the key itself is absent — a topic legitimately has zero
+//!   subscriptions, and that is a fact, not an unknown.
+//! - **`consumers`** (fix round 2) is `Option<Vec<ConsumerStats>>`, not a
+//!   bare `Vec` defaulted to empty. An *explicit* empty array is Pulsar
+//!   telling us nobody is attached — a fact `derive_anomalies` acts on (see
+//!   `a_subscription_with_no_consumers_parses_with_an_empty_list`). The key
+//!   being *absent* is a different fact entirely: we do not know who, if
+//!   anyone, is attached. An earlier version of this module used
+//!   `#[serde(default)]` here too, collapsing both into the same empty
+//!   `Vec` — which meant a payload that simply omitted `consumers` read as
+//!   "confirmed nobody attached" and could raise
+//!   `AnomalyKind::BacklogWithNoConsumer` from data that was never actually
+//!   present. That was the last remaining path where an unknown could
+//!   become a confident claim; see `broker::anomaly`'s module doc for how
+//!   it now handles `None` here.
 //!
 //! Fields the wire payload carries that this module does not map (dozens —
 //! see the real fixture) are silently ignored: there is no
@@ -157,7 +168,11 @@ pub struct SubscriptionStats {
     pub unacked_messages: Option<u64>,
     pub msg_rate_out: Option<f64>,
     pub sub_type: Option<String>,
-    pub consumers: Vec<ConsumerStats>,
+    /// `None` when Pulsar omitted the `consumers` key entirely — we do not
+    /// know who, if anyone, is attached. `Some(vec![])` is a different,
+    /// determinate fact: Pulsar sent the key with zero entries, i.e.
+    /// "confirmed nobody attached". See the module doc's "fix round 2" note.
+    pub consumers: Option<Vec<ConsumerStats>>,
 }
 
 /// The parsed subset of one entry in a subscription's `consumers` array.
@@ -209,21 +224,22 @@ pub fn parse_topic_stats(raw: &serde_json::Value) -> Result<TopicStats, BrokerEr
             unacked_messages: sub.unacked_messages,
             msg_rate_out: sub.msg_rate_out,
             sub_type: normalize_sub_type(sub.sub_type),
-            consumers: sub
-                .consumers
-                .into_iter()
-                .map(|c| ConsumerStats {
-                    consumer_name: c.consumer_name,
-                    address: c.address,
-                    client_version: c.client_version,
-                    available_permits: c.available_permits,
-                    unacked_messages: c.unacked_messages,
-                    last_acked_timestamp: normalize_never_timestamp(c.last_acked_timestamp),
-                    last_consumed_timestamp: normalize_never_timestamp(c.last_consumed_timestamp),
-                    msg_rate_out: c.msg_rate_out,
-                    blocked_on_unacked_msgs: c.blocked_on_unacked_msgs,
-                })
-                .collect(),
+            consumers: sub.consumers.map(|consumers| {
+                consumers
+                    .into_iter()
+                    .map(|c| ConsumerStats {
+                        consumer_name: c.consumer_name,
+                        address: c.address,
+                        client_version: c.client_version,
+                        available_permits: c.available_permits,
+                        unacked_messages: c.unacked_messages,
+                        last_acked_timestamp: normalize_never_timestamp(c.last_acked_timestamp),
+                        last_consumed_timestamp: normalize_never_timestamp(c.last_consumed_timestamp),
+                        msg_rate_out: c.msg_rate_out,
+                        blocked_on_unacked_msgs: c.blocked_on_unacked_msgs,
+                    })
+                    .collect()
+            }),
         })
         .collect();
     subscriptions.sort_by(|a, b| a.name.cmp(&b.name));

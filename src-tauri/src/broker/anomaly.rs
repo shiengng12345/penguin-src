@@ -16,8 +16,10 @@
 //!   `msg_backlog` is `None`, we do not know whether there is a backlog, so
 //!   [`AnomalyKind::BacklogWithNoConsumer`] must not fire — claiming a
 //!   problem the data cannot support is how an operator stops trusting the
-//!   panel. The same holds for a consumer's `blocked_on_unacked_msgs` and,
-//!   via [`BacklogAge::Unknown`], a topic's `oldest_backlog_message_age`.
+//!   panel. The same holds for a consumer's `blocked_on_unacked_msgs`, for
+//!   a subscription's `consumers` itself being `None` (fix round 2 — see
+//!   below), and, via [`BacklogAge::Unknown`], a topic's
+//!   `oldest_backlog_message_age`.
 //! - **A `None` is not silently read as healthy either.** An empty
 //!   [`derive_anomalies`] result must mean "every check ran and found
 //!   nothing", never "some checks could not run". Collapsing those two
@@ -56,6 +58,19 @@
 //! an undocumented negative value). This module now only ever treats
 //! `BacklogAge::Unknown` as indeterminate; `NoBacklog` is a clean, positive
 //! result — neither an anomaly nor an indeterminate check.
+//!
+//! Fix round 2 closed the last such path: `SubscriptionStats::consumers` was
+//! `Vec<ConsumerStats>` defaulted from a missing key, so "Pulsar never sent
+//! `consumers`" and "Pulsar sent `consumers: []`" were indistinguishable —
+//! both parsed to an empty `Vec`. `derive_anomalies` read either one as the
+//! confirmed fact "nobody is attached" and could raise
+//! `BacklogWithNoConsumer` from a field that was never actually observed.
+//! `consumers` is now `Option<Vec<ConsumerStats>>`: `Some(vec![])` stays the
+//! confirmed, actionable fact it always was; `None` now takes the same path
+//! as every other unknown in this module — never an anomaly, always an
+//! [`IndeterminateCheck`] (for both `BacklogWithNoConsumer` and
+//! `ConsumerBlockedOnUnacked`, since neither check has anything to look at
+//! without knowing who, if anyone, is attached).
 //!
 //! ## Wording discipline
 //!
@@ -125,45 +140,48 @@ pub fn derive_anomalies(topic: &str, stats: &TopicStats, oldest_backlog_threshol
     let mut anomalies = Vec::new();
 
     for sub in &stats.subscriptions {
-        if sub.consumers.is_empty() {
-            // An empty consumer list is a fact, not an unknown (Pulsar told
-            // us nobody is attached) — but whether that idle subscription
-            // has a backlog waiting is still only knowable if msg_backlog
-            // was actually reported.
-            if let Some(backlog) = sub.msg_backlog {
-                if backlog > 0 {
+        // `None` means Pulsar never sent `consumers` at all — we do not know
+        // who, if anyone, is attached, so this check cannot run (it shows up
+        // via `derive_indeterminate_checks` instead). `Some(&[])` is Pulsar's
+        // own confirmed fact "nobody is attached", the only case that can
+        // combine with a known, positive `msg_backlog` to be an anomaly.
+        if let Some(consumers) = &sub.consumers {
+            if consumers.is_empty() {
+                if let Some(backlog) = sub.msg_backlog {
+                    if backlog > 0 {
+                        anomalies.push(Anomaly {
+                            kind: AnomalyKind::BacklogWithNoConsumer,
+                            topic: topic.to_string(),
+                            subscription: Some(sub.name.clone()),
+                            detail: format!(
+                                "Subscription \"{}\" has a backlog and no consumer is attached to receive it.",
+                                sub.name
+                            ),
+                            observed_value: format!("{backlog} messages backlogged, 0 consumers attached"),
+                        });
+                    }
+                }
+            }
+
+            for consumer in consumers {
+                if consumer.blocked_on_unacked_msgs == Some(true) {
+                    let observed_value = match consumer.unacked_messages {
+                        Some(n) => format!("{n} unacked messages (blockedOnUnackedMsgs=true)"),
+                        None => "blockedOnUnackedMsgs=true (unacked count unknown)".to_string(),
+                    };
+                    let consumer_label = consumer.consumer_name.as_deref().unwrap_or("(unnamed consumer)");
                     anomalies.push(Anomaly {
-                        kind: AnomalyKind::BacklogWithNoConsumer,
+                        kind: AnomalyKind::ConsumerBlockedOnUnacked,
                         topic: topic.to_string(),
                         subscription: Some(sub.name.clone()),
                         detail: format!(
-                            "Subscription \"{}\" has a backlog and no consumer is attached to receive it.",
+                            "Consumer \"{consumer_label}\" on subscription \"{}\" is blocked on \
+                             unacknowledged messages; the broker has stopped delivering to it.",
                             sub.name
                         ),
-                        observed_value: format!("{backlog} messages backlogged, 0 consumers attached"),
+                        observed_value,
                     });
                 }
-            }
-        }
-
-        for consumer in &sub.consumers {
-            if consumer.blocked_on_unacked_msgs == Some(true) {
-                let observed_value = match consumer.unacked_messages {
-                    Some(n) => format!("{n} unacked messages (blockedOnUnackedMsgs=true)"),
-                    None => "blockedOnUnackedMsgs=true (unacked count unknown)".to_string(),
-                };
-                let consumer_label = consumer.consumer_name.as_deref().unwrap_or("(unnamed consumer)");
-                anomalies.push(Anomaly {
-                    kind: AnomalyKind::ConsumerBlockedOnUnacked,
-                    topic: topic.to_string(),
-                    subscription: Some(sub.name.clone()),
-                    detail: format!(
-                        "Consumer \"{consumer_label}\" on subscription \"{}\" is blocked on \
-                         unacknowledged messages; the broker has stopped delivering to it.",
-                        sub.name
-                    ),
-                    observed_value,
-                });
             }
         }
     }
@@ -172,8 +190,16 @@ pub fn derive_anomalies(topic: &str, stats: &TopicStats, oldest_backlog_threshol
     // sentinel) — it must raise nothing here, exactly like a known-young
     // age. Only a known age at or past the threshold is an anomaly; Unknown
     // never raises one (see `derive_indeterminate_checks` for that case).
+    //
+    // The comparison is done entirely in `u64` space rather than casting
+    // `age` down to `i64`: a `u64` age near its top end would silently wrap
+    // negative under `as i64`, and — the defect that actually matters here —
+    // a misconfigured *negative* threshold would make `age as i64 >=
+    // negative` true for every known age, drowning the panel in false
+    // positives. Widening the threshold up with `try_from` instead means a
+    // negative threshold simply fails to convert and matches nothing.
     if let BacklogAge::Seconds { seconds: age } = stats.oldest_backlog_message_age {
-        if age as i64 >= oldest_backlog_threshold_secs {
+        if u64::try_from(oldest_backlog_threshold_secs).is_ok_and(|threshold| age >= threshold) {
             anomalies.push(Anomaly {
                 kind: AnomalyKind::BacklogOlderThanThreshold,
                 topic: topic.to_string(),
@@ -200,32 +226,70 @@ pub fn derive_indeterminate_checks(topic: &str, stats: &TopicStats) -> Vec<Indet
     let mut indeterminate = Vec::new();
 
     for sub in &stats.subscriptions {
-        if sub.consumers.is_empty() && sub.msg_backlog.is_none() {
-            indeterminate.push(IndeterminateCheck {
-                kind: AnomalyKind::BacklogWithNoConsumer,
-                topic: topic.to_string(),
-                subscription: Some(sub.name.clone()),
-                reason: format!(
-                    "subscription \"{}\" has no attached consumer and msg_backlog was not reported, \
-                     so whether it has an unattended backlog could not be determined",
-                    sub.name
-                ),
-            });
-        }
-
-        for consumer in &sub.consumers {
-            if consumer.blocked_on_unacked_msgs.is_none() {
-                let consumer_label = consumer.consumer_name.as_deref().unwrap_or("(unnamed consumer)");
+        match &sub.consumers {
+            // Pulsar never sent `consumers` at all: neither check that
+            // depends on it can run. This is one indeterminate entry per
+            // check, not one per consumer — there is no consumer to name,
+            // because whether any exist is itself the unknown.
+            None => {
+                indeterminate.push(IndeterminateCheck {
+                    kind: AnomalyKind::BacklogWithNoConsumer,
+                    topic: topic.to_string(),
+                    subscription: Some(sub.name.clone()),
+                    reason: format!(
+                        "subscription \"{}\" did not report its consumers at all, so whether it \
+                         has an unattended backlog could not be determined",
+                        sub.name
+                    ),
+                });
                 indeterminate.push(IndeterminateCheck {
                     kind: AnomalyKind::ConsumerBlockedOnUnacked,
                     topic: topic.to_string(),
                     subscription: Some(sub.name.clone()),
                     reason: format!(
-                        "consumer \"{consumer_label}\" on subscription \"{}\" did not report \
-                         blockedOnUnackedMsgs, so whether it is stalled could not be determined",
+                        "subscription \"{}\" did not report its consumers at all, so whether any \
+                         attached consumer is blocked on unacked messages could not be determined",
                         sub.name
                     ),
                 });
+            }
+            Some(consumers) => {
+                // An explicit, possibly-empty list is a fact, not an
+                // unknown (Pulsar told us exactly who is attached) — but
+                // whether an idle, unattended subscription has a backlog
+                // waiting is still only knowable if msg_backlog was
+                // actually reported.
+                if consumers.is_empty() && sub.msg_backlog.is_none() {
+                    indeterminate.push(IndeterminateCheck {
+                        kind: AnomalyKind::BacklogWithNoConsumer,
+                        topic: topic.to_string(),
+                        subscription: Some(sub.name.clone()),
+                        reason: format!(
+                            "subscription \"{}\" has no attached consumer and msg_backlog was not \
+                             reported, so whether it has an unattended backlog could not be \
+                             determined",
+                            sub.name
+                        ),
+                    });
+                }
+
+                for consumer in consumers {
+                    if consumer.blocked_on_unacked_msgs.is_none() {
+                        let consumer_label =
+                            consumer.consumer_name.as_deref().unwrap_or("(unnamed consumer)");
+                        indeterminate.push(IndeterminateCheck {
+                            kind: AnomalyKind::ConsumerBlockedOnUnacked,
+                            topic: topic.to_string(),
+                            subscription: Some(sub.name.clone()),
+                            reason: format!(
+                                "consumer \"{consumer_label}\" on subscription \"{}\" did not \
+                                 report blockedOnUnackedMsgs, so whether it is stalled could not \
+                                 be determined",
+                                sub.name
+                            ),
+                        });
+                    }
+                }
             }
         }
     }

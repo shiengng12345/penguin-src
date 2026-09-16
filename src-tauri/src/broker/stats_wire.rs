@@ -53,8 +53,12 @@ pub(super) struct RawSubscriptionStats {
     pub(super) msg_rate_out: Option<f64>,
     #[serde(default, rename = "type")]
     pub(super) sub_type: Option<String>,
-    #[serde(default)]
-    pub(super) consumers: Vec<RawConsumerStats>,
+    // No #[serde(default)]: `Option<T>` fields are deserialized to `None`
+    // when the key is missing without it (serde's built-in special case for
+    // literal `Option<...>` field types), and that is exactly the behaviour
+    // wanted here — see `SubscriptionStats::consumers` in `stats.rs` for why
+    // "key absent" must stay distinguishable from "key present, empty array".
+    pub(super) consumers: Option<Vec<RawConsumerStats>>,
 }
 
 #[derive(Debug, Deserialize)]
