@@ -60,8 +60,12 @@ export function testConnection(connectionId: string): Promise<ResultEnvelope<Cap
   return invoke("broker_test_connection", { connectionId });
 }
 
-/** `refresh: true` bypasses the snapshot cache and forces a fresh read from
- *  the broker, discarding whatever was cached for this tenant/namespace. */
+/** `refresh: true` bypasses reading the snapshot cache and forces a fresh
+ *  read from the broker for this tenant/namespace. It does NOT discard the
+ *  cached row: the row is deliberately left in place so that if the refetch
+ *  itself fails, the last known list can still be served (as `source:
+ *  "cache"`, with a warning) instead of leaving the screen blank. A
+ *  successful refetch overwrites the row on its own. */
 export function listTopics(
   connectionId: string,
   tenant: string,

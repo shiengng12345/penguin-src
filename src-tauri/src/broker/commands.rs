@@ -285,12 +285,23 @@ pub async fn broker_list_topics(
 /// instead of exercising the `#[tauri::command]` wrapper against the real
 /// `~/.penguin/penguin.sqlite3`.
 ///
-/// Takes the `Connection` by value, not `&Connection`: a `rusqlite::Connection`
-/// is `Send` but not `Sync`, and this function's `.await`s (the broker calls)
-/// happen in between reading and writing the cache, so any reference held
-/// across them would make the returned future `!Send` — which Tauri's async
-/// command dispatch requires. Owning it sidesteps that without giving up the
-/// injectable-connection shape the tests need.
+/// Takes the `Connection` by value, not `&Connection`, and — this is the
+/// part that actually matters — never passes it into another `async fn`
+/// that this function then `.await`s. `rusqlite::Connection` is `Send` but
+/// not `Sync`. An *owned* `Connection` crossing an `.await` is fine (`Send`
+/// never requires `Sync`), which is why it's safe for `conn` to sit alive,
+/// untouched, across the broker calls below. But an async fn PARAMETER
+/// typed `&Connection` gets baked into *that* function's own generator
+/// state for as long as the parameter is live, and if that span crosses one
+/// of its own internal `.await`s, the whole embedded future becomes
+/// `!Send` — which then poisons every ancestor that `.await`s it, all the
+/// way up to this `#[tauri::command]`. (An earlier version of this function
+/// learned this by hitting exactly that compile error twice; see the Task 3
+/// report's "Fix round 2" section for the full trace.) So the broker
+/// network calls (`fetch_topic_lists`, below) take no `Connection`
+/// parameter at all, and every `store::` call here is a short-lived,
+/// synchronous `&conn` borrow that starts and ends within one statement,
+/// never straddling an `.await`.
 ///
 /// `refresh` means "don't serve me the cache, go ask the broker" — it does
 /// NOT mean "destroy what I have". The cached row is left in the database;
@@ -327,7 +338,20 @@ pub async fn list_topics_through_cache(
             match parse_topic_page(&payload, query) {
                 Ok(page) => Ok(cache_envelope(page, age_ms, Vec::new())),
                 Err(parse_error) => {
-                    recover_from_corrupt_cache(conn, row, tenant, namespace, query, token, scope, &scope_key, parse_error).await
+                    // Best-effort delete (Item 1, fix round 2): if it fails
+                    // (e.g. a transient SQLite lock), still proceed to the
+                    // refetch below. `put_snapshot` is an upsert, so a
+                    // successful refetch overwrites the poisoned row
+                    // whether or not this delete succeeded — aborting here
+                    // over a delete failure would produce a hard error
+                    // screen while the broker is perfectly healthy.
+                    let _ = store::delete_snapshot(&conn, &row.id, scope.scope_name(), &scope_key);
+                    match fetch_topic_lists(row, tenant, namespace, token).await {
+                        Ok((all, partitioned)) => {
+                            build_recovered_envelope(&conn, row, scope, &scope_key, all, partitioned, query, &parse_error)
+                        }
+                        Err(err) => Ok(ResultEnvelope::failed(err, BrokerSource::AdminRest)),
+                    }
                 }
             }
         }
@@ -342,7 +366,13 @@ pub async fn list_topics_through_cache(
                     )],
                 )),
                 Err(parse_error) => {
-                    recover_from_corrupt_cache(conn, row, tenant, namespace, query, token, scope, &scope_key, parse_error).await
+                    let _ = store::delete_snapshot(&conn, &row.id, scope.scope_name(), &scope_key);
+                    match fetch_topic_lists(row, tenant, namespace, token).await {
+                        Ok((all, partitioned)) => {
+                            build_recovered_envelope(&conn, row, scope, &scope_key, all, partitioned, query, &parse_error)
+                        }
+                        Err(err) => Ok(ResultEnvelope::failed(err, BrokerSource::AdminRest)),
+                    }
                 }
             }
         }
@@ -361,51 +391,54 @@ pub async fn list_topics_through_cache(
                     )],
                 )),
                 Err(parse_error) => {
-                    recover_from_corrupt_cache(conn, row, tenant, namespace, query, token, scope, &scope_key, parse_error).await
+                    let _ = store::delete_snapshot(&conn, &row.id, scope.scope_name(), &scope_key);
+                    match fetch_topic_lists(row, tenant, namespace, token).await {
+                        Ok((all, partitioned)) => {
+                            build_recovered_envelope(&conn, row, scope, &scope_key, all, partitioned, query, &parse_error)
+                        }
+                        Err(err) => Ok(ResultEnvelope::failed(err, BrokerSource::AdminRest)),
+                    }
                 }
             }
         }
-        Freshness::Absent => {
-            let (conn, fetch_result) = fetch_and_cache(conn, row, tenant, namespace, query, token).await;
-            match fetch_result {
-                Ok(envelope) => Ok(envelope),
-                Err(err) => match &existing {
-                    // Either `refresh` bypassed a still-good row, or there
-                    // never was one. If there was, and it is still readable,
-                    // fall back to it — losing the screen entirely because a
-                    // refresh failed is worse than showing what we last
-                    // knew, clearly marked with the failure. This is
-                    // repeatable: `existing` is read fresh from the DB on
-                    // every call and nothing here deletes it, so a second,
-                    // third, or Nth consecutive failed refresh gets the same
-                    // fallback as the first.
-                    Some((payload, observed_at)) => match parse_topic_page(payload, query) {
-                        Ok(page) => {
-                            let age_ms = now.saturating_sub(*observed_at).max(0) as u64;
-                            Ok(cache_envelope(page, age_ms, vec![err.message.clone()]))
-                        }
-                        Err(_parse_error) => {
-                            // The existing row is ALSO corrupt, and the fetch
-                            // that was supposed to replace it just failed —
-                            // nothing valid remains. Self-heal for next time
-                            // and surface the broker failure, the more
-                            // actionable fact here.
-                            let _ = store::delete_snapshot(&conn, &row.id, scope.scope_name(), &scope_key);
-                            Ok(ResultEnvelope::failed(err, BrokerSource::AdminRest))
-                        }
-                    },
-                    None => Ok(ResultEnvelope::failed(err, BrokerSource::AdminRest)),
+        Freshness::Absent => match fetch_topic_lists(row, tenant, namespace, token).await {
+            Ok((all, partitioned)) => cache_and_build_admin_envelope(&conn, row, scope, &scope_key, all, partitioned, query),
+            Err(err) => match &existing {
+                // Either `refresh` bypassed a still-good row, or there
+                // never was one. If there was, and it is still readable,
+                // fall back to it — losing the screen entirely because a
+                // refresh failed is worse than showing what we last
+                // knew, clearly marked with the failure. This is
+                // repeatable: `existing` is read fresh from the DB on
+                // every call and nothing here deletes it, so a second,
+                // third, or Nth consecutive failed refresh gets the same
+                // fallback as the first.
+                Some((payload, observed_at)) => match parse_topic_page(payload, query) {
+                    Ok(page) => {
+                        let age_ms = now.saturating_sub(*observed_at).max(0) as u64;
+                        Ok(cache_envelope(page, age_ms, vec![err.message.clone()]))
+                    }
+                    Err(_parse_error) => {
+                        // The existing row is ALSO corrupt, and the fetch
+                        // that was supposed to replace it just failed —
+                        // nothing valid remains. Self-heal for next time
+                        // (best-effort, same reasoning as above) and
+                        // surface the broker failure, the more actionable
+                        // fact here.
+                        let _ = store::delete_snapshot(&conn, &row.id, scope.scope_name(), &scope_key);
+                        Ok(ResultEnvelope::failed(err, BrokerSource::AdminRest))
+                    }
                 },
-            }
-        }
+                None => Ok(ResultEnvelope::failed(err, BrokerSource::AdminRest)),
+            },
+        },
     }
 }
 
 /// Parses one cached `TopicListSnapshot`, folds it, and pages it — the pure,
 /// synchronous part of serving a cached response. Returns the deserialize
 /// error message on a corrupt payload so the caller can decide how to
-/// recover (see `recover_from_corrupt_cache`), rather than surfacing it as a
-/// hard failure.
+/// recover, rather than surfacing it as a hard failure.
 fn parse_topic_page(payload: &str, query: &PageQueryDto) -> Result<PageDto<TopicSummaryDto>, String> {
     let cached: TopicListSnapshot = serde_json::from_str(payload).map_err(|e| e.to_string())?;
     let folded = topic_folding::fold_topics(&cached.all, &cached.partitioned);
@@ -423,101 +456,73 @@ fn cache_envelope(
     envelope
 }
 
-/// A cached row that fails to deserialize is a poisoned entry with no
-/// antidote short of deleting it — a hard error on every future call would
-/// leave the operator stuck with no way to recover short of editing SQLite
-/// by hand. So: discard the row and fall through to a fresh broker fetch,
-/// with a warning naming what was discarded, rather than repeating the
-/// failure forever.
-///
-/// Takes (and does not hand back) `conn` by value for the same `!Send`
-/// reason as `list_topics_through_cache`: an async fn parameter typed
-/// `&Connection` gets embedded in *this* function's own generator state,
-/// which then poisons every ancestor that `.await`s it, all the way up to
-/// the `#[tauri::command]` at the top. Every helper in this chain
-/// (`fetch_and_cache` included) must only ever move an owned `Connection`
-/// across an `.await`, never borrow one across it.
-async fn recover_from_corrupt_cache(
-    conn: Connection,
+/// Fetches both topic lists from the broker — a pure network call, with no
+/// `Connection` parameter at all. Kept free of any cache access specifically
+/// so it can be `.await`ed safely from `list_topics_through_cache` without
+/// risking the `!Send` trap described on that function's doc comment.
+async fn fetch_topic_lists(
     row: &ConnectionRow,
     tenant: &str,
     namespace: &str,
-    query: &PageQueryDto,
     token: Option<String>,
-    scope: CacheScope,
-    scope_key: &str,
-    parse_error: String,
-) -> Result<ResultEnvelope<PageDto<TopicSummaryDto>>, String> {
-    store::delete_snapshot(&conn, &row.id, scope.scope_name(), scope_key).map_err(|e| e.message)?;
-    let (_conn, fetch_result) = fetch_and_cache(conn, row, tenant, namespace, query, token).await;
-    match fetch_result {
-        Ok(mut envelope) => {
-            envelope.warnings.push(format!(
-                "The cached topic list entry was unreadable ({parse_error}) and was discarded; \
-                 showing a fresh read from the broker."
-            ));
-            Ok(envelope)
-        }
-        Err(err) => Ok(ResultEnvelope::failed(err, BrokerSource::AdminRest)),
-    }
-}
-
-/// Fetches both topic lists from the broker, writes them to the cache as one
-/// `TopicListSnapshot` JSON object (so `all` and `partitioned` cannot drift
-/// apart on disk), and returns a paginated `BrokerSource::AdminRest`
-/// envelope. `Err` carries the raw `BrokerError` rather than an already-built
-/// failure envelope, so callers can decide whether a cached fallback is more
-/// appropriate than a bare failure (see the `Absent` branch above and
-/// `recover_from_corrupt_cache`).
-///
-/// Hands the `Connection` back alongside the result (rather than consuming
-/// it) because the `Absent` branch above still needs it afterward — to
-/// self-heal an *also*-corrupt fallback row when the fetch itself fails.
-async fn fetch_and_cache(
-    conn: Connection,
-    row: &ConnectionRow,
-    tenant: &str,
-    namespace: &str,
-    query: &PageQueryDto,
-    token: Option<String>,
-) -> (Connection, Result<ResultEnvelope<PageDto<TopicSummaryDto>>, BrokerError>) {
-    // Admin REST ignores paging, so fetch the full lists, fold partitions,
-    // and page in Rust (spec V-A5 / V-A6).
-    let admin = match crate::broker::adapters::pulsar::admin_rest::PulsarAdminRest::new(
+) -> Result<(Vec<String>, Vec<String>), BrokerError> {
+    // Admin REST ignores paging, so fetch the full lists here; folding
+    // partitions and paging happens in Rust afterward (spec V-A5 / V-A6).
+    let admin = crate::broker::adapters::pulsar::admin_rest::PulsarAdminRest::new(
         row.admin_url.clone(),
         row.timeout_ms as u64,
         row.tls_verify,
         token,
-    ) {
-        Ok(a) => a,
-        Err(e) => return (conn, Err(e)),
-    };
-    let (all, partitioned) = match (
+    )?;
+    match (
         admin.list_topics(tenant, namespace).await,
         admin.list_partitioned_topics(tenant, namespace).await,
     ) {
-        (Ok(a), Ok(p)) => (a, p),
-        (Err(e), _) | (_, Err(e)) => return (conn, Err(e)),
-    };
-
-    let folded = topic_folding::fold_topics(&all, &partitioned);
-    let scope_key = format!("{tenant}/{namespace}");
-    let snap = TopicListSnapshot { all, partitioned };
-    let json = match serde_json::to_string(&snap) {
-        Ok(j) => j,
-        Err(e) => {
-            return (
-                conn,
-                Err(BrokerError { code: BrokerErrorCode::MalformedResponse, message: e.to_string(), retryable: false }),
-            )
-        }
-    };
-    if let Err(e) = store::put_snapshot(&conn, &row.id, CacheScope::Topics.scope_name(), &scope_key, &json) {
-        return (conn, Err(e));
+        (Ok(all), Ok(partitioned)) => Ok((all, partitioned)),
+        (Err(e), _) | (_, Err(e)) => Err(e),
     }
+}
 
+/// Folds and pages a freshly-fetched topic list, writes it to the cache as
+/// one `TopicListSnapshot` JSON object (so `all` and `partitioned` cannot
+/// drift apart on disk), and returns the paginated `BrokerSource::AdminRest`
+/// envelope. Purely synchronous — never `.await`s — so taking `&Connection`
+/// here carries none of the `!Send` risk described above.
+fn cache_and_build_admin_envelope(
+    conn: &Connection,
+    row: &ConnectionRow,
+    scope: CacheScope,
+    scope_key: &str,
+    all: Vec<String>,
+    partitioned: Vec<String>,
+    query: &PageQueryDto,
+) -> Result<ResultEnvelope<PageDto<TopicSummaryDto>>, String> {
+    let folded = topic_folding::fold_topics(&all, &partitioned);
+    let snap = TopicListSnapshot { all, partitioned };
+    let json = serde_json::to_string(&snap).map_err(|e| e.to_string())?;
+    store::put_snapshot(conn, &row.id, scope.scope_name(), scope_key, &json).map_err(|e| e.message)?;
     let page = topic_folding::paginate(folded, query);
-    (conn, Ok(ResultEnvelope::ok(page, BrokerSource::AdminRest)))
+    Ok(ResultEnvelope::ok(page, BrokerSource::AdminRest))
+}
+
+/// Same as `cache_and_build_admin_envelope`, plus a warning naming the
+/// corrupt entry that was just discarded to make room for this fresh read —
+/// used by the `Fresh`/`Stale`/`Skewed` corrupt-cache-recovery paths above.
+fn build_recovered_envelope(
+    conn: &Connection,
+    row: &ConnectionRow,
+    scope: CacheScope,
+    scope_key: &str,
+    all: Vec<String>,
+    partitioned: Vec<String>,
+    query: &PageQueryDto,
+    parse_error: &str,
+) -> Result<ResultEnvelope<PageDto<TopicSummaryDto>>, String> {
+    let mut envelope = cache_and_build_admin_envelope(conn, row, scope, scope_key, all, partitioned, query)?;
+    envelope.warnings.push(format!(
+        "The cached topic list entry was unreadable ({parse_error}) and was discarded; showing a fresh read from the broker."
+    ));
+    Ok(envelope)
 }
 
 #[cfg(test)]

@@ -405,3 +405,126 @@ async fn a_failed_refresh_with_no_valid_fallback_reports_the_broker_error_and_se
 
     let _ = std::fs::remove_file(&path);
 }
+
+// --- Fix round 2, Item 3 ---
+//
+// Phase 0's defect was exactly this shape: a state existed in code and was
+// never proven reachable in production. Fix round 1 made `Stale` and
+// `Skewed` reachable through `list_topics_through_cache`, but only `Fresh`
+// and `Absent` had command-layer tests — the other two arms were correct by
+// inspection only. These two tests seed a snapshot with a directly-controlled
+// `observed_at` (via a raw `UPDATE`, since `put_snapshot` always stamps it
+// from the system clock) and assert on the real output of the function,
+// closing that gap. Neither depends on the live broker or a network call —
+// `Stale`/`Skewed` never reach the broker at all, by design.
+
+fn epoch_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64
+}
+
+fn set_observed_at(conn: &rusqlite::Connection, connection_id: &str, scope_key: &str, observed_at: i64) {
+    conn.execute(
+        "UPDATE broker_topology_snapshots SET observed_at = ?1 WHERE connection_id = ?2 AND scope = ?3 AND scope_key = ?4",
+        rusqlite::params![observed_at, connection_id, "topics", scope_key],
+    )
+    .expect("directly controlling observed_at for a freshness test");
+}
+
+#[tokio::test]
+async fn a_stale_snapshot_is_served_with_its_rows_intact_and_a_warning_naming_the_age() {
+    let path = scratch_db_path();
+    let seed = open_scratch(&path);
+    seed_connection(&seed, "c-stale");
+    let row = store::get_connection(&seed, "c-stale").unwrap().expect("seeded row");
+    store::put_snapshot(
+        &seed,
+        &row.id,
+        "topics",
+        "public/default",
+        r#"{"all":["persistent://public/default/t1","persistent://public/default/t2"],"partitioned":[]}"#,
+    )
+    .unwrap();
+    // Topics TTL is 60s (`CacheScope::Topics::ttl`); 90s old is past it.
+    let observed_at = epoch_ms() - 90_000;
+    set_observed_at(&seed, &row.id, "public/default", observed_at);
+    drop(seed);
+
+    let query = all_topics_query();
+    let result = commands::list_topics_through_cache(open_scratch(&path), &row, "public", "default", &query, false, None)
+        .await
+        .expect("a stale cache read must still succeed");
+
+    assert_eq!(result.source, BrokerSource::Cache, "stale data is still cache-sourced, not re-fetched automatically");
+    assert!(
+        result.freshness_ms >= 90_000,
+        "freshness_ms must reflect the real age we set, not a smaller or zeroed value; got {}",
+        result.freshness_ms
+    );
+    assert!(
+        result.freshness_ms < 95_000,
+        "freshness_ms should be close to the 90_000ms we set, not inflated; got {}",
+        result.freshness_ms
+    );
+    assert!(
+        result.warnings.iter().any(|w| w.contains(&format!("{} ms old", result.freshness_ms))),
+        "must carry a warning naming the actual measured age ({}): {:?}",
+        result.freshness_ms,
+        result.warnings
+    );
+    // Stale data is SHOWN, not withheld.
+    let data = result.data.expect("stale rows must still be served, not withheld");
+    let names = names_of(&data.items);
+    assert!(names.contains("persistent://public/default/t1"));
+    assert!(names.contains("persistent://public/default/t2"));
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn a_skewed_snapshot_is_served_with_a_warning_naming_the_skew_not_a_misleading_age() {
+    let path = scratch_db_path();
+    let seed = open_scratch(&path);
+    seed_connection(&seed, "c-skewed");
+    let row = store::get_connection(&seed, "c-skewed").unwrap().expect("seeded row");
+    store::put_snapshot(
+        &seed,
+        &row.id,
+        "topics",
+        "public/default",
+        r#"{"all":["persistent://public/default/t1"],"partitioned":[]}"#,
+    )
+    .unwrap();
+    // Stamped 5s ahead of "now" — a clock skew, not a stale-but-honest age.
+    let observed_at = epoch_ms() + 5_000;
+    set_observed_at(&seed, &row.id, "public/default", observed_at);
+    drop(seed);
+
+    let query = all_topics_query();
+    let result = commands::list_topics_through_cache(open_scratch(&path), &row, "public", "default", &query, false, None)
+        .await
+        .expect("a skewed cache read must still succeed");
+
+    assert_eq!(result.source, BrokerSource::Cache, "skewed data is still served from the cache");
+    assert_eq!(
+        result.freshness_ms, 0,
+        "age is genuinely unknowable when the row is stamped ahead of the clock — must not report a fabricated age"
+    );
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|w| w.to_lowercase().contains("ahead") || w.to_lowercase().contains("clock")),
+        "must name the skew (ahead of this machine's clock), not report a misleading age: {:?}",
+        result.warnings
+    );
+    assert!(
+        !result.warnings.iter().any(|w| w.contains("ms old")),
+        "must NOT phrase this as a stale age — that's the exact confusion `Freshness::Skewed` \
+         exists to prevent: {:?}",
+        result.warnings
+    );
+    let data = result.data.expect("skewed rows must still be served, not withheld");
+    assert!(names_of(&data.items).contains("persistent://public/default/t1"));
+
+    let _ = std::fs::remove_file(&path);
+}
