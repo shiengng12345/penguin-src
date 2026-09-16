@@ -139,4 +139,31 @@ describe("useTopicDetail", () => {
     expect(result.current.detail).toEqual(DETAIL);
     expect(result.current.warnings).toEqual(["a transient warning"]);
   });
+
+  // Phase A final review, finding 3: `setDetail` only ran on the truthy-data
+  // branch and the `catch` block — an *error envelope* (`data: undefined`,
+  // no thrown exception) fell through neither, so a failed fetch for a new
+  // topic left the previous topic's detail sitting in state, mislabeled as
+  // the new topic's. Shared clear-on-failure policy (see
+  // useBrokerTopology.ts's header): whenever a fetch does not yield a real
+  // `data` value, already-loaded data is cleared rather than retained.
+  it("clears stale detail when a fetch resolves to an error envelope, not just when it throws", async () => {
+    getTopicDetailMock.mockResolvedValueOnce(envelope());
+    const { result } = renderHook(() => useTopicDetail("conn-1", TOPIC));
+    await waitFor(() => expect(result.current.detail).toEqual(DETAIL));
+
+    getTopicDetailMock.mockResolvedValueOnce({
+      data: undefined,
+      source: "pulsar-admin-rest",
+      observedAt: "2026-09-16T00:00:00.000Z",
+      freshnessMs: 0,
+      warnings: [],
+      error: { code: "SOURCE_UNAVAILABLE", message: "topic not found", retryable: false },
+    });
+    await act(async () => {
+      result.current.refresh();
+    });
+    await waitFor(() => expect(result.current.state).toBe("error"));
+    expect(result.current.detail).toBeNull();
+  });
 });

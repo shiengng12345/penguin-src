@@ -10,6 +10,13 @@
 // warning neither of those two commands anticipated) still renders
 // correctly instead of silently being misread as `"ready"`.
 //
+// `detail` is cleared whenever a fetch does not yield a real `data` value —
+// see `useBrokerTopology.ts`'s header for the shared policy this hook
+// follows (Phase A final review, finding 3). Before that fix `detail` was
+// only cleared when `topic` became `null` or `invoke` threw, so an error
+// *envelope* for a newly-selected topic left the previous topic's detail on
+// screen, mislabeled as the new one's.
+//
 // Takes a `TopicSummary | null` rather than a bespoke `{tenant, namespace,
 // topic, persistent}` shape so a caller can pass the row `TopicTable`
 // handed it straight through; the effect dependency array below still
@@ -79,8 +86,13 @@ export function useTopicDetail(
         topic.shortName,
         topic.persistent,
       );
-      if (envelope.data) {
+      if (envelope.data !== undefined) {
         setDetail(envelope.data);
+      } else {
+        // An error envelope, not a thrown exception — must clear the same
+        // way `catch` below does. See the shared clear-on-failure policy in
+        // useBrokerTopology.ts's header.
+        setDetail(null);
       }
       const result = deriveTopicDetailResult(envelope);
       setState(result.state);

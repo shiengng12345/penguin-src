@@ -17,6 +17,22 @@
 // operator. `data` present with `warnings` empty is the only clean case;
 // `data` absent is the only genuine failure.
 //
+// Shared failed-fetch policy (Phase A final review, finding 3), stated
+// once here and followed by `useBrokerOverview` and `useTopicDetail` too:
+// whenever a fetch does not yield a real `data` value — an error envelope
+// (`data: undefined`) or a thrown exception alike — already-loaded state
+// is cleared, never left showing a previous, now-superseded answer next to
+// an error. `tenants`/`namespaces` below are set from `envelope.data ??
+// []` on every fetch, so a failed one clears them the same way the
+// `catch` block does; the other two hooks apply the identical rule to
+// their own single value (`report`, `detail`). This was a real
+// inconsistency until this fix: this hook already cleared, but the other
+// two only cleared on a thrown exception, silently retaining a prior
+// topic's detail (or a prior overview report) underneath a fresh error —
+// exactly the "looks like an answer but is not one" defect this whole
+// phase exists to prevent. Reusing an old value while calling it fresh is
+// worse than showing nothing, so clear is the one policy, not retain.
+//
 // `subjects` (fix round 2) names which of the two independently-fetched
 // lists — tenants, namespaces — actually produced the reported `state`.
 // Tenants and namespaces are fetched separately and can be in completely

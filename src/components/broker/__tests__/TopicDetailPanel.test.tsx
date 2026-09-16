@@ -221,7 +221,23 @@ describe("TopicDetailPanel", () => {
     expect(positions.length).toBeGreaterThan(0);
   });
 
-  it("renders the loading state without showing stale content", () => {
+  // Phase A final review, finding 3: the loading branch used to live inside
+  // `if (detail === null)`, so once anything had loaded, a later
+  // `state === "loading"` (a new topic selected, or a manual refresh)
+  // rendered nothing new — the previous topic's stats, anomalies and
+  // subscriptions stayed on screen with no indication a fetch was even in
+  // flight. `detail={null}` alone could never catch this, since that is the
+  // one case where stale content cannot exist. This test uses a populated
+  // `detail` instead, the way the finding required.
+  it("renders the loading state instead of a previous topic's stale content", () => {
+    render(<TopicDetailPanel detail={makeDetail()} state="loading" onRefresh={vi.fn()} />);
+    expect(screen.getByRole("status")).toHaveTextContent(/loading/i);
+    // The previous topic's cursor position must not still be on screen.
+    expect(screen.queryByText("38:-1")).not.toBeInTheDocument();
+    expect(screen.queryByText(/rg_deposit_accumulate_LOCAL/)).not.toBeInTheDocument();
+  });
+
+  it("still renders the loading state when nothing has loaded yet", () => {
     render(<TopicDetailPanel detail={null} state="loading" onRefresh={vi.fn()} />);
     expect(screen.getByRole("status")).toHaveTextContent(/loading/i);
   });

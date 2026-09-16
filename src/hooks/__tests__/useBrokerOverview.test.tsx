@@ -130,4 +130,31 @@ describe("useBrokerOverview", () => {
     renderHook(() => useBrokerOverview(null));
     expect(getOverviewMock).not.toHaveBeenCalled();
   });
+
+  // Phase A final review, finding 3: `setReport` only ran on the
+  // truthy-data branch and the `catch` block — an *error envelope* (`data:
+  // undefined`, no thrown exception) fell through neither, so a failed
+  // refresh left the previous report sitting in state. Shared
+  // clear-on-failure policy (see useBrokerTopology.ts's header): whenever a
+  // fetch does not yield a real `data` value, already-loaded data is
+  // cleared rather than retained.
+  it("clears the stale report when a refresh resolves to an error envelope, not just when it throws", async () => {
+    getOverviewMock.mockResolvedValueOnce(envelope());
+    const { result } = renderHook(() => useBrokerOverview("conn-1"));
+    await waitFor(() => expect(result.current.report).toEqual(REPORT));
+
+    getOverviewMock.mockResolvedValueOnce({
+      data: undefined,
+      source: "pulsar-admin-rest",
+      observedAt: "2026-09-16T00:00:00.000Z",
+      freshnessMs: 0,
+      warnings: [],
+      error: { code: "SOURCE_UNAVAILABLE", message: "connection refused", retryable: true },
+    });
+    await act(async () => {
+      result.current.refresh();
+    });
+    await waitFor(() => expect(result.current.state).toBe("error"));
+    expect(result.current.report).toBeNull();
+  });
 });

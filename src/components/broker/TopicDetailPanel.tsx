@@ -24,6 +24,16 @@
 // This panel is entirely read-only (Phase A) — no mutation, no
 // WritePermit — and every rate on it sits under a `DeliveryNotice`: these
 // numbers prove delivery to a consumer, never business completion.
+//
+// Phase A final review, finding 3: `state === "loading"` is checked before
+// `detail === null`, not only inside it. The loading branch used to live
+// entirely inside the `detail === null` case, so once any topic had ever
+// loaded, a later "loading" (a new topic selected, or a manual refresh)
+// rendered nothing — the previous topic's stats, anomalies and
+// subscriptions stayed on screen with no sign a new fetch was in flight,
+// mislabeled as belonging to whatever topic was actually loading. Loading
+// now always takes priority and blanks the panel, the same way
+// `AnomalyPanel` handles its own `state === "loading"`.
 import type { Anomaly, IndeterminateCheck, TopicDetail } from "@penguin/broker-contracts";
 import type { DataTableState } from "@/components/ui/data-table-types";
 import { Button } from "@/components/ui/button";
@@ -53,19 +63,28 @@ export function TopicDetailPanel({
   warnings = [],
   onRefresh,
 }: TopicDetailPanelProps) {
+  if (state === "loading") {
+    // The header never names a topic here, even if `detail` still holds a
+    // previous topic's data: while loading, this component cannot vouch
+    // for which topic that stale `detail` actually belongs to (a switch to
+    // a different topic and a same-topic refresh both pass through here).
+    return (
+      <div className="flex flex-col gap-2">
+        <PanelHeader topic={null} onRefresh={onRefresh} />
+        <div role="status" className={STATUS_CLASS}>
+          Loading topic detail…
+        </div>
+      </div>
+    );
+  }
+
   if (detail === null) {
     return (
       <div className="flex flex-col gap-2">
         <PanelHeader topic={null} onRefresh={onRefresh} />
-        {state === "loading" ? (
-          <div role="status" className={STATUS_CLASS}>
-            Loading topic detail…
-          </div>
-        ) : (
-          <div role="alert" className={ALERT_CLASS}>
-            {errorMessage ?? "Failed to load topic detail."}
-          </div>
-        )}
+        <div role="alert" className={ALERT_CLASS}>
+          {errorMessage ?? "Failed to load topic detail."}
+        </div>
       </div>
     );
   }

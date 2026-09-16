@@ -19,6 +19,12 @@
 // lossy mapping this hook could get wrong. Only when `report` itself is
 // `null` (nothing fetched yet, or the fetch failed outright) does a caller
 // have no real report to draw from at all.
+//
+// `report` is cleared whenever a fetch does not yield a real `data` value —
+// see `useBrokerTopology.ts`'s header for the shared policy this hook
+// follows (Phase A final review, finding 3). Before that fix `report` was
+// only cleared when `invoke` threw, so an error *envelope* on a refresh
+// left the previous report on screen next to the new error.
 import { useCallback, useEffect, useState } from "react";
 import type { OverviewReport, ResultEnvelope } from "@penguin/broker-contracts";
 import { getOverview } from "@/lib/broker-client";
@@ -78,8 +84,13 @@ export function useBrokerOverview(connectionId: string | null | undefined): UseB
       // A broker failure that still yields a usable sample is a partial
       // success (rule 3, task-14-brief.md) — `report` is populated from
       // `data` whenever it is present, independently of `warnings`.
-      if (envelope.data) {
+      if (envelope.data !== undefined) {
         setReport(envelope.data);
+      } else {
+        // An error envelope, not a thrown exception — must clear the same
+        // way `catch` below does. See the shared clear-on-failure policy in
+        // useBrokerTopology.ts's header.
+        setReport(null);
       }
       const result = deriveOverviewResult(envelope);
       setState(result.state);
