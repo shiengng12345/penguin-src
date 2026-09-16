@@ -16,9 +16,11 @@ import type {
   BrokerConnection,
   BrokerConnectionDraft,
   CapabilitySnapshot,
+  NamespaceSummary,
   Page,
   PageQuery,
   ResultEnvelope,
+  TenantSummary,
   TopicSummary,
 } from "@penguin/broker-contracts";
 
@@ -74,4 +76,22 @@ export function listTopics(
   refresh = false,
 ): Promise<ResultEnvelope<Page<TopicSummary>>> {
   return invoke("broker_list_topics", { connectionId, tenant, namespace, query, refresh });
+}
+
+/** Same `refresh` semantics as `listTopics`: bypasses the cache read without
+ *  discarding the cached row, so a failed refresh still serves the last
+ *  known list. */
+export function listTenants(
+  connectionId: string,
+  refresh = false,
+): Promise<ResultEnvelope<TenantSummary[]>> {
+  return invoke("broker_list_tenants", { connectionId, refresh });
+}
+
+export function listNamespaces(
+  connectionId: string,
+  tenant: string,
+  refresh = false,
+): Promise<ResultEnvelope<NamespaceSummary[]>> {
+  return invoke("broker_list_namespaces", { connectionId, tenant, refresh });
 }

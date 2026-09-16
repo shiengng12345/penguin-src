@@ -22,17 +22,19 @@
 //!
 //! Split into submodules (Phase A Task 4) to keep every file at or under 400
 //! lines: `connection` (connection CRUD + health probe), `topic` (topic
-//! listing through the snapshot cache), and (added in the Task 4 follow-up
-//! commit) `topology` (tenant/namespace listing through the snapshot cache).
-//! This file re-exports only — every `#[tauri::command]` at the
-//! `broker::commands::broker_*` path `lib.rs`'s `generate_handler!` depends
-//! on, plus `list_topics_through_cache`, which `tests/broker_cache.rs` calls
-//! directly as `commands::list_topics_through_cache` — and the handful of
+//! listing through the snapshot cache), `topology` (tenant/namespace listing
+//! through the snapshot cache). This file re-exports only — every
+//! `#[tauri::command]` at the `broker::commands::broker_*` path `lib.rs`'s
+//! `generate_handler!` depends on, plus `list_topics_through_cache` /
+//! `list_tenants_through_cache` / `list_namespaces_through_cache`, which the
+//! `tests/broker_cache.rs` / `tests/broker_topology.rs` integration tests
+//! call directly as `commands::list_*_through_cache` — and the handful of
 //! helpers genuinely shared across submodules (`now_ms`, `load_row`,
 //! `resolve_secret`, `KEYCHAIN_SERVICE`).
 
 mod connection;
 mod topic;
+mod topology;
 
 // Glob re-exports, deliberately: `#[tauri::command]` generates a hidden
 // macro-companion item (`__cmd__broker_*`) alongside each command function,
@@ -46,6 +48,7 @@ mod topic;
 // gave lib.rs for free before this split.
 pub use connection::*;
 pub use topic::*;
+pub use topology::*;
 
 use crate::broker::store::{self, ConnectionRow};
 
