@@ -10,6 +10,7 @@ pub mod internal_stats;
 pub mod ports;
 pub mod security;
 pub mod stats;
+mod stats_sentinels;
 mod stats_wire;
 pub mod store;
 pub mod topic_folding;
