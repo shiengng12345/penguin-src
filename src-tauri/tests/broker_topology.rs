@@ -209,6 +209,49 @@ async fn a_skewed_tenant_snapshot_is_served_with_a_warning_naming_the_skew_not_a
     let _ = std::fs::remove_file(&path);
 }
 
+/// The one thing about `Stale` that is genuinely scope-specific after the
+/// cache-read policy was unified into a single generic: the TTL. Tenants get
+/// 300s, topics get 60s. Re-asserting the shared `Stale` arm per scope would
+/// re-test the same lines `broker_cache.rs` already covers — but nothing
+/// proves the tenants command is wired to the *tenants* TTL, and a
+/// copy-pasted `CacheScope::Topics` there would be invisible: a 2-minute-old
+/// tenant list would silently start reporting itself as stale, and a screen
+/// an operator trusts would carry a warning it did not earn.
+#[tokio::test]
+async fn a_two_minute_old_tenant_snapshot_is_still_fresh_because_tenants_use_the_longer_ttl() {
+    let path = scratch_db_path();
+    let seed = open_scratch(&path);
+    seed_connection(&seed, "c-tenant-ttl");
+    let row = store::get_connection(&seed, "c-tenant-ttl").unwrap().expect("seeded row");
+    store::put_snapshot(&seed, &row.id, "tenants", "*", r#"["public","pulsar"]"#).unwrap();
+    // 120s old: past the 60s Topics TTL, well inside the 300s Tenants TTL.
+    let observed_at = epoch_ms() - 120_000;
+    seed.execute(
+        "UPDATE broker_topology_snapshots SET observed_at = ?1 WHERE connection_id = ?2 AND scope = ?3 AND scope_key = ?4",
+        rusqlite::params![observed_at, row.id, "tenants", "*"],
+    )
+    .unwrap();
+    drop(seed);
+
+    let result = commands::list_tenants_through_cache(open_scratch(&path), &row, false, None)
+        .await
+        .expect("a cached tenant read must succeed");
+
+    assert_eq!(result.source, BrokerSource::Cache, "must be served from the cache, not refetched");
+    assert!(
+        result.warnings.is_empty(),
+        "120s is inside the 300s tenants TTL, so this is Fresh — a staleness warning here would be unearned: {:?}",
+        result.warnings
+    );
+    assert!(
+        result.freshness_ms >= 120_000 && result.freshness_ms < 125_000,
+        "must report the real measured age, not a fabricated one: {}",
+        result.freshness_ms
+    );
+
+    let _ = std::fs::remove_file(&path);
+}
+
 fn epoch_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64
 }
