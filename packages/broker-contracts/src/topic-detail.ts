@@ -31,23 +31,44 @@ export type BacklogAge =
   | { state: "noBacklog" }
   | { state: "unknown" };
 
+/** A consumer's `lastAckedTimestamp`/`lastConsumedTimestamp`. Mirrors
+ *  `BacklogAge` exactly, for the identical reason: Pulsar's wire value
+ *  actually distinguishes three cases a bare `number | null` cannot — a real
+ *  epoch-millisecond timestamp, Pulsar's own documented `0` sentinel ("this
+ *  consumer has never acked/consumed" — a determinate fact, not a missing
+ *  value), and genuine absence (the field was withheld).
+ *
+ *  Fix round 1 (task 11): an earlier version of this field was `number |
+ *  null` with `0` normalized to `null` at the Rust parse boundary, which
+ *  collapsed "definitely never acked" and "we don't know" into the same
+ *  `null` — repeating, one field later, the exact mistake `BacklogAge` was
+ *  built to fix for `oldestBacklogMessageAgeSeconds`. Paired with
+ *  `blockedOnUnackedMsgs`, "attached but has never acked" is exactly the
+ *  signal an operator wants from this pairing, and it was unreportable under
+ *  the old shape. Mirrors `ConsumerTimestamp` in
+ *  `src-tauri/src/broker/stats.rs` field-for-field; the wire shape is pinned
+ *  by `consumer_timestamp_serialises_to_the_pinned_wire_shape` in
+ *  `stats_tests.rs`. */
+export type ConsumerTimestamp =
+  | { state: "millis"; millis: number }
+  | { state: "never" }
+  | { state: "unknown" };
+
 /** One entry in a subscription's `consumers` array. Every field but
- *  `blockedOnUnackedMsgs` is `Option` on the Rust side because an absent
- *  identity/diagnostic field is a plausible real gap, not a sentinel;
- *  `blockedOnUnackedMsgs` is `boolean | null` specifically because it is
- *  the single most diagnostic consumer field (the broker itself stopped
- *  delivering) and must never be inferred from a default. */
+ *  `blockedOnUnackedMsgs`, `lastAckedTimestamp` and `lastConsumedTimestamp`
+ *  is `Option` on the Rust side because an absent identity/diagnostic field
+ *  is a plausible real gap, not a sentinel; `blockedOnUnackedMsgs` is
+ *  `boolean | null` specifically because it is the single most diagnostic
+ *  consumer field (the broker itself stopped delivering) and must never be
+ *  inferred from a default. */
 export interface ConsumerStats {
   consumerName: string | null;
   address: string | null;
   clientVersion: string | null;
   availablePermits: number | null;
   unackedMessages: number | null;
-  /** `0` on the wire (Pulsar's "never acked/consumed" sentinel) is
-   *  normalized to `null` at the Rust parse boundary — epoch 0 (1970) would
-   *  otherwise read as a real, alarming last-acked time. */
-  lastAckedTimestamp: number | null;
-  lastConsumedTimestamp: number | null;
+  lastAckedTimestamp: ConsumerTimestamp;
+  lastConsumedTimestamp: ConsumerTimestamp;
   msgRateOut: number | null;
   blockedOnUnackedMsgs: boolean | null;
 }

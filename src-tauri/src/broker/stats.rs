@@ -25,11 +25,13 @@
 //!   missing field to `""` would be indistinguishable from a real empty
 //!   value. Subscription type additionally has an in-band sentinel on top
 //!   of ordinary absence — see "Sentinel values" below.
-//! - **Timestamps** are `Option<i64>`. Epoch 0 is a real, very different
-//!   instant (1970) from "never recorded" — collapsing the two would make a
-//!   never-consumed subscription look ancient rather than untouched. The
-//!   two consumer-level timestamps carry this same problem in-band, not
-//!   just on absence — see "Sentinel values" below.
+//! - **`last_acked_timestamp` / `last_consumed_timestamp`** (consumer-level)
+//!   are [`ConsumerTimestamp`], not `Option<i64>`. Epoch 0 is a real, very
+//!   different instant (1970) from "never acked/consumed" — and (fix round
+//!   1, task 11) "never acked/consumed" is itself a determinate fact,
+//!   distinct from the field having been withheld. A bare `Option<i64>`
+//!   cannot hold all three; see "Sentinel values" below and
+//!   `ConsumerTimestamp`'s own doc.
 //! - **`blocked_on_unacked_msgs`** is `Option<bool>` specifically, per the
 //!   brief: this is the single most diagnostic consumer field (the broker
 //!   itself stopped delivering) and must never be inferred. Defaulting
@@ -70,10 +72,10 @@
 //!
 //! `Option<T>` solves *absence* — a missing key. It does not by itself
 //! solve Pulsar encoding "this doesn't apply" as an in-band value that
-//! still type-checks. Three fields carry exactly this problem. Two of them
-//! are normalized to plain `None` at the parse boundary — the only place
-//! that knows Pulsar's wire conventions — so no downstream consumer has to
-//! remember them:
+//! still type-checks. Three field groups carry exactly this problem. One of
+//! them is normalized to plain `None` at the parse boundary — the only
+//! place that knows Pulsar's wire conventions — so no downstream consumer
+//! has to remember it:
 //!
 //! - **`type`** (subscription type, mapped as `sub_type`): Pulsar serializes
 //!   an unset subscription type as the literal string `"None"` — not a
@@ -85,28 +87,34 @@
 //!   directly: **both** of `fpms_topup`'s real subscriptions send exactly
 //!   `"type": "None"` today (captured, unmodified, in the fixture) — this
 //!   was live on the user's own data, not a hypothetical.
+//!
+//! The other two field groups do **not** collapse to plain `None`: each
+//! carries a *determinate*, in-band fact that is a different thing entirely
+//! from absence, so collapsing either into `None` would make a healthy,
+//! observed answer indistinguishable from "we could not tell" — exactly
+//! backwards for a module whose whole purpose is telling those two apart.
+//! Each is mapped as its own three-state type instead:
+//!
+//! - `oldestBacklogMessageAgeSeconds`: `-1` means "no backlog has ever
+//!   existed," a determinate, healthy fact, not an absent value or a
+//!   negative duration one second short of zero. Mapped as [`BacklogAge`]
+//!   (see its own doc). Evidenced directly: the live `fpms_topup` topic
+//!   sends `-1` today (captured, unmodified, in the fixture).
 //! - **`lastAckedTimestamp` / `lastConsumedTimestamp`** (consumer-level):
 //!   Pulsar sends `0` when the consumer has never acked or consumed
-//!   anything, not the Unix epoch. Epoch 0 is a real, very different
-//!   instant (1 January 1970) from "never recorded" — showing it verbatim
-//!   would make a consumer that never acknowledged anything look like it
-//!   last did so 56 years ago, which an operator reads as a real and
-//!   alarming timestamp rather than "nothing yet." Literal `0` is
-//!   normalized to `None`. **Not evidenced on the live broker**: none of
-//!   the user's topics has a connected consumer at capture time, so this
-//!   rests on Pulsar's documented convention (the same "0 means never"
-//!   default the equivalent subscription-level fields use) plus the
-//!   reasoning above, not on anything actually observed here.
-//!
-//! The third field, `oldestBacklogMessageAgeSeconds`, does **not** collapse
-//! to plain `None`: `-1` means "no backlog has ever existed," which is a
-//! determinate, healthy fact, not an absent value — collapsing it into the
-//! same `None` used for a genuinely withheld field would make "nothing to
-//! check here" indistinguishable from "we could not tell," which is exactly
-//! backwards for a module whose entire purpose is telling those two apart.
-//! It is mapped as [`BacklogAge`] instead, a three-state type (see its own
-//! doc). Evidenced directly: the live `fpms_topup` topic sends `-1` today
-//! (captured, unmodified, in the fixture).
+//!   anything, not the Unix epoch — and that "never" is itself a
+//!   determinate fact, not the same thing as the field being withheld. (Fix
+//!   round 1, task 11: an earlier version of this module normalized both
+//!   `0` and a genuinely absent field to the same `None`, which repeated
+//!   the exact mistake `BacklogAge` was built one task earlier to fix — for
+//!   a different field, one task later. "Definitely never acked" and "we
+//!   don't know" both printed as "Unknown" on screen, and paired with
+//!   `blocked_on_unacked_msgs`, "attached but has never acked" — exactly the
+//!   signal an operator wants from this pairing — was unreportable.) Mapped
+//!   as [`ConsumerTimestamp`] instead (see its own doc). **Not evidenced on
+//!   the live broker**: none of the user's topics has a connected consumer
+//!   at capture time, so this rests on Pulsar's documented "0 means never"
+//!   convention, not on anything actually observed here.
 //!
 //! A sweep of every other mapped field for a similar convention (a `-1`, a
 //! `Long.MAX_VALUE`, an empty-string-means-unset) found no further case
@@ -166,6 +174,33 @@ pub enum BacklogAge {
     Unknown,
 }
 
+/// A consumer's `lastAckedTimestamp`/`lastConsumedTimestamp`, as Pulsar's
+/// wire value actually distinguishes three cases a bare `Option<i64>`
+/// cannot: a real epoch-millisecond timestamp, Pulsar's own documented `0`
+/// sentinel ("this consumer has never acked/consumed" — a determinate fact,
+/// not a missing value), and genuine absence. (Fix round 1, task 11: an
+/// earlier version of this module normalized `0` and absence to the same
+/// `None`, repeating for this field the exact mistake `BacklogAge` exists to
+/// fix for `oldestBacklogMessageAgeSeconds` — see the module doc's "Sentinel
+/// values" section.) Mirrors `BacklogAge` field-for-field, including the
+/// wire shape (an internally-tagged `{"state": ...}` object), pinned by
+/// `consumer_timestamp_serialises_to_the_pinned_wire_shape` in
+/// `stats_tests.rs`. Mirrored in
+/// `packages/broker-contracts/src/topic-detail.ts` as `ConsumerTimestamp`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum ConsumerTimestamp {
+    /// A real timestamp, in the epoch milliseconds Pulsar sends on the wire.
+    Millis { millis: i64 },
+    /// Pulsar's `0`: the consumer has never acked (or consumed, for
+    /// `last_consumed_timestamp`). A determinate fact — there is nothing
+    /// here for an anomaly check to be unsure about — not the Unix epoch.
+    Never,
+    /// The field was absent. We do not know.
+    #[default]
+    Unknown,
+}
+
 /// The parsed subset of one entry in the `subscriptions` map of a topic's
 /// `stats` payload. `name` is not a field of the wire object itself — it is
 /// the map key the object was found under.
@@ -186,10 +221,12 @@ pub struct SubscriptionStats {
 
 /// The parsed subset of one entry in a subscription's `consumers` array.
 ///
-/// `Default` is derived (every field is `Option`, so `None` is a legitimate
-/// default) purely so `anomaly.rs`'s tests can build a `ConsumerStats` with
-/// `..Default::default()` and set only the field under test — production
-/// code always goes through `parse_topic_stats` and never relies on this.
+/// `Default` is derived — every `Option` field defaults to `None` and both
+/// `ConsumerTimestamp` fields default to `ConsumerTimestamp::Unknown` (its
+/// own derived default) — purely so `anomaly.rs`'s tests can build a
+/// `ConsumerStats` with `..Default::default()` and set only the field under
+/// test — production code always goes through `parse_topic_stats` and never
+/// relies on this.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConsumerStats {
@@ -198,8 +235,8 @@ pub struct ConsumerStats {
     pub client_version: Option<String>,
     pub available_permits: Option<i64>,
     pub unacked_messages: Option<u64>,
-    pub last_acked_timestamp: Option<i64>,
-    pub last_consumed_timestamp: Option<i64>,
+    pub last_acked_timestamp: ConsumerTimestamp,
+    pub last_consumed_timestamp: ConsumerTimestamp,
     pub msg_rate_out: Option<f64>,
     pub blocked_on_unacked_msgs: Option<bool>,
 }
@@ -243,8 +280,10 @@ pub fn parse_topic_stats(raw: &serde_json::Value) -> Result<TopicStats, BrokerEr
                         client_version: c.client_version,
                         available_permits: c.available_permits,
                         unacked_messages: c.unacked_messages,
-                        last_acked_timestamp: normalize_never_timestamp(c.last_acked_timestamp),
-                        last_consumed_timestamp: normalize_never_timestamp(c.last_consumed_timestamp),
+                        last_acked_timestamp: normalize_consumer_timestamp(c.last_acked_timestamp),
+                        last_consumed_timestamp: normalize_consumer_timestamp(
+                            c.last_consumed_timestamp,
+                        ),
                         msg_rate_out: c.msg_rate_out,
                         blocked_on_unacked_msgs: c.blocked_on_unacked_msgs,
                     })
@@ -296,15 +335,20 @@ fn normalize_sub_type(sub_type: Option<String>) -> Option<String> {
 }
 
 /// Pulsar sends `0` for `lastAckedTimestamp` / `lastConsumedTimestamp` when
-/// the consumer has never acked or consumed anything — not the Unix epoch.
-/// Shown verbatim, a consumer that has never acknowledged anything would
-/// appear to have last done so on 1 January 1970, which an operator reads
-/// as a real and alarming timestamp rather than "nothing yet." Normalized
-/// to `None` here. This cannot be observed on the live broker today (no
-/// topic has a connected consumer at capture time); it rests on Pulsar's
-/// documented "0 means never" convention, not on captured evidence.
-fn normalize_never_timestamp(ts: Option<i64>) -> Option<i64> {
-    ts.filter(|value| *value != 0)
+/// the consumer has never acked or consumed anything — not the Unix epoch,
+/// and (fix round 1, task 11) a determinate fact in its own right, not the
+/// same thing as the field being withheld. The two real inputs distinguished
+/// here are `None` (the key was absent — genuinely unknown) and `Some(0)`
+/// (Pulsar's own "never" sentinel); mirrors `normalize_backlog_age` above.
+/// This cannot be observed on the live broker today (no topic has a
+/// connected consumer at capture time); it rests on Pulsar's documented "0
+/// means never" convention, not on captured evidence.
+fn normalize_consumer_timestamp(ts: Option<i64>) -> ConsumerTimestamp {
+    match ts {
+        None => ConsumerTimestamp::Unknown,
+        Some(0) => ConsumerTimestamp::Never,
+        Some(millis) => ConsumerTimestamp::Millis { millis },
+    }
 }
 
 #[cfg(test)]

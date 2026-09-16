@@ -277,9 +277,11 @@ fn pulsars_none_subscription_type_sentinel_becomes_unknown_not_a_real_type() {
 /// convention (the same default its equivalent subscription-level fields
 /// use), not on anything captured here. A consumer that never acknowledged
 /// or consumed anything must not be shown as having last done so at the
-/// Unix epoch.
+/// Unix epoch — and (fix round 1, task 11) must read as a determinate
+/// "never," not the same "Unknown" a withheld field gets; see the test
+/// immediately below for that distinction proven directly.
 #[test]
-fn pulsars_zero_timestamp_sentinel_becomes_unknown_not_the_unix_epoch() {
+fn pulsars_zero_timestamp_sentinel_becomes_never_not_the_unix_epoch() {
     let mut raw = real_fixture();
     raw["subscriptions"]["rg_deposit_accumulate_LOCAL"]["consumers"] = serde_json::json!([{
         "consumerName": "probe",
@@ -292,6 +294,72 @@ fn pulsars_zero_timestamp_sentinel_becomes_unknown_not_the_unix_epoch() {
         .iter()
         .find(|s| s.name == "rg_deposit_accumulate_LOCAL")
         .unwrap();
-    assert_eq!(sub.consumers.as_ref().unwrap()[0].last_acked_timestamp, None);
-    assert_eq!(sub.consumers.as_ref().unwrap()[0].last_consumed_timestamp, None);
+    assert_eq!(sub.consumers.as_ref().unwrap()[0].last_acked_timestamp, ConsumerTimestamp::Never);
+    assert_eq!(
+        sub.consumers.as_ref().unwrap()[0].last_consumed_timestamp,
+        ConsumerTimestamp::Never
+    );
+}
+
+/// Fix round 1, task 11: this is the identical defect fixed for
+/// `oldestBacklogMessageAgeSeconds` one task earlier, applied here. An
+/// earlier version of `normalize_never_timestamp` collapsed Pulsar's `0`
+/// ("never acked/consumed" — determinate) and a genuinely withheld field
+/// (unknown) into the same `None`, so both printed as "Unknown" and
+/// "attached but has never acked" — exactly the signal an operator wants
+/// paired with `blocked_on_unacked_msgs` — was unreportable. This proves all
+/// three wire inputs land on three different, correct results in one place:
+/// absent, `0`, and a real timestamp must not collapse pairwise either.
+#[test]
+fn a_withheld_timestamp_a_never_acked_timestamp_and_a_real_timestamp_are_all_distinct() {
+    let mut raw = real_fixture();
+    raw["subscriptions"]["rg_deposit_accumulate_LOCAL"]["consumers"] = serde_json::json!([
+        { "consumerName": "withheld" },
+        { "consumerName": "never-acked", "lastAckedTimestamp": 0, "lastConsumedTimestamp": 0 },
+        {
+            "consumerName": "real-timestamp",
+            "lastAckedTimestamp": 1_700_000_000_000i64,
+            "lastConsumedTimestamp": 1_700_000_000_000i64
+        },
+    ]);
+    let stats = parse_topic_stats(&raw).expect("parses");
+    let consumers = stats
+        .subscriptions
+        .iter()
+        .find(|s| s.name == "rg_deposit_accumulate_LOCAL")
+        .unwrap()
+        .consumers
+        .as_ref()
+        .unwrap();
+
+    let by_name = |name: &str| {
+        consumers.iter().find(|c| c.consumer_name.as_deref() == Some(name)).unwrap()
+    };
+
+    assert_eq!(by_name("withheld").last_acked_timestamp, ConsumerTimestamp::Unknown);
+    assert_eq!(by_name("never-acked").last_acked_timestamp, ConsumerTimestamp::Never);
+    assert_eq!(
+        by_name("real-timestamp").last_acked_timestamp,
+        ConsumerTimestamp::Millis { millis: 1_700_000_000_000 }
+    );
+}
+
+#[test]
+fn consumer_timestamp_serialises_to_the_pinned_wire_shape() {
+    // packages/broker-contracts/src/topic-detail.ts mirrors this three-state
+    // discriminated union; a rename on either side breaks the other
+    // silently, so pin the wire shape here, the way `BacklogAge` is pinned
+    // above and `BrokerSource` is pinned in envelope.rs.
+    assert_eq!(
+        serde_json::to_value(ConsumerTimestamp::Millis { millis: 1_700_000_000_000 }).unwrap(),
+        serde_json::json!({"state": "millis", "millis": 1_700_000_000_000i64})
+    );
+    assert_eq!(
+        serde_json::to_value(ConsumerTimestamp::Never).unwrap(),
+        serde_json::json!({"state": "never"})
+    );
+    assert_eq!(
+        serde_json::to_value(ConsumerTimestamp::Unknown).unwrap(),
+        serde_json::json!({"state": "unknown"})
+    );
 }

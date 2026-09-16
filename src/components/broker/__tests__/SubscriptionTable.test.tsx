@@ -17,8 +17,8 @@ const withConsumer: SubscriptionStats = {
       clientVersion: "Pulsar-Java-v4.2.4",
       availablePermits: 995,
       unackedMessages: 0,
-      lastAckedTimestamp: null,
-      lastConsumedTimestamp: null,
+      lastAckedTimestamp: { state: "unknown" },
+      lastConsumedTimestamp: { state: "unknown" },
       msgRateOut: 12.5,
       blockedOnUnackedMsgs: false,
     },
@@ -139,5 +139,58 @@ describe("SubscriptionTable", () => {
 
     await user.click(screen.getByRole("button", { name: /expand anti_addiction_deposit_limit_fpmsnt/i }));
     expect(screen.getByText(/no consumers attached/i)).toBeInTheDocument();
+  });
+
+  // --- Fix round 1 -----------------------------------------------------
+
+  it("keeps the delivery notice visible after expanding into the consumer view", async () => {
+    // Only the collapsed-state notice was ever asserted before — a refactor
+    // could drop ConsumerTable's own notice from the populated branch and
+    // nothing would fail. msgRateOut is a column in the expanded consumer
+    // table too, so the notice must still be reachable once expanded.
+    const user = userEvent.setup();
+    setup();
+    await user.click(screen.getByRole("button", { name: /expand rg_deposit_accumulate_LOCAL/i }));
+    const notes = screen.getAllByRole("note");
+    expect(notes.length).toBeGreaterThan(1);
+    expect(notes.some((n) => (n.textContent ?? "").match(/deliver/i))).toBe(true);
+  });
+
+  it("renders a withheld, a never-acked, and a real last-acked timestamp as three different things", async () => {
+    // This is the identical defect fixed for oldestBacklogMessageAgeSeconds
+    // one task earlier, applied to lastAckedTimestamp: "we don't know" and
+    // "definitely never acked" must not collapse into the same word.
+    const user = userEvent.setup();
+    const threeStates: SubscriptionStats = {
+      ...withConsumer,
+      consumers: [
+        {
+          ...withConsumer.consumers![0],
+          consumerName: "withheld",
+          lastAckedTimestamp: { state: "unknown" },
+        },
+        {
+          ...withConsumer.consumers![0],
+          consumerName: "never-acked",
+          lastAckedTimestamp: { state: "never" },
+        },
+        {
+          ...withConsumer.consumers![0],
+          consumerName: "real-timestamp",
+          // 2023-11-14T22:13:20.000Z — any locale's rendering of this epoch
+          // millisecond value falls in 2023 regardless of timezone offset.
+          lastAckedTimestamp: { state: "millis", millis: 1_700_000_000_000 },
+        },
+      ],
+    };
+    render(<SubscriptionTable subscriptions={[threeStates]} state="ready" onRefresh={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: /expand/i }));
+
+    expect(screen.getByText("withheld")).toBeInTheDocument();
+    expect(screen.getByText("never-acked")).toBeInTheDocument();
+    expect(screen.getByText("real-timestamp")).toBeInTheDocument();
+    expect(screen.getAllByText(/^unknown$/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/^never$/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/2023/).length).toBeGreaterThan(0);
   });
 });

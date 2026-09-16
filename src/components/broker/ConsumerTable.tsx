@@ -17,7 +17,7 @@
 import type { ConsumerStats } from "@penguin/broker-contracts";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { DeliveryNotice } from "./DeliveryNotice";
-import { formatBlocked, formatNumber, formatText, formatTimestamp } from "./broker-value";
+import { formatBlocked, formatConsumerTimestamp, formatNumber, formatText } from "./broker-value";
 
 export interface ConsumerTableProps {
   consumers: ConsumerStats[] | null;
@@ -80,13 +80,13 @@ export function ConsumerTable({ consumers }: ConsumerTableProps) {
       key: "lastAckedTimestamp",
       header: "Last acked",
       width: 160,
-      render: (c) => formatTimestamp(c.lastAckedTimestamp),
+      render: (c) => formatConsumerTimestamp(c.lastAckedTimestamp),
     },
     {
       key: "lastConsumedTimestamp",
       header: "Last consumed",
       width: 160,
-      render: (c) => formatTimestamp(c.lastConsumedTimestamp),
+      render: (c) => formatConsumerTimestamp(c.lastConsumedTimestamp),
     },
     {
       key: "blockedOnUnackedMsgs",
@@ -112,7 +112,12 @@ export function ConsumerTable({ consumers }: ConsumerTableProps) {
         // No stable id on ConsumerStats — address is the closest thing to
         // one in practice (a Pulsar client connection's socket address),
         // with consumerName as a fallback for the rare payload missing it.
-        rowKey={(c) => c.address ?? c.consumerName ?? JSON.stringify(c)}
+        // Fix round 1 (task 11): the last resort used to be
+        // `JSON.stringify(c)`, which can collide — two consumers with both
+        // identity fields null and every other field equal produce the same
+        // key. `consumers.indexOf(c)` is honest about being positional
+        // instead of manufacturing an identity the data doesn't have.
+        rowKey={(c) => c.address ?? c.consumerName ?? `consumer-${consumers.indexOf(c)}`}
         state="ready"
         // This list is already the full, in-memory `consumers` array handed
         // down from the parent subscription — there is nothing further to
