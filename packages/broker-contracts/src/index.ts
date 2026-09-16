@@ -5,3 +5,4 @@ export * from "./capability.js";
 export * from "./topic.js";
 export * from "./topology.js";
 export * from "./anomaly.js";
+export * from "./topic-detail.js";

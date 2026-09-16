@@ -67,12 +67,22 @@
 //! anywhere below, at the top level or inside each cursor object.
 
 use crate::broker::envelope::{BrokerError, BrokerErrorCode};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::BTreeMap;
 
 /// A parsed Pulsar `"ledgerId:entryId"` position. See the module doc for why
 /// `entry_id: -1` is preserved rather than normalized to `None`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `Serialize` is derived plainly (a `{"ledgerId": ..., "entryId": ...}`
+/// object), NOT the reverse of the custom `Deserialize` below — Task 8 is
+/// the first caller to put this on the wire (`TopicDetailDto.internal` in
+/// `broker::commands::topic_detail`) and there is no existing wire
+/// convention to match: re-encoding back to Pulsar's `"ledgerId:entryId"`
+/// string would just hand the frontend the same parsing job this module
+/// exists to do once, here. Mirrors `Position` in
+/// `packages/broker-contracts/src/topic-detail.ts`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Position {
     pub ledger_id: i64,
     pub entry_id: i64,
@@ -103,8 +113,12 @@ impl<'de> Deserialize<'de> for Position {
     }
 }
 
-/// The parsed subset of a Pulsar topic's `internalStats` payload.
-#[derive(Debug, Clone, PartialEq)]
+/// The parsed subset of a Pulsar topic's `internalStats` payload. `Serialize`
+/// (Task 8) mirrors `InternalStats` in
+/// `packages/broker-contracts/src/topic-detail.ts` field-for-field,
+/// camelCase on the wire.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct InternalStats {
     pub entries_added_counter: Option<u64>,
     pub number_of_entries: Option<u64>,
@@ -115,7 +129,8 @@ pub struct InternalStats {
 /// The parsed subset of one entry in the `cursors` map of an
 /// `internalStats` payload. `subscription` is not a field of the wire
 /// object itself — it is the map key the object was found under.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CursorPosition {
     pub subscription: String,
     pub mark_delete_position: Position,

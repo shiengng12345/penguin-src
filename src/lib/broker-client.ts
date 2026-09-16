@@ -17,10 +17,12 @@ import type {
   BrokerConnectionDraft,
   CapabilitySnapshot,
   NamespaceSummary,
+  OverviewReport,
   Page,
   PageQuery,
   ResultEnvelope,
   TenantSummary,
+  TopicDetail,
   TopicSummary,
 } from "@penguin/broker-contracts";
 
@@ -94,4 +96,27 @@ export function listNamespaces(
   refresh = false,
 ): Promise<ResultEnvelope<NamespaceSummary[]>> {
   return invoke("broker_list_namespaces", { connectionId, tenant, refresh });
+}
+
+/** Never reads or writes the snapshot cache — `stats`/`internalStats` are
+ *  the live numbers read during triage, not something a connection
+ *  refresh/cache TTL should ever apply to. There is no `refresh` parameter
+ *  here for that reason: every call is already live. */
+export function getTopicDetail(
+  connectionId: string,
+  tenant: string,
+  namespace: string,
+  topic: string,
+  persistent: boolean,
+): Promise<ResultEnvelope<TopicDetail>> {
+  return invoke("broker_get_topic_detail", { connectionId, tenant, namespace, topic, persistent });
+}
+
+/** The topic *list* behind this may be served from the cache (it is
+ *  structural, same as `listTopics`); every per-topic stats read used to
+ *  derive `anomalies`/`indeterminate` is always live. `topicsSampled` /
+ *  `topicsTotal` / `truncated` tell the caller whether this covers the
+ *  whole namespace or only its first `topicsSampled` topics. */
+export function getOverview(connectionId: string): Promise<ResultEnvelope<OverviewReport>> {
+  return invoke("broker_get_overview", { connectionId });
 }

@@ -334,6 +334,8 @@ pub fn run() {
             broker::commands::broker_list_topics,
             broker::commands::broker_list_tenants,
             broker::commands::broker_list_namespaces,
+            broker::commands::broker_get_topic_detail,
+            broker::commands::broker_get_overview,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

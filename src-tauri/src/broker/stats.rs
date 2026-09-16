@@ -121,7 +121,15 @@ use crate::broker::stats_wire::RawTopicStats;
 use serde::{Deserialize, Serialize};
 
 /// The parsed subset of a Pulsar topic's `stats` payload.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `Serialize` (Task 8) is additive: every other consumer of this type
+/// (`anomaly.rs`, this module's own tests) only ever builds or matches on
+/// it in-process. Task 8 is the first to put it on the wire —
+/// `TopicDetailDto.stats` in `broker::commands::topic_detail` — so this is
+/// where the derive was added, `rename_all = "camelCase"` to match the
+/// mirror in `packages/broker-contracts/src/topic-detail.ts`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TopicStats {
     pub msg_rate_in: Option<f64>,
     pub msg_rate_out: Option<f64>,
@@ -161,7 +169,8 @@ pub enum BacklogAge {
 /// The parsed subset of one entry in the `subscriptions` map of a topic's
 /// `stats` payload. `name` is not a field of the wire object itself — it is
 /// the map key the object was found under.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SubscriptionStats {
     pub name: String,
     pub msg_backlog: Option<u64>,
@@ -181,7 +190,8 @@ pub struct SubscriptionStats {
 /// default) purely so `anomaly.rs`'s tests can build a `ConsumerStats` with
 /// `..Default::default()` and set only the field under test — production
 /// code always goes through `parse_topic_stats` and never relies on this.
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConsumerStats {
     pub consumer_name: Option<String>,
     pub address: Option<String>,

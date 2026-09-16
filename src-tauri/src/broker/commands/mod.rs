@@ -35,6 +35,7 @@
 mod cache_read;
 mod connection;
 mod topic;
+mod topic_detail;
 mod topology;
 
 // Glob re-exports, deliberately: `#[tauri::command]` generates a hidden
@@ -49,6 +50,7 @@ mod topology;
 // gave lib.rs for free before this split.
 pub use connection::*;
 pub use topic::*;
+pub use topic_detail::*;
 pub use topology::*;
 
 use crate::broker::store::{self, ConnectionRow};
