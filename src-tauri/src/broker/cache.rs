@@ -42,13 +42,19 @@ impl CacheScope {
 
 /// How old a cached entry is relative to its scope's TTL.
 ///
-/// `Stale` still carries its data to the caller: the UI renders stale rows
-/// AND a notice, because hiding data an operator can still reason about is
-/// worse than marking it.
+/// `Stale` and `Skewed` still carry their data to the caller: the UI renders
+/// the rows AND a notice, because hiding data an operator can still reason
+/// about is worse than marking it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Freshness {
     Fresh { age_ms: u64 },
     Stale { age_ms: u64 },
+    /// The row is stamped ahead of this machine's clock, so its age cannot be
+    /// computed at all. This is deliberately NOT folded into `Fresh { age_ms: 0 }`:
+    /// that would hand the operator the most reassuring answer available at the
+    /// exact moment the data is least trustworthy, and it would erase the only
+    /// evidence that a clock somewhere is wrong. `ahead_ms` is how far ahead.
+    Skewed { ahead_ms: u64 },
     Absent,
 }
 
@@ -56,8 +62,15 @@ pub fn assess(scope: CacheScope, observed_at_ms: Option<i64>, now_ms: i64) -> Fr
     let Some(observed) = observed_at_ms else {
         return Freshness::Absent;
     };
-    // Clamp at zero: a row written by a clock ahead of ours must not
-    // underflow into an enormous age.
+    // A row stamped ahead of us has no computable age. Report the skew
+    // instead of inventing an age for it. (`saturating_sub` is not what
+    // protects this path — at epoch-millisecond magnitudes it is plain
+    // subtraction; the explicit `observed > now_ms` branch below is. It stays
+    // only to keep a pathological stored value from wrapping.)
+    if observed > now_ms {
+        let ahead_ms = observed.saturating_sub(now_ms).max(0) as u64;
+        return Freshness::Skewed { ahead_ms };
+    }
     let age_ms = now_ms.saturating_sub(observed).max(0) as u64;
     if age_ms <= scope.ttl().as_millis() as u64 {
         Freshness::Fresh { age_ms }
@@ -114,12 +127,35 @@ mod tests {
     }
 
     #[test]
-    fn a_timestamp_in_the_future_is_treated_as_fresh_with_zero_age() {
-        // Clock skew between the app and whatever wrote the row must not
-        // produce a negative age or an underflow.
+    fn a_timestamp_ahead_of_our_clock_is_reported_as_skew_not_as_fresh() {
+        // A row stamped in the future means some clock is wrong, and the age
+        // of that row is therefore unknowable. Reporting it as `Fresh` with a
+        // zero age would hand the operator the single most reassuring answer
+        // available at the exact moment the data is least trustworthy.
         let observed = NOW + 5_000;
         assert_eq!(
             assess(CacheScope::Topics, Some(observed), NOW),
+            Freshness::Skewed { ahead_ms: 5_000 }
+        );
+    }
+
+    #[test]
+    fn skew_is_reported_for_every_scope_because_it_is_a_clock_fault_not_a_ttl_one() {
+        // The TTL is irrelevant when the timestamp itself cannot be trusted,
+        // so a long-TTL scope must not absorb skew into `Fresh`.
+        let observed = NOW + 5_000;
+        assert_eq!(
+            assess(CacheScope::Tenants, Some(observed), NOW),
+            Freshness::Skewed { ahead_ms: 5_000 }
+        );
+    }
+
+    #[test]
+    fn an_identical_timestamp_is_fresh_not_skewed() {
+        // The skew boundary is strictly-ahead. A row written in the same
+        // millisecond is ordinary, and must not be flagged.
+        assert_eq!(
+            assess(CacheScope::Topics, Some(NOW), NOW),
             Freshness::Fresh { age_ms: 0 }
         );
     }
