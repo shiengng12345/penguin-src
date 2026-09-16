@@ -48,4 +48,22 @@ describe("ConnectionTable", () => {
     render(<ConnectionTable connections={[]} activeId={null} state="empty" {...handlers} />);
     expect(screen.getByRole("status")).toHaveTextContent(/no/i);
   });
+
+  it("shows the admin URL, with a title so the full value is available on hover", () => {
+    // The admin URL previously wasn't rendered at all — it must now appear,
+    // and carry a title (jsdom has no layout engine, so "does this actually
+    // get visually truncated at some width" isn't assertable; the title
+    // attribute that recovers the full value on hover is).
+    render(<ConnectionTable connections={[base]} activeId={null} state="ready" {...handlers} />);
+    expect(screen.getByTitle(base.adminUrl)).toHaveTextContent(base.adminUrl);
+  });
+
+  it("marks the admin URL column to grow, so it fills the width the narrower status/version columns don't need", () => {
+    render(<ConnectionTable connections={[base]} activeId={null} state="ready" {...handlers} />);
+    const header = screen.getByRole("columnheader", { name: /admin url/i });
+    expect(header.parentElement).toHaveAttribute("data-grow", "true");
+
+    const statusHeader = screen.getByRole("columnheader", { name: /^status/i });
+    expect(statusHeader.parentElement).not.toHaveAttribute("data-grow", "true");
+  });
 });

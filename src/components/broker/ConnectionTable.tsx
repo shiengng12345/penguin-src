@@ -52,12 +52,25 @@ export function ConnectionTable({
   onSetActive,
 }: ConnectionTableProps) {
   const columns: DataTableColumn<BrokerConnection>[] = [
-    { key: "name", header: "Name", render: (c) => c.name },
-    { key: "status", header: "Status", render: (c) => STATUS_LABELS[c.lastStatus] },
-    { key: "version", header: "Version", render: (c) => c.brokerVersion ?? "Not measured" },
+    { key: "name", header: "Name", width: 160, render: (c) => c.name },
+    {
+      key: "adminUrl",
+      header: "Admin URL",
+      // The other identifier worth reading in full: admin URLs can run long
+      // (host + port, sometimes a path), and this column previously wasn't
+      // shown at all. `grow` gives it the space the narrower status/version
+      // columns don't need instead of leaving it dead; `title` covers the
+      // narrow-window case where it still gets truncated.
+      width: 260,
+      grow: true,
+      render: (c) => <span title={c.adminUrl}>{c.adminUrl}</span>,
+    },
+    { key: "status", header: "Status", width: 110, render: (c) => STATUS_LABELS[c.lastStatus] },
+    { key: "version", header: "Version", width: 110, render: (c) => c.brokerVersion ?? "Not measured" },
     {
       key: "access",
       header: "Access",
+      width: 130,
       render: (c) =>
         c.readOnly ? (
           <Badge variant="secondary">Read-only</Badge>

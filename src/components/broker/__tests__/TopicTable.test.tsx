@@ -50,4 +50,40 @@ describe("TopicTable", () => {
     render(<TopicTable {...props} topics={[]} total={0} state="empty" noActiveConnection />);
     expect(screen.getByRole("status")).toHaveTextContent(/connection/i);
   });
+
+  it("gives the topic name cell a title, so the full name is available on hover if truncated", () => {
+    // A long, real Pulsar-shaped name (42 chars) — CSS truncation itself
+    // isn't assertable in jsdom (no layout engine), but the title attribute
+    // that recovers the full value on hover is.
+    const longName = "LOCAL.BP.PAYMENT.PAYMENTACCOUNT.CHECKED.V1";
+    const longTopics: TopicSummary[] = [
+      {
+        fullName: `persistent://public/default/${longName}`,
+        shortName: longName,
+        tenant: "public",
+        namespace: "default",
+        persistent: true,
+        partitions: 0,
+        partitionNames: [],
+      },
+    ];
+    render(<TopicTable {...props} topics={longTopics} total={1} />);
+    expect(screen.getByTitle(longName)).toHaveTextContent(longName);
+  });
+
+  it("gives the topic name column enough width to fit a realistic 42-char topic name, and marks it to grow", () => {
+    render(<TopicTable {...props} />);
+    const header = screen.getByRole("columnheader", { name: /^topic/i });
+    // The `role="columnheader"` div renders directly inside ResizableColumn's
+    // own wrapper div, which is the element actually carrying the
+    // width/grow styling (see resizable-column.tsx) — one level up.
+    const resizableWrapper = header.parentElement;
+    expect(resizableWrapper).toHaveAttribute("data-grow", "true");
+    expect(resizableWrapper).toHaveStyle({ minWidth: "420px" });
+
+    // A narrow, low-information column must not claim the same share.
+    const namespaceHeader = screen.getByRole("columnheader", { name: /namespace/i });
+    expect(namespaceHeader.parentElement).not.toHaveAttribute("data-grow", "true");
+    expect(namespaceHeader.parentElement).toHaveStyle({ width: "180px" });
+  });
 });

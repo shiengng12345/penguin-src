@@ -54,21 +54,38 @@ export function TopicTable({
   }
 
   const columns: DataTableColumn<TopicSummary>[] = [
-    { key: "shortName", header: "Topic", render: (t) => t.shortName, sortable: true },
+    {
+      key: "shortName",
+      header: "Topic",
+      // The primary identifier: real Pulsar topic names in this namespace
+      // run well past 40 characters (e.g.
+      // `LOCAL.BP.PAYMENT.PAYMENTACCOUNT.CHECKED.V1`, 42 chars), and two
+      // topics that only differ near the end must stay distinguishable
+      // without opening the row. `grow` lets it take whatever row width the
+      // narrower columns below don't need; `width` is only its floor, and a
+      // `title` covers the rare case a narrow window still truncates it.
+      width: 420,
+      grow: true,
+      render: (t) => <span title={t.shortName}>{t.shortName}</span>,
+      sortable: true,
+    },
     {
       key: "namespace",
       header: "Namespace",
+      width: 180,
       render: (t) => `${t.tenant}/${t.namespace}`,
       sortable: true,
     },
     {
       key: "persistent",
       header: "Type",
+      width: 120,
       render: (t) => (t.persistent ? "Persistent" : "Non-persistent"),
     },
     {
       key: "partitions",
       header: "Partitions",
+      width: 100,
       render: (t) => (t.partitions > 0 ? String(t.partitions) : "—"),
       sortable: true,
     },

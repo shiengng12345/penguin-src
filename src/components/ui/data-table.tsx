@@ -44,20 +44,23 @@
 // they're reachable by scrolling once the container has a real size.
 import { useEffect, useMemo, useRef, useState, useCallback, type HTMLAttributes, type ReactNode } from "react";
 import { useVirtualizer, observeElementRect, type Rect } from "@tanstack/react-virtual";
-import { ResizableColumn } from "./resizable-column";
 import { DataTableStatusRegion } from "./data-table-status";
 import { DataTablePagination } from "./data-table-pagination";
-import type { DataTableState } from "./data-table-types";
-import { mergeRowProps } from "./data-table-row-props";
-import { cn } from "@/lib/utils";
+import { DataRow, ColumnHeaderCell } from "./data-table-cells";
+import {
+  DEFAULT_COLUMN_WIDTH,
+  MIN_COLUMN_WIDTH,
+  MAX_COLUMN_WIDTH,
+  EXPAND_COLUMN_WIDTH,
+  type DataTableState,
+  type DataTableColumn,
+} from "./data-table-types";
 
-export interface DataTableColumn<T> {
-  key: string;
-  header: string;
-  width?: number;
-  render: (row: T) => ReactNode;
-  sortable?: boolean;
-}
+// Re-exported for existing consumers (`TopicTable`, `ConnectionTable`, tests)
+// that import the column type from this module — the type itself now lives
+// in data-table-types.ts alongside the sizing constants above, so
+// data-table-cells.tsx can use it without importing from here.
+export type { DataTableColumn };
 
 export interface DataTableProps<T> {
   columns: DataTableColumn<T>[];
@@ -85,10 +88,6 @@ export interface DataTableProps<T> {
   expandLabel?: (row: T) => string;
 }
 
-const DEFAULT_COLUMN_WIDTH = 160;
-const MIN_COLUMN_WIDTH = 72;
-const MAX_COLUMN_WIDTH = 640;
-const EXPAND_COLUMN_WIDTH = 32;
 const ROW_HEIGHT_ESTIMATE = 44;
 const EXPANSION_HEIGHT_ESTIMATE = 96;
 const VIEWPORT_HEIGHT = 420;
@@ -216,6 +215,8 @@ export function DataTable<T>(props: DataTableProps<T>) {
                   onWidthChange={handleWidthChange}
                   sortDir={sortState?.key === column.key ? sortState.dir : undefined}
                   onSort={column.sortable ? () => handleSort(column) : undefined}
+                  minWidth={MIN_COLUMN_WIDTH}
+                  maxWidth={MAX_COLUMN_WIDTH}
                 />
               ))}
             </div>
@@ -250,6 +251,7 @@ export function DataTable<T>(props: DataTableProps<T>) {
                           onToggleExpand={toggleExpand}
                           rowProps={rowProps?.(entry.row)}
                           expandLabel={expandLabel?.(entry.row)}
+                          expandColumnWidth={EXPAND_COLUMN_WIDTH}
                         />
                       ) : (
                         <div
@@ -269,129 +271,6 @@ export function DataTable<T>(props: DataTableProps<T>) {
           <DataTablePagination offset={offset} limit={limit} total={total} onPageChange={onPageChange} />
         </>
       )}
-    </div>
-  );
-}
-
-function DataRow<T>({
-  row,
-  columns,
-  columnWidths,
-  rowKeyValue,
-  expandable,
-  expanded,
-  onToggleExpand,
-  rowProps,
-  expandLabel,
-}: {
-  row: T;
-  columns: DataTableColumn<T>[];
-  columnWidths: Record<string, number>;
-  rowKeyValue: string;
-  expandable: boolean;
-  expanded: boolean;
-  onToggleExpand: (key: string) => void;
-  rowProps?: HTMLAttributes<HTMLDivElement>;
-  expandLabel?: string;
-}) {
-  // See data-table-row-props.ts for the merge policy: the caller can
-  // decorate this row (aria-current, aria-expanded, data-*, ...) but the
-  // row's own role/className/style are never simply overwritten.
-  const rowAttrs = mergeRowProps<HTMLDivElement>(
-    { role: "row", className: "flex items-stretch border-b border-border text-sm" },
-    rowProps,
-  );
-  return (
-    <div {...rowAttrs}>
-      {expandable && (
-        <div style={{ width: EXPAND_COLUMN_WIDTH }} className="flex shrink-0 items-center justify-center">
-          <button
-            type="button"
-            aria-label={
-              expandLabel
-                ? `${expanded ? "Collapse" : "Expand"} ${expandLabel}`
-                : expanded
-                ? "Collapse row"
-                : "Expand row"
-            }
-            onClick={() => onToggleExpand(rowKeyValue)}
-            className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-accent-foreground"
-          >
-            <span aria-hidden="true">{expanded ? "▾" : "▸"}</span>
-          </button>
-        </div>
-      )}
-      {columns.map((column) => (
-        <div
-          key={column.key}
-          role="cell"
-          style={{ width: columnWidths[column.key] ?? column.width ?? DEFAULT_COLUMN_WIDTH }}
-          className="flex shrink-0 items-center truncate px-2 py-2"
-        >
-          {column.render(row)}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function ColumnHeaderCell<T>({
-  column,
-  width,
-  onWidthChange,
-  sortDir,
-  onSort,
-}: {
-  column: DataTableColumn<T>;
-  width: number;
-  onWidthChange: (key: string, width: number) => void;
-  sortDir: "asc" | "desc" | undefined;
-  onSort: (() => void) | undefined;
-}) {
-  // Measures the rendered (resizable) cell so body columns can mirror its
-  // width. ResizableColumn owns the drag logic and its own width state; this
-  // is the one piece of glue needed to keep header and body columns aligned
-  // without duplicating that logic.
-  const measureRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    const el = measureRef.current;
-    if (!el || typeof ResizeObserver === "undefined") return undefined;
-    const observer = new ResizeObserver((observerEntries) => {
-      const observedWidth = observerEntries[0]?.contentRect.width;
-      if (observedWidth && Math.round(observedWidth) !== width) {
-        onWidthChange(column.key, Math.round(observedWidth));
-      }
-    });
-    observer.observe(el);
-    return () => observer.disconnect();
-  }, [column.key, width, onWidthChange]);
-
-  return (
-    <div ref={measureRef} className="inline-block shrink-0 align-top">
-      <ResizableColumn
-        defaultWidth={width}
-        minWidth={MIN_COLUMN_WIDTH}
-        maxWidth={MAX_COLUMN_WIDTH}
-        className="border-r border-border"
-      >
-        <div
-          role="columnheader"
-          aria-sort={sortDir ? (sortDir === "asc" ? "ascending" : "descending") : undefined}
-          className={cn("flex items-center gap-1 whitespace-nowrap px-2 py-2")}
-        >
-          <span>{column.header}</span>
-          {onSort && (
-            <button
-              type="button"
-              aria-label={`Sort by ${column.header}`}
-              onClick={onSort}
-              className="text-xs text-muted-foreground hover:text-foreground"
-            >
-              <span aria-hidden="true">{sortDir === "asc" ? "▲" : sortDir === "desc" ? "▼" : "↕"}</span>
-            </button>
-          )}
-        </div>
-      </ResizableColumn>
     </div>
   );
 }

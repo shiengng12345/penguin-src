@@ -191,4 +191,34 @@ describe("DataTable behaviour", () => {
     const ordersRow = rows.find((row) => row.textContent?.includes("orders"));
     expect(ordersRow).not.toHaveAttribute("aria-current");
   });
+
+  it("lets a column grow to fill the row's leftover width instead of sitting at a fixed width", () => {
+    // Whether the table visually fills its container isn't assertable in
+    // jsdom (no layout engine) — but the mechanism that makes it do so in a
+    // real browser (flex-grow instead of a fixed shrink-0 pixel width) is:
+    // both the resizable header wrapper and the body cell carry it.
+    const growColumns: DataTableColumn<Row>[] = [
+      { key: "name", header: "Name", width: 240, grow: true, render: (r) => r.name },
+      { key: "partitions", header: "Partitions", width: 90, render: (r) => String(r.partitions) },
+    ];
+    render(
+      <DataTable
+        columns={growColumns} rows={rows} total={2} offset={0} limit={25}
+        rowKey={(r) => r.id} state="ready" onPageChange={vi.fn()}
+      />,
+    );
+
+    const nameHeader = screen.getByRole("columnheader", { name: /name/i });
+    expect(nameHeader.parentElement).toHaveAttribute("data-grow", "true");
+    expect(nameHeader.parentElement).toHaveStyle({ minWidth: "240px" });
+
+    const partitionsHeader = screen.getByRole("columnheader", { name: /partitions/i });
+    expect(partitionsHeader.parentElement).not.toHaveAttribute("data-grow", "true");
+    expect(partitionsHeader.parentElement).toHaveStyle({ width: "90px" });
+
+    // The body cell for the grow column must carry the same signal, since
+    // it (not the header) is what actually needs to fill the row visually.
+    const nameCell = screen.getAllByRole("cell")[0];
+    expect(nameCell).toHaveAttribute("data-grow", "true");
+  });
 });

@@ -25,6 +25,12 @@ interface ResizableColumnProps {
   // background / opacity). The width / shrink-0 / relative are owned
   // by this component.
   className?: string;
+  // When true, the column does not sit at a hard pixel width: it grows to
+  // fill whatever space its flex row has left over (`flex-grow`), using
+  // `width` only as its minimum / drag-resize floor. Still fully
+  // resizable — dragging raises or lowers that floor exactly as it would
+  // for a fixed column. At most one column in a row should set this.
+  grow?: boolean;
 }
 
 function clampWidth(value: number, min: number, max: number): number {
@@ -53,6 +59,7 @@ export function ResizableColumn({
   maxWidth,
   persistKey,
   className,
+  grow,
 }: ResizableColumnProps) {
   // Lazy initial — read app_kv exactly once.
   const [width, setWidth] = useState<number>(() =>
@@ -116,8 +123,9 @@ export function ResizableColumn({
   return (
     <div
       ref={containerRef}
-      style={{ width: `${width}px` }}
-      className={cn("relative shrink-0", className)}
+      data-grow={grow ? "true" : undefined}
+      style={grow ? { minWidth: `${width}px`, flex: "1 1 auto" } : { width: `${width}px` }}
+      className={cn("relative", grow ? "flex-1" : "shrink-0", className)}
     >
       {children}
       {/* Drag handle — 3px visible strip on the right edge, with a
