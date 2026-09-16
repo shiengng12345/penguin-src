@@ -332,76 +332,72 @@ pub async fn list_topics_through_cache(
     let observed_at = snapshot.as_ref().map(|(_, ts)| *ts);
     let freshness = cache::assess(scope, observed_at, now);
 
-    match freshness {
+    // The three cached-data variants (`Fresh`/`Stale`/`Skewed`) differ from
+    // each other in exactly one respect — how a *successful* parse of the
+    // payload is presented (the freshness to report, and what to warn
+    // about) — and are identical in how a *corrupt* payload is recovered
+    // from. Reducing each to (payload, freshness_ms, warnings) here, once,
+    // is what lets the recovery path below be written once instead of
+    // three times. `Absent` has no cached data at all, so it reduces to
+    // `None` and is handled entirely separately below (it goes straight to
+    // the broker; there is no payload to parse in the first place). The
+    // match stays exhaustive and every variant stays named — the point of
+    // `Skewed` existing as its own variant is that a human decided what it
+    // shows (`freshness_ms: 0`, a warning naming the skew, never a
+    // fabricated age), and that decision has to stay visible here, not get
+    // absorbed into a generic branch.
+    let cached: Option<(String, u64, Vec<String>)> = match freshness {
         Freshness::Fresh { age_ms } => {
             let (payload, _) = snapshot.expect("Fresh implies a snapshot was read");
-            match parse_topic_page(&payload, query) {
-                Ok(page) => Ok(cache_envelope(page, age_ms, Vec::new())),
-                Err(parse_error) => {
-                    // Best-effort delete (Item 1, fix round 2): if it fails
-                    // (e.g. a transient SQLite lock), still proceed to the
-                    // refetch below. `put_snapshot` is an upsert, so a
-                    // successful refetch overwrites the poisoned row
-                    // whether or not this delete succeeded — aborting here
-                    // over a delete failure would produce a hard error
-                    // screen while the broker is perfectly healthy.
-                    let _ = store::delete_snapshot(&conn, &row.id, scope.scope_name(), &scope_key);
-                    match fetch_topic_lists(row, tenant, namespace, token).await {
-                        Ok((all, partitioned)) => {
-                            build_recovered_envelope(&conn, row, scope, &scope_key, all, partitioned, query, &parse_error)
-                        }
-                        Err(err) => Ok(ResultEnvelope::failed(err, BrokerSource::AdminRest)),
-                    }
-                }
-            }
+            Some((payload, age_ms, Vec::new()))
         }
         Freshness::Stale { age_ms } => {
             let (payload, _) = snapshot.expect("Stale implies a snapshot was read");
-            match parse_topic_page(&payload, query) {
-                Ok(page) => Ok(cache_envelope(
-                    page,
-                    age_ms,
-                    vec![format!(
-                        "Cached topic list is {age_ms} ms old, past its freshness window; showing the last known list."
-                    )],
-                )),
-                Err(parse_error) => {
-                    let _ = store::delete_snapshot(&conn, &row.id, scope.scope_name(), &scope_key);
-                    match fetch_topic_lists(row, tenant, namespace, token).await {
-                        Ok((all, partitioned)) => {
-                            build_recovered_envelope(&conn, row, scope, &scope_key, all, partitioned, query, &parse_error)
-                        }
-                        Err(err) => Ok(ResultEnvelope::failed(err, BrokerSource::AdminRest)),
-                    }
-                }
-            }
+            Some((
+                payload,
+                age_ms,
+                vec![format!(
+                    "Cached topic list is {age_ms} ms old, past its freshness window; showing the last known list."
+                )],
+            ))
         }
         Freshness::Skewed { ahead_ms } => {
             // Usable-but-suspect, exactly like Stale: serve the cached rows,
             // but name the skew explicitly rather than folding it into a
             // reassuring "fresh" or a meaningless age.
             let (payload, _) = snapshot.expect("Skewed implies a snapshot was read");
-            match parse_topic_page(&payload, query) {
-                Ok(page) => Ok(cache_envelope(
-                    page,
-                    0,
-                    vec![format!(
-                        "Cached topic list is stamped {ahead_ms} ms ahead of this machine's clock; \
-                         its age cannot be measured. Showing it anyway — check the clocks."
-                    )],
-                )),
-                Err(parse_error) => {
-                    let _ = store::delete_snapshot(&conn, &row.id, scope.scope_name(), &scope_key);
-                    match fetch_topic_lists(row, tenant, namespace, token).await {
-                        Ok((all, partitioned)) => {
-                            build_recovered_envelope(&conn, row, scope, &scope_key, all, partitioned, query, &parse_error)
-                        }
-                        Err(err) => Ok(ResultEnvelope::failed(err, BrokerSource::AdminRest)),
+            Some((
+                payload,
+                0,
+                vec![format!(
+                    "Cached topic list is stamped {ahead_ms} ms ahead of this machine's clock; \
+                     its age cannot be measured. Showing it anyway — check the clocks."
+                )],
+            ))
+        }
+        Freshness::Absent => None,
+    };
+
+    match cached {
+        Some((payload, freshness_ms, warnings)) => match parse_topic_page(&payload, query) {
+            Ok(page) => Ok(cache_envelope(page, freshness_ms, warnings)),
+            Err(parse_error) => {
+                // Best-effort delete: if it fails (e.g. a transient SQLite
+                // lock), still proceed to the refetch below. `put_snapshot`
+                // is an upsert, so a successful refetch overwrites the
+                // poisoned row whether or not this delete succeeded —
+                // aborting here over a delete failure would produce a hard
+                // error screen while the broker is perfectly healthy.
+                let _ = store::delete_snapshot(&conn, &row.id, scope.scope_name(), &scope_key);
+                match fetch_topic_lists(row, tenant, namespace, token).await {
+                    Ok((all, partitioned)) => {
+                        build_recovered_envelope(&conn, row, scope, &scope_key, all, partitioned, query, &parse_error)
                     }
+                    Err(err) => Ok(ResultEnvelope::failed(err, BrokerSource::AdminRest)),
                 }
             }
-        }
-        Freshness::Absent => match fetch_topic_lists(row, tenant, namespace, token).await {
+        },
+        None => match fetch_topic_lists(row, tenant, namespace, token).await {
             Ok((all, partitioned)) => cache_and_build_admin_envelope(&conn, row, scope, &scope_key, all, partitioned, query),
             Err(err) => match &existing {
                 // Either `refresh` bypassed a still-good row, or there
