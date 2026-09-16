@@ -6,7 +6,7 @@
 // with a Home button, and `onClose` returning to the API Client.
 import { useCallback, useEffect, useState } from "react";
 import { ArrowLeft, Waypoints } from "lucide-react";
-import type { Page, TopicSummary } from "@penguin/broker-contracts";
+import type { Page, ResultEnvelope, TopicSummary } from "@penguin/broker-contracts";
 import { useBrokerConnections } from "@/hooks/useBrokerConnections";
 import { listTopics } from "@/lib/broker-client";
 import type { DataTableState } from "@/components/ui/data-table-types";
@@ -23,6 +23,40 @@ type BrokerTab = "connections" | "topics";
 
 const TOPIC_PAGE_LIMIT = 25;
 const EMPTY_TOPIC_PAGE: Page<TopicSummary> = { items: [], total: 0, offset: 0, limit: TOPIC_PAGE_LIMIT };
+
+export interface TopicFetchResult {
+  state: DataTableState;
+  error?: string;
+}
+
+/** Reduces a `listTopics` envelope to the `(state, error)` pair the topics
+ *  tab renders — the same way `useBrokerTopology`'s `deriveResult` does:
+ *  from `data` and `warnings`, never from `source` alone.
+ *
+ *  Fix round 1, item 5: this used to branch on `envelope.source === "cache"`
+ *  to decide `"stale"`. Before Task 3, `source: "cache"` was unreachable, so
+ *  that branch never actually ran. Task 3 made cache hits real, and a
+ *  *fresh* cache hit also arrives as `source: "cache"` with `warnings: []`
+ *  — the old code stamped a staleness banner on it anyway, presenting
+ *  perfectly good data as suspect. Also fixes the mirror-image defect this
+ *  hook's own `deriveResult` had before this same fix round: keeping only
+ *  `warnings[0]` when the cache-read-through policy can attach more than
+ *  one warning to a single response.
+ *
+ *  Exported so this exact derivation is unit-testable without mounting the
+ *  whole page — `BrokerPage` also owns `useBrokerConnections`, whose
+ *  persisted-active-connection chain reaches into the app's SQLite-backed
+ *  `app_kv` bridge, which a pure state-derivation test has no business
+ *  depending on. */
+export function deriveTopicResult(envelope: ResultEnvelope<Page<TopicSummary>>): TopicFetchResult {
+  if (!envelope.data) {
+    return { state: "error", error: envelope.error?.message };
+  }
+  if (envelope.warnings.length > 0) {
+    return { state: "stale", error: envelope.warnings.join(" ") };
+  }
+  return { state: envelope.data.items.length === 0 ? "empty" : "ready", error: undefined };
+}
 
 export function BrokerPage({ onClose }: BrokerPageProps) {
   const conn = useBrokerConnections();
@@ -57,20 +91,10 @@ export function BrokerPage({ onClose }: BrokerPageProps) {
       );
       if (envelope.data) {
         setTopicPage(envelope.data);
-        setTopicError(envelope.warnings[0]);
-        // `source: "cache"` means Admin REST failed and this is the last
-        // known-good snapshot — surface that as stale rather than ready.
-        setTopicState(
-          envelope.source === "cache"
-            ? "stale"
-            : envelope.data.items.length === 0
-            ? "empty"
-            : "ready",
-        );
-      } else {
-        setTopicError(envelope.error?.message);
-        setTopicState("error");
       }
+      const result = deriveTopicResult(envelope);
+      setTopicError(result.error);
+      setTopicState(result.state);
     } catch (err) {
       setTopicError(err instanceof Error ? err.message : String(err));
       setTopicState("error");

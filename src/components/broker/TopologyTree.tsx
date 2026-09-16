@@ -26,16 +26,23 @@ export interface TopologyTreeProps {
   onSelectTenant: (tenant: string) => void;
   onSelectNamespace: (namespace: string) => void;
   state: DataTableState;
-  /** Detail text for the current `state` — a warning's wording (stale,
-   *  skewed, or a broker failure's message) when `state === "stale"`/
-   *  `"partial"`, or a hard failure's message when `state === "error"`. */
-  errorMessage?: string;
+  /** Every warning attached to the current `state` — a stale/skew footnote,
+   *  a broker failure's message, a malformed-namespace-entry notice, or any
+   *  combination, since `useBrokerTopology` can attach more than one at
+   *  once and none of them may be dropped on the way to the screen. Empty
+   *  or omitted for `"ready"`/`"empty"`/`"loading"`. */
+  warnings?: string[];
 }
 
+// Subject-neutral: this tree shows two independently-sourced lists
+// (tenants, namespaces), and either one can be the one that's actually
+// stale — a fixed "tenants" wording here would misname the namespace list's
+// own staleness (fix round 1, item 3). The specific warning text appended
+// below names the actual subject; this prefix only names the state.
 const STATUS_TEXT: Partial<Record<DataTableState, string>> = {
   loading: "Loading tenants…",
   empty: "No tenants found.",
-  stale: "Showing cached tenants — this list may be stale.",
+  stale: "Showing cached data — this list may be stale.",
   partial: "Showing partial results — some tenants or namespaces may be missing.",
 };
 
@@ -50,11 +57,11 @@ export function TopologyTree({
   onSelectTenant,
   onSelectNamespace,
   state,
-  errorMessage,
+  warnings,
 }: TopologyTreeProps) {
   return (
     <div className="flex flex-col gap-1">
-      <StatusRegion state={state} errorMessage={errorMessage} />
+      <StatusRegion state={state} warnings={warnings} />
       <div role="tree" aria-label="Tenants and namespaces" className="flex flex-col gap-0.5 text-sm">
         {tenants.map((tenant) => {
           const isSelected = tenant.name === selectedTenant;
@@ -113,7 +120,7 @@ function TreeRow({ label, selected, onSelect }: TreeRowProps) {
   );
 }
 
-function StatusRegion({ state, errorMessage }: { state: DataTableState; errorMessage?: string }) {
+function StatusRegion({ state, warnings = [] }: { state: DataTableState; warnings?: string[] }) {
   if (state === "ready") return null;
 
   if (state === "error") {
@@ -122,7 +129,7 @@ function StatusRegion({ state, errorMessage }: { state: DataTableState; errorMes
         role="alert"
         className="rounded border border-destructive/30 bg-destructive/10 px-2 py-1 text-xs text-destructive"
       >
-        {errorMessage ?? "Failed to load tenants."}
+        {warnings.length > 0 ? warnings.join(" ") : "Failed to load tenants."}
       </div>
     );
   }
@@ -130,7 +137,14 @@ function StatusRegion({ state, errorMessage }: { state: DataTableState; errorMes
   const message = STATUS_TEXT[state] ?? "Loading…";
   return (
     <div role="status" className="rounded border border-border bg-muted/40 px-2 py-1 text-xs text-muted-foreground">
-      {errorMessage ? `${message} ${errorMessage}` : message}
+      <p>{message}</p>
+      {warnings.length > 0 && (
+        <ul className="mt-0.5 list-disc pl-4">
+          {warnings.map((warning) => (
+            <li key={warning}>{warning}</li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }

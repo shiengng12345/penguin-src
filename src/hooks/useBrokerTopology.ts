@@ -9,12 +9,13 @@
 // operator can still reason about is worse than marking it, so `tenants` /
 // `namespaces` are populated from `envelope.data` whenever it is present,
 // completely independently of whether there is also something to warn
-// about. `state` carries how trustworthy that data is; `error` carries the
-// human-readable reason when there is one. They are read together — this
-// hook never collapses "here is data, and here is something you should
-// know about it" down to a single error flag, and never treats
-// `warnings.length > 0` as a failure. `error` present with `data` absent is
-// the only genuine failure case.
+// about. `state` carries how trustworthy that data is; `warnings` carries
+// every reason there is to say so — ALL of them, not just the first: Task
+// 4's `list_namespaces_through_cache` can push a data-integrity warning
+// (a malformed "tenant/namespace" entry) into the very same array that
+// already carries a staleness footnote, and both need to reach the
+// operator. `data` present with `warnings` empty is the only clean case;
+// `data` absent is the only genuine failure.
 import { useCallback, useEffect, useState } from "react";
 import type { NamespaceSummary, ResultEnvelope, TenantSummary } from "@penguin/broker-contracts";
 import { listNamespaces, listTenants } from "@/lib/broker-client";
@@ -28,46 +29,69 @@ export interface UseBrokerTopologyResult {
   selectTenant: (tenant: string) => void;
   selectNamespace: (namespace: string) => void;
   state: DataTableState;
-  error?: string;
+  /** Every warning attached to the current state, from both the tenants and
+   *  the namespaces fetch — concatenated, never truncated to one. Empty
+   *  when `state` is `"ready"`/`"empty"`/`"loading"`. Carries the hard
+   *  failure's message too when `state === "error"`/`"partial"`. */
+  warnings: string[];
   refresh: () => void;
 }
 
 interface FetchResult {
   state: DataTableState;
-  error?: string;
+  warnings: string[];
 }
 
-const LOADING: FetchResult = { state: "loading" };
+const LOADING: FetchResult = { state: "loading", warnings: [] };
 
-/** Reduces one envelope to the (state, error) pair its caller renders.
+/** Reduces one envelope to the (state, warnings) pair its caller renders.
  *  `data` present + `warnings` non-empty is a partial success (stale cache,
  *  clock skew, or a broker failure served from the last known cache) —
- *  never `"error"`. Only `data === undefined` is the genuine failure. */
+ *  never `"error"`. Only `data === undefined` is the genuine failure, and
+ *  even then the message is carried the same way (as a one-element
+ *  `warnings` array) rather than a separate field, so callers never have to
+ *  read two different places depending on which case they're in. */
 function deriveResult<T extends { length: number }>(envelope: ResultEnvelope<T>): FetchResult {
   if (envelope.data === undefined) {
-    return { state: "error", error: envelope.error?.message ?? "Failed to load." };
+    return { state: "error", warnings: [envelope.error?.message ?? "Failed to load."] };
   }
   if (envelope.warnings.length > 0) {
-    return { state: "stale", error: envelope.warnings[0] };
+    return { state: "stale", warnings: envelope.warnings };
   }
-  return { state: envelope.data.length === 0 ? "empty" : "ready", error: undefined };
+  return { state: envelope.data.length === 0 ? "empty" : "ready", warnings: [] };
 }
 
 /** Combines the tenants and namespaces fetch results into the single
- *  `state`/`error` pair TopologyTree renders, worst-first: a hard error
- *  anywhere wins over a stale/partial warning, which wins over still
- *  loading, which wins over an empty list, which wins over ready. This
- *  means a fine tenant list next to a stale namespace list still surfaces
- *  as "stale" — the operator needs to know part of what's on screen is
- *  suspect, even if the rest is fresh. */
+ *  `state`/`warnings` pair TopologyTree renders. Every warning from both
+ *  sides is concatenated — never one winner's message picked over the
+ *  other's, so a stale tenant list next to a namespace list carrying a
+ *  malformed-entry warning surfaces both, not just one.
+ *
+ *  State precedence is NOT a flat "worst wins" over both slices, because a
+ *  hard failure in exactly one of the two is a different situation from a
+ *  hard failure in both (or the only fetch there is): the other list is
+ *  still real, still on screen, and the operator can still work from it.
+ *  That is `"partial"` — reserved for exactly that mix. `"error"` is
+ *  reserved for when both fetches failed, or there is only one fetch
+ *  (no tenant selected yet) and it failed. */
 function combine(tenants: FetchResult, namespaces: FetchResult | null): FetchResult {
-  const order: DataTableState[] = ["error", "stale", "partial", "loading", "empty", "ready"];
   const candidates = namespaces ? [tenants, namespaces] : [tenants];
-  for (const wanted of order) {
-    const hit = candidates.find((c) => c.state === wanted);
-    if (hit) return hit;
+  const warnings = candidates.flatMap((c) => c.warnings);
+
+  if (namespaces) {
+    const tenantsFailed = tenants.state === "error";
+    const namespacesFailed = namespaces.state === "error";
+    if (tenantsFailed !== namespacesFailed) return { state: "partial", warnings };
+    if (tenantsFailed && namespacesFailed) return { state: "error", warnings };
+  } else if (tenants.state === "error") {
+    return { state: "error", warnings };
   }
-  return tenants;
+
+  const order: DataTableState[] = ["stale", "loading", "empty", "ready"];
+  for (const wanted of order) {
+    if (candidates.some((c) => c.state === wanted)) return { state: wanted, warnings };
+  }
+  return { state: tenants.state, warnings };
 }
 
 export function useBrokerTopology(connectionId: string | null | undefined): UseBrokerTopologyResult {
@@ -82,7 +106,7 @@ export function useBrokerTopology(connectionId: string | null | undefined): UseB
     async (refresh = false) => {
       if (!connectionId) {
         setTenants([]);
-        setTenantsResult({ state: "empty" });
+        setTenantsResult({ state: "empty", warnings: [] });
         return;
       }
       setTenantsResult(LOADING);
@@ -92,7 +116,7 @@ export function useBrokerTopology(connectionId: string | null | undefined): UseB
         setTenantsResult(deriveResult(envelope));
       } catch (err) {
         setTenants([]);
-        setTenantsResult({ state: "error", error: err instanceof Error ? err.message : String(err) });
+        setTenantsResult({ state: "error", warnings: [err instanceof Error ? err.message : String(err)] });
       }
     },
     [connectionId],
@@ -108,7 +132,7 @@ export function useBrokerTopology(connectionId: string | null | undefined): UseB
         setNamespacesResult(deriveResult(envelope));
       } catch (err) {
         setNamespaces([]);
-        setNamespacesResult({ state: "error", error: err instanceof Error ? err.message : String(err) });
+        setNamespacesResult({ state: "error", warnings: [err instanceof Error ? err.message : String(err)] });
       }
     },
     [connectionId],
@@ -155,7 +179,7 @@ export function useBrokerTopology(connectionId: string | null | undefined): UseB
     selectTenant,
     selectNamespace,
     state: combined.state,
-    error: combined.error,
+    warnings: combined.warnings,
     refresh,
   };
 }

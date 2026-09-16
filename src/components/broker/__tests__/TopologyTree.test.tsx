@@ -69,4 +69,55 @@ describe("TopologyTree", () => {
     expect(screen.getByText("public")).toBeInTheDocument();
     expect(screen.getByRole("status")).toHaveTextContent(/stale|cached/i);
   });
+
+  // Fix round 1, item 4: every prior "stale" test only checked the generic
+  // banner text, which STATUS_TEXT alone satisfies — deleting the
+  // interpolation that appends the actual warning wouldn't fail any of
+  // them. This one asserts the specific warning content itself lands on
+  // the screen.
+  it("renders the specific warning text, not just the generic stale banner", () => {
+    setup({
+      state: "stale",
+      warnings: ["Cached tenant list is 400000 ms old, past its freshness window; showing the last known list."],
+    });
+    expect(screen.getByRole("status")).toHaveTextContent(/400000 ms old/);
+  });
+
+  // Fix round 1, item 1 (rendering side): a single fetch can carry more
+  // than one warning at once, and none of them may be dropped between the
+  // hook and the screen.
+  it("renders every warning, not just the first, when more than one applies at once", () => {
+    setup({
+      state: "stale",
+      warnings: [
+        "Cached tenant list is 400000 ms old, past its freshness window; showing the last known list.",
+        'namespace "weird" did not contain the expected "tenant/namespace" separator; treating it as a bare name with no tenant',
+      ],
+    });
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent(/400000 ms old/);
+    expect(status).toHaveTextContent(/did not contain the expected/);
+  });
+
+  // Fix round 1, item 3: the tree shows two independently-sourced lists
+  // (tenants, namespaces); a stale *namespace* list must not be described
+  // by wording that names "tenants" specifically.
+  it("describes the stale banner without misnaming which list is stale", () => {
+    setup({
+      state: "stale",
+      warnings: ["Cached namespace list is 90000 ms old, past its freshness window; showing the last known list."],
+    });
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent(/90000 ms old/);
+    // The fixed prefix must not claim it's specifically the tenant list
+    // that's stale when a namespace warning is what's actually showing.
+    expect(status.textContent).not.toMatch(/cached tenants/i);
+  });
+
+  it("marks the tree partial without hiding the data that did succeed", () => {
+    setup({ state: "partial", warnings: ["namespace list unavailable"] });
+    expect(screen.getByText("public")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(/partial/i);
+    expect(screen.getByRole("status")).toHaveTextContent(/namespace list unavailable/);
+  });
 });
