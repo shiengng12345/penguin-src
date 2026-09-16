@@ -10,6 +10,54 @@
 
 ---
 
+## 进度总览（截至 2026-09-16，分支 `feat/broker-module`）
+
+| 阶段 | 内容 | 完成度 | 阻塞于 |
+|---|---|---:|---|
+| **Phase 0** | 验证地基（全阶段假设实测） | **100%** ✅ | — |
+| **Phase A** | Console 控制塔（看状态） | **95%** 🟡 | **用户的 GUI 走查** |
+| **Stage 0** | 合规修复 + 本机 QAT 模拟 | **100%** ✅ | — |
+| **Stage A** | 协议与安全验证（JWT + TLS） | **0%** ⬜ | — （本机 rig 已就绪） |
+| **Stage B** | Observe 补齐 | **0%** ⬜ | — |
+| **Stage C** | Send Message | **0%** ⬜ | 获准发送的 topic 范围 |
+| **Stage D** | `Metric<T>` | 见 R34 —— 收窄为 `StatsRequestScope`，已随 Stage 0 交付 | — |
+| **总体** | | **约 45%** | |
+
+**当前测试基线**：`cargo test` **323 passed + 4 ignored** · `pnpm test:ui` **178 passed** · `pnpm typecheck` **0** · `pnpm build` **0** · `pnpm broker:gate` **PASSED** · 用户真实业务 topic **10 个完好、零残留**
+
+**Phase A 差的 5%**：gate 明文要求「GUI 走查确实执行了，或明确列出未完成步骤」。清单在
+`.superpowers/sdd/2026-09-16-penguin-broker-phaseA/task-14-report.md`，11 步，约十分钟。控制者无法启动桌面应用点击，这一项只能由用户关闭。
+
+### Stage 0 交付清单
+
+| # | 任务 | 提交 |
+|---|---|---|
+| 2 | 移除建删 topic 的写探测 | `9292b9bd` |
+| 1 | `/stats` 五个安全参数 + `StatsRequestScope` | `4d5b189c` `ad5eabfc` |
+| 3 | 64-bit 计数器改十进制字符串传输 | `4e01c231` |
+| 3.1 | 拆分超出 400 行上限的 `stats.rs` | `dfa55d5f` |
+| 4 | `read_without_ack` 移出 lib | `f1efef09` |
+| 5 | `docs/api-allowlist.md` | `5e010a0f` |
+| — | 删除死代码 `list_subscriptions` | `992fe87b` |
+| 6 | 本机 TLS（JWT + `pulsar+ssl://`） | `3fe07edc` |
+| — | 全量审核四项修复 | `a0efb8ed` `e2412739` `249a2290` `40906dea` |
+
+### Stage 0 全量审核发现的问题（已全部修复）
+
+七个任务里只有一个做过独立审核，补做全量审核后发现三条，其中一条**当时正在线上生效**：
+
+1. **【高】订阅表的 Backlog 列每一行都显示「未查询」。** `subscriptionBacklogSize` 实测**不管** `msgBacklog`（两种取值下同为 `0`），它管的是订阅级 `backlogSize`（`-1` → `0`），而本代码库根本没映射那个字段。这是 R42 隔壁字段的重演，且**在同一个提交里发布**。还有一个测试断言真实积压数**不许出现**，把缺陷锁死了。
+2. **【高】异常引擎信任了界面已判定不可信的值。** `BacklogOlderThanThreshold` 在线上配置下结构上不可达，且不显示为「无法判定」——空结果读作「每项检查都跑了」。
+3. **【中】`excludeConsumers` 只串到异常引擎，没串到 DTO/UI。** 规格那句话的后半句「DTO 必须标记 `notRequested`」被漏掉。
+
+**根因**：171 个 UI 测试的 fixture 全部使用 `true,true,true`，而生产配置是 `false,false,false` ——
+**没有任何一个测试按应用实际发布的配置渲染过界面**。已引入 `SHIPPED_SCOPE` 作为默认 fixture，并有契约测试钉住它与 Rust 常量一致。
+
+### 遗留给产品负责人的问题
+
+修复第 2 条之后，`BacklogOlderThanThreshold` 在线上**永远是「无法判定」**，因为 `earliestTimeInBacklog` 恒为 `false`。现在的行为是诚实的（不再假称已检查），但这项能力等于不存在。上游 §12.3 对该参数写的是「需要时按需读取」——建议 Stage B 提供一个按需动作，只为那一次调用打开它，并在界面说明代价。
+
+
 ## 0. 来历，必须说清楚
 
 Phase A 的 14 个任务**不是**照上游规格做的 —— 那份规格在 14 个任务全部完成后才出现。Phase A 依据的是 `2026-09-16-penguin-broker-phaseA-design.md`，由 brainstorm 会话产出。
@@ -66,9 +114,12 @@ Phase A 的 14 个任务**不是**照上游规格做的 —— 那份规格在 1
 
 ---
 
-## 3. 违反项（现有代码，必须修）
+## 3. 违反项 —— **全部已修（Stage 0）**
 
-### 3.1 【高】`broker_test_connection` 会在目标集群建 topic 再删
+> 本节保留原始诊断，因为「为什么这是个问题」比「它已经修好了」更值得下次读到。
+> 每条下方标注了修复提交。其中三条**在本机永远不会变红** —— 只能靠对着规格读代码找出来。
+
+### 3.1 【高】✅ 已修 `9292b9bd` —— `broker_test_connection` 曾会在目标集群建 topic 再删
 
 **位置**：`src-tauri/src/broker/capability.rs:301`（PUT 建 `broker-probe-write-<pid>-<ts>`）、`:319`（DELETE）
 
@@ -78,7 +129,7 @@ Phase A 的 14 个任务**不是**照上游规格做的 —— 那份规格在 1
 
 **修法**：写能力从 Admin API 的响应形状推断（401/403），或直接报告「未测量」。**绝不能靠实际写一次来证明。** `can_write_probed: false` 这个字段本来就是为「没测过」准备的。
 
-### 3.2 【中】`/stats` 未带安全参数
+### 3.2 【中】✅ 已修 `4d5b189c` `ad5eabfc` —— `/stats` 曾未带安全参数
 
 **位置**：`src-tauri/src/broker/adapters/pulsar/admin_rest.rs:220`
 
@@ -88,7 +139,7 @@ Phase A 的 14 个任务**不是**照上游规格做的 —— 那份规格在 1
 
 **为什么本机测不出来**：10 个空 topic 没有 Ledger 压力。QAT 有真实流量时才会显现。
 
-### 3.3 【中】64-bit 计数器用 JS Number 传，静默丢精度
+### 3.3 【中】✅ 已修 `4e01c231` —— 64-bit 计数器曾用 JS Number 传，静默丢精度
 
 **违反**：§14.1（「64-bit Counter、Ledger ID、大尺寸字节量等通过十进制字符串或无损结构传给前端」）、§23（「大整数与 Message ID 保持精度和完整性」）
 
@@ -106,7 +157,7 @@ JS 安全整数上限 2⁵³−1 ≈ 9.007×10¹⁵；`u64` 上限 1.8×10¹⁹�
 
 **修法**：serde 侧以十进制字符串序列化，TS 侧类型为 `string`，UI 格式化时用 `BigInt` 或字符串分组。
 
-### 3.4 【高】`subType` 是第三个同形状哨兵，仍被压平
+### 3.4 【高】✅ 已修 `d162be2a` —— `subType` 曾是第三个被压平的同形状哨兵
 
 **位置**：`src-tauri/src/broker/stats.rs`，`normalize_sub_type`
 
@@ -122,7 +173,7 @@ fn normalize_sub_type(sub_type: Option<String>) -> Option<String> {
 
 **修法**：`SubscriptionType { Named { name }, Unset, Unknown }`，照 `BacklogAge` 的形状（内部标记、线格式钉测试、TS 判别联合、穷尽 switch）。**不要抽泛型 `Tri<T>`** —— 三者 payload 与领域含义不同，ledger 已就此裁决。
 
-### 3.5 【低】`internalStats` 不在 §12.2 白名单内
+### 3.5 【低】✅ 已处理 `5e010a0f` —— `internalStats` 曾不在白名单内，现已列入 `docs/api-allowlist.md` 并说明理由
 
 **位置**：`admin_rest.rs:223`、`ports.rs`
 
@@ -134,7 +185,7 @@ fn normalize_sub_type(sub_type: Option<String>) -> Option<String> {
 
 ## 4. 差距（上游要求，尚未建）
 
-### 4.1 边界加固（建议）
+### 4.1 ✅ 已完成 `f1efef09` —— 边界加固
 将 `binary::read_without_ack` 移出 lib（仅测试可见），使 B-01/B-03 从「无人调用」变为「编译期不可能」。上游 §1.3 明确警告 Reader 底层即 Consumer。
 
 ### 4.2 Observe 补齐
@@ -165,7 +216,7 @@ fn normalize_sub_type(sub_type: Option<String>) -> Option<String> {
 ### 4.4 本地存储与审计（§14.4、§16.5）
 `favorites`、`payload_templates`、`send_history`、`metric_samples`、`audit_events`。发送历史默认不存 Payload 正文。
 
-### 4.5 `Metric<T>` 结构性改造（§14.1）—— **需用户决策**
+### 4.5 `Metric<T>` 结构性改造（§14.1）—— **已裁决 R34：收窄为 `StatsRequestScope`，随 Stage 0 交付**
 
 上游要求每个字段自带质量标记：
 
@@ -214,7 +265,7 @@ interface Metric<T> {
 
 沿用上游 §20 的阶段命名，但把**已完成的工作归位** —— 我们实际做的是它的阶段 B，且跳过了阶段 A。
 
-### 阶段 0 — 收尾与合规（无外部依赖，可立即执行）
+### 阶段 0 — 收尾与合规 ✅ **已完成**（见顶部进度总览的交付清单）
 
 | # | 内容 | 依据 |
 |---|---|---|
@@ -228,7 +279,7 @@ interface Metric<T> {
 
 **0.2 是硬前置**：未完成前，QAT 连接不得点「测试连接」。
 
-### 阶段 A — 协议与安全验证（**阻塞于用户**）
+### 阶段 A — 协议与安全验证 ⬜ **可立即开始**（本机 JWT+TLS rig 已由 Stage 0 任务 6 建好，不需要用户的 QAT 凭据）
 
 上游 §13.3 的 SDK 验证表：TLS / 证书链 / 主机名校验、Token 与过期刷新、Proxy / Lookup / SASE 可达、Partitioned Topic、**Shared Producer 不 fencing**、Key / Properties 字节语义、Raw / Schema 编码、**Receipt / Timeout 三态可分**、Reconnect 内部重试、Close 回收、**运行路径无隐式 Reader / Consumer**。
 
@@ -252,20 +303,22 @@ Phase 0 的 V-C3 只证明了 `pulsar` crate 对**本机无认证 broker** 可�
 ### 阶段 C — Send Message
 §4.3 全部。依赖阶段 A 通过。
 
-### 阶段 D — `Metric<T>` 改造（**需用户决策**）
+### 阶段 D — `Metric<T>` 改造 ✅ **已裁决并交付**（R34：收窄为 `StatsRequestScope`；`unsupported` 一态排进 Stage B 的能力矩阵）
 §4.5。建议在阶段 B 之前决定，否则返工面积随 B、C 增长。
 
 ---
 
-## 7. 待用户确认
+## 7. 待用户确认（2026-09-16 已答部分标注在内）
 
-| # | 问题 | 影响 |
+| # | 问题 | 状态 |
 |---|---|---|
-| 1 | **阶段 D（`Metric<T>`）做不做？** | 唯一的结构性分歧；越晚决定越贵 |
-| 2 | **QAT token（换发后）与 broker URL** | 阶段 A 完全阻塞 |
-| 3 | 阶段顺序：0→A→B→C，还是 0→A→C→B（先出 Send） | 后者的发送界面要建在不完整的 Observe 上 |
-| 4 | 获准发送的 Topic / Namespace 范围（§11.10） | Send 的 allowlist 需要它 |
-| 5 | Observe 与 Produce 是否分开凭据（§16.1） | 影响连接模型 |
+| 1 | 阶段 D（`Metric<T>`）做不做？ | ✅ **用户委托控制者决定** → 裁决 R34：不照搬七态，收窄为 `StatsRequestScope`；`unsupported` 排进 Stage B 的能力矩阵 |
+| 2 | QAT token 与 broker URL | ✅ **用户决定不提供** —— 凭据由用户手动填入连接 CRUD，控制者只测本机。因此 Stage 0 任务 6 建了本机 JWT+TLS rig，**阶段 A 不再阻塞** |
+| 3 | 阶段顺序 | ✅ **用户选 A**：0 → A → B → C（先补完 Observe，再做 Send） |
+| 4 | 获准发送的 Topic / Namespace 范围（§11.10） | 🟡 **部分已答** —— 用户明确「列出已连接 broker 的全部 topic，用户不能手动创建/输入」。仍需确认：是否进一步限制到某个测试 namespace（§11.10 建议管理员预先准备隔离资源） |
+| 5 | Observe 与 Produce 是否分开凭据（§16.1） | ⬜ 未答。控制者建议分开；影响连接模型，Stage C 之前须定 |
+| 6 | **GUI 走查**（Phase A gate 最后一项） | ⬜ **只能由用户执行** —— 控制者无法启动桌面应用点击。清单见 `task-14-report.md`，11 步 |
+| 7 | `BacklogOlderThanThreshold` 现在永远「无法判定」 | ⬜ 未答。是接受现状，还是 Stage B 增加按需读取动作（§12.3「需要时按需读取」） |
 
 上游 §25 另列了 11 项需 SRE 确认的配置（版本、网关前缀、重定向主机、Schema 现状、自动创建策略等），未确认前一律标 Unknown，不猜测。
 
