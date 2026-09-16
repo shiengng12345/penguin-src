@@ -59,19 +59,11 @@
 //!
 //! `Option<T>` solves *absence* — a missing key. It does not by itself
 //! solve Pulsar encoding "this doesn't apply" as an in-band value that
-//! still type-checks. Three fields carry exactly this problem, and this
-//! module normalizes all three to `None` at the parse boundary — the only
-//! place that knows Pulsar's wire conventions — so no downstream consumer
-//! has to remember any of them:
+//! still type-checks. Three fields carry exactly this problem. Two of them
+//! are normalized to plain `None` at the parse boundary — the only place
+//! that knows Pulsar's wire conventions — so no downstream consumer has to
+//! remember them:
 //!
-//! - **`oldestBacklogMessageAgeSeconds`**: `-1` means "no backlog has ever
-//!   existed," not "the backlog is 1 second younger than 0." Passed through
-//!   verbatim, a screen would show "oldest backlog message: -1 seconds,"
-//!   which is not a fact about anything. Any negative value (not only
-//!   exactly `-1`) is normalized to `None`, in case a future broker version
-//!   picks a different negative sentinel for the same meaning. Evidenced
-//!   directly: the live `fpms_topup` topic sends `-1` today (captured,
-//!   unmodified, in the fixture).
 //! - **`type`** (subscription type, mapped as `sub_type`): Pulsar serializes
 //!   an unset subscription type as the literal string `"None"` — not a
 //!   member of its own `SubscriptionType` enum
@@ -95,6 +87,16 @@
 //!   default the equivalent subscription-level fields use) plus the
 //!   reasoning above, not on anything actually observed here.
 //!
+//! The third field, `oldestBacklogMessageAgeSeconds`, does **not** collapse
+//! to plain `None`: `-1` means "no backlog has ever existed," which is a
+//! determinate, healthy fact, not an absent value — collapsing it into the
+//! same `None` used for a genuinely withheld field would make "nothing to
+//! check here" indistinguishable from "we could not tell," which is exactly
+//! backwards for a module whose entire purpose is telling those two apart.
+//! It is mapped as [`BacklogAge`] instead, a three-state type (see its own
+//! doc). Evidenced directly: the live `fpms_topup` topic sends `-1` today
+//! (captured, unmodified, in the fixture).
+//!
 //! A sweep of every other mapped field for a similar convention (a `-1`, a
 //! `Long.MAX_VALUE`, an empty-string-means-unset) found no further case
 //! warranting the same treatment: counters (`storageSize`, `backlogSize`,
@@ -105,6 +107,7 @@
 
 use crate::broker::envelope::{BrokerError, BrokerErrorCode};
 use crate::broker::stats_wire::RawTopicStats;
+use serde::{Deserialize, Serialize};
 
 /// The parsed subset of a Pulsar topic's `stats` payload.
 #[derive(Debug, Clone, PartialEq)]
@@ -116,8 +119,32 @@ pub struct TopicStats {
     pub storage_size: Option<u64>,
     pub backlog_size: Option<u64>,
     pub msg_in_counter: Option<u64>,
-    pub oldest_backlog_message_age_seconds: Option<i64>,
+    pub oldest_backlog_message_age: BacklogAge,
     pub subscriptions: Vec<SubscriptionStats>,
+}
+
+/// The age of a topic's oldest backlog message, as Pulsar's
+/// `oldestBacklogMessageAgeSeconds` actually distinguishes three cases that
+/// a bare `Option<i64>` cannot: a real age, a documented "healthy, nothing
+/// to check" sentinel, and genuine absence. Merging the last two (as an
+/// earlier version of this module did) made every quiescent topic — which
+/// commonly sends the `-1` sentinel — report as "could not tell" on the
+/// anomaly panel, indistinguishable from a topic where the field was
+/// actually withheld. Mirrors `BacklogAge` in
+/// `packages/broker-contracts/src/anomaly.ts` field-for-field; the wire
+/// shape (an internally-tagged `{"state": ...}` object) is pinned by
+/// `backlog_age_serialises_to_the_pinned_wire_shape` in `stats_tests.rs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "camelCase")]
+pub enum BacklogAge {
+    /// A backlog exists and its oldest message is this many seconds old.
+    Seconds { seconds: u64 },
+    /// Pulsar's `-1`: no backlog has ever existed. A determinate, healthy
+    /// fact — there is nothing here for an anomaly check to be unsure about.
+    NoBacklog,
+    /// The field was absent, or carried a negative value other than the
+    /// documented `-1` sentinel. We do not know the backlog's age.
+    Unknown,
 }
 
 /// The parsed subset of one entry in the `subscriptions` map of a topic's
@@ -209,7 +236,7 @@ pub fn parse_topic_stats(raw: &serde_json::Value) -> Result<TopicStats, BrokerEr
         storage_size: parsed.storage_size,
         backlog_size: parsed.backlog_size,
         msg_in_counter: parsed.msg_in_counter,
-        oldest_backlog_message_age_seconds: normalize_backlog_age(
+        oldest_backlog_message_age: normalize_backlog_age(
             parsed.oldest_backlog_message_age_seconds,
         ),
         subscriptions,
@@ -217,14 +244,19 @@ pub fn parse_topic_stats(raw: &serde_json::Value) -> Result<TopicStats, BrokerEr
 }
 
 /// Pulsar sends `-1` for `oldestBacklogMessageAgeSeconds` to mean "no
-/// backlog has ever existed," not a negative duration. A screen rendering
-/// that value verbatim would report "-1 seconds," which is not a fact about
-/// anything, so it is normalized to `None` here, at the one place that
-/// knows the wire convention. Any negative value (not only exactly `-1`) is
-/// treated the same way, in case a future broker version picks a different
-/// negative sentinel for the same "not applicable" meaning.
-fn normalize_backlog_age(age: Option<i64>) -> Option<i64> {
-    age.filter(|seconds| *seconds >= 0)
+/// backlog has ever existed" — a determinate, healthy fact, not a missing
+/// value or a negative duration one second short of zero. Only `-1` carries
+/// that documented meaning: any other negative value maps to
+/// [`BacklogAge::Unknown`] rather than [`BacklogAge::NoBacklog`], because
+/// inventing a meaning for, say, `-7` would repeat the exact mistake this
+/// type exists to fix, just for a different number.
+fn normalize_backlog_age(age: Option<i64>) -> BacklogAge {
+    match age {
+        None => BacklogAge::Unknown,
+        Some(-1) => BacklogAge::NoBacklog,
+        Some(seconds) if seconds >= 0 => BacklogAge::Seconds { seconds: seconds as u64 },
+        Some(_) => BacklogAge::Unknown,
+    }
 }
 
 /// Pulsar serializes an unset subscription type as the literal string

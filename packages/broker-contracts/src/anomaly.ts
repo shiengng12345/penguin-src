@@ -42,12 +42,15 @@ export interface Anomaly {
 }
 
 /** One check that could not be evaluated because its required input was
- *  absent (Pulsar sent no value, or — for `backlogOlderThanThreshold` —
- *  either no value or its own "never happened" sentinel, which the Rust
- *  parser normalizes to the same absence). Never a duplicate of an
- *  `Anomaly`: reporting one of these is saying "we could not tell", not
- *  "something is wrong". An empty `anomalies` array is only really "clean"
- *  once a caller has also checked this list is empty. */
+ *  absent — Pulsar sent no value at all (or, for `backlogOlderThanThreshold`,
+ *  an undocumented negative value the Rust side cannot interpret). Note
+ *  what this is *not*: Pulsar's own `-1` "no backlog has ever existed"
+ *  sentinel is a determinate, healthy fact (`BacklogAge::NoBacklog` on the
+ *  Rust side, fix round 1), not an unknown, and never produces one of
+ *  these. Never a duplicate of an `Anomaly` either: reporting one of these
+ *  is saying "we could not tell", not "something is wrong". An empty
+ *  `anomalies` array is only really "clean" once a caller has also checked
+ *  `indeterminate` is empty. */
 export interface IndeterminateCheck {
   kind: AnomalyKind;
   topic: string;
@@ -58,7 +61,11 @@ export interface IndeterminateCheck {
 /** What the Overview screen renders. `truncated` plus the two counts are
  *  what stop "no anomalies" being misread as "the namespace is clean" when
  *  only the first `topicsSampled` of `topicsTotal` topics were actually
- *  fetched and checked. */
+ *  fetched and checked. `indeterminate` is the same kind of guard for
+ *  individual checks within the topics that were sampled: it is never
+ *  optional, because an empty array is itself a real, meaningful answer
+ *  ("every check ran") and an optional field would let a caller forget to
+ *  ask the question at all. */
 export interface OverviewReport {
   tenant: string;
   namespace: string;
@@ -66,4 +73,5 @@ export interface OverviewReport {
   topicsTotal: number;
   truncated: boolean;
   anomalies: Anomaly[];
+  indeterminate: IndeterminateCheck[];
 }

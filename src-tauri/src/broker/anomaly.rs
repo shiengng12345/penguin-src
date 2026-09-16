@@ -16,8 +16,8 @@
 //!   `msg_backlog` is `None`, we do not know whether there is a backlog, so
 //!   [`AnomalyKind::BacklogWithNoConsumer`] must not fire — claiming a
 //!   problem the data cannot support is how an operator stops trusting the
-//!   panel. The same holds for a consumer's `blocked_on_unacked_msgs` and a
-//!   topic's `oldest_backlog_message_age_seconds`.
+//!   panel. The same holds for a consumer's `blocked_on_unacked_msgs` and,
+//!   via [`BacklogAge::Unknown`], a topic's `oldest_backlog_message_age`.
 //! - **A `None` is not silently read as healthy either.** An empty
 //!   [`derive_anomalies`] result must mean "every check ran and found
 //!   nothing", never "some checks could not run". Collapsing those two
@@ -41,18 +41,21 @@
 //! the same way it surfaces `truncated`) can tell "checked and clear" apart
 //! from "could not tell" without that fact ever posing as a found anomaly.
 //!
-//! One field, `oldest_backlog_message_age_seconds`, deserves a specific
-//! note: Task 5 normalizes Pulsar's `-1` sentinel ("no backlog has ever
-//! existed" — a genuine, healthy fact) to the same `None` used for a
-//! withheld/absent field. `derive_anomalies` cannot recover which of the two
-//! applies from the value alone, so it treats every `None` here the same
-//! conservative way: never raise [`AnomalyKind::BacklogOlderThanThreshold`],
-//! and always record it via [`derive_indeterminate_checks`]. In practice
-//! this means most quiescent topics (which commonly carry the `-1` sentinel
-//! today) will show up on the indeterminate list rather than as silently
-//! "checked and clear" — a deliberate, conservative choice, made because the
-//! type here cannot distinguish the two cases and assuming the healthier one
-//! is exactly the "read `None` as fine" mistake this module must not make.
+//! One field, `oldest_backlog_message_age`, used to be a plain
+//! `Option<i64>` seconds value in which Task 5 normalized Pulsar's `-1`
+//! sentinel ("no backlog has ever existed" — a genuine, healthy fact) to
+//! the same `None` used for a withheld/absent field. This module could not
+//! recover which of the two applies from a bare `None`, so an earlier
+//! version of this file treated every `None` here conservatively — never
+//! raising [`AnomalyKind::BacklogOlderThanThreshold`], but always recording
+//! it via [`derive_indeterminate_checks`] — which flooded the indeterminate
+//! list with every quiescent topic (which commonly carries the `-1`
+//! sentinel). Fix round 1 corrected this at the source: `broker::stats` now
+//! reports [`BacklogAge`], a three-state type that keeps `NoBacklog`
+//! (determinate and healthy) distinct from `Unknown` (genuinely absent, or
+//! an undocumented negative value). This module now only ever treats
+//! `BacklogAge::Unknown` as indeterminate; `NoBacklog` is a clean, positive
+//! result — neither an anomaly nor an indeterminate check.
 //!
 //! ## Wording discipline
 //!
@@ -68,7 +71,7 @@
 //! only). Task 8's `broker_get_overview` command emits that variant, since
 //! it holds the connection.
 
-use crate::broker::stats::TopicStats;
+use crate::broker::stats::{BacklogAge, TopicStats};
 use serde::{Deserialize, Serialize};
 
 /// The closed set of problems this module (and, for
@@ -165,8 +168,12 @@ pub fn derive_anomalies(topic: &str, stats: &TopicStats, oldest_backlog_threshol
         }
     }
 
-    if let Some(age) = stats.oldest_backlog_message_age_seconds {
-        if age >= oldest_backlog_threshold_secs {
+    // NoBacklog is a determinate, healthy fact (Pulsar's documented `-1`
+    // sentinel) — it must raise nothing here, exactly like a known-young
+    // age. Only a known age at or past the threshold is an anomaly; Unknown
+    // never raises one (see `derive_indeterminate_checks` for that case).
+    if let BacklogAge::Seconds { seconds: age } = stats.oldest_backlog_message_age {
+        if age as i64 >= oldest_backlog_threshold_secs {
             anomalies.push(Anomaly {
                 kind: AnomalyKind::BacklogOlderThanThreshold,
                 topic: topic.to_string(),
@@ -223,15 +230,18 @@ pub fn derive_indeterminate_checks(topic: &str, stats: &TopicStats) -> Vec<Indet
         }
     }
 
-    if stats.oldest_backlog_message_age_seconds.is_none() {
+    // BacklogAge::NoBacklog is deliberately excluded: it is Pulsar's own
+    // determinate "no backlog has ever existed" fact, not an unknown, so it
+    // must never appear on this list (fix round 1 — see the module doc).
+    if matches!(stats.oldest_backlog_message_age, BacklogAge::Unknown) {
         indeterminate.push(IndeterminateCheck {
             kind: AnomalyKind::BacklogOlderThanThreshold,
             topic: topic.to_string(),
             subscription: None,
             reason: format!(
-                "topic \"{topic}\" did not report oldestBacklogMessageAgeSeconds (or reported the \
-                 no-backlog sentinel, which normalizes to the same value), so whether it has an \
-                 old backlog could not be determined"
+                "topic \"{topic}\" did not report oldestBacklogMessageAgeSeconds (or reported an \
+                 undocumented negative value), so whether it has an old backlog could not be \
+                 determined"
             ),
         });
     }

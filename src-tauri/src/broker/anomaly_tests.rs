@@ -4,7 +4,7 @@
 //! no `mod tests { ... }` wrapper here.
 
 use super::*;
-use crate::broker::stats::{ConsumerStats, SubscriptionStats, TopicStats};
+use crate::broker::stats::{BacklogAge, ConsumerStats, SubscriptionStats, TopicStats};
 
 fn sub(name: &str, backlog: Option<u64>, consumers: Vec<ConsumerStats>) -> SubscriptionStats {
     SubscriptionStats {
@@ -17,7 +17,7 @@ fn sub(name: &str, backlog: Option<u64>, consumers: Vec<ConsumerStats>) -> Subsc
     }
 }
 
-fn topic_with(subs: Vec<SubscriptionStats>, oldest_backlog_secs: Option<i64>) -> TopicStats {
+fn topic_with(subs: Vec<SubscriptionStats>, oldest_backlog_age: BacklogAge) -> TopicStats {
     TopicStats {
         msg_rate_in: None,
         msg_rate_out: None,
@@ -26,7 +26,7 @@ fn topic_with(subs: Vec<SubscriptionStats>, oldest_backlog_secs: Option<i64>) ->
         storage_size: None,
         backlog_size: None,
         msg_in_counter: None,
-        oldest_backlog_message_age_seconds: oldest_backlog_secs,
+        oldest_backlog_message_age: oldest_backlog_age,
         subscriptions: subs,
     }
 }
@@ -34,7 +34,9 @@ fn topic_with(subs: Vec<SubscriptionStats>, oldest_backlog_secs: Option<i64>) ->
 #[test]
 fn backlog_with_no_consumer_is_an_anomaly() {
     // The most common real incident: the consumer died and nobody noticed.
-    let stats = topic_with(vec![sub("orders-sub", Some(3400), vec![])], None);
+    // BacklogAge::NoBacklog here is a deliberately neutral, healthy value —
+    // this test is about the backlog/consumer check, not the age check.
+    let stats = topic_with(vec![sub("orders-sub", Some(3400), vec![])], BacklogAge::NoBacklog);
     let found = derive_anomalies("orders", &stats, 3600);
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].kind, AnomalyKind::BacklogWithNoConsumer);
@@ -50,7 +52,7 @@ fn backlog_with_a_live_consumer_is_not_an_anomaly() {
         blocked_on_unacked_msgs: Some(false),
         ..Default::default()
     };
-    let stats = topic_with(vec![sub("orders-sub", Some(3400), vec![consumer])], None);
+    let stats = topic_with(vec![sub("orders-sub", Some(3400), vec![consumer])], BacklogAge::NoBacklog);
     assert!(derive_anomalies("orders", &stats, 3600).is_empty());
 }
 
@@ -58,7 +60,7 @@ fn backlog_with_a_live_consumer_is_not_an_anomaly() {
 fn no_backlog_and_no_consumer_is_not_an_anomaly() {
     // An idle subscription with nothing waiting is fine. Flagging it
     // would bury the real incidents in noise.
-    let stats = topic_with(vec![sub("orders-sub", Some(0), vec![])], None);
+    let stats = topic_with(vec![sub("orders-sub", Some(0), vec![])], BacklogAge::NoBacklog);
     assert!(derive_anomalies("orders", &stats, 3600).is_empty());
 }
 
@@ -71,7 +73,7 @@ fn a_blocked_consumer_is_an_anomaly_even_with_no_backlog() {
         blocked_on_unacked_msgs: Some(true),
         ..Default::default()
     };
-    let stats = topic_with(vec![sub("orders-sub", Some(0), vec![consumer])], None);
+    let stats = topic_with(vec![sub("orders-sub", Some(0), vec![consumer])], BacklogAge::NoBacklog);
     let found = derive_anomalies("orders", &stats, 3600);
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].kind, AnomalyKind::ConsumerBlockedOnUnacked);
@@ -79,7 +81,8 @@ fn a_blocked_consumer_is_an_anomaly_even_with_no_backlog() {
 
 #[test]
 fn an_old_backlog_is_an_anomaly_at_the_threshold_boundary() {
-    let stats = topic_with(vec![sub("orders-sub", Some(1), vec![])], Some(3600));
+    let stats =
+        topic_with(vec![sub("orders-sub", Some(1), vec![])], BacklogAge::Seconds { seconds: 3600 });
     let found = derive_anomalies("orders", &stats, 3600);
     // Exactly at the threshold counts — "older than an hour" should fire
     // at an hour, and a boundary that silently excludes is a bug.
@@ -87,12 +90,31 @@ fn an_old_backlog_is_an_anomaly_at_the_threshold_boundary() {
 }
 
 #[test]
-fn a_missing_backlog_age_is_not_treated_as_zero() {
-    // Absent means "we do not know", not "brand new". Reporting no
-    // anomaly for an unknown age is correct; reporting one is not.
-    let stats = topic_with(vec![sub("orders-sub", Some(1), vec![])], None);
+fn an_unknown_backlog_age_is_not_treated_as_zero_or_as_an_anomaly() {
+    // BacklogAge::Unknown ("we do not know") must never be treated as a
+    // young age that trivially clears the threshold, and must never itself
+    // raise BacklogOlderThanThreshold — see the dedicated indeterminate
+    // test below for the other half of this: it must still surface as
+    // "could not tell" rather than silently "clear".
+    let stats = topic_with(vec![sub("orders-sub", Some(1), vec![])], BacklogAge::Unknown);
     let found = derive_anomalies("orders", &stats, 3600);
     assert!(!found.iter().any(|a| a.kind == AnomalyKind::BacklogOlderThanThreshold));
+}
+
+#[test]
+fn a_no_backlog_state_is_neither_an_anomaly_nor_indeterminate() {
+    // This is the whole point of fix round 1: NoBacklog (Pulsar's `-1`
+    // sentinel) is a determinate, healthy fact, not an unknown. Even a
+    // threshold of 0 — which a Seconds value of anything would clear —
+    // must not raise BacklogOlderThanThreshold here, and it must not show
+    // up as indeterminate either.
+    let stats = topic_with(vec![sub("orders-sub", Some(0), vec![])], BacklogAge::NoBacklog);
+    assert!(!derive_anomalies("orders", &stats, 0)
+        .iter()
+        .any(|a| a.kind == AnomalyKind::BacklogOlderThanThreshold));
+    assert!(!derive_indeterminate_checks("orders", &stats)
+        .iter()
+        .any(|c| c.kind == AnomalyKind::BacklogOlderThanThreshold));
 }
 
 #[test]
@@ -102,7 +124,10 @@ fn one_subscription_can_raise_two_distinct_anomalies() {
         blocked_on_unacked_msgs: Some(true),
         ..Default::default()
     };
-    let stats = topic_with(vec![sub("orders-sub", Some(99), vec![consumer])], Some(7200));
+    let stats = topic_with(
+        vec![sub("orders-sub", Some(99), vec![consumer])],
+        BacklogAge::Seconds { seconds: 7200 },
+    );
     let kinds: Vec<_> = derive_anomalies("orders", &stats, 3600).into_iter().map(|a| a.kind).collect();
     assert!(kinds.contains(&AnomalyKind::ConsumerBlockedOnUnacked));
     assert!(kinds.contains(&AnomalyKind::BacklogOlderThanThreshold));
@@ -116,10 +141,11 @@ fn an_unknown_backlog_with_no_consumer_never_raises_and_is_marked_indeterminate(
     // all. Raising BacklogWithNoConsumer here would be a fabricated
     // claim, not a measurement. But silence must not be read as "clear"
     // either — the check has to show up as unresolved somewhere.
-    // oldest_backlog_secs is Some(0) here (known, under any threshold),
+    // oldest_backlog_message_age is NoBacklog here (known, healthy),
     // deliberately, so only the check under test — backlog visibility —
-    // is exercised; None there is covered by its own dedicated test below.
-    let stats = topic_with(vec![sub("orders-sub", None, vec![])], Some(0));
+    // is exercised; BacklogAge::Unknown is covered by its own dedicated
+    // test below.
+    let stats = topic_with(vec![sub("orders-sub", None, vec![])], BacklogAge::NoBacklog);
     let found = derive_anomalies("orders", &stats, 3600);
     assert!(found.is_empty(), "a None input must never raise an anomaly");
 
@@ -143,7 +169,7 @@ fn an_attached_consumer_makes_an_unknown_backlog_moot() {
         blocked_on_unacked_msgs: Some(false),
         ..Default::default()
     };
-    let stats = topic_with(vec![sub("orders-sub", None, vec![consumer])], Some(0));
+    let stats = topic_with(vec![sub("orders-sub", None, vec![consumer])], BacklogAge::NoBacklog);
     assert!(derive_anomalies("orders", &stats, 3600).is_empty());
     assert!(derive_indeterminate_checks("orders", &stats).is_empty());
 }
@@ -153,10 +179,11 @@ fn an_unknown_blocked_flag_never_raises_and_is_marked_indeterminate() {
     // blocked_on_unacked_msgs is None: the broker did not report the one
     // field that reveals a stalled consumer. Assuming "not blocked"
     // would hide a real outage; assuming "blocked" would fabricate one.
-    // oldest_backlog_secs is Some(0) here so only the blocked-flag check
-    // is exercised; None there is covered by its own dedicated test below.
+    // oldest_backlog_message_age is NoBacklog here so only the
+    // blocked-flag check is exercised; Unknown there is covered by its own
+    // dedicated test below.
     let consumer = ConsumerStats { consumer_name: Some("c1".into()), ..Default::default() };
-    let stats = topic_with(vec![sub("orders-sub", Some(0), vec![consumer])], Some(0));
+    let stats = topic_with(vec![sub("orders-sub", Some(0), vec![consumer])], BacklogAge::NoBacklog);
     let found = derive_anomalies("orders", &stats, 3600);
     assert!(found.is_empty(), "a None input must never raise an anomaly");
 
@@ -168,12 +195,11 @@ fn an_unknown_blocked_flag_never_raises_and_is_marked_indeterminate() {
 
 #[test]
 fn an_unknown_backlog_age_never_raises_and_is_marked_indeterminate() {
-    // None here means either "no backlog has ever existed" (the -1
-    // sentinel, already normalized away by Task 5) or "the field was
-    // withheld" — both collapse to the same value, and derive_anomalies
-    // cannot tell them apart. Treating that as silently healthy would
-    // hide the second case, so it is reported indeterminate instead.
-    let stats = topic_with(vec![sub("orders-sub", Some(1), vec![])], None);
+    // Fix round 1: BacklogAge::Unknown means the field was genuinely
+    // absent (or carried an undocumented negative value) — `broker::stats`
+    // now keeps this distinct from BacklogAge::NoBacklog (Pulsar's `-1`
+    // sentinel, a determinate healthy fact), so only Unknown belongs here.
+    let stats = topic_with(vec![sub("orders-sub", Some(1), vec![])], BacklogAge::Unknown);
     let indeterminate = derive_indeterminate_checks("orders", &stats);
     assert!(indeterminate
         .iter()
@@ -184,7 +210,8 @@ fn an_unknown_backlog_age_never_raises_and_is_marked_indeterminate() {
 fn a_known_backlog_age_under_threshold_is_not_indeterminate() {
     // A conclusive "no" is not the same as "could not tell" — only a
     // genuinely missing input belongs on the indeterminate list.
-    let stats = topic_with(vec![sub("orders-sub", Some(1), vec![])], Some(10));
+    let stats =
+        topic_with(vec![sub("orders-sub", Some(1), vec![])], BacklogAge::Seconds { seconds: 10 });
     let indeterminate = derive_indeterminate_checks("orders", &stats);
     assert!(!indeterminate.iter().any(|c| c.kind == AnomalyKind::BacklogOlderThanThreshold));
 }

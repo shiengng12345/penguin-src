@@ -30,12 +30,13 @@ fn an_unknown_field_does_not_break_the_parse() {
 
 #[test]
 fn a_missing_optional_field_yields_a_default_not_an_error() {
-    // oldestBacklogMessageAgeSeconds is absent on topics that never had a
-    // backlog. That is normal, not a failure.
+    // Absence is not an error, but it is also not the same fact as Pulsar's
+    // own "no backlog has ever existed" sentinel (see the dedicated tests
+    // below) — an absent field means we genuinely do not know.
     let mut raw = real_fixture();
     raw.as_object_mut().unwrap().remove("oldestBacklogMessageAgeSeconds");
     let stats = parse_topic_stats(&raw).expect("still parses");
-    assert_eq!(stats.oldest_backlog_message_age_seconds, None);
+    assert_eq!(stats.oldest_backlog_message_age, BacklogAge::Unknown);
 }
 
 #[test]
@@ -145,14 +146,58 @@ fn an_absent_rate_is_unknown_not_zero_because_zero_reads_as_a_dead_consumer() {
 
 /// The live broker sends `-1` for this field on `fpms_topup` today
 /// (see the captured fixture, unmodified). `-1` is Pulsar's documented
-/// sentinel for "no backlog has ever existed," not a negative duration
-/// one second short of zero — passing it through as a number would let
-/// a screen say "oldest backlog message: -1 seconds," which is not a
-/// fact about anything.
+/// sentinel for "no backlog has ever existed" — a determinate, healthy
+/// fact, not a negative duration one second short of zero, and (fix round
+/// 1) not the same thing as the field being absent either: an earlier
+/// version of this test asserted `None`, collapsing "verified clean" into
+/// the same value as "we could not tell" and flooding the anomaly panel's
+/// indeterminate list with perfectly healthy topics.
 #[test]
-fn pulsars_negative_one_backlog_age_sentinel_becomes_unknown_not_a_negative_duration() {
+fn pulsars_negative_one_backlog_age_sentinel_becomes_no_backlog_not_unknown() {
     let stats = parse_topic_stats(&real_fixture()).expect("parses");
-    assert_eq!(stats.oldest_backlog_message_age_seconds, None);
+    assert_eq!(stats.oldest_backlog_message_age, BacklogAge::NoBacklog);
+}
+
+/// Only `-1` carries Pulsar's documented "no backlog" meaning. A different
+/// negative value has no documented meaning at all, so guessing it means
+/// the same thing as `-1` would repeat the exact mistake fix round 1
+/// corrects, just for a different number — it must fall back to `Unknown`.
+#[test]
+fn a_different_negative_backlog_age_is_unknown_not_no_backlog() {
+    let mut raw = real_fixture();
+    raw["oldestBacklogMessageAgeSeconds"] = serde_json::json!(-7);
+    let stats = parse_topic_stats(&raw).expect("parses");
+    assert_eq!(stats.oldest_backlog_message_age, BacklogAge::Unknown);
+}
+
+/// A genuine, positive backlog age is carried through as a plain number of
+/// seconds — the ordinary case neither sentinel nor absence touches.
+#[test]
+fn a_positive_backlog_age_is_carried_through_as_seconds() {
+    let mut raw = real_fixture();
+    raw["oldestBacklogMessageAgeSeconds"] = serde_json::json!(42);
+    let stats = parse_topic_stats(&raw).expect("parses");
+    assert_eq!(stats.oldest_backlog_message_age, BacklogAge::Seconds { seconds: 42 });
+}
+
+#[test]
+fn backlog_age_serialises_to_the_pinned_wire_shape() {
+    // packages/broker-contracts/src/anomaly.ts mirrors this three-state
+    // discriminated union; a rename on either side breaks the other
+    // silently, so pin the wire shape here, the way BrokerSource is pinned
+    // in envelope.rs.
+    assert_eq!(
+        serde_json::to_value(BacklogAge::Seconds { seconds: 42 }).unwrap(),
+        serde_json::json!({"state": "seconds", "seconds": 42})
+    );
+    assert_eq!(
+        serde_json::to_value(BacklogAge::NoBacklog).unwrap(),
+        serde_json::json!({"state": "noBacklog"})
+    );
+    assert_eq!(
+        serde_json::to_value(BacklogAge::Unknown).unwrap(),
+        serde_json::json!({"state": "unknown"})
+    );
 }
 
 /// Both subscriptions in the real fixture have `consumers: []`, and
