@@ -134,7 +134,12 @@ pub struct SubscriptionStats {
 }
 
 /// The parsed subset of one entry in a subscription's `consumers` array.
-#[derive(Debug, Clone, PartialEq)]
+///
+/// `Default` is derived (every field is `Option`, so `None` is a legitimate
+/// default) purely so `anomaly.rs`'s tests can build a `ConsumerStats` with
+/// `..Default::default()` and set only the field under test — production
+/// code always goes through `parse_topic_stats` and never relies on this.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ConsumerStats {
     pub consumer_name: Option<String>,
     pub address: Option<String>,

@@ -1,0 +1,244 @@
+//! Decides what counts as "wrong" on a topic. This is the logic behind the
+//! Overview screen's anomaly panel (ruling D-A3: that panel answers "what is
+//! broken", never "how many topics exist").
+//!
+//! Pure logic only — no I/O, no cache, no store, no network. Every input is
+//! a value already parsed by `broker::stats`; every output is a plain value
+//! handed back to the caller.
+//!
+//! ## The central rule: unknown is neither wrong nor fine
+//!
+//! `broker::stats` made almost every field `Option` on purpose, so that "the
+//! broker did not report this" (`None`) is distinguishable from a real zero.
+//! This module has to honour that distinction in both directions:
+//!
+//! - **A `None` never raises an [`Anomaly`].** If a subscription's
+//!   `msg_backlog` is `None`, we do not know whether there is a backlog, so
+//!   [`AnomalyKind::BacklogWithNoConsumer`] must not fire — claiming a
+//!   problem the data cannot support is how an operator stops trusting the
+//!   panel. The same holds for a consumer's `blocked_on_unacked_msgs` and a
+//!   topic's `oldest_backlog_message_age_seconds`.
+//! - **A `None` is not silently read as healthy either.** An empty
+//!   [`derive_anomalies`] result must mean "every check ran and found
+//!   nothing", never "some checks could not run". Collapsing those two
+//!   would hide precisely the situation this module exists to catch: a
+//!   broker that has quietly stopped sending the one field an operator
+//!   needed.
+//!
+//! [`derive_anomalies`]'s signature is fixed by the task brief to
+//! `Vec<Anomaly>`, and [`AnomalyKind`] is a closed, fixed set of four
+//! variants — none of which mean "could not tell". Inventing a fifth
+//! "unknown" variant, or smuggling an extra field onto [`Anomaly`], would
+//! make every caller that matches on `kind` (Task 8's Overview command,
+//! eventually a UI switch/case) reason about a state that is not actually an
+//! anomaly. Instead, [`derive_indeterminate_checks`] is a second, separate
+//! pure function returning a distinct type, [`IndeterminateCheck`] — "a
+//! separate return value" as the brief's central-constraint section
+//! suggests. It reuses [`AnomalyKind`] as a discriminant (which check could
+//! not be evaluated) without adding a variant that would ever appear inside
+//! an actual `Anomaly`. A caller that ignores it loses nothing it had before;
+//! a caller that surfaces it (as Task 8's `OverviewReport` eventually might,
+//! the same way it surfaces `truncated`) can tell "checked and clear" apart
+//! from "could not tell" without that fact ever posing as a found anomaly.
+//!
+//! One field, `oldest_backlog_message_age_seconds`, deserves a specific
+//! note: Task 5 normalizes Pulsar's `-1` sentinel ("no backlog has ever
+//! existed" — a genuine, healthy fact) to the same `None` used for a
+//! withheld/absent field. `derive_anomalies` cannot recover which of the two
+//! applies from the value alone, so it treats every `None` here the same
+//! conservative way: never raise [`AnomalyKind::BacklogOlderThanThreshold`],
+//! and always record it via [`derive_indeterminate_checks`]. In practice
+//! this means most quiescent topics (which commonly carry the `-1` sentinel
+//! today) will show up on the indeterminate list rather than as silently
+//! "checked and clear" — a deliberate, conservative choice, made because the
+//! type here cannot distinguish the two cases and assuming the healthier one
+//! is exactly the "read `None` as fine" mistake this module must not make.
+//!
+//! ## Wording discipline
+//!
+//! `msgRateOut` (used nowhere in this file) proves delivery to a consumer,
+//! never business completion — no `detail` string may imply a message was
+//! processed. Every [`Anomaly`] also carries an `observed_value` that is the
+//! actual figure observed (a count, an age in seconds, a boolean flag as
+//! reported), never a restatement of the rule that fired.
+//!
+//! [`AnomalyKind::CapabilityProbeFailed`] is intentionally never produced by
+//! this module: its evidence lives in a `CapabilitySnapshot`, which this
+//! module never sees (see the module's own signature — it takes `TopicStats`
+//! only). Task 8's `broker_get_overview` command emits that variant, since
+//! it holds the connection.
+
+use crate::broker::stats::TopicStats;
+use serde::{Deserialize, Serialize};
+
+/// The closed set of problems this module (and, for
+/// [`AnomalyKind::CapabilityProbeFailed`], Task 8) can report about a topic.
+/// `rename_all = "camelCase"` mirrors `AnomalyKind` in
+/// `packages/broker-contracts/src/anomaly.ts` field-for-field — the wire
+/// value for `BacklogWithNoConsumer` is the string `"backlogWithNoConsumer"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AnomalyKind {
+    BacklogWithNoConsumer,
+    ConsumerBlockedOnUnacked,
+    BacklogOlderThanThreshold,
+    /// Never constructed by [`derive_anomalies`] — see the module doc. Kept
+    /// here because it is part of the one shared, closed set of anomaly
+    /// kinds Task 8 also reports through.
+    CapabilityProbeFailed,
+}
+
+/// One concrete, evidenced problem found on a topic (or, for a
+/// topic-scoped check such as [`AnomalyKind::BacklogOlderThanThreshold`], on
+/// the topic as a whole — `subscription` is `None` in that case).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Anomaly {
+    pub kind: AnomalyKind,
+    pub topic: String,
+    pub subscription: Option<String>,
+    pub detail: String,
+    pub observed_value: String,
+}
+
+/// One check that could not be evaluated because the input it depends on
+/// was `None` — see the module doc's "central rule". Never a claim that
+/// something is wrong; a claim that we could not tell. `kind` names which of
+/// [`AnomalyKind`]'s (non-`CapabilityProbeFailed`) checks was blocked.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndeterminateCheck {
+    pub kind: AnomalyKind,
+    pub topic: String,
+    pub subscription: Option<String>,
+    pub reason: String,
+}
+
+/// Derives every anomaly [Task 5's `TopicStats`] gives this module enough
+/// evidence to report. Never raises an anomaly from a `None` input (see the
+/// module doc); use [`derive_indeterminate_checks`] alongside this to learn
+/// which checks could not run at all.
+pub fn derive_anomalies(topic: &str, stats: &TopicStats, oldest_backlog_threshold_secs: i64) -> Vec<Anomaly> {
+    let mut anomalies = Vec::new();
+
+    for sub in &stats.subscriptions {
+        if sub.consumers.is_empty() {
+            // An empty consumer list is a fact, not an unknown (Pulsar told
+            // us nobody is attached) — but whether that idle subscription
+            // has a backlog waiting is still only knowable if msg_backlog
+            // was actually reported.
+            if let Some(backlog) = sub.msg_backlog {
+                if backlog > 0 {
+                    anomalies.push(Anomaly {
+                        kind: AnomalyKind::BacklogWithNoConsumer,
+                        topic: topic.to_string(),
+                        subscription: Some(sub.name.clone()),
+                        detail: format!(
+                            "Subscription \"{}\" has a backlog and no consumer is attached to receive it.",
+                            sub.name
+                        ),
+                        observed_value: format!("{backlog} messages backlogged, 0 consumers attached"),
+                    });
+                }
+            }
+        }
+
+        for consumer in &sub.consumers {
+            if consumer.blocked_on_unacked_msgs == Some(true) {
+                let observed_value = match consumer.unacked_messages {
+                    Some(n) => format!("{n} unacked messages (blockedOnUnackedMsgs=true)"),
+                    None => "blockedOnUnackedMsgs=true (unacked count unknown)".to_string(),
+                };
+                let consumer_label = consumer.consumer_name.as_deref().unwrap_or("(unnamed consumer)");
+                anomalies.push(Anomaly {
+                    kind: AnomalyKind::ConsumerBlockedOnUnacked,
+                    topic: topic.to_string(),
+                    subscription: Some(sub.name.clone()),
+                    detail: format!(
+                        "Consumer \"{consumer_label}\" on subscription \"{}\" is blocked on \
+                         unacknowledged messages; the broker has stopped delivering to it.",
+                        sub.name
+                    ),
+                    observed_value,
+                });
+            }
+        }
+    }
+
+    if let Some(age) = stats.oldest_backlog_message_age_seconds {
+        if age >= oldest_backlog_threshold_secs {
+            anomalies.push(Anomaly {
+                kind: AnomalyKind::BacklogOlderThanThreshold,
+                topic: topic.to_string(),
+                subscription: None,
+                detail: format!(
+                    "Topic \"{topic}\" has a backlog message older than the {oldest_backlog_threshold_secs}s threshold."
+                ),
+                observed_value: format!(
+                    "oldest backlog message is {age}s old (threshold {oldest_backlog_threshold_secs}s)"
+                ),
+            });
+        }
+    }
+
+    anomalies
+}
+
+/// Reports every check [`derive_anomalies`] skipped for this topic because
+/// its required input was `None` — never a duplicate of an anomaly, always
+/// a distinct "could not tell" signal. See the module doc for why this is a
+/// separate function rather than a new [`AnomalyKind`] variant or an extra
+/// field on [`Anomaly`].
+pub fn derive_indeterminate_checks(topic: &str, stats: &TopicStats) -> Vec<IndeterminateCheck> {
+    let mut indeterminate = Vec::new();
+
+    for sub in &stats.subscriptions {
+        if sub.consumers.is_empty() && sub.msg_backlog.is_none() {
+            indeterminate.push(IndeterminateCheck {
+                kind: AnomalyKind::BacklogWithNoConsumer,
+                topic: topic.to_string(),
+                subscription: Some(sub.name.clone()),
+                reason: format!(
+                    "subscription \"{}\" has no attached consumer and msg_backlog was not reported, \
+                     so whether it has an unattended backlog could not be determined",
+                    sub.name
+                ),
+            });
+        }
+
+        for consumer in &sub.consumers {
+            if consumer.blocked_on_unacked_msgs.is_none() {
+                let consumer_label = consumer.consumer_name.as_deref().unwrap_or("(unnamed consumer)");
+                indeterminate.push(IndeterminateCheck {
+                    kind: AnomalyKind::ConsumerBlockedOnUnacked,
+                    topic: topic.to_string(),
+                    subscription: Some(sub.name.clone()),
+                    reason: format!(
+                        "consumer \"{consumer_label}\" on subscription \"{}\" did not report \
+                         blockedOnUnackedMsgs, so whether it is stalled could not be determined",
+                        sub.name
+                    ),
+                });
+            }
+        }
+    }
+
+    if stats.oldest_backlog_message_age_seconds.is_none() {
+        indeterminate.push(IndeterminateCheck {
+            kind: AnomalyKind::BacklogOlderThanThreshold,
+            topic: topic.to_string(),
+            subscription: None,
+            reason: format!(
+                "topic \"{topic}\" did not report oldestBacklogMessageAgeSeconds (or reported the \
+                 no-backlog sentinel, which normalizes to the same value), so whether it has an \
+                 old backlog could not be determined"
+            ),
+        });
+    }
+
+    indeterminate
+}
+
+#[cfg(test)]
+#[path = "anomaly_tests.rs"]
+mod tests;
