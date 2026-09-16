@@ -58,7 +58,15 @@ export function DataRow<T>({
                 ? "Collapse row"
                 : "Expand row"
             }
-            onClick={() => onToggleExpand(rowKeyValue)}
+            // Stop the click reaching the row. A consumer can put a row-level
+            // onClick on `rowProps` (TopicTable does, to open a topic's detail
+            // pane); without this, expanding a row to peek at its partitions
+            // also fires that handler — an unwanted fetch and an unwanted
+            // pane, every time someone expands a row.
+            onClick={(event) => {
+              event.stopPropagation();
+              onToggleExpand(rowKeyValue);
+            }}
             className="flex h-6 w-6 items-center justify-center rounded text-muted-foreground hover:bg-accent hover:text-accent-foreground"
           >
             <span aria-hidden="true">{expanded ? "▾" : "▸"}</span>

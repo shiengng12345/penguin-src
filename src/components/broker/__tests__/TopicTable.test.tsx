@@ -28,6 +28,27 @@ const props = {
 };
 
 describe("TopicTable", () => {
+  it("expanding a row to see its partitions does not also open the topic", async () => {
+    // The expand arrow lives inside the row, and the row carries an onClick
+    // that opens the detail pane. Without stopPropagation the click reaches
+    // both: someone peeking at a partitioned topic's partition names would
+    // trigger a getTopicDetail fetch and an unwanted pane, every time.
+    const onSelectTopic = vi.fn();
+    render(<TopicTable {...props} onSelectTopic={onSelectTopic} />);
+
+    await userEvent.click(screen.getByRole("button", { name: /expand events/i }));
+
+    // The partitions are revealed...
+    expect(screen.getByText(/events-partition-0/)).toBeInTheDocument();
+    // ...and the topic was NOT opened.
+    expect(onSelectTopic).not.toHaveBeenCalled();
+
+    // A click on the row itself still opens it — the guard must not have
+    // disabled selection wholesale.
+    await userEvent.click(screen.getByText("events"));
+    expect(onSelectTopic).toHaveBeenCalledTimes(1);
+  });
+
   it("renders a partitioned topic as one row, not one row per partition", () => {
     render(<TopicTable {...props} />);
     expect(screen.getAllByRole("row")).toHaveLength(3); // header + 2 topics
