@@ -4,6 +4,27 @@
 //! `read_only` is only meaningful if this module refuses to send. Likewise the
 //! endpoint allowlist is what stops a crafted connection URL from turning the
 //! Rust backend into an SSRF proxy.
+//!
+//! NOTE (Stage 0 Task 2): `WriteGuard`/`WritePermit` currently have **no
+//! production caller**. `capability.rs`'s `probe_write` was the only call
+//! site of `WriteGuard::authorize`, and it was deleted — it created and
+//! deleted a real topic to learn `can_write`, which the product spec forbids
+//! outright (B-07, §11.9, §14.3), regardless of `read_only`. Write capability
+//! is now inferred from read-only responses instead; see the doc comment on
+//! `capability::discover`.
+//!
+//! This is deliberate, not dead code to clean up. `WriteGuard`/`WritePermit`
+//! are the security gate for Stage C's Send Message, and Phase 0 wrote
+//! red-then-green tests proving the permit is unforgeable (no public
+//! constructor, no public fields — a write path that takes `&WritePermit`
+//! cannot compile without going through `authorize` first). `send.execute`
+//! in Stage C is the sole expected consumer. Anyone doing dead-code cleanup
+//! before then should leave this type alone — removing it now means Stage C
+//! has to rebuild the same guarantee, almost certainly worse for having lost
+//! the reasoning above. (This project began because Phase 0 shipped a
+//! `source: "cache"` value nothing could produce, silently. An
+//! unreachable-but-deliberate type is fine when it says so; this comment is
+//! that.)
 
 use crate::broker::envelope::{BrokerError, BrokerErrorCode};
 use url::Url;

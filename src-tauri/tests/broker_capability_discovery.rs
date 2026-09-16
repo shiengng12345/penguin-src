@@ -4,6 +4,20 @@ use penguin_lib::broker::capability;
 const ADMIN: &str = "http://localhost:8080";
 const BROKER: &str = "pulsar://localhost:6650";
 
+/// Raw response body for the tenant/namespace's topic list, fetched fresh
+/// each call. Compared byte-for-byte (not just parsed and re-sorted) so a
+/// stray create-then-delete would still show up as a diff even if it
+/// happened to leave the set of names unchanged (e.g. same count, different
+/// transient ordering from a broker-side cache invalidation).
+async fn topics_text() -> String {
+    reqwest::get(format!("{ADMIN}/admin/v2/persistent/public/default"))
+        .await
+        .expect("admin REST reachable")
+        .text()
+        .await
+        .expect("topic list response body")
+}
+
 #[tokio::test]
 async fn discovery_reports_measured_facts_not_configured_ones() {
     let snap = capability::discover(ADMIN, BROKER, 10_000, true, None, false)
@@ -17,9 +31,21 @@ async fn discovery_reports_measured_facts_not_configured_ones() {
     // affected phase's design is stale.
     assert!(!snap.peek_on_partitioned_allowed, "V-B4: peek is rejected on partitioned topics");
     assert!(snap.binary_protocol_reachable, "V-C3: :6650 must be reachable");
-    assert!(snap.can_write, "V-E8: local Pulsar accepts writes from anyone");
-    assert!(snap.can_write_probed, "a non-read-only connection must actually attempt the probe");
     assert!(snap.has_metrics);
+
+    // Local Pulsar is unauthenticated, so `list_clusters` succeeds — and a
+    // successful read is NOT evidence of write access (Stage 0 Task 2:
+    // `probe_write` is gone, nothing here ever attempts an actual write).
+    assert!(!snap.can_write, "this stage never attempts a write; can_write must default to false");
+    assert!(!snap.can_write_probed, "a successful read must not be reported as a write measurement");
+    assert!(
+        snap.warnings.iter().any(|w| {
+            let w = w.to_lowercase();
+            w.contains("not measured") || w.contains("not probed")
+        }),
+        "the UI must be told can_write is unmeasured, not silently false: {:?}",
+        snap.warnings
+    );
 }
 
 #[tokio::test]
@@ -30,43 +56,53 @@ async fn discovery_on_an_unreachable_broker_fails_without_panicking() {
     assert!(err.retryable, "a connection failure is worth retrying");
 }
 
-/// CONTROLLER RULING on the Task 14 brief: the brief's `probe_write` created
-/// and deleted a real scratch topic to measure `can_write` regardless of the
-/// connection's `read_only` flag — itself a write, on the one connection
-/// where a write is exactly what must never happen. This is the test that
-/// would have failed against that design: on a read-only connection the
-/// probe must never run, `can_write` must come back `false`, and the UI must
-/// be told this is "not measured", not "measured as unwritable".
+/// CONTROLLER RULING on the Task 2 brief (Stage 0): Task 14's `probe_write`
+/// created and deleted a real scratch topic to measure `can_write`,
+/// unconditionally — including when `read_only` was set. `read_only` only
+/// ever gated *whether the probe ran*, never whether a write path existed at
+/// all; on a super-admin-scoped credential pointed at a real cluster, that
+/// PUT/DELETE would genuinely execute. `probe_write` is now deleted outright
+/// (grep -c -E '\.put\(|\.delete\(' over capability.rs is 0), so this
+/// asserts the thing that actually matters: no write happens, under EITHER
+/// value of `read_only` — not just the one the old code happened to guard.
 #[tokio::test]
-async fn a_read_only_connection_is_never_probed_for_write() {
-    let snap = capability::discover(ADMIN, BROKER, 10_000, true, None, true)
-        .await
-        .expect("discovery against the local broker");
+async fn discovery_never_writes_regardless_of_read_only_flag() {
+    for read_only in [true, false] {
+        let before = topics_text().await;
 
-    assert!(!snap.can_write, "an unprobed connection must never claim can_write: true");
-    assert!(!snap.can_write_probed, "read-only discovery must record that the probe did not run");
-    assert!(
-        snap.warnings.iter().any(|w| {
-            let w = w.to_lowercase();
-            w.contains("read-only") || w.contains("read only")
-        }),
-        "the UI must be told WHY can_write is false: {:?}",
-        snap.warnings
-    );
+        let snap = capability::discover(ADMIN, BROKER, 10_000, true, None, read_only)
+            .await
+            .expect("discovery against the local broker");
+
+        let after = topics_text().await;
+
+        assert_eq!(
+            before, after,
+            "discover() must never create or delete a topic (read_only={read_only})"
+        );
+        assert!(!snap.can_write, "no write is ever attempted (read_only={read_only})");
+        assert!(!snap.can_write_probed, "a successful read is not a write measurement (read_only={read_only})");
+    }
 }
 
+/// The test that would have caught the original defect directly: run the
+/// discovery path once against the real local broker and assert the topic
+/// list is byte-identical before and after, not merely "no `broker-probe-`
+/// name survived" (which a create-then-successfully-delete would also
+/// satisfy).
 #[tokio::test]
-async fn write_probe_leaves_no_scratch_topic_behind() {
+async fn topic_list_is_byte_identical_before_and_after_discovery() {
+    let before = topics_text().await;
+
     let _snap = capability::discover(ADMIN, BROKER, 10_000, true, None, false)
         .await
         .expect("discovery against the local broker");
 
-    let res = reqwest::get(format!("{ADMIN}/admin/v2/persistent/public/default"))
-        .await
-        .expect("admin REST reachable");
-    let topics: Vec<String> = res.json().await.expect("topic list is JSON");
-    assert!(
-        topics.iter().all(|t| !t.contains("broker-probe")),
-        "a scratch topic survived discovery: {topics:?}"
+    let after = topics_text().await;
+
+    assert_eq!(
+        before, after,
+        "discover() must not create or delete any topic — this is the check that would have \
+         caught probe_write's PUT/DELETE in the first place"
     );
 }

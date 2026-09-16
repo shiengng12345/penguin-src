@@ -106,6 +106,21 @@ export function formatSubscriptionType(value: SubscriptionType): string {
   }
 }
 
+/** `CapabilitySnapshot.canWrite`/`canWriteProbed` (Stage 0 Task 2).
+ *  `capability.rs` no longer attempts an actual write to learn `canWrite` —
+ *  the spec (B-07, §11.9, §14.3) forbids creating or deleting a topic just
+ *  to probe permissions. Write capability is inferred from a read-only
+ *  admin call instead: a 401/403 there IS a conclusive measurement
+ *  (`canWriteProbed: true`), but a successful read is NOT evidence of write
+ *  access (`canWriteProbed: false`). This must render as three distinct
+ *  states, and in particular `canWriteProbed: false` must read "Not
+ *  measured", never "Cannot write" — collapsing the two would present an
+ *  inference as a fact, exactly what this project's spec forbids. */
+export function formatWriteCapability(canWrite: boolean, canWriteProbed: boolean): string {
+  if (!canWriteProbed) return "Not measured";
+  return canWrite ? "Can write" : "Cannot write";
+}
+
 /** A cursor `Position` (`markDeletePosition`, `readPosition`,
  *  `lastConfirmedEntry`) as Pulsar's own `"ledgerId:entryId"` wire text.
  *  `entryId: -1` is rendered verbatim, never blanked or normalized — it is

@@ -31,11 +31,15 @@ export interface CapabilitySnapshot {
   binaryProtocolReachable: boolean;  // V-C3 — probed per connection
   webSocketEnabled: boolean;         // V-C1 — informational only, not a code path; constant today, not yet probed per connection
   canProduce: boolean;               // V-E5 — only ever via binary; probed per connection
-  canWrite: boolean;                 // V-E8 — what the server allows; probed per connection
-  /** True only when the write probe actually ran and returned a conclusive
-   *  answer. False both when it was skipped (read-only connection) and when
-   *  it could not complete (e.g. broker unreachable for that one call) — in
-   *  either case `canWrite` must not be trusted as a measured fact. */
+  canWrite: boolean;                 // V-E8 — what the server allows; inferred, never probed by an actual write (Stage 0 Task 2)
+  /** True only when a read-only admin call came back 401/403 — a refusal IS
+   *  a measurement: a credential that cannot even read certainly cannot
+   *  write. False in every other case, including a successful read: a
+   *  successful read is NOT evidence of write access. This stage never
+   *  attempts an actual write to find out either way (see
+   *  `src-tauri/src/broker/capability.rs`'s `probe_write` removal — B-07,
+   *  §11.9, §14.3 all forbid it). A UI reading `canWriteProbed: false` must
+   *  render "not measured", never "cannot write". */
   canWriteProbed: boolean;
   hasMetrics: boolean;
   warnings: string[];

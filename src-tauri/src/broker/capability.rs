@@ -14,17 +14,37 @@
 //! before treating them as measurements; don't read the struct's presence
 //! as proof they already are.
 //!
-//! CONTROLLER RULING on the Task 14 brief: the brief's `probe_write` created
-//! a scratch topic and deleted it to learn `can_write`, unconditionally —
-//! including on a `read_only` connection. That is itself a write, and doing
-//! it on a read-only connection defeats the exact guarantee `read_only`
-//! exists to provide (this project measured that local Pulsar accepts every
-//! write from anyone; our own code is the only thing enforcing the flag).
-//! Fixed here: when `read_only` is true, the probe never runs at all —
-//! `can_write` is reported `false` with `can_write_probed: false` and a
-//! warning, so the UI can tell "measured as not writable" apart from
-//! "never measured". The probe itself, when it does run, is gated behind
-//! `WriteGuard::authorize` like any other write path in this module.
+//! ## Write capability: inferred, never probed (Stage 0 Task 2)
+//!
+//! Earlier revisions of this module (Task 14's `probe_write`) learned
+//! `can_write` by PUTting a `broker-probe-write-<pid>-<ts>` topic into
+//! existence and DELETEing it back out — a real write against the broker,
+//! unconditionally, including on a `read_only` connection. Against local
+//! Pulsar (unauthenticated, accepts every write — spec V-E8) that "worked"
+//! and nothing ever flagged it; against a super-admin-scoped credential
+//! pointed at someone's QAT cluster, it would genuinely create and delete a
+//! topic there. The product spec forbids this three separate ways: B-07 (no
+//! topic create/delete), §11.9 (auto-creation strictly forbidden), and
+//! §14.3 (`connections.testObserve` must not create a Producer or Consumer,
+//! let alone a topic).
+//!
+//! `probe_write` and its PUT/DELETE calls are gone — there are no write
+//! verbs left in this file, under any `read_only` setting. Write capability
+//! is instead inferred from the read-only admin call `discover` already
+//! makes (`list_clusters`):
+//!
+//! - It came back `401`/`403` → the credential cannot even read, so it
+//!   certainly cannot write. `can_write: false`, `can_write_probed: true` —
+//!   a refusal IS a measurement.
+//! - Anything else (the read succeeded, or failed for some unrelated
+//!   reason) is not evidence of write capability either way — a credential
+//!   that can read is not thereby proven able to write. `can_write: false`,
+//!   `can_write_probed: false`, plus a warning saying so in words. The UI
+//!   must read this as "not measured", never as "cannot write".
+//!
+//! `WriteGuard`/`WritePermit` (`security.rs`) are kept even though this
+//! removes their only call site — see the note at the top of `security.rs`
+//! for why that is deliberate rather than silent dead code.
 //!
 //! Divergence from the brief's binary-reachability check: the brief probed
 //! `:6650` with `binary::read_without_ack` against a scratch topic name.
@@ -37,9 +57,9 @@
 //! — the client's own connection handshake, which touches no topic at all —
 //! giving the same V-C3 signal with zero side effects.
 
-use crate::broker::envelope::{is_success, map_reqwest_error, BrokerError, BrokerSource};
+use crate::broker::envelope::{map_reqwest_error, BrokerError, BrokerErrorCode, BrokerSource};
 use crate::broker::ports::BrokerAdmin;
-use crate::broker::security::{EndpointGuard, WriteGuard, WritePermit};
+use crate::broker::security::EndpointGuard;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -72,60 +92,40 @@ pub struct CapabilitySnapshot {
     pub web_socket_enabled: bool,
     pub can_produce: bool,
     pub can_write: bool,
-    /// True only when the write probe actually ran and returned a
-    /// conclusive answer. False both when it was skipped (`read_only`) and
-    /// when it could not be completed (e.g. the broker was unreachable for
-    /// that one call) — either way `can_write` must not be trusted as a
-    /// measured fact. Mirrored in `packages/broker-contracts/src/capability.ts`.
+    /// True only when a read-only admin call came back `401`/`403`, which
+    /// conclusively proves the credential cannot write either. False in
+    /// every other case, including a successful read — a successful read is
+    /// not evidence of write access, so it must not be reported as measured.
+    /// This stage never attempts an actual write to find out either way.
+    /// Mirrored in `packages/broker-contracts/src/capability.ts`.
     pub can_write_probed: bool,
     pub has_metrics: bool,
     pub warnings: Vec<String>,
     pub source: BrokerSource,
 }
 
-/// Outcome of attempting (or deliberately not attempting) the write probe.
-/// Kept separate from `discover`'s async plumbing so the read-only/warning
-/// logic in [`summarize_write_probe`] is a pure function and unit-testable
-/// without a live broker.
-#[derive(Debug, Clone, PartialEq)]
-enum WriteProbeOutcome {
-    /// Never attempted: the connection is read-only.
-    SkippedReadOnly,
-    /// The probe ran and got a conclusive HTTP answer for the create step.
-    Measured { can_write: bool, cleanup_failed: bool, create_status: u16, latency_ms: u64 },
-    /// The probe could not be run to a conclusion at all (e.g. the client
-    /// could not even be built, or the request never got a response).
-    Inconclusive { reason: String },
-}
-
-/// Turns a [`WriteProbeOutcome`] into the three snapshot fields it affects.
-/// Pure and synchronous on purpose — see the module doc for why cleanup on
-/// every path matters, including a successful create whose delete fails.
-fn summarize_write_probe(outcome: &WriteProbeOutcome) -> (bool, bool, Option<String>) {
-    match outcome {
-        WriteProbeOutcome::SkippedReadOnly => (
+/// Infers `can_write`/`can_write_probed` from the read-only admin call
+/// `discover` already made (`list_clusters`), instead of attempting an
+/// actual write. Pure and synchronous on purpose — unit-testable without a
+/// live broker. See the module doc for why this replaced Task 14's
+/// `probe_write`.
+fn infer_write_capability(clusters_result: &Result<Vec<String>, BrokerError>) -> (bool, bool, Option<String>) {
+    match clusters_result {
+        Err(e) if matches!(e.code, BrokerErrorCode::AuthenticationFailed | BrokerErrorCode::Forbidden) => {
+            // A read refusal IS a measurement: a credential that cannot even
+            // read certainly cannot write.
+            (false, true, None)
+        }
+        _ => (
             false,
             false,
             Some(
-                "can_write was not probed: the connection is read-only, so no write was \
-                 attempted. This is \"not measured\", not \"measured as unwritable\"."
+                "can_write was not probed: this stage never attempts a write. A successful \
+                 read does not imply write access, so this is \"not measured\", not \"measured \
+                 as unwritable\"."
                     .to_string(),
             ),
         ),
-        WriteProbeOutcome::Measured { can_write, cleanup_failed, .. } => {
-            let warning = cleanup_failed.then(|| {
-                format!(
-                    "the write probe {} a scratch topic but failed to delete it afterward; \
-                     it may still exist on the broker (prefix `broker-probe-write-`) and need \
-                     manual cleanup",
-                    if *can_write { "created" } else { "attempted to create" }
-                )
-            });
-            (*can_write, true, warning)
-        }
-        WriteProbeOutcome::Inconclusive { reason } => {
-            (false, false, Some(format!("can_write was not probed: {reason}")))
-        }
     }
 }
 
@@ -135,7 +135,12 @@ pub async fn discover(
     timeout_ms: u64,
     tls_verify: bool,
     token: Option<String>,
-    read_only: bool,
+    // Retained for signature stability and because it remains a meaningful
+    // property of the connection (Stage C's send path still reads it via
+    // `WriteGuard`). No longer read here: `discover` performs no write under
+    // any value of this flag, so there is nothing left for it to gate. See
+    // the module doc.
+    _read_only: bool,
 ) -> Result<CapabilitySnapshot, BrokerError> {
     let admin = crate::broker::adapters::pulsar::admin_rest::PulsarAdminRest::new(
         admin_url.to_string(),
@@ -196,25 +201,9 @@ pub async fn discover(
         ));
     }
 
-    let write_guard = WriteGuard::new(read_only);
-    let write_outcome = match write_guard.authorize("capability-probe-write") {
-        Ok(permit) => probe_write(admin_url, timeout_ms, tls_verify, token.as_deref(), &permit).await,
-        Err(_) => WriteProbeOutcome::SkippedReadOnly,
-    };
-    if let WriteProbeOutcome::Measured { create_status, latency_ms, .. } = &write_outcome {
-        endpoints.insert(
-            "write_probe".to_string(),
-            EndpointProbe {
-                path: "/admin/v2/persistent/public/default/broker-probe-write-*".to_string(),
-                method: "PUT".to_string(),
-                status: Some(*create_status),
-                ok: is_success(*create_status) || *create_status == 409,
-                latency_ms: Some(*latency_ms),
-                reason: None,
-            },
-        );
-    }
-    let (can_write, can_write_probed, write_warning) = summarize_write_probe(&write_outcome);
+    // No write is ever attempted here (Stage 0 Task 2 — see module doc).
+    // `can_write` is inferred from the read-only `list_clusters` call above.
+    let (can_write, can_write_probed, write_warning) = infer_write_capability(&clusters_result);
     if let Some(w) = write_warning {
         warnings.push(w);
     }
@@ -261,75 +250,6 @@ fn build_client(timeout_ms: u64, tls_verify: bool) -> Result<reqwest::Client, Br
         .map_err(|e| map_reqwest_error(&e))
 }
 
-/// Creates a `broker-probe-write-`-prefixed scratch topic and immediately
-/// deletes it, to learn whether the connection's credentials can write.
-/// Called only after `WriteGuard::authorize` has issued a [`WritePermit`] —
-/// `_permit`'s only job is to make that fact checkable by the compiler, not
-/// to carry data.
-///
-/// Cleanup runs on every path that could have created something: a plain
-/// success (204), a "topic already existed" response (409, from some earlier
-/// interrupted run), and any other non-auth status the broker might return
-/// for a half-applied create. It is skipped only for 401/403, where nothing
-/// could have been created in the first place. If the delete itself fails —
-/// including after a successful create — the scratch topic may survive, and
-/// that fact is surfaced as `cleanup_failed` rather than swallowed.
-async fn probe_write(
-    admin_url: &str,
-    timeout_ms: u64,
-    tls_verify: bool,
-    token: Option<&str>,
-    _permit: &WritePermit,
-) -> WriteProbeOutcome {
-    let guard = match EndpointGuard::new(admin_url) {
-        Ok(g) => g,
-        Err(e) => return WriteProbeOutcome::Inconclusive { reason: e.message },
-    };
-    let client = match build_client(timeout_ms, tls_verify) {
-        Ok(c) => c,
-        Err(e) => return WriteProbeOutcome::Inconclusive { reason: e.message },
-    };
-
-    let base = admin_url.trim_end_matches('/');
-    let topic_name = format!("broker-probe-write-{}-{}", std::process::id(), now_ms());
-    let topic_url = format!("{base}/admin/v2/persistent/public/default/{topic_name}");
-    if let Err(e) = guard.check(&topic_url) {
-        return WriteProbeOutcome::Inconclusive { reason: e.message };
-    }
-
-    let started = std::time::Instant::now();
-    let mut create_req = client.put(&topic_url);
-    if let Some(t) = token {
-        create_req = create_req.bearer_auth(t);
-    }
-    let create_status = match create_req.send().await {
-        Ok(res) => res.status().as_u16(),
-        Err(e) => return WriteProbeOutcome::Inconclusive { reason: e.to_string() },
-    };
-    let latency_ms = started.elapsed().as_millis() as u64;
-
-    // 204 = created; 409 = a same-named scratch topic from an earlier,
-    // interrupted run already exists — either way the credential could
-    // write. 401/403 mean nothing was created at all.
-    let can_write = matches!(create_status, 204 | 409);
-    let should_attempt_cleanup = !matches!(create_status, 401 | 403);
-
-    let mut cleanup_failed = false;
-    if should_attempt_cleanup {
-        let mut delete_req = client.delete(format!("{topic_url}?force=true"));
-        if let Some(t) = token {
-            delete_req = delete_req.bearer_auth(t);
-        }
-        cleanup_failed = match delete_req.send().await {
-            // 204 deleted; 404 already gone (fine either way).
-            Ok(res) => !matches!(res.status().as_u16(), 204 | 404),
-            Err(_) => true,
-        };
-    }
-
-    WriteProbeOutcome::Measured { can_write, cleanup_failed, create_status, latency_ms }
-}
-
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -341,65 +261,48 @@ fn now_ms() -> i64 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn read_only_skips_the_probe_and_says_so() {
-        let (can_write, probed, warning) = summarize_write_probe(&WriteProbeOutcome::SkippedReadOnly);
-        assert!(!can_write, "an unprobed connection must never claim can_write: true");
-        assert!(!probed, "read-only discovery must record that the probe did not run");
-        let warning = warning.expect("a skipped probe must explain itself to the UI");
-        assert!(warning.to_lowercase().contains("read-only"));
-        assert!(warning.to_lowercase().contains("not measured") || warning.to_lowercase().contains("not probed"));
+    fn err(code: BrokerErrorCode) -> BrokerError {
+        BrokerError { code, message: "boom".to_string(), retryable: false }
     }
 
     #[test]
-    fn a_clean_measured_write_carries_no_cleanup_warning() {
-        let outcome = WriteProbeOutcome::Measured {
-            can_write: true,
-            cleanup_failed: false,
-            create_status: 204,
-            latency_ms: 5,
-        };
-        let (can_write, probed, warning) = summarize_write_probe(&outcome);
-        assert!(can_write);
-        assert!(probed, "an actually-run probe must be marked as probed regardless of the answer");
-        assert!(warning.is_none());
+    fn a_401_on_the_read_probe_is_a_conclusive_negative_write_measurement() {
+        let (can_write, probed, warning) = infer_write_capability(&Err(err(BrokerErrorCode::AuthenticationFailed)));
+        assert!(!can_write, "a credential that cannot even read certainly cannot write");
+        assert!(probed, "a definitive 401 IS a measurement, just a negative one");
+        assert!(warning.is_none(), "a conclusive negative needs no further explanation");
     }
 
     #[test]
-    fn a_failed_cleanup_after_a_successful_create_is_surfaced_not_swallowed() {
-        let outcome = WriteProbeOutcome::Measured {
-            can_write: true,
-            cleanup_failed: true,
-            create_status: 204,
-            latency_ms: 5,
-        };
-        let (can_write, probed, warning) = summarize_write_probe(&outcome);
-        assert!(can_write, "the measurement itself is still valid even if cleanup afterward failed");
-        assert!(probed);
-        let warning = warning.expect("a failed cleanup must produce a warning, never silence");
-        assert!(warning.contains("broker-probe-write-"), "must name the prefix an operator can search for");
-    }
-
-    #[test]
-    fn a_write_that_was_refused_outright_needs_no_cleanup_warning() {
-        let outcome = WriteProbeOutcome::Measured {
-            can_write: false,
-            cleanup_failed: false,
-            create_status: 403,
-            latency_ms: 5,
-        };
-        let (can_write, probed, warning) = summarize_write_probe(&outcome);
+    fn a_403_on_the_read_probe_is_a_conclusive_negative_write_measurement() {
+        let (can_write, probed, warning) = infer_write_capability(&Err(err(BrokerErrorCode::Forbidden)));
         assert!(!can_write);
         assert!(probed, "a definitive 403 IS a measurement, just a negative one");
         assert!(warning.is_none());
     }
 
     #[test]
-    fn an_inconclusive_probe_is_not_probed_either() {
-        let outcome = WriteProbeOutcome::Inconclusive { reason: "connection refused".to_string() };
-        let (can_write, probed, warning) = summarize_write_probe(&outcome);
-        assert!(!can_write);
-        assert!(!probed, "a probe that never got a real answer must not be reported as measured");
-        assert!(warning.unwrap().contains("connection refused"));
+    fn a_successful_read_is_not_evidence_of_write_capability() {
+        let (can_write, probed, warning) = infer_write_capability(&Ok(vec!["standalone".to_string()]));
+        assert!(!can_write, "can_write must default to false absent an actual write attempt");
+        assert!(!probed, "a successful read must NOT be reported as a write measurement");
+        let warning = warning.expect("the UI must be told this is unmeasured, not silently false");
+        assert!(warning.to_lowercase().contains("not probed") || warning.to_lowercase().contains("not measured"));
     }
+
+    #[test]
+    fn a_read_failure_for_an_unrelated_reason_is_also_not_measured() {
+        let (can_write, probed, warning) = infer_write_capability(&Err(err(BrokerErrorCode::Timeout)));
+        assert!(!can_write);
+        assert!(!probed, "only a 401/403 refusal is conclusive; any other failure is inconclusive");
+        assert!(warning.is_some());
+    }
+
+    // The B-07/§11.9/§14.3 compile-level guard ("no HTTP PUT or DELETE call
+    // left in this file, under a reqwest-style builder") is intentionally
+    // NOT a Rust test embedded here: writing the checked-for call syntax as
+    // a string literal would make this file match its own grep, defeating
+    // the point. It is instead a plain shell check, run as part of
+    // verification and pasted into the task report — see the report for the
+    // exact command and its output, which must be zero.
 }
