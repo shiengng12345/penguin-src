@@ -150,7 +150,7 @@ pub struct TopicStats {
 /// commonly sends the `-1` sentinel — report as "could not tell" on the
 /// anomaly panel, indistinguishable from a topic where the field was
 /// actually withheld. Mirrors `BacklogAge` in
-/// `packages/broker-contracts/src/anomaly.ts` field-for-field; the wire
+/// `packages/broker-contracts/src/topic-detail.ts` field-for-field; the wire
 /// shape (an internally-tagged `{"state": ...}` object) is pinned by
 /// `backlog_age_serialises_to_the_pinned_wire_shape` in `stats_tests.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

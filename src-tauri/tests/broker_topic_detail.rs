@@ -55,15 +55,23 @@ async fn reads_the_real_topic_end_to_end() {
 
     let raw = admin.get_topic_stats(&fpms_topup()).await.expect("stats");
     let stats = parse_topic_stats(&raw).expect("stats parse");
-    assert_eq!(stats.subscriptions.len(), 2, "fpms_topup has two subscriptions");
+    assert!(!stats.subscriptions.is_empty(), "fpms_topup must have at least one subscription");
 
     let raw_internal = admin
         .get_topic_internal_stats(&fpms_topup())
         .await
         .expect("internalStats");
     let internal = parse_internal_stats(&raw_internal).expect("internal parse");
-    assert_eq!(internal.cursors.len(), 2, "one cursor per subscription");
 
+    // Structural, not a pinned count (fix round 1, item 3): the two lists
+    // must describe exactly the same set of subscriptions — same size, and
+    // every name present on both sides — never a specific number that is a
+    // fact about the user's business today, not about this code.
+    assert_eq!(
+        stats.subscriptions.len(),
+        internal.cursors.len(),
+        "stats and internalStats must agree on how many subscriptions exist"
+    );
     // Every subscription in stats must have a cursor in internalStats. If the
     // two lists disagree, the detail screen would show a subscription with no
     // position, and the cause would be four files away.
@@ -72,6 +80,16 @@ async fn reads_the_real_topic_end_to_end() {
             internal.cursors.iter().any(|c| c.subscription == sub.name),
             "subscription {} has no cursor",
             sub.name
+        );
+    }
+    // ...and the reverse: no cursor may name a subscription that does not
+    // exist in stats — combined with the equal-length check above, this
+    // makes the match a bijection, not just a one-directional subset.
+    for cursor in &internal.cursors {
+        assert!(
+            stats.subscriptions.iter().any(|s| s.name == cursor.subscription),
+            "cursor {} has no matching subscription in stats",
+            cursor.subscription
         );
     }
 }
@@ -90,12 +108,23 @@ async fn build_topic_detail_wires_stats_internal_and_anomalies_for_the_real_topi
     let detail = commands::build_topic_detail(&admin(), &topic_ref).await.expect("topic detail");
 
     assert_eq!(detail.topic, "fpms_topup");
-    assert_eq!(detail.stats.subscriptions.len(), 2, "fpms_topup has two subscriptions");
-    assert_eq!(detail.internal.cursors.len(), 2, "one cursor per subscription");
+    assert!(!detail.stats.subscriptions.is_empty(), "fpms_topup must have at least one subscription");
 
+    // Structural, not a pinned count (fix round 1, item 3): equal sizes plus
+    // a bidirectional name match is a bijection, never a specific number
+    // that is a fact about the user's business rather than this code.
+    assert_eq!(
+        detail.stats.subscriptions.len(),
+        detail.internal.cursors.len(),
+        "stats and internalStats must agree on how many subscriptions exist"
+    );
     let sub_names: Vec<&str> = detail.stats.subscriptions.iter().map(|s| s.name.as_str()).collect();
     for cursor in &detail.internal.cursors {
         assert!(sub_names.contains(&cursor.subscription.as_str()), "cursor {} has no matching subscription", cursor.subscription);
+    }
+    let cursor_names: Vec<&str> = detail.internal.cursors.iter().map(|c| c.subscription.as_str()).collect();
+    for name in &sub_names {
+        assert!(cursor_names.contains(name), "subscription {name} has no cursor");
     }
 
     // Every anomaly and indeterminate check this function can produce is

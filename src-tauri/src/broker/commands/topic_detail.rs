@@ -70,7 +70,7 @@ use crate::broker::internal_stats::{self, InternalStats};
 use crate::broker::ports::{BrokerAdmin, TopicRef};
 use crate::broker::stats::{self, TopicStats};
 use crate::broker::store::ConnectionRow;
-use crate::broker::topic_folding::PageQueryDto;
+use crate::broker::topic_folding::{PageQueryDto, TopicSummaryDto};
 use serde::Serialize;
 
 use super::{load_row, resolve_secret};
@@ -272,8 +272,36 @@ pub async fn build_overview(
     let admin = PulsarAdminRest::new(row.admin_url.clone(), row.timeout_ms as u64, row.tls_verify, token)
         .map_err(|e| e.message)?;
 
+    let (anomalies, indeterminate, sample_warnings) = sample_overview(&admin, &tenant, &namespace, &page.items).await;
+    warnings.extend(sample_warnings);
+
+    let report = OverviewReportDto { tenant, namespace, topics_sampled, topics_total, truncated, anomalies, indeterminate };
+    let mut envelope = ResultEnvelope::ok(report, BrokerSource::AdminRest);
+    envelope.warnings = warnings;
+    Ok(envelope)
+}
+
+/// The post-topic-list half of `build_overview`: the capability probe plus
+/// per-topic sampling. Factored out (fix round 1, items 1 & 2) specifically
+/// so a test can drive a real (if canned) `BrokerAdmin` through the actual
+/// `.await` and `Result`/`Vec::extend` handling here — both
+/// `capability_probe_anomaly` (a pure decision function) and the live
+/// `fpms_topup` topic (which has no unknown fields today, and no
+/// capability-probe failure to exercise) were each, on their own, unable to
+/// prove this code path actually carries a failure/an indeterminate entry
+/// through to the report rather than silently dropping it. Parameterized
+/// over `&dyn BrokerAdmin` and an already-resolved topic list — never over
+/// a `Connection` — so it cannot touch the cache either (same ruling D-A2
+/// as `build_topic_detail`).
+async fn sample_overview(
+    admin: &dyn BrokerAdmin,
+    tenant: &str,
+    namespace: &str,
+    items: &[TopicSummaryDto],
+) -> (Vec<Anomaly>, Vec<IndeterminateCheck>, Vec<String>) {
     let mut anomalies = Vec::new();
     let mut indeterminate = Vec::new();
+    let mut warnings = Vec::new();
 
     // A single, read-only capability probe, scoped to the whole namespace —
     // see the module doc for why this is `broker_version()` and not the
@@ -283,10 +311,10 @@ pub async fn build_overview(
         anomalies.push(anomaly);
     }
 
-    for item in &page.items {
+    for item in items {
         let topic_ref =
             TopicRef { tenant: item.tenant.clone(), namespace: item.namespace.clone(), topic: item.short_name.clone(), persistent: item.persistent };
-        match build_topic_detail(&admin, &topic_ref).await {
+        match build_topic_detail(admin, &topic_ref).await {
             Ok(detail) => {
                 anomalies.extend(detail.anomalies);
                 indeterminate.extend(detail.indeterminate);
@@ -300,10 +328,7 @@ pub async fn build_overview(
         }
     }
 
-    let report = OverviewReportDto { tenant, namespace, topics_sampled, topics_total, truncated, anomalies, indeterminate };
-    let mut envelope = ResultEnvelope::ok(report, BrokerSource::AdminRest);
-    envelope.warnings = warnings;
-    Ok(envelope)
+    (anomalies, indeterminate, warnings)
 }
 
 #[cfg(test)]
