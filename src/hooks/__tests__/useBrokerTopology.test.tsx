@@ -20,6 +20,13 @@
 // different from "everything failed" — one of the two independent fetches
 // (tenants, namespaces) hard-failing while the other still has something to
 // show.
+//
+// Fix round 2 adds `subjects`: which of the two independently-fetched lists
+// (tenants, namespaces) actually produced the reported `state`. Without it,
+// a namespace-only "empty" or "loading" result was indistinguishable from a
+// tenant-only one, and `TopologyTree` had no way to avoid rendering "No
+// tenants found." above a populated tenant list just because the selected
+// tenant's namespace list happened to be empty.
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { ResultEnvelope, NamespaceSummary, TenantSummary } from "@penguin/broker-contracts";
@@ -204,6 +211,73 @@ describe("useBrokerTopology", () => {
     await waitFor(() => expect(result.current.namespaces).toEqual(NAMESPACES));
     expect(result.current.state).toBe("stale");
     expect(result.current.warnings.join(" ")).toMatch(/namespace/i);
+    // Fix round 2 re-check: the tenant list is fine, only the namespace
+    // fetch is stale — the subject reported must name the list that's
+    // actually stale, not both, and not neither.
+    expect(result.current.subjects).toEqual(["namespaces"]);
+  });
+
+  // Fix round 2, item 1: a selected tenant with zero namespaces is a
+  // genuinely different fact from "there are no tenants" — the tenant list
+  // is right there, populated, on screen. `subjects` must say "namespaces",
+  // not "tenants", so `TopologyTree` never renders "No tenants found."
+  // above a populated tenant list.
+  it("reports the namespaces subject as empty without contradicting a populated tenant list", async () => {
+    listTenantsMock.mockResolvedValueOnce(tenantsEnvelope());
+    listNamespacesMock.mockResolvedValueOnce({
+      data: [],
+      source: "pulsar-admin-rest",
+      observedAt: "2026-09-16T00:00:00.000Z",
+      freshnessMs: 0,
+      warnings: [],
+    } satisfies ResultEnvelope<NamespaceSummary[]>);
+    const { result } = renderHook(() => useBrokerTopology("conn-1"));
+    await waitFor(() => expect(result.current.state).toBe("ready"));
+
+    act(() => {
+      result.current.selectTenant("public");
+    });
+
+    await waitFor(() => expect(result.current.state).toBe("empty"));
+    expect(result.current.subjects).toEqual(["namespaces"]);
+    // The crux: the tenant list did NOT become empty just because the
+    // selected tenant's namespaces did.
+    expect(result.current.tenants).toEqual(TENANTS);
+  });
+
+  // Fix round 2, item 2: the namespace fetch goes to "loading" the moment
+  // `selectTenant` is called, while the tenant fetch is already settled
+  // ("ready"). The reported subject must track which fetch is actually in
+  // flight.
+  it("reports the namespaces subject as loading while only the namespace fetch is in flight", async () => {
+    listTenantsMock.mockResolvedValueOnce(tenantsEnvelope());
+    let resolveNamespaces: (envelope: ResultEnvelope<NamespaceSummary[]>) => void = () => {};
+    listNamespacesMock.mockImplementationOnce(
+      () =>
+        new Promise<ResultEnvelope<NamespaceSummary[]>>((resolve) => {
+          resolveNamespaces = resolve;
+        }),
+    );
+    const { result } = renderHook(() => useBrokerTopology("conn-1"));
+    await waitFor(() => expect(result.current.state).toBe("ready"));
+
+    act(() => {
+      result.current.selectTenant("public");
+    });
+
+    await waitFor(() => expect(result.current.state).toBe("loading"));
+    expect(result.current.subjects).toEqual(["namespaces"]);
+
+    // Let the pending fetch settle so it doesn't leak into the next test.
+    await act(async () => {
+      resolveNamespaces({
+        data: NAMESPACES,
+        source: "pulsar-admin-rest",
+        observedAt: "2026-09-16T00:00:00.000Z",
+        freshnessMs: 0,
+        warnings: [],
+      });
+    });
   });
 
   // Fix round 1, item 2: the namespace fetch hard-failing while the tenant
