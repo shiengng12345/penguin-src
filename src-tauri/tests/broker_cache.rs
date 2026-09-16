@@ -348,3 +348,60 @@ async fn a_corrupt_cache_entry_self_heals_from_the_broker() {
 
     let _ = std::fs::remove_file(&path);
 }
+
+/// The one branch neither of the two tests above exercises: `refresh:true`
+/// forces the `Absent` path, the broker fetch that was supposed to replace
+/// the cache fails, AND the existing row it would otherwise fall back to is
+/// itself corrupt. Nothing valid remains, so this must surface the broker
+/// failure (the more actionable fact) rather than a JSON parse error — and
+/// it must self-heal the poisoned row so it doesn't keep tripping this same
+/// path forever once the broker recovers.
+#[tokio::test]
+async fn a_failed_refresh_with_no_valid_fallback_reports_the_broker_error_and_self_heals() {
+    let path = scratch_db_path();
+    let seed = open_scratch(&path);
+    let row = store::ConnectionRow {
+        id: "c-dead-corrupt".into(),
+        kind: "pulsar".into(),
+        name: "Dead".into(),
+        color: "red".into(),
+        admin_url: "http://localhost:1".into(),
+        broker_url: "pulsar://localhost:1".into(),
+        auth_type: "none".into(),
+        secret_handle_id: None,
+        default_tenant: "public".into(),
+        default_namespace: "default".into(),
+        read_only: true,
+        tls_verify: true,
+        timeout_ms: 500,
+        last_status: "unknown".into(),
+        last_checked_at: None,
+        broker_version: None,
+        capabilities_json: None,
+        created_at: 1,
+        updated_at: 1,
+    };
+    store::upsert_connection(&seed, &row).unwrap();
+    store::put_snapshot(&seed, &row.id, "topics", "public/default", "not valid json").unwrap();
+    drop(seed);
+
+    let query = all_topics_query();
+
+    let result = commands::list_topics_through_cache(open_scratch(&path), &row, "public", "default", &query, true, None)
+        .await
+        .expect("must return a failed envelope, not a hard Err — there is simply nothing valid to serve");
+    assert!(result.data.is_none(), "no valid data exists anywhere; this must be a failure envelope");
+    assert!(result.error.is_some(), "must carry the broker error, since that's the more actionable fact");
+    assert_eq!(
+        result.source,
+        BrokerSource::AdminRest,
+        "the failure came from the (attempted) broker fetch, not a cache read"
+    );
+
+    // Self-healed: the poisoned row must be gone, not left to keep failing
+    // to parse on every future call once the broker recovers.
+    let remaining = store::get_snapshot(&open_scratch(&path), &row.id, "topics", "public/default").unwrap();
+    assert!(remaining.is_none(), "the corrupt row must have been deleted, not left behind");
+
+    let _ = std::fs::remove_file(&path);
+}
