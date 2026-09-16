@@ -108,10 +108,17 @@ msgRateOut · blockedConsumerOnUnackedMsgs
 `blockedConsumerOnUnackedMsgs` 尤其有价值 —— 它直接说明"这个 consumer 被
 broker 因未确认消息过多而掐住了"，不用靠猜。
 
-### 3.5 Overview
+### 3.5 Overview —— 异常面板（见 D-A3）
 
-当前连接的概览：cluster、tenant/namespace 数、topic 总数、总 backlog、
-异常项（有 backlog 但无 consumer 的订阅）。
+不做仪表盘。直接回答排查时的第一个问题：**哪里不对**。
+
+- 有 backlog 但没有活跃 consumer 的订阅
+- `blockedConsumerOnUnackedMsgs` 为真的 consumer
+- backlog 最老消息年龄超阈值的 topic
+- capability 探测失败的项
+
+没有异常时显示明确的「未发现异常」，不留空白 —— 空白无法区分
+「一切正常」和「查询失败」。
 
 ---
 
@@ -194,28 +201,51 @@ broker_get_overview(connectionId) -> ResultEnvelope<Overview>
 
 ---
 
-## 7. 开放问题（需要你决定）
+## 7. 已裁决的问题
 
-**Q1 —— `packages/broker-core` 怎么办？**
+三个问题在执行前由 controller 裁决并记录，理由与"判错的代价"一并写下。
 
-- (a) 维持双份，作为 Rust 实现的交叉验证参照
-- (b) 让它承担真实职责（前端某些计算走 TS 而非 Rust）
-- (c) 删掉，Rust 是唯一实现
+### D-A1 — `packages/broker-core` 保留为交叉验证参照
 
-我倾向 **(a)**：Phase 0 的 review 靠逐条比对两边行为抓出过真实分歧
-（大小写敏感性、trim 差异），这个价值在 Phase C 的关联逻辑上会更大。
-但这是维护成本，你可能有别的判断。
+Phase 0 的 review 靠逐条比对 TS 与 Rust 两侧行为，抓出过两处真实分歧
+（schema 类名匹配的大小写敏感性、message 的 trim 差异）——
+两者都会让 UI 和后端对同一个响应给出不同结论。
 
-**Q2 —— stats 要不要缓存？**
+Phase C 的关联引擎（去重、乱序、时钟漂移）逻辑比这复杂得多，
+那时有一份可对照的参照实现价值更大。
 
-我提议不缓存（§4.1），理由是排查时看的就是实时数字。但如果你的 SRE 环境
-对 Admin REST 有限流，可能需要短 TTL（比如 5 秒）。**这取决于你们非生产
-环境的实际限制，我没有依据。**
+**代价（若判错）**：双份维护。缓解方式是 Phase A 不给 broker-core 加新职责 ——
+它只维持现有的 `error-map` / `pagination` / `topic-folding` 三块，
+新逻辑一律只写 Rust。若到 Phase C 前它仍无生产消费者且未再抓到分歧，届时删除。
 
-**Q3 —— Overview 页要不要？**
+### D-A2 — stats / subscription / consumer 一律不缓存
 
-它是"好看"多于"有用"的那类页面。如果你更想直接进 topic 列表，
-可以砍掉换成更好的搜索/过滤。
+排查时看的就是实时数字。一个缓存过的 backlog 数值不是"稍旧的信息"，
+而是**主动误导** —— 运维人员据此判断"积压在下降"，而实际可能仍在上升。
+
+SRE 环境可能对 Admin REST 限流，但那是**没有证据的猜测**。真有限流会表现为
+429，而错误映射已经把它归为可重试并有测试覆盖。到 Phase F 拿到真实环境时，
+限流是可测量的事实，届时再加 TTL 是有依据的决定。
+
+**代价（若判错）**：对限流的 broker 发出多余请求，表现为 429。
+这是可见的失败，不是静默的错误答案。
+
+### D-A3 — Overview 保留，但改成「异常面板」而非仪表盘
+
+一个显示"12 个 topic、总 backlog 3400"的面板是好看多于有用的。
+改成直接回答排查时的第一个问题：**哪里不对**。
+
+内容限定为：
+- 有 backlog 但**没有活跃 consumer** 的订阅
+- `blockedConsumerOnUnackedMsgs` 为真的 consumer
+- backlog 最老消息年龄超过阈值的 topic
+- 连接层面的问题（capability 探测失败项）
+
+没有异常时显示明确的"未发现异常"，而不是一片空白 —— 空白无法区分
+"一切正常"和"查询失败"。
+
+**代价（若判错）**：一个用得少的页面。但它复用的是 topic/subscription
+查询，没有独立的数据路径需要维护。
 
 ---
 
