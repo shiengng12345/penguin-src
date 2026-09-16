@@ -3,6 +3,28 @@
 > Status: Draft for review · Date: 2026-09-16 · Module: `broker`
 > 前置：Phase 0 完成（分支 `feat/broker-module`，41 commits，273 测试，gate 通过）
 
+> ## ⚠️ 状态更新（2026-09-16，Phase A 完成后）
+>
+> **本文档已被取代，保留为历史记录。**
+>
+> 用户在 Phase A 十四个任务完成后提供了一份完整产品规格
+> （`2026-09-16-penguin-pulsar-panel-product-spec.md`，1861 行）。
+> 本文档**不是**照那份规格写的 —— 它写在前面，由 brainstorm 会话产出。
+>
+> 后续工作依据 **`2026-09-16-penguin-pulsar-panel-conformance.md`**，
+> 那份文档逐条核对了上游规格与本仓库现状，并列出 5 处违反项与完整差距清单。
+>
+> **本文档仍然有效的部分**：第 7 节的三条裁决 D-A1 / D-A2 / D-A3。
+> 其中 D-A2（stats / subscription / consumer 一律不缓存）与上游 §2.2 的影响矩阵一致，
+> D-A3（Overview 是异常面板而非仪表盘）与上游 §3 的导航结构一致。
+>
+> **本文档已知与上游规格冲突之处**，详见 conformance 文档 §3：
+> - `broker_test_connection` 的写探测会建删 topic —— 违反上游 B-07 / §11.9
+> - `/stats` 未带安全参数 —— 违反上游 §12.3
+> - 64-bit 计数器以 JS Number 传输 —— 违反上游 §14.1 / §23
+> - `subType` 仍塌成 `Option<String>` —— 与本仓库自己的裁决 R22 / R29 矛盾
+
+
 ## Goal
 
 把"发现积压 → 定位到 topic/subscription → 看清 consumer 状态"这条排查路径，从手敲 curl 变成点击。
