@@ -37,14 +37,18 @@
 import type { Anomaly, IndeterminateCheck } from "@penguin/broker-contracts";
 import type { DataTableState } from "@/components/ui/data-table-types";
 import { Button } from "@/components/ui/button";
+import { ALERT_CLASS, INDETERMINATE_CLASS, NOTE_CLASS, STATUS_CLASS } from "./broker-panel-styles";
 
 export interface AnomalyPanelProps {
   anomalies: Anomaly[];
   /** Checks that could not run at all — never a duplicate of `Anomaly`.
-   *  Defaults to empty, but that default must never be read as "confirmed
-   *  every check ran"; only an explicit empty array from the backend means
-   *  that. See the module doc's state 2. */
-  indeterminate?: IndeterminateCheck[];
+   *  Required, not optional, mirroring `OverviewReport.indeterminate`
+   *  (non-optional in the contract on purpose): an omitted prop must be a
+   *  compile error, not a silent `[]` that reads as "confirmed every check
+   *  ran" when the caller simply forgot to pass it. See the module doc's
+   *  state 2 — a caller that forgets this is exactly how the sentence "no
+   *  anomalies" gets produced while checks silently did not run. */
+  indeterminate: IndeterminateCheck[];
   topicsSampled?: number;
   topicsTotal?: number;
   truncated?: boolean;
@@ -56,17 +60,9 @@ export interface AnomalyPanelProps {
   onRefresh: () => void;
 }
 
-const ALERT_CLASS =
-  "rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive";
-const STATUS_CLASS =
-  "rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground";
-const INDETERMINATE_CLASS =
-  "rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-300";
-const NOTE_CLASS = "rounded-md border border-border bg-muted/20 px-3 py-2 text-sm text-muted-foreground";
-
 export function AnomalyPanel({
   anomalies,
-  indeterminate = [],
+  indeterminate,
   topicsSampled,
   topicsTotal,
   truncated = false,
@@ -86,6 +82,14 @@ export function AnomalyPanel({
       ) : state === "loading" ? (
         <div role="status" className={STATUS_CLASS}>
           Loading overview…
+        </div>
+      ) : state === "empty" ? (
+        // Fix round 1, item 2: zero topics is not "every check ran and
+        // found nothing" — zero checks ran because there was nothing to
+        // check. That sentence is vacuously true in the misleading way: it
+        // asserts a sweep happened. Named separately so it can never say so.
+        <div role="status" className={STATUS_CLASS}>
+          This namespace has no topics. Nothing was checked.
         </div>
       ) : (
         <>

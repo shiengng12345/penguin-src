@@ -30,6 +30,7 @@ import { Button } from "@/components/ui/button";
 import { DeliveryNotice } from "./DeliveryNotice";
 import { SubscriptionTable } from "./SubscriptionTable";
 import { formatBacklogAge, formatNumber, formatPosition } from "./broker-value";
+import { ALERT_CLASS, INDETERMINATE_CLASS, STATUS_CLASS } from "./broker-panel-styles";
 
 export interface TopicDetailPanelProps {
   detail: TopicDetail | null;
@@ -44,13 +45,6 @@ export interface TopicDetailPanelProps {
   warnings?: string[];
   onRefresh: () => void;
 }
-
-const ALERT_CLASS =
-  "rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive";
-const STATUS_CLASS =
-  "rounded-md border border-border bg-muted/40 px-3 py-2 text-sm text-muted-foreground";
-const INDETERMINATE_CLASS =
-  "rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-800 dark:text-amber-300";
 
 export function TopicDetailPanel({
   detail,

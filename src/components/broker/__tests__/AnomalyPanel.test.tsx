@@ -38,19 +38,19 @@ const indeterminate: IndeterminateCheck[] = [
 describe("AnomalyPanel", () => {
   it("shows the measured value, not just the rule that fired", () => {
     // "has a backlog" is a rule. "3400 messages" is what an operator acts on.
-    render(<AnomalyPanel anomalies={anomalies} state="ready" onRefresh={vi.fn()} />);
+    render(<AnomalyPanel anomalies={anomalies} indeterminate={[]} state="ready" onRefresh={vi.fn()} />);
     expect(screen.getByText(/3400 messages/)).toBeInTheDocument();
   });
 
   it("names the subscription and topic involved", () => {
-    render(<AnomalyPanel anomalies={anomalies} state="ready" onRefresh={vi.fn()} />);
+    render(<AnomalyPanel anomalies={anomalies} indeterminate={[]} state="ready" onRefresh={vi.fn()} />);
     expect(screen.getByText(/anti_addiction_deposit_limit_fpmsnt/)).toBeInTheDocument();
   });
 
   it("says no anomalies found rather than rendering nothing", () => {
     // A blank panel cannot be told apart from a failed query. The whole point
     // of this surface is that silence means something specific.
-    render(<AnomalyPanel anomalies={[]} state="ready" onRefresh={vi.fn()} />);
+    render(<AnomalyPanel anomalies={[]} indeterminate={[]} state="ready" onRefresh={vi.fn()} />);
     expect(screen.getByRole("status")).toHaveTextContent(/no anomalies/i);
   });
 
@@ -58,6 +58,7 @@ describe("AnomalyPanel", () => {
     render(
       <AnomalyPanel
         anomalies={[]}
+        indeterminate={[]}
         state="error"
         errorMessage="Connection refused"
         onRefresh={vi.fn()}
@@ -98,6 +99,7 @@ describe("AnomalyPanel", () => {
     render(
       <AnomalyPanel
         anomalies={[]}
+        indeterminate={[]}
         truncated={true}
         topicsSampled={50}
         topicsTotal={120}
@@ -113,6 +115,7 @@ describe("AnomalyPanel", () => {
     render(
       <AnomalyPanel
         anomalies={[]}
+        indeterminate={[]}
         truncated={false}
         topicsSampled={12}
         topicsTotal={12}
@@ -124,7 +127,18 @@ describe("AnomalyPanel", () => {
   });
 
   it("shows a loading status instead of rendering nothing while the query is in flight", () => {
-    render(<AnomalyPanel anomalies={[]} state="loading" onRefresh={vi.fn()} />);
+    render(<AnomalyPanel anomalies={[]} indeterminate={[]} state="loading" onRefresh={vi.fn()} />);
     expect(screen.getByRole("status")).toHaveTextContent(/loading/i);
+  });
+
+  // Fix round 1, item 2: a namespace with zero topics is not the same fact
+  // as "every check ran and found nothing" — zero checks ran because there
+  // was nothing to check. Asserting a sweep happened is the same defect as
+  // the indeterminate case, in different clothes.
+  it("says no topics rather than claiming every check ran when the namespace is empty", () => {
+    render(<AnomalyPanel anomalies={[]} indeterminate={[]} state="empty" onRefresh={vi.fn()} />);
+    const status = screen.getByRole("status");
+    expect(status).toHaveTextContent(/no topics/i);
+    expect(status).not.toHaveTextContent(/every check ran/i);
   });
 });
