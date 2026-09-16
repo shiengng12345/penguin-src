@@ -10,12 +10,79 @@
 //! path — and only then surfaces the original assertion failure. It also
 //! re-verifies the topic is actually gone rather than assuming the delete
 //! call worked.
-use penguin_lib::broker::adapters::pulsar::binary;
+//!
+//! `read_without_ack` below is test-only plumbing (Stage 0, task 4): it used
+//! to live in `penguin_lib::broker::adapters::pulsar::binary` alongside
+//! `produce_one`, but B-01/B-03 require the *shipped app* to never construct
+//! a Consumer, Reader or TableView (spec §1.3: a Reader is itself a Consumer
+//! with a non-durable subscription). "No Tauri command calls it" was judged
+//! too weak — the function still compiled into the library. It now exists
+//! only in this test binary, which is never linked into the app; only
+//! `produce_one` remains in the lib, since Stage C's Send Message needs it.
+use futures::StreamExt;
+use penguin_lib::broker::adapters::pulsar::binary::{self, BinaryError};
+use pulsar::{consumer::InitialPosition, ConsumerOptions, Pulsar, TokioExecutor};
 
 const BROKER: &str = "pulsar://localhost:6650";
 const ADMIN: &str = "http://localhost:8080";
 const TENANT: &str = "public";
 const NAMESPACE: &str = "default";
+
+#[derive(Debug, Clone)]
+struct RawMessage {
+    payload: Vec<u8>,
+    properties: Vec<(String, String)>,
+}
+
+/// Reads up to `max` messages from the earliest position without acking.
+///
+/// Uses a `Reader`, not a `Consumer`: the `pulsar` crate's `Reader` type has
+/// no `ack` method at all, so this transport is structurally incapable of
+/// consuming a message off the topic. Each call opens a fresh reader
+/// (constructed from `InitialPosition::Earliest`) so repeated reads are
+/// independent of each other and of any real subscription's cursor.
+///
+/// Deliberately test-only — see the module doc comment above.
+async fn read_without_ack(
+    broker_url: &str,
+    topic: &str,
+    max: usize,
+) -> Result<Vec<RawMessage>, BinaryError> {
+    let pulsar = Pulsar::builder(broker_url, TokioExecutor)
+        .build()
+        .await
+        .map_err(|e| BinaryError::Connect(e.to_string()))?;
+    let mut reader = pulsar
+        .reader()
+        .with_topic(topic)
+        .with_options(ConsumerOptions {
+            initial_position: InitialPosition::Earliest,
+            ..Default::default()
+        })
+        .into_reader::<Vec<u8>>()
+        .await
+        .map_err(|e| BinaryError::Read(e.to_string()))?;
+
+    let mut out = Vec::with_capacity(max.min(4096));
+    while out.len() < max {
+        match reader.next().await {
+            Some(Ok(msg)) => {
+                let meta = &msg.payload.metadata;
+                out.push(RawMessage {
+                    payload: msg.payload.data.clone(),
+                    properties: meta
+                        .properties
+                        .iter()
+                        .map(|kv| (kv.key.clone(), kv.value.clone()))
+                        .collect(),
+                });
+            }
+            Some(Err(e)) => return Err(BinaryError::Read(e.to_string())),
+            None => break,
+        }
+    }
+    Ok(out)
+}
 
 /// DELETE .../{topic}?force=true — these topics have produced messages, so
 /// a plain delete (no force) would be refused. Best-effort: called from a
@@ -67,7 +134,7 @@ async fn produces_then_reads_back_without_acking() {
             return Err("produce returns a message id".to_string());
         }
 
-        let msgs = binary::read_without_ack(BROKER, topic, 1)
+        let msgs = read_without_ack(BROKER, topic, 1)
             .await
             .map_err(|e| {
                 format!("reader must read without a subscription and without acking: {e}")
@@ -133,14 +200,14 @@ async fn reading_twice_yields_the_same_messages() {
         .await
         .map_err(|e| format!("seed produce must succeed: {e}"))?;
 
-        let first = binary::read_without_ack(BROKER, topic, 1)
+        let first = read_without_ack(BROKER, topic, 1)
             .await
             .map_err(|e| format!("first read: {e}"))?;
         if first.is_empty() {
             return Err("first read must return the seeded message, not nothing".to_string());
         }
 
-        let second = binary::read_without_ack(BROKER, topic, 1)
+        let second = read_without_ack(BROKER, topic, 1)
             .await
             .map_err(|e| format!("second read: {e}"))?;
         if second.is_empty() {

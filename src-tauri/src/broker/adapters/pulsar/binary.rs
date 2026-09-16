@@ -1,41 +1,37 @@
 //! Pulsar binary protocol transport (port 6650).
 //!
-//! Exists because Admin REST cannot produce (405) and its peek requires an
-//! existing subscription and is rejected on partitioned topics. A Reader on
-//! this transport reads from a position without a subscription and without
-//! acking, which is what a lifecycle observer needs (spec V-C1/V-C3).
+//! Exists because Admin REST cannot produce (405). `produce_one` is the only
+//! function this module exposes to the shipped app.
 //!
 //! WebSocket is deliberately NOT used: `broker.conf` ships with
 //! `webSocketServiceEnabled=false`, so it works on standalone and fails on a
 //! real broker deployment.
 //!
-//! This file is a spike (Phase 0, task 5): the `pulsar` crate's 6.9 API was
-//! confirmed against its real docs, not assumed from memory. Notably `Reader`
-//! has no `ack` method at all — structurally it cannot acknowledge, which is
-//! exactly the property `read_without_ack` needs.
+//! ## `read_without_ack` was moved out of the shipped library (Stage 0, task 4)
+//!
+//! This module used to also carry a `read_without_ack` Reader-based read
+//! path (Phase 0, task 5's spike: a `Reader` has no `ack` method at all, so
+//! it is structurally incapable of consuming). Spec §1.3 warns that a Reader
+//! is itself built on a Consumer with a non-durable subscription, and
+//! B-01/B-03 require that the *shipped app* never construct a Consumer,
+//! Reader or TableView — "no command calls it" was judged too weak a
+//! guarantee, because the function still compiled into the library. It now
+//! lives only in `src-tauri/tests/broker_binary.rs`, alongside its own
+//! `RawMessage`/reader plumbing, where it is reachable solely by the test
+//! binary that exercises it, never by the app's lib target.
+//!
+//! For a Consumer/Reader/TableView to become constructible from the shipped
+//! app again, someone would have to add a new function *here* (or anywhere
+//! under `src/`) that builds one — an intentional, reviewable source change,
+//! not something that falls out of adding a Tauri command or an accidental
+//! re-export. `cargo build --lib` / `cargo doc` over this crate contain no
+//! such symbol; see the task 4 report for how that was checked.
 //!
 //! Connection cleanup (checked against the 6.9.0 source, not the docs site):
 //! `Producer<Exe>` exposes an explicit, awaitable `close()` that sends
-//! `close_producer` to the broker, and `produce_one` calls it. `Reader` has
-//! **no public close method at all** — checked its full method list in
-//! `reader.rs`. Its cleanup instead comes from `Drop` on the internal
-//! `ConsumerEngine`, which spawns a fire-and-forget async task that sends
-//! `close_consumer` to the broker; `Connection`'s own `Drop` additionally
-//! signals its receiver task to shut down. So the underlying connection is
-//! not simply abandoned, but for `Reader` specifically the close is
-//! best-effort and un-awaited by our code — there is nothing in the public
-//! API to await instead.
+//! `close_producer` to the broker, and `produce_one` calls it.
 
-use futures::StreamExt;
-use pulsar::{consumer::InitialPosition, ConsumerOptions, Pulsar, TokioExecutor};
-
-#[derive(Debug, Clone)]
-pub struct RawMessage {
-    pub message_id: String,
-    pub payload: Vec<u8>,
-    pub properties: Vec<(String, String)>,
-    pub publish_time: i64,
-}
+use pulsar::{Pulsar, TokioExecutor};
 
 #[derive(Debug, thiserror::Error)]
 pub enum BinaryError {
@@ -52,62 +48,6 @@ async fn client(broker_url: &str) -> Result<Pulsar<TokioExecutor>, BinaryError> 
         .build()
         .await
         .map_err(|e| BinaryError::Connect(e.to_string()))
-}
-
-/// Reads up to `max` messages from the earliest position without acking.
-///
-/// Uses a `Reader`, not a `Consumer`: the `pulsar` crate's `Reader` type has
-/// no `ack` method at all, so this transport is structurally incapable of
-/// consuming a message off the topic. Each call opens a fresh reader
-/// (constructed from `InitialPosition::Earliest`) so repeated reads are
-/// independent of each other and of any real subscription's cursor.
-pub async fn read_without_ack(
-    broker_url: &str,
-    topic: &str,
-    max: usize,
-) -> Result<Vec<RawMessage>, BinaryError> {
-    let pulsar = client(broker_url).await?;
-    let mut reader = pulsar
-        .reader()
-        .with_topic(topic)
-        .with_options(ConsumerOptions {
-            initial_position: InitialPosition::Earliest,
-            ..Default::default()
-        })
-        .into_reader::<Vec<u8>>()
-        .await
-        .map_err(|e| BinaryError::Read(e.to_string()))?;
-
-    // `max` is caller-supplied and may originate in the webview (the timeline
-    // phase's Tauri command). Growing is cheap; a huge pre-allocation is an
-    // uncatchable abort. Only the allocation hint is clamped — `max` itself
-    // stays the real loop bound below.
-    const MAX_PREALLOC: usize = 4096;
-    let mut out = Vec::with_capacity(max.min(MAX_PREALLOC));
-    while out.len() < max {
-        match reader.next().await {
-            Some(Ok(msg)) => {
-                let meta = &msg.payload.metadata;
-                out.push(RawMessage {
-                    message_id: format!(
-                        "{}:{}",
-                        msg.message_id().ledger_id,
-                        msg.message_id().entry_id
-                    ),
-                    payload: msg.payload.data.clone(),
-                    properties: meta
-                        .properties
-                        .iter()
-                        .map(|kv| (kv.key.clone(), kv.value.clone()))
-                        .collect(),
-                    publish_time: meta.publish_time as i64,
-                });
-            }
-            Some(Err(e)) => return Err(BinaryError::Read(e.to_string())),
-            None => break,
-        }
-    }
-    Ok(out)
 }
 
 /// Produces one message. This is the only produce path the module has —
