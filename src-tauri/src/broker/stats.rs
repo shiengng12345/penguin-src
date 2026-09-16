@@ -33,11 +33,15 @@
 //!   absence to `false` would say "not blocked" for a consumer we simply
 //!   have no data on.
 //! - **Rates and throughput (`msgRateIn/Out`, `msgThroughputIn/Out`,
-//!   subscription/consumer `msgRateOut`)** use `#[serde(default)]` to
-//!   `0.0`. These are continuous, supplementary metrics, not the primary
-//!   "is it stuck" signal (backlog/unacked/blocked are), and a genuinely
-//!   quiet topic legitimately reports 0 — the ambiguity that matters for
-//!   counts does not apply the same way here.
+//!   subscription/consumer `msgRateOut`)** are `Option<f64>`. `msgRateOut`
+//!   is the delivery signal Task 7's anomaly derivation reads to decide
+//!   whether a subscription with a backlog has anyone actually consuming —
+//!   it is the number an operator looks at first, not a supplementary one.
+//!   A genuinely quiet topic legitimately reports `Some(0.0)`; a field a
+//!   future Pulsar release renames must report `None` instead, because
+//!   collapsing the two into a bare `0.0` would make "we lost the field"
+//!   indistinguishable from "delivery has stopped" during triage — sending
+//!   someone chasing an outage that does not exist.
 //! - **`subscriptions` / `consumers` collections** use `#[serde(default)]`
 //!   to an empty collection when the key itself is absent. An empty list of
 //!   consumers is meaningful and actionable on its own (see
@@ -55,10 +59,10 @@ use std::collections::BTreeMap;
 /// The parsed subset of a Pulsar topic's `stats` payload.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TopicStats {
-    pub msg_rate_in: f64,
-    pub msg_rate_out: f64,
-    pub msg_throughput_in: f64,
-    pub msg_throughput_out: f64,
+    pub msg_rate_in: Option<f64>,
+    pub msg_rate_out: Option<f64>,
+    pub msg_throughput_in: Option<f64>,
+    pub msg_throughput_out: Option<f64>,
     pub storage_size: Option<u64>,
     pub backlog_size: Option<u64>,
     pub msg_in_counter: Option<u64>,
@@ -74,7 +78,7 @@ pub struct SubscriptionStats {
     pub name: String,
     pub msg_backlog: Option<u64>,
     pub unacked_messages: Option<u64>,
-    pub msg_rate_out: f64,
+    pub msg_rate_out: Option<f64>,
     pub sub_type: Option<String>,
     pub consumers: Vec<ConsumerStats>,
 }
@@ -89,7 +93,7 @@ pub struct ConsumerStats {
     pub unacked_messages: Option<u64>,
     pub last_acked_timestamp: Option<i64>,
     pub last_consumed_timestamp: Option<i64>,
-    pub msg_rate_out: f64,
+    pub msg_rate_out: Option<f64>,
     pub blocked_on_unacked_msgs: Option<bool>,
 }
 
@@ -102,13 +106,13 @@ pub struct ConsumerStats {
 #[serde(rename_all = "camelCase")]
 struct RawTopicStats {
     #[serde(default)]
-    msg_rate_in: f64,
+    msg_rate_in: Option<f64>,
     #[serde(default)]
-    msg_rate_out: f64,
+    msg_rate_out: Option<f64>,
     #[serde(default)]
-    msg_throughput_in: f64,
+    msg_throughput_in: Option<f64>,
     #[serde(default)]
-    msg_throughput_out: f64,
+    msg_throughput_out: Option<f64>,
     #[serde(default)]
     storage_size: Option<u64>,
     #[serde(default)]
@@ -129,7 +133,7 @@ struct RawSubscriptionStats {
     #[serde(default)]
     unacked_messages: Option<u64>,
     #[serde(default)]
-    msg_rate_out: f64,
+    msg_rate_out: Option<f64>,
     #[serde(default, rename = "type")]
     sub_type: Option<String>,
     #[serde(default)]
@@ -154,7 +158,7 @@ struct RawConsumerStats {
     #[serde(default)]
     last_consumed_timestamp: Option<i64>,
     #[serde(default)]
-    msg_rate_out: f64,
+    msg_rate_out: Option<f64>,
     #[serde(default, rename = "blockedConsumerOnUnackedMsgs")]
     blocked_on_unacked_msgs: Option<bool>,
 }
@@ -316,5 +320,40 @@ mod tests {
             .find(|s| s.name == "rg_deposit_accumulate_LOCAL")
             .unwrap();
         assert_eq!(sub.consumers[0].blocked_on_unacked_msgs, None);
+    }
+
+    /// `msgRateOut` is the delivery signal Task 7's anomaly derivation reads
+    /// to decide whether a subscription with a backlog has anyone actually
+    /// consuming, and it is the number an operator looks at first. If a
+    /// future Pulsar release renames it, defaulting the absence to `0.0`
+    /// would make that look identical to a real, live "nothing being
+    /// delivered right now" — sending someone chasing an outage that does
+    /// not exist. Absence must stay distinguishable as `None`.
+    #[test]
+    fn an_absent_rate_is_unknown_not_zero_because_zero_reads_as_a_dead_consumer() {
+        let mut raw = real_fixture();
+        raw.as_object_mut().unwrap().remove("msgRateOut");
+        raw.as_object_mut().unwrap().remove("msgRateIn");
+        raw.as_object_mut().unwrap().remove("msgThroughputOut");
+        raw.as_object_mut().unwrap().remove("msgThroughputIn");
+        raw["subscriptions"]["rg_deposit_accumulate_LOCAL"]
+            .as_object_mut()
+            .unwrap()
+            .remove("msgRateOut");
+        raw["subscriptions"]["rg_deposit_accumulate_LOCAL"]["consumers"] =
+            serde_json::json!([{ "consumerName": "probe" }]);
+
+        let stats = parse_topic_stats(&raw).expect("parses");
+        assert_eq!(stats.msg_rate_in, None);
+        assert_eq!(stats.msg_rate_out, None);
+        assert_eq!(stats.msg_throughput_in, None);
+        assert_eq!(stats.msg_throughput_out, None);
+        let sub = stats
+            .subscriptions
+            .iter()
+            .find(|s| s.name == "rg_deposit_accumulate_LOCAL")
+            .unwrap();
+        assert_eq!(sub.msg_rate_out, None);
+        assert_eq!(sub.consumers[0].msg_rate_out, None);
     }
 }
