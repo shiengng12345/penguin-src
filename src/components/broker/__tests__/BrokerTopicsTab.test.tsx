@@ -1,10 +1,11 @@
 // Unit tests for `deriveTopicResult`, the pure envelope-to-(state, error)
-// derivation `BrokerPage`'s topics tab renders from. Deliberately does NOT
-// render `<BrokerPage>` itself — that would drag in `useBrokerConnections`'s
-// persisted-active-connection chain (the app's SQLite-backed `app_kv`
-// bridge via `src/lib/app-persistence.ts` / `penguin-db.ts`), which has
-// nothing to do with the bug this fixes and would need mocking several
-// layers deep to avoid touching Tauri at import time.
+// derivation `BrokerTopicsTab`'s topic list renders from. (Task 14 moved
+// this — and the fetch effect around it — out of `BrokerPage.tsx` and into
+// this file's composition root, alongside `useBrokerTopology` and
+// `useTopicDetail`; the logic and this test suite are unchanged.)
+// Deliberately does NOT render `<BrokerTopicsTab>` itself for this suite —
+// see `BrokerTopicsTab.wiring.test.tsx` for the mounted, mocked-broker-client
+// integration coverage added in Task 14.
 //
 // Fix round 1, item 5: `fetchTopics` used to decide `"stale"` from
 // `envelope.source === "cache"` alone. Before Task 3, `source: "cache"` was
@@ -15,7 +16,7 @@
 // `warnings`, never from `source`.
 import { describe, expect, it } from "vitest";
 import type { Page, ResultEnvelope, TopicSummary } from "@penguin/broker-contracts";
-import { deriveTopicResult } from "../BrokerPage";
+import { deriveTopicResult } from "../BrokerTopicsTab";
 
 const TOPIC: TopicSummary = {
   fullName: "persistent://public/default/orders",

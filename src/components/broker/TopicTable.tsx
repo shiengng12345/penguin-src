@@ -13,6 +13,15 @@
 // name. `DataTable` didn't have a seam for that until this task, which is
 // why it now also takes `expandLabel` alongside `rowProps` (see
 // `data-table.tsx`).
+//
+// Task 14: `onSelectTopic` opens the row's detail pane, wired through
+// `rowProps` exactly the way `ConnectionTable` marks its active row
+// (`aria-current`, see that file's header) — the seam already existed, this
+// is its second consumer. `selectedTopicFullName` marks the open row the
+// same way, so the table itself never has to track selection state; the
+// caller (`BrokerTopicsTab`) already owns it because the detail pane it
+// opens lives outside this component.
+import type { HTMLAttributes } from "react";
 import type { TopicSummary } from "@penguin/broker-contracts";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import type { DataTableState } from "@/components/ui/data-table-types";
@@ -30,6 +39,14 @@ export interface TopicTableProps {
    *  connection whose namespace genuinely has zero topics): the guidance
    *  here points the operator at Connections, not at Pulsar. */
   noActiveConnection?: boolean;
+  /** Opens the clicked topic's detail pane. Omitted entirely, this table
+   *  behaves exactly as it did before Task 14 — a plain read-only list. */
+  onSelectTopic?: (topic: TopicSummary) => void;
+  /** Which topic's detail pane is currently open, if any — marks that row
+   *  `aria-current` so the open row stays visually and programmatically
+   *  distinguishable from every other one, same convention as
+   *  `ConnectionTable`'s active-connection row. */
+  selectedTopicFullName?: string | null;
 }
 
 export function TopicTable({
@@ -41,6 +58,8 @@ export function TopicTable({
   errorMessage,
   onPageChange,
   noActiveConnection,
+  onSelectTopic,
+  selectedTopicFullName,
 }: TopicTableProps) {
   if (noActiveConnection) {
     return (
@@ -102,6 +121,22 @@ export function TopicTable({
       state={state}
       errorMessage={errorMessage}
       onPageChange={onPageChange}
+      rowProps={(t): HTMLAttributes<HTMLDivElement> => ({
+        ...(t.fullName === selectedTopicFullName ? { "aria-current": "true" } : {}),
+        ...(onSelectTopic
+          ? {
+              onClick: () => onSelectTopic(t),
+              onKeyDown: (event) => {
+                if (event.key === "Enter" || event.key === " ") {
+                  event.preventDefault();
+                  onSelectTopic(t);
+                }
+              },
+              tabIndex: 0,
+              className: "cursor-pointer",
+            }
+          : {}),
+      })}
       expandLabel={(t) => t.shortName}
       expandedContent={(t) =>
         t.partitions > 0 ? (

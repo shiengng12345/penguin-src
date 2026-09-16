@@ -86,4 +86,45 @@ describe("TopicTable", () => {
     expect(namespaceHeader.parentElement).not.toHaveAttribute("data-grow", "true");
     expect(namespaceHeader.parentElement).toHaveStyle({ width: "180px" });
   });
+
+  // Task 14: clicking a topic row is how the Topics tab's detail pane opens.
+  describe("onSelectTopic", () => {
+    it("reports the clicked topic", async () => {
+      const user = userEvent.setup();
+      const onSelectTopic = vi.fn();
+      render(<TopicTable {...props} onSelectTopic={onSelectTopic} />);
+      await user.click(screen.getByText("orders"));
+      expect(onSelectTopic).toHaveBeenCalledWith(topics[0]);
+    });
+
+    it("marks the selected row without disturbing the row's own table semantics", () => {
+      render(
+        <TopicTable
+          {...props}
+          onSelectTopic={vi.fn()}
+          selectedTopicFullName="persistent://public/default/orders"
+        />,
+      );
+      const rows = screen.getAllByRole("row");
+      // rows[0] is the header row; rows[1] is "orders".
+      expect(rows[1]).toHaveAttribute("aria-current", "true");
+      expect(rows[2]).not.toHaveAttribute("aria-current");
+    });
+
+    it("is reachable by keyboard (Enter) when a selection handler is given", async () => {
+      const user = userEvent.setup();
+      const onSelectTopic = vi.fn();
+      render(<TopicTable {...props} onSelectTopic={onSelectTopic} />);
+      const rows = screen.getAllByRole("row");
+      rows[1]?.focus();
+      await user.keyboard("{Enter}");
+      expect(onSelectTopic).toHaveBeenCalledWith(topics[0]);
+    });
+
+    it("does not attach any row interaction when no handler is given", () => {
+      render(<TopicTable {...props} />);
+      const rows = screen.getAllByRole("row");
+      expect(rows[1]).not.toHaveAttribute("tabIndex");
+    });
+  });
 });
