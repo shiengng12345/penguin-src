@@ -5,6 +5,7 @@ pub mod cache;
 pub mod capability;
 pub mod commands;
 pub mod envelope;
+pub mod internal_stats;
 pub mod ports;
 pub mod security;
 pub mod stats;

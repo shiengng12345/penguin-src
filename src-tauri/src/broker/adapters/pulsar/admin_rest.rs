@@ -220,6 +220,10 @@ impl BrokerAdmin for PulsarAdminRest {
         self.get_json(&format!("/admin/v2/{}/stats", topic.rest_path())).await
     }
 
+    async fn get_topic_internal_stats(&self, topic: &TopicRef) -> Result<serde_json::Value, BrokerError> {
+        self.get_json(&format!("/admin/v2/{}/internalStats", topic.rest_path())).await
+    }
+
     async fn list_subscriptions(&self, topic: &TopicRef) -> Result<Vec<String>, BrokerError> {
         self.get_json(&format!("/admin/v2/{}/subscriptions", topic.rest_path())).await
     }
