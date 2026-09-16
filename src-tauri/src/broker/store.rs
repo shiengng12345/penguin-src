@@ -135,6 +135,25 @@ pub fn put_snapshot(
     .map_err(db_err)
 }
 
+/// Drops one cached snapshot. Used by an explicit refresh, which must go to
+/// the broker rather than re-reading what it is trying to replace.
+/// Deleting a row that is not there is success, not an error — refreshing a
+/// view that was never cached is an ordinary thing to do.
+pub fn delete_snapshot(
+    conn: &Connection,
+    connection_id: &str,
+    scope: &str,
+    scope_key: &str,
+) -> Result<(), BrokerError> {
+    conn.execute(
+        "DELETE FROM broker_topology_snapshots
+         WHERE connection_id = ?1 AND scope = ?2 AND scope_key = ?3",
+        params![connection_id, scope, scope_key],
+    )
+    .map(|_| ())
+    .map_err(db_err)
+}
+
 pub fn get_snapshot(
     conn: &Connection,
     connection_id: &str,

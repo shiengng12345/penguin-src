@@ -60,11 +60,14 @@ export function testConnection(connectionId: string): Promise<ResultEnvelope<Cap
   return invoke("broker_test_connection", { connectionId });
 }
 
+/** `refresh: true` bypasses the snapshot cache and forces a fresh read from
+ *  the broker, discarding whatever was cached for this tenant/namespace. */
 export function listTopics(
   connectionId: string,
   tenant: string,
   namespace: string,
   query: PageQuery,
+  refresh = false,
 ): Promise<ResultEnvelope<Page<TopicSummary>>> {
-  return invoke("broker_list_topics", { connectionId, tenant, namespace, query });
+  return invoke("broker_list_topics", { connectionId, tenant, namespace, query, refresh });
 }

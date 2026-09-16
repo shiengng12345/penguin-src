@@ -20,11 +20,13 @@
 //! fail, and `Result<T, String>` is this codebase's existing convention for
 //! fallible commands (see `db.rs`).
 
+use crate::broker::cache::{self, CacheScope, Freshness};
 use crate::broker::capability::{self, CapabilitySnapshot};
 use crate::broker::envelope::{BrokerError, BrokerErrorCode, BrokerSource, ResultEnvelope};
 use crate::broker::ports::BrokerAdmin;
 use crate::broker::store::{self, ConnectionRow};
 use crate::broker::topic_folding::{self, PageDto, PageQueryDto, TopicSummaryDto};
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
 /// Separate keychain namespace from the REST module's `"penguin-rest"` —
@@ -253,38 +255,166 @@ pub async fn broker_test_connection(connection_id: String) -> Result<ResultEnvel
     }
 }
 
+/// The two lists cached together as one JSON object, so `all` and
+/// `partitioned` can never drift apart on disk (a stale `all` next to a
+/// fresh `partitioned`, or vice versa, would silently corrupt folding).
+#[derive(Serialize, Deserialize)]
+struct TopicListSnapshot {
+    all: Vec<String>,
+    partitioned: Vec<String>,
+}
+
 #[tauri::command]
 pub async fn broker_list_topics(
     connection_id: String,
     tenant: String,
     namespace: String,
     query: PageQueryDto,
+    refresh: bool,
 ) -> Result<ResultEnvelope<PageDto<TopicSummaryDto>>, String> {
     let row = load_row(&connection_id)?;
     let token = resolve_secret(row.secret_handle_id.as_deref())?;
-    let admin = match crate::broker::adapters::pulsar::admin_rest::PulsarAdminRest::new(
-        row.admin_url.clone(),
-        row.timeout_ms as u64,
-        row.tls_verify,
-        token,
-    ) {
-        Ok(a) => a,
-        Err(e) => return Ok(ResultEnvelope::failed(e, BrokerSource::AdminRest)),
+    let conn = crate::db::open_product_db_shared()?;
+    list_topics_through_cache(conn, &row, &tenant, &namespace, &query, refresh, token).await
+}
+
+/// The actual cache-read-through logic behind `broker_list_topics`, taking
+/// its SQLite connection as a parameter rather than opening the product DB
+/// itself. This is what makes it possible to test the caching behaviour
+/// in-process against an in-memory database (see `tests/broker_cache.rs`)
+/// instead of exercising the `#[tauri::command]` wrapper against the real
+/// `~/.penguin/penguin.sqlite3`.
+///
+/// Takes the `Connection` by value, not `&Connection`: a `rusqlite::Connection`
+/// is `Send` but not `Sync`, and this function's `.await`s (the broker calls)
+/// happen in between reading and writing the cache, so any reference held
+/// across them would make the returned future `!Send` — which Tauri's async
+/// command dispatch requires. Owning it sidesteps that without giving up the
+/// injectable-connection shape the tests need.
+///
+/// Order of operations, matching the Task 3 brief with one addition: the
+/// snapshot that is about to be deleted (on an explicit `refresh`) is read
+/// first and kept around in memory. This is what lets a broker failure
+/// *during* that refresh still serve the last known list — the brief's
+/// step 7 ("on a broker error when the cache held something") is otherwise
+/// unreachable on the refresh path, since step 2 deletes the row before the
+/// broker is ever called.
+pub async fn list_topics_through_cache(
+    conn: Connection,
+    row: &ConnectionRow,
+    tenant: &str,
+    namespace: &str,
+    query: &PageQueryDto,
+    refresh: bool,
+    token: Option<String>,
+) -> Result<ResultEnvelope<PageDto<TopicSummaryDto>>, String> {
+    let scope = CacheScope::Topics;
+    let scope_key = format!("{tenant}/{namespace}");
+
+    let pre_refresh_snapshot =
+        store::get_snapshot(&conn, &row.id, scope.scope_name(), &scope_key).map_err(|e| e.message)?;
+
+    if refresh {
+        store::delete_snapshot(&conn, &row.id, scope.scope_name(), &scope_key).map_err(|e| e.message)?;
+    }
+
+    // After an explicit refresh the row above is gone, so re-deriving the
+    // snapshot from `pre_refresh_snapshot` (rather than re-reading the DB)
+    // is what actually forces the `Absent` branch below.
+    let snapshot = if refresh { None } else { pre_refresh_snapshot.clone() };
+    let now = now_ms();
+    let observed_at = snapshot.as_ref().map(|(_, ts)| *ts);
+    let freshness = cache::assess(scope, observed_at, now);
+
+    let build_from_cache = |payload: &str,
+                            freshness_ms: u64,
+                            warning: Option<String>|
+     -> Result<ResultEnvelope<PageDto<TopicSummaryDto>>, String> {
+        let cached: TopicListSnapshot =
+            serde_json::from_str(payload).map_err(|e| format!("corrupt topic cache entry: {e}"))?;
+        let folded = topic_folding::fold_topics(&cached.all, &cached.partitioned);
+        let page = topic_folding::paginate(folded, query);
+        let mut envelope = ResultEnvelope::ok(page, BrokerSource::Cache);
+        envelope.freshness_ms = freshness_ms;
+        if let Some(w) = warning {
+            envelope.warnings.push(w);
+        }
+        Ok(envelope)
     };
 
-    // Admin REST ignores paging, so fetch the full lists, fold partitions,
-    // and page in Rust (spec V-A5 / V-A6).
-    let (all, partitioned) = match (
-        admin.list_topics(&tenant, &namespace).await,
-        admin.list_partitioned_topics(&tenant, &namespace).await,
-    ) {
-        (Ok(a), Ok(p)) => (a, p),
-        (Err(e), _) | (_, Err(e)) => return Ok(ResultEnvelope::failed(e, BrokerSource::AdminRest)),
-    };
+    match freshness {
+        Freshness::Fresh { age_ms } => {
+            let (payload, _) = snapshot.expect("Fresh implies a snapshot was read");
+            build_from_cache(&payload, age_ms, None)
+        }
+        Freshness::Stale { age_ms } => {
+            let (payload, _) = snapshot.expect("Stale implies a snapshot was read");
+            build_from_cache(
+                &payload,
+                age_ms,
+                Some(format!(
+                    "Cached topic list is {age_ms} ms old, past its freshness window; showing the last known list."
+                )),
+            )
+        }
+        Freshness::Skewed { ahead_ms } => {
+            // Usable-but-suspect, exactly like Stale: serve the cached rows,
+            // but name the skew explicitly rather than folding it into a
+            // reassuring "fresh" or a meaningless age.
+            let (payload, _) = snapshot.expect("Skewed implies a snapshot was read");
+            build_from_cache(
+                &payload,
+                0,
+                Some(format!(
+                    "Cached topic list is stamped {ahead_ms} ms ahead of this machine's clock; \
+                     its age cannot be measured. Showing it anyway — check the clocks."
+                )),
+            )
+        }
+        Freshness::Absent => {
+            // Admin REST ignores paging, so fetch the full lists, fold
+            // partitions, and page in Rust (spec V-A5 / V-A6).
+            let fetch_result: Result<(Vec<String>, Vec<String>), BrokerError> =
+                match crate::broker::adapters::pulsar::admin_rest::PulsarAdminRest::new(
+                    row.admin_url.clone(),
+                    row.timeout_ms as u64,
+                    row.tls_verify,
+                    token,
+                ) {
+                    Ok(admin) => match (
+                        admin.list_topics(tenant, namespace).await,
+                        admin.list_partitioned_topics(tenant, namespace).await,
+                    ) {
+                        (Ok(all), Ok(partitioned)) => Ok((all, partitioned)),
+                        (Err(e), _) | (_, Err(e)) => Err(e),
+                    },
+                    Err(e) => Err(e),
+                };
 
-    let folded = topic_folding::fold_topics(&all, &partitioned);
-    let page = topic_folding::paginate(folded, &query);
-    Ok(ResultEnvelope::ok(page, BrokerSource::AdminRest))
+            match fetch_result {
+                Ok((all, partitioned)) => {
+                    let folded = topic_folding::fold_topics(&all, &partitioned);
+                    let snap = TopicListSnapshot { all, partitioned };
+                    let json = serde_json::to_string(&snap).map_err(|e| e.to_string())?;
+                    store::put_snapshot(&conn, &row.id, scope.scope_name(), &scope_key, &json)
+                        .map_err(|e| e.message)?;
+                    let page = topic_folding::paginate(folded, query);
+                    Ok(ResultEnvelope::ok(page, BrokerSource::AdminRest))
+                }
+                Err(err) => match &pre_refresh_snapshot {
+                    // A refresh deleted a still-good snapshot and the fetch
+                    // that was supposed to replace it then failed. Losing
+                    // the screen entirely here is worse than showing what
+                    // we last knew, clearly marked with the failure.
+                    Some((payload, observed_at)) => {
+                        let age_ms = now.saturating_sub(*observed_at).max(0) as u64;
+                        build_from_cache(payload, age_ms, Some(err.message.clone()))
+                    }
+                    None => Ok(ResultEnvelope::failed(err, BrokerSource::AdminRest)),
+                },
+            }
+        }
+    }
 }
 
 #[cfg(test)]
