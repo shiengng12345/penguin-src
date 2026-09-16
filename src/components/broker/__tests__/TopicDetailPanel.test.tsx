@@ -45,6 +45,74 @@ function makeDetail(overrides: Partial<TopicDetail> = {}): TopicDetail {
 }
 
 describe("TopicDetailPanel", () => {
+  it("shows a real anomaly's measured value, not just that something is wrong", () => {
+    // Every test in this file used `anomalies: []`, so the whole non-empty
+    // branch was unexercised: a future edit could drop `observedValue`, or
+    // print `detail` twice, and nothing would fail. "has a backlog" is the
+    // rule that fired; "3400 messages" is what an operator acts on.
+    render(
+      <TopicDetailPanel
+        detail={makeDetail({
+          anomalies: [
+            {
+              kind: "backlogWithNoConsumer",
+              topic: "persistent://public/default/fpms_topup",
+              subscription: "anti_addiction_deposit_limit_fpmsnt",
+              detail: "subscription has a backlog but no connected consumer",
+              observedValue: "3400 messages backlogged, 0 consumers attached",
+            },
+          ],
+        })}
+        state="ready"
+        warnings={[]}
+        onRefresh={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/3400 messages backlogged, 0 consumers attached/)).toBeInTheDocument();
+    expect(screen.getByText(/anti_addiction_deposit_limit_fpmsnt/)).toBeInTheDocument();
+    expect(screen.queryByText(/no anomalies detected/i)).not.toBeInTheDocument();
+  });
+
+  it("gives anomalies and indeterminate checks different roles, not just different words", () => {
+    // The visual distinction this panel exists to protect can be lost by
+    // semantics alone: an indeterminate section promoted to role="alert"
+    // reads as "something is wrong" to a screen reader and to the eye,
+    // which is the opposite of what an unrunnable check means.
+    render(
+      <TopicDetailPanel
+        detail={makeDetail({
+          anomalies: [
+            {
+              kind: "consumerBlockedOnUnacked",
+              topic: "persistent://public/default/fpms_topup",
+              subscription: null,
+              detail: "the broker has stopped delivering to this consumer",
+              observedValue: "1200 unacked messages (blockedOnUnackedMsgs=true)",
+            },
+          ],
+          indeterminate: [
+            {
+              kind: "backlogWithNoConsumer",
+              topic: "persistent://public/default/fpms_topup",
+              subscription: "rg_deposit_accumulate_LOCAL",
+              reason: "msgBacklog was not reported, so this check could not run",
+            },
+          ],
+        })}
+        state="ready"
+        warnings={[]}
+        onRefresh={vi.fn()}
+      />,
+    );
+    const alert = screen.getByRole("alert");
+    expect(alert).toHaveTextContent(/1200 unacked messages/);
+    // The indeterminate reason must NOT be inside the alert region — an
+    // unrunnable check promoted to role="alert" tells a screen reader that
+    // something is wrong, which is the opposite of what it means.
+    expect(alert).not.toHaveTextContent(/msgBacklog was not reported/);
+    expect(screen.getByText(/msgBacklog was not reported/)).toBeInTheDocument();
+  });
+
   it("shows the cursor position verbatim", () => {
     // "38:-1" is ledger:entry, and -1 means nothing consumed yet. Rewriting
     // it as a number, or blanking it, would destroy that meaning.
