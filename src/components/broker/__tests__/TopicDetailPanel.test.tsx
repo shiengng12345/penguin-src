@@ -3,10 +3,20 @@
 // noBacklog / unknown), indeterminate checks vs. anomalies, and a cursor
 // entryId of -1 as a real position rather than a gap. Every test here
 // guards one of those distinctions from being flattened.
+//
+// Whole-stage review item 4: `makeDetail`'s default `statsRequestScope` is
+// `SHIPPED_SCOPE` — the scope this codebase's `/stats` calls actually send
+// in production — so this file renders the panel the way an operator
+// actually sees it. Only the "oldestBacklogMessageAge — three distinct
+// renderings" describe block overrides it to `ALL_REQUESTED_SCOPE`: that
+// block is explicitly about what each of `BacklogAge`'s three states
+// renders as, which is only observable at all when the governing flag is
+// on (see `src/test/broker-scope-fixtures.ts`).
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { TopicDetailPanel } from "../TopicDetailPanel";
 import type { TopicDetail } from "@penguin/broker-contracts";
+import { SHIPPED_SCOPE } from "@/test/broker-scope-fixtures";
 
 function makeDetail(overrides: Partial<TopicDetail> = {}): TopicDetail {
   return {
@@ -21,13 +31,7 @@ function makeDetail(overrides: Partial<TopicDetail> = {}): TopicDetail {
       msgInCounter: "0",
       oldestBacklogMessageAge: { state: "unknown" },
       subscriptions: [],
-      statsRequestScope: {
-        preciseBacklog: true,
-        subscriptionBacklogSize: true,
-        earliestTimeInBacklog: true,
-        excludePublishers: false,
-        excludeConsumers: false,
-      },
+      statsRequestScope: SHIPPED_SCOPE,
     },
     internal: {
       entriesAddedCounter: "0",
@@ -127,10 +131,19 @@ describe("TopicDetailPanel", () => {
     expect(screen.getByText("38:-1")).toBeInTheDocument();
   });
 
-  it("says unknown for an absent backlog age rather than showing zero", () => {
-    // Absent means we do not know. Zero would read as "brand new".
+  // Whole-stage review item 4: under `SHIPPED_SCOPE` (the default here),
+  // `earliestTimeInBacklog` is `false`, so this cell reads "Not requested"
+  // regardless of what `oldestBacklogMessageAge` normalized to — Task 1's
+  // `formatScopedBacklogAge` has always worked this way; what changed is
+  // that this file's default fixture now actually exercises it, instead of
+  // the unrealistic all-flags-true scope every test here used to render
+  // under. The "unknown vs zero vs noBacklog" distinction this test used to
+  // name is covered, under a scope that actually requested the field, by
+  // the "oldestBacklogMessageAge — three distinct renderings" describe
+  // block below.
+  it('reads "Not requested" for the backlog age under the scope this app actually ships', () => {
     render(<TopicDetailPanel detail={makeDetail()} state="ready" onRefresh={vi.fn()} />);
-    expect(screen.getByText(/unknown|not measured/i)).toBeInTheDocument();
+    expect(screen.getByText(/not requested/i)).toBeInTheDocument();
   });
 
   it("carries the delivery-not-completion notice", () => {
@@ -151,19 +164,34 @@ describe("TopicDetailPanel", () => {
   });
 
   describe("oldestBacklogMessageAge — three distinct renderings", () => {
+    // This block is explicitly about what each of BacklogAge's three states
+    // renders as — only observable when earliestTimeInBacklog was actually
+    // requested (under SHIPPED_SCOPE, every state here would collapse into
+    // "Not requested" instead; see the test above this describe block).
+    const requestedScope = { ...SHIPPED_SCOPE, earliestTimeInBacklog: true };
+
     it("renders a real age in seconds as a measured number, not a sentinel", () => {
       const detail = makeDetail({
-        stats: { ...makeDetail().stats, oldestBacklogMessageAge: { state: "seconds", seconds: 42 } },
+        stats: {
+          ...makeDetail().stats,
+          oldestBacklogMessageAge: { state: "seconds", seconds: 42 },
+          statsRequestScope: requestedScope,
+        },
       });
       render(<TopicDetailPanel detail={detail} state="ready" onRefresh={vi.fn()} />);
       expect(screen.getByText(/42/)).toBeInTheDocument();
       expect(screen.queryByText(/^unknown$/i)).not.toBeInTheDocument();
       expect(screen.queryByText(/no backlog/i)).not.toBeInTheDocument();
+      expect(screen.queryByText(/not requested/i)).not.toBeInTheDocument();
     });
 
     it("renders noBacklog as a determinate, healthy fact — not as unknown", () => {
       const detail = makeDetail({
-        stats: { ...makeDetail().stats, oldestBacklogMessageAge: { state: "noBacklog" } },
+        stats: {
+          ...makeDetail().stats,
+          oldestBacklogMessageAge: { state: "noBacklog" },
+          statsRequestScope: requestedScope,
+        },
       });
       render(<TopicDetailPanel detail={detail} state="ready" onRefresh={vi.fn()} />);
       // Must read as a positive, measured fact ("no backlog"), never as the
@@ -174,7 +202,11 @@ describe("TopicDetailPanel", () => {
 
     it("renders unknown as genuinely unmeasured — distinct from noBacklog", () => {
       const detail = makeDetail({
-        stats: { ...makeDetail().stats, oldestBacklogMessageAge: { state: "unknown" } },
+        stats: {
+          ...makeDetail().stats,
+          oldestBacklogMessageAge: { state: "unknown" },
+          statsRequestScope: requestedScope,
+        },
       });
       render(<TopicDetailPanel detail={detail} state="ready" onRefresh={vi.fn()} />);
       expect(screen.getByText(/unknown|not measured/i)).toBeInTheDocument();
@@ -201,7 +233,13 @@ describe("TopicDetailPanel", () => {
       // "12345" — but never via `Number(...)`, which is the whole point of
       // Task 3.
       expect(screen.getByText("12,345")).toBeInTheDocument();
-      expect(screen.queryByText(/not requested/i)).not.toBeInTheDocument();
+      // Specifically the Backlog size cell, not the page as a whole — under
+      // SHIPPED_SCOPE (the default here) the topic-level backlog-age cell
+      // legitimately reads "Not requested" too (earliestTimeInBacklog is
+      // false), which is unrelated to this test's claim about backlogSize.
+      const backlogSizeValue = screen.getByText("Backlog size (bytes)").nextElementSibling;
+      expect(backlogSizeValue).toHaveTextContent("12,345");
+      expect(backlogSizeValue).not.toHaveTextContent(/not requested/i);
     });
   });
 
@@ -298,5 +336,78 @@ describe("TopicDetailPanel", () => {
   it("still renders the loading state when nothing has loaded yet", () => {
     render(<TopicDetailPanel detail={null} state="loading" onRefresh={vi.fn()} />);
     expect(screen.getByRole("status")).toHaveTextContent(/loading/i);
+  });
+
+  // Whole-stage review item 4: the test this file was missing. Every other
+  // test above either used the unrealistic all-flags-true scope (before
+  // this fix) or a manufactured anomaly/indeterminate array. This test
+  // renders under SHIPPED_SCOPE with a subscription shaped like a real,
+  // stuck queue — a real backlog, a real attached consumer, and a topic
+  // whose backlog age genuinely was not requested — and asserts what an
+  // operator actually sees on screen. This is the test that would have
+  // caught item 1 (msgBacklog wrongly hidden behind "Not requested") and
+  // item 2 (BacklogOlderThanThreshold silently unreachable, with no
+  // indeterminate entry to say so) on the day they landed: item 1 shows up
+  // here as "3400" failing to appear; item 2 as the indeterminate section
+  // being empty when it should carry the age check.
+  it("under the scope this app actually ships, an operator sees the real backlog and the age check marked indeterminate", () => {
+    const detail = makeDetail({
+      stats: {
+        ...makeDetail().stats,
+        subscriptions: [
+          {
+            name: "anti_addiction_deposit_limit_fpmsnt",
+            msgBacklog: 3400,
+            unackedMessages: 12,
+            msgRateOut: 0,
+            subType: { state: "named", name: "Shared" },
+            consumers: [
+              {
+                consumerName: "worker-1",
+                address: "/10.0.0.1:5000",
+                clientVersion: "Pulsar-Java-v4.2.4",
+                availablePermits: 500,
+                unackedMessages: 12,
+                lastAckedTimestamp: { state: "unknown" },
+                lastConsumedTimestamp: { state: "unknown" },
+                msgRateOut: 0,
+                blockedOnUnackedMsgs: false,
+              },
+            ],
+          },
+        ],
+        // Matches what parse_topic_stats actually stamps under
+        // TOPIC_STATS_REQUEST_SCOPE: a real payload's -1 sentinel normalizes
+        // to noBacklog, which effective_backlog_age (src-tauri/src/broker/
+        // anomaly.rs) folds to Unknown for the indeterminate check below,
+        // because earliestTimeInBacklog is false.
+        oldestBacklogMessageAge: { state: "noBacklog" },
+      },
+      anomalies: [],
+      indeterminate: [
+        {
+          kind: "backlogOlderThanThreshold",
+          topic: "persistent://public/default/fpms_topup",
+          subscription: null,
+          reason:
+            'topic "persistent://public/default/fpms_topup" did not report oldestBacklogMessageAgeSeconds (or reported an undocumented negative value), so whether it has an old backlog could not be determined',
+        },
+      ],
+    });
+    render(<TopicDetailPanel detail={detail} state="ready" onRefresh={vi.fn()} />);
+
+    // Item 1: the real backlog must be on screen, not hidden behind "Not
+    // requested" — subscriptionBacklogSize does not govern msgBacklog.
+    expect(screen.getByText("3400")).toBeInTheDocument();
+    // The attached consumer's own count must also be visible — excludeConsumers
+    // is false in SHIPPED_SCOPE, so consumer detail genuinely was requested.
+    expect(screen.getByText("1 consumer")).toBeInTheDocument();
+
+    // Item 2: an empty anomalies section next to a non-empty indeterminate
+    // section must not read as "checked and clear" — the age check has to
+    // be visibly marked as never having run.
+    expect(screen.getByText(/no anomalies/i)).toBeInTheDocument();
+    expect(screen.getByText(/did not report oldestBacklogMessageAgeSeconds/i)).toBeInTheDocument();
+    expect(screen.getByText(/could not (be )?(run|perform)/i)).toBeInTheDocument();
   });
 });

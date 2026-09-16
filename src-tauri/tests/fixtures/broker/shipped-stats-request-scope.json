@@ -1,0 +1,7 @@
+{
+  "preciseBacklog": false,
+  "subscriptionBacklogSize": false,
+  "earliestTimeInBacklog": false,
+  "excludePublishers": false,
+  "excludeConsumers": false
+}

@@ -6,6 +6,7 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi, beforeEach } from "vitest";
 import type { ResultEnvelope, TopicDetail, TopicSummary } from "@penguin/broker-contracts";
+import { SHIPPED_SCOPE } from "@/test/broker-scope-fixtures";
 
 const getTopicDetailMock = vi.fn();
 
@@ -37,13 +38,12 @@ const DETAIL: TopicDetail = {
     msgInCounter: "1",
     oldestBacklogMessageAge: { state: "noBacklog" },
     subscriptions: [],
-    statsRequestScope: {
-      preciseBacklog: true,
-      subscriptionBacklogSize: true,
-      earliestTimeInBacklog: true,
-      excludePublishers: false,
-      excludeConsumers: false,
-    },
+    // Whole-stage review item 4: the scope this codebase's `/stats` calls
+    // actually send in production — see `src/test/broker-scope-fixtures.ts`.
+    // This hook only passes the envelope's `data` through unchanged
+    // (asserted below via `toEqual`), so the specific scope values are not
+    // otherwise load-bearing for this file's tests.
+    statsRequestScope: SHIPPED_SCOPE,
   },
   internal: {
     entriesAddedCounter: "1",

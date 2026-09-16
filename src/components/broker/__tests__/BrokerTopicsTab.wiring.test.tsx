@@ -16,6 +16,7 @@ import type {
   TopicDetail,
   TopicSummary,
 } from "@penguin/broker-contracts";
+import { SHIPPED_SCOPE } from "@/test/broker-scope-fixtures";
 
 const listTenantsMock = vi.fn();
 const listNamespacesMock = vi.fn();
@@ -61,13 +62,10 @@ const DETAIL: TopicDetail = {
       { name: "anti_addiction_deposit_limit_fpmsnt", msgBacklog: 3400, unackedMessages: 0, msgRateOut: 1, subType: { state: "named", name: "Shared" }, consumers: [] },
       { name: "rg_deposit_accumulate_LOCAL", msgBacklog: 0, unackedMessages: 0, msgRateOut: 1, subType: { state: "named", name: "Shared" }, consumers: null },
     ],
-    statsRequestScope: {
-      preciseBacklog: true,
-      subscriptionBacklogSize: true,
-      earliestTimeInBacklog: true,
-      excludePublishers: false,
-      excludeConsumers: false,
-    },
+    // Whole-stage review item 4: the scope this codebase's `/stats` calls
+    // actually send in production, not the unrealistic all-flags-true scope
+    // this fixture used to hardcode — see `src/test/broker-scope-fixtures.ts`.
+    statsRequestScope: SHIPPED_SCOPE,
   },
   internal: { entriesAddedCounter: "10", numberOfEntries: 10, lastConfirmedEntry: { ledgerId: 1, entryId: -1 }, cursors: [] },
   anomalies: [],

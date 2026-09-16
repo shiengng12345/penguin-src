@@ -228,6 +228,28 @@ fn parsed_stats_carry_the_actual_request_scope() {
     assert!(!stats.stats_request_scope.earliest_time_in_backlog);
 }
 
+/// Whole-stage review item 4: `SHIPPED_SCOPE` in
+/// `src/test/broker-scope-fixtures.ts` — the default `StatsRequestScope`
+/// fixture every broker UI test is now required to render under — must
+/// equal this constant. Neither side of the language boundary can import
+/// the other's source, so both are pinned against the same checked-in
+/// fixture instead:
+/// `tests/fixtures/broker/shipped-stats-request-scope.json`.
+///
+/// This is the enforcement half of that contract: if
+/// `TOPIC_STATS_REQUEST_SCOPE` ever changes, THIS test fails first, because
+/// the checked-in fixture no longer matches. Fixing it here means editing
+/// the fixture — and the next `pnpm test:ui` run then fails loudly on the
+/// TS side too, because `broker-scope-fixtures.test.tsx` reads that exact
+/// same file and compares it against the still-unedited `SHIPPED_SCOPE`
+/// literal. Neither side can drift without the other noticing.
+#[test]
+fn topic_stats_request_scope_matches_the_shipped_scope_fixture_the_ts_side_reads() {
+    let raw = include_str!("../../tests/fixtures/broker/shipped-stats-request-scope.json");
+    let fixture: serde_json::Value = serde_json::from_str(raw).expect("fixture is valid JSON");
+    assert_eq!(serde_json::to_value(TOPIC_STATS_REQUEST_SCOPE).unwrap(), fixture);
+}
+
 /// Task 3: a `u64` counter above JS's safe-integer ceiling (2^53 - 1 =
 /// 9,007,199,254,740,991) must cross the wire as a *quoted decimal string*,
 /// never a bare JSON number — a bare number round-trips exactly inside

@@ -3,18 +3,16 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { SubscriptionTable } from "../SubscriptionTable";
 import type { StatsRequestScope, SubscriptionStats } from "@penguin/broker-contracts";
+import { ALL_REQUESTED_SCOPE, SHIPPED_SCOPE } from "@/test/broker-scope-fixtures";
 
-// Every test below except the "Task 1 scope" describe block below is about a
-// distinction other than `StatsRequestScope` — they all pass this "fully
-// requested" scope so `msgBacklog`'s "Unknown" rendering (the thing most of
-// this file tests) is exercised the same way it always was.
-const ALL_REQUESTED: StatsRequestScope = {
-  preciseBacklog: true,
-  subscriptionBacklogSize: true,
-  earliestTimeInBacklog: true,
-  excludePublishers: false,
-  excludeConsumers: false,
-};
+// Whole-stage review item 4: every test below except the scope-specific
+// describe blocks near the end of this file is about a distinction other
+// than `StatsRequestScope` — they render under `SHIPPED_SCOPE`, the scope
+// this codebase's `/stats` calls actually send in production, so this file
+// renders the panel the way an operator actually sees it. Only a test
+// explicitly about scoped behaviour (comparing what renders when a flag is
+// on vs. off) uses `ALL_REQUESTED_SCOPE` instead — see
+// `src/test/broker-scope-fixtures.ts` for why.
 
 const withConsumer: SubscriptionStats = {
   name: "rg_deposit_accumulate_LOCAL",
@@ -47,7 +45,7 @@ const stranded: SubscriptionStats = {
 };
 
 function setup(subscriptions: SubscriptionStats[] = [withConsumer, stranded]) {
-  const props = { subscriptions, scope: ALL_REQUESTED, state: "ready" as const, onRefresh: vi.fn() };
+  const props = { subscriptions, scope: SHIPPED_SCOPE, state: "ready" as const, onRefresh: vi.fn() };
   render(<SubscriptionTable {...props} />);
   return props;
 }
@@ -93,7 +91,7 @@ describe("SubscriptionTable", () => {
   });
 
   it("shows an empty state when a topic has no subscriptions at all", () => {
-    render(<SubscriptionTable subscriptions={[]} scope={ALL_REQUESTED} state="empty" onRefresh={vi.fn()} />);
+    render(<SubscriptionTable subscriptions={[]} scope={SHIPPED_SCOPE} state="empty" onRefresh={vi.fn()} />);
     expect(screen.getByRole("status")).toHaveTextContent(/no subscriptions/i);
   });
 
@@ -109,7 +107,7 @@ describe("SubscriptionTable", () => {
       msgBacklog: null,
       unackedMessages: 5,
     };
-    render(<SubscriptionTable subscriptions={[unknownBacklog]} scope={ALL_REQUESTED} state="ready" onRefresh={vi.fn()} />);
+    render(<SubscriptionTable subscriptions={[unknownBacklog]} scope={SHIPPED_SCOPE} state="ready" onRefresh={vi.fn()} />);
     expect(screen.queryByText("0")).not.toBeInTheDocument();
     expect(screen.getByText(/unknown/i)).toBeInTheDocument();
   });
@@ -123,7 +121,7 @@ describe("SubscriptionTable", () => {
       ...withConsumer,
       consumers: [{ ...withConsumer.consumers![0], blockedOnUnackedMsgs: null }],
     };
-    render(<SubscriptionTable subscriptions={[unknownBlocked]} scope={ALL_REQUESTED} state="ready" onRefresh={vi.fn()} />);
+    render(<SubscriptionTable subscriptions={[unknownBlocked]} scope={SHIPPED_SCOPE} state="ready" onRefresh={vi.fn()} />);
     await user.click(screen.getByRole("button", { name: /expand/i }));
     expect(screen.queryByText(/^not blocked$/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/^blocked$/i)).not.toBeInTheDocument();
@@ -137,7 +135,7 @@ describe("SubscriptionTable", () => {
     const user = userEvent.setup();
     const unknownConsumers: SubscriptionStats = { ...stranded, name: "unknown_consumers_sub", consumers: null };
     render(
-      <SubscriptionTable subscriptions={[unknownConsumers, stranded]} scope={ALL_REQUESTED} state="ready" onRefresh={vi.fn()} />,
+      <SubscriptionTable subscriptions={[unknownConsumers, stranded]} scope={SHIPPED_SCOPE} state="ready" onRefresh={vi.fn()} />,
     );
 
     // Collapsed rows already read differently: "Unknown" vs "No consumers".
@@ -195,7 +193,7 @@ describe("SubscriptionTable", () => {
         },
       ],
     };
-    render(<SubscriptionTable subscriptions={[threeStates]} scope={ALL_REQUESTED} state="ready" onRefresh={vi.fn()} />);
+    render(<SubscriptionTable subscriptions={[threeStates]} scope={SHIPPED_SCOPE} state="ready" onRefresh={vi.fn()} />);
     await user.click(screen.getByRole("button", { name: /expand/i }));
 
     expect(screen.getByText("withheld")).toBeInTheDocument();
@@ -216,7 +214,7 @@ describe("SubscriptionTable", () => {
     const named: SubscriptionStats = { ...stranded, name: "named_sub", subType: { state: "named", name: "Shared" } };
     const unset: SubscriptionStats = { ...stranded, name: "unset_sub", subType: { state: "unset" } };
     const unknown: SubscriptionStats = { ...stranded, name: "unknown_sub", subType: { state: "unknown" } };
-    render(<SubscriptionTable subscriptions={[named, unset, unknown]} scope={ALL_REQUESTED} state="ready" onRefresh={vi.fn()} />);
+    render(<SubscriptionTable subscriptions={[named, unset, unknown]} scope={SHIPPED_SCOPE} state="ready" onRefresh={vi.fn()} />);
 
     expect(screen.getByText("Shared")).toBeInTheDocument();
     expect(screen.getByText(/^unset$/i)).toBeInTheDocument();
@@ -276,7 +274,7 @@ describe("SubscriptionTable", () => {
 
     it("renders the identical real number whether the flag is on or off", () => {
       const { unmount } = render(
-        <SubscriptionTable subscriptions={[stranded]} scope={ALL_REQUESTED} state="ready" onRefresh={vi.fn()} />,
+        <SubscriptionTable subscriptions={[stranded]} scope={ALL_REQUESTED_SCOPE} state="ready" onRefresh={vi.fn()} />,
       );
       const withFlagOn = screen.getByText("3400").textContent;
       unmount();
@@ -303,7 +301,7 @@ describe("SubscriptionTable", () => {
   // carries no information at all — both the collapsed "Consumers" column
   // (`formatConsumerCount`) and the expanded `ConsumerTable`'s empty branch.
   describe("Consumers column and expanded view — excludeConsumers is Not requested, not zero", () => {
-    const EXCLUDE_CONSUMERS_SCOPE: StatsRequestScope = { ...ALL_REQUESTED, excludeConsumers: true };
+    const EXCLUDE_CONSUMERS_SCOPE: StatsRequestScope = { ...ALL_REQUESTED_SCOPE, excludeConsumers: true };
 
     it('renders "Not requested" in the Consumers column when excludeConsumers was true, never "No consumers"', () => {
       // Measured directly against the live broker (fix round 1, item 3):
@@ -319,7 +317,7 @@ describe("SubscriptionTable", () => {
 
     it('still renders "No consumers" when consumers genuinely were requested and confirmed empty', () => {
       render(
-        <SubscriptionTable subscriptions={[stranded]} scope={ALL_REQUESTED} state="ready" onRefresh={vi.fn()} />,
+        <SubscriptionTable subscriptions={[stranded]} scope={ALL_REQUESTED_SCOPE} state="ready" onRefresh={vi.fn()} />,
       );
       expect(screen.getByText(/no consumers/i)).toBeInTheDocument();
     });
