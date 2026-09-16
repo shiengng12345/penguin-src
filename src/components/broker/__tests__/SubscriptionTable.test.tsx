@@ -2,7 +2,17 @@ import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { SubscriptionTable } from "../SubscriptionTable";
-import type { SubscriptionStats } from "@penguin/broker-contracts";
+import type { StatsRequestScope, SubscriptionStats } from "@penguin/broker-contracts";
+
+// Every test below except the "Task 1 scope" describe block below is about a
+// distinction other than `StatsRequestScope` — they all pass this "fully
+// requested" scope so `msgBacklog`'s "Unknown" rendering (the thing most of
+// this file tests) is exercised the same way it always was.
+const ALL_REQUESTED: StatsRequestScope = {
+  preciseBacklog: true,
+  subscriptionBacklogSize: true,
+  earliestTimeInBacklog: true,
+};
 
 const withConsumer: SubscriptionStats = {
   name: "rg_deposit_accumulate_LOCAL",
@@ -35,7 +45,7 @@ const stranded: SubscriptionStats = {
 };
 
 function setup(subscriptions: SubscriptionStats[] = [withConsumer, stranded]) {
-  const props = { subscriptions, state: "ready" as const, onRefresh: vi.fn() };
+  const props = { subscriptions, scope: ALL_REQUESTED, state: "ready" as const, onRefresh: vi.fn() };
   render(<SubscriptionTable {...props} />);
   return props;
 }
@@ -81,7 +91,7 @@ describe("SubscriptionTable", () => {
   });
 
   it("shows an empty state when a topic has no subscriptions at all", () => {
-    render(<SubscriptionTable subscriptions={[]} state="empty" onRefresh={vi.fn()} />);
+    render(<SubscriptionTable subscriptions={[]} scope={ALL_REQUESTED} state="empty" onRefresh={vi.fn()} />);
     expect(screen.getByRole("status")).toHaveTextContent(/no subscriptions/i);
   });
 
@@ -97,7 +107,7 @@ describe("SubscriptionTable", () => {
       msgBacklog: null,
       unackedMessages: 5,
     };
-    render(<SubscriptionTable subscriptions={[unknownBacklog]} state="ready" onRefresh={vi.fn()} />);
+    render(<SubscriptionTable subscriptions={[unknownBacklog]} scope={ALL_REQUESTED} state="ready" onRefresh={vi.fn()} />);
     expect(screen.queryByText("0")).not.toBeInTheDocument();
     expect(screen.getByText(/unknown/i)).toBeInTheDocument();
   });
@@ -111,7 +121,7 @@ describe("SubscriptionTable", () => {
       ...withConsumer,
       consumers: [{ ...withConsumer.consumers![0], blockedOnUnackedMsgs: null }],
     };
-    render(<SubscriptionTable subscriptions={[unknownBlocked]} state="ready" onRefresh={vi.fn()} />);
+    render(<SubscriptionTable subscriptions={[unknownBlocked]} scope={ALL_REQUESTED} state="ready" onRefresh={vi.fn()} />);
     await user.click(screen.getByRole("button", { name: /expand/i }));
     expect(screen.queryByText(/^not blocked$/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/^blocked$/i)).not.toBeInTheDocument();
@@ -125,7 +135,7 @@ describe("SubscriptionTable", () => {
     const user = userEvent.setup();
     const unknownConsumers: SubscriptionStats = { ...stranded, name: "unknown_consumers_sub", consumers: null };
     render(
-      <SubscriptionTable subscriptions={[unknownConsumers, stranded]} state="ready" onRefresh={vi.fn()} />,
+      <SubscriptionTable subscriptions={[unknownConsumers, stranded]} scope={ALL_REQUESTED} state="ready" onRefresh={vi.fn()} />,
     );
 
     // Collapsed rows already read differently: "Unknown" vs "No consumers".
@@ -183,7 +193,7 @@ describe("SubscriptionTable", () => {
         },
       ],
     };
-    render(<SubscriptionTable subscriptions={[threeStates]} state="ready" onRefresh={vi.fn()} />);
+    render(<SubscriptionTable subscriptions={[threeStates]} scope={ALL_REQUESTED} state="ready" onRefresh={vi.fn()} />);
     await user.click(screen.getByRole("button", { name: /expand/i }));
 
     expect(screen.getByText("withheld")).toBeInTheDocument();
@@ -204,10 +214,60 @@ describe("SubscriptionTable", () => {
     const named: SubscriptionStats = { ...stranded, name: "named_sub", subType: { state: "named", name: "Shared" } };
     const unset: SubscriptionStats = { ...stranded, name: "unset_sub", subType: { state: "unset" } };
     const unknown: SubscriptionStats = { ...stranded, name: "unknown_sub", subType: { state: "unknown" } };
-    render(<SubscriptionTable subscriptions={[named, unset, unknown]} state="ready" onRefresh={vi.fn()} />);
+    render(<SubscriptionTable subscriptions={[named, unset, unknown]} scope={ALL_REQUESTED} state="ready" onRefresh={vi.fn()} />);
 
     expect(screen.getByText("Shared")).toBeInTheDocument();
     expect(screen.getByText(/^unset$/i)).toBeInTheDocument();
     expect(screen.getByText(/^unknown$/i)).toBeInTheDocument();
+  });
+
+  // Task 1 (R34/R38): `subscriptionBacklogSize=false` is now sent
+  // explicitly on every `/stats` call (spec §12.3 — this parameter can take
+  // Ledger locks on a busy broker). Once that flag is off, `msgBacklog`
+  // being null means "we deliberately did not ask", not "the broker didn't
+  // answer" — those are two different facts and must render as two
+  // different, visibly distinct strings.
+  describe("msgBacklog — Not requested vs Unknown (Task 1)", () => {
+    const NOT_REQUESTED_SCOPE: StatsRequestScope = {
+      preciseBacklog: true,
+      subscriptionBacklogSize: false,
+      earliestTimeInBacklog: true,
+    };
+
+    it('renders "Not requested" when subscriptionBacklogSize was not asked for', () => {
+      render(
+        <SubscriptionTable subscriptions={[stranded]} scope={NOT_REQUESTED_SCOPE} state="ready" onRefresh={vi.fn()} />,
+      );
+      expect(screen.getByText(/not requested/i)).toBeInTheDocument();
+      // The real 3400 backlog on `stranded` must not leak through either —
+      // "Not requested" means this call did not trust the number enough to
+      // show it, not merely a different label alongside the same value.
+      expect(screen.queryByText("3400")).not.toBeInTheDocument();
+    });
+
+    it('renders "Unknown", not "Not requested", when the flag was on and the broker withheld the value', () => {
+      const withheldBacklog: SubscriptionStats = { ...stranded, msgBacklog: null };
+      render(
+        <SubscriptionTable subscriptions={[withheldBacklog]} scope={ALL_REQUESTED} state="ready" onRefresh={vi.fn()} />,
+      );
+      expect(screen.getByText(/^unknown$/i)).toBeInTheDocument();
+      expect(screen.queryByText(/not requested/i)).not.toBeInTheDocument();
+    });
+
+    it("renders two visibly different strings for the two cases above", () => {
+      const withheldBacklog: SubscriptionStats = { ...stranded, msgBacklog: null };
+      const { unmount } = render(
+        <SubscriptionTable subscriptions={[withheldBacklog]} scope={ALL_REQUESTED} state="ready" onRefresh={vi.fn()} />,
+      );
+      const unknownText = screen.getByText(/^unknown$/i).textContent;
+      unmount();
+
+      render(
+        <SubscriptionTable subscriptions={[stranded]} scope={NOT_REQUESTED_SCOPE} state="ready" onRefresh={vi.fn()} />,
+      );
+      const notRequestedText = screen.getByText(/not requested/i).textContent;
+
+      expect(notRequestedText).not.toBe(unknownText);
+    });
   });
 });

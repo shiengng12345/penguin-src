@@ -114,6 +114,42 @@ export interface SubscriptionStats {
   consumers: ConsumerStats[] | null;
 }
 
+/** What `PulsarAdminRest::get_topic_stats` (Rust) actually asked the broker
+ *  for when it fetched the `TopicStats` this travels alongside (Task 1,
+ *  controller ruling R34).
+ *
+ *  The product spec's §14.1 sketch asked for a generic `Metric<T>` with a
+ *  seven-state `quality` tag on every field. That was rejected: of the
+ *  seven states, only `notRequested` genuinely varies field-by-field within
+ *  one response (`forbidden` is response-level — a 403 the envelope already
+ *  carries; `unsupported` needs a per-broker-version capability matrix that
+ *  does not exist until Stage B). And the existing three-state unions
+ *  (`BacklogAge`, `ConsumerTimestamp`, `SubscriptionType`) already carry
+ *  *more* information than a generic `quality` tag would — collapsing
+ *  `{ state: "noBacklog" }` (a determinate, healthy fact) into a bare
+ *  `quality: "unknown"` would destroy exactly the distinction those types
+ *  exist to preserve. This type adds only the one axis those unions cannot
+ *  express on their own: whether the underlying REST call even asked.
+ *
+ *  Mirrors `StatsRequestScope` in `src-tauri/src/broker/stats.rs`
+ *  field-for-field; the wire shape (a plain object, not a `{ state: ... }`
+ *  tagged union like `BacklogAge` — there is no sentinel here, only three
+ *  plain booleans) is pinned there by
+ *  `stats_request_scope_serialises_to_the_pinned_wire_shape` in
+ *  `stats_tests.rs`.
+ *
+ *  Which `TopicStats`/`SubscriptionStats` fields each flag governs is
+ *  itself a mapping that must be code, not a comment (ruling R38) — see
+ *  `SCOPE_FLAG_FOR_FIELD` in `src/components/broker/broker-value.ts`.
+ *  Deliberately not a list of strings on this response for a panel to match
+ *  against: that is the exact defect the Overview panel was fixed for (a
+ *  free-text warning a panel can only display, never reason about). */
+export interface StatsRequestScope {
+  preciseBacklog: boolean;
+  subscriptionBacklogSize: boolean;
+  earliestTimeInBacklog: boolean;
+}
+
 /** The parsed subset of a Pulsar topic's `stats` payload. `msgRateOut`
  *  proves delivery to a consumer, never business completion — nothing
  *  downstream may present it as "processed". */
@@ -127,6 +163,9 @@ export interface TopicStats {
   msgInCounter: number | null;
   oldestBacklogMessageAge: BacklogAge;
   subscriptions: SubscriptionStats[];
+  /** What this call actually asked the broker for (Task 1, R34) — see
+   *  `StatsRequestScope`'s own doc. */
+  statsRequestScope: StatsRequestScope;
 }
 
 /** A parsed Pulsar `"ledgerId:entryId"` position. `entryId: -1` is kept

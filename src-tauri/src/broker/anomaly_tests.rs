@@ -4,7 +4,9 @@
 //! no `mod tests { ... }` wrapper here.
 
 use super::*;
-use crate::broker::stats::{BacklogAge, ConsumerStats, SubscriptionStats, SubscriptionType, TopicStats};
+use crate::broker::stats::{
+    BacklogAge, ConsumerStats, SubscriptionStats, SubscriptionType, TopicStats, TOPIC_STATS_REQUEST_SCOPE,
+};
 
 fn sub(name: &str, backlog: Option<u64>, consumers: Option<Vec<ConsumerStats>>) -> SubscriptionStats {
     SubscriptionStats {
@@ -28,6 +30,7 @@ fn topic_with(subs: Vec<SubscriptionStats>, oldest_backlog_age: BacklogAge) -> T
         msg_in_counter: None,
         oldest_backlog_message_age: oldest_backlog_age,
         subscriptions: subs,
+        stats_request_scope: TOPIC_STATS_REQUEST_SCOPE,
     }
 }
 

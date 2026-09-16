@@ -133,6 +133,66 @@ use crate::broker::envelope::{BrokerError, BrokerErrorCode};
 use crate::broker::stats_wire::RawTopicStats;
 use serde::{Deserialize, Serialize};
 
+/// What this call actually asked the broker for, alongside the stats it
+/// returned (Task 1, controller ruling R34).
+///
+/// The product spec's §14.1 sketch asked for a generic `Metric<T>` with a
+/// seven-state `quality` tag on every field. That is rejected: of the seven
+/// states, only `notRequested` genuinely varies field-by-field within one
+/// response (`forbidden` is response-level — a 403 the envelope already
+/// carries; `unsupported` needs a per-broker-version capability matrix that
+/// does not exist until Stage B). And the existing three-state enums
+/// (`BacklogAge`, `ConsumerTimestamp`, `SubscriptionType`) already carry
+/// *more* information than a generic `quality` tag would — collapsing
+/// `BacklogAge::NoBacklog` (a determinate, healthy fact) into a bare
+/// `quality: "unknown"` would destroy exactly the distinction those types
+/// exist to preserve. This struct adds only the one axis those enums cannot
+/// express on their own: whether the underlying REST call even asked.
+///
+/// Mirrors `StatsRequestScope` in
+/// `packages/broker-contracts/src/topic-detail.ts` field-for-field; the wire
+/// shape (a plain object, not an internally-tagged enum like `BacklogAge` —
+/// there is no sentinel here, every field is a plain bool) is pinned by
+/// `stats_request_scope_serialises_to_the_pinned_wire_shape` in
+/// `stats_tests.rs`. The field↔flag mapping that tells the UI which
+/// `TopicStats`/`SubscriptionStats` fields each flag governs lives in
+/// TypeScript as code, not a comment — see
+/// `src/components/broker/broker-value.ts` (ruling R38) — deliberately not
+/// duplicated here as a list of strings for the UI to match against: that
+/// is the exact defect the Overview panel was fixed for (a free-text list a
+/// panel can only display, never reason about).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatsRequestScope {
+    /// `getPreciseBacklog` query parameter. Governs whether `backlogSize`
+    /// was computed precisely (walking ledger metadata) or as a fast
+    /// estimate — Pulsar always returns *a* number either way, so this flag
+    /// affects the number's precision, not its presence.
+    pub precise_backlog: bool,
+    /// `subscriptionBacklogSize` query parameter. Per spec §12.3, computing
+    /// this precisely can take ledger locks and is unsafe to request
+    /// unconditionally against a busy broker — this is the flag Task 1
+    /// exists to pin to `false` explicitly, rather than silently inheriting
+    /// whatever the REST default happens to be.
+    pub subscription_backlog_size: bool,
+    /// `getEarliestTimeInBacklog` query parameter.
+    pub earliest_time_in_backlog: bool,
+}
+
+/// The fixed `/stats` request scope this codebase sends today (Task 1):
+/// `PulsarAdminRest::get_topic_stats` builds its request URL from exactly
+/// these three values, and `parse_topic_stats` stamps every `TopicStats` it
+/// produces with this same constant. One source of truth, so the URL that
+/// was actually sent and the scope the UI is told to trust can never drift
+/// apart. All three are `false` — the REST defaults are not the same as the
+/// CLI defaults, so this phase asks explicitly rather than inheriting
+/// whatever the broker's REST default happens to be (spec §12.3).
+pub const TOPIC_STATS_REQUEST_SCOPE: StatsRequestScope = StatsRequestScope {
+    precise_backlog: false,
+    subscription_backlog_size: false,
+    earliest_time_in_backlog: false,
+};
+
 /// The parsed subset of a Pulsar topic's `stats` payload.
 ///
 /// `Serialize` (Task 8) is additive: every other consumer of this type
@@ -153,6 +213,9 @@ pub struct TopicStats {
     pub msg_in_counter: Option<u64>,
     pub oldest_backlog_message_age: BacklogAge,
     pub subscriptions: Vec<SubscriptionStats>,
+    /// What this call actually asked the broker for (Task 1, R34) — see
+    /// [`StatsRequestScope`]'s own doc.
+    pub stats_request_scope: StatsRequestScope,
 }
 
 /// The age of a topic's oldest backlog message, as Pulsar's
@@ -347,6 +410,7 @@ pub fn parse_topic_stats(raw: &serde_json::Value) -> Result<TopicStats, BrokerEr
             parsed.oldest_backlog_message_age_seconds,
         ),
         subscriptions,
+        stats_request_scope: TOPIC_STATS_REQUEST_SCOPE,
     })
 }
 

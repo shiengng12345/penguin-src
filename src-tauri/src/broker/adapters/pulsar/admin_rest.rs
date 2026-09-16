@@ -11,6 +11,7 @@
 use crate::broker::envelope::{is_success, map_http_error, map_reqwest_error, BrokerError, BrokerErrorCode};
 use crate::broker::ports::{BrokerAdmin, TopicRef};
 use crate::broker::security::EndpointGuard;
+use crate::broker::stats::TOPIC_STATS_REQUEST_SCOPE;
 
 pub struct PulsarAdminRest {
     client: reqwest::Client,
@@ -181,6 +182,33 @@ impl PulsarAdminRest {
             retryable: false,
         })
     }
+
+    /// The path + query string `get_topic_stats` requests. Pulled out as its
+    /// own function (Task 1, spec §12.3) so the exact three query
+    /// parameters can be pinned by a test without a live HTTP call: Pulsar
+    /// v4.0.0's REST `/stats` endpoint answers `subscriptionBacklogSize`
+    /// with real Ledger locks on a busy topic — its own source comments warn
+    /// about high-traffic topics — and the REST default for these three
+    /// flags is not the same as the Pulsar CLI's default. Sending no query
+    /// parameters at all (the previous behaviour) meant this module silently
+    /// inherited whichever default the broker happened to ship, on every
+    /// call, forever. All three are pinned to `false` explicitly instead,
+    /// using the same [`TOPIC_STATS_REQUEST_SCOPE`] constant
+    /// `broker::stats::parse_topic_stats` stamps onto every `TopicStats` it
+    /// produces — one source of truth, so the URL actually sent and the
+    /// scope the UI is told to trust can never drift apart (see that
+    /// constant's own doc, and `StatsRequestScope`'s, for why this exists at
+    /// all instead of a `quality` tag per field).
+    fn stats_request_path(topic: &TopicRef) -> String {
+        let scope = TOPIC_STATS_REQUEST_SCOPE;
+        format!(
+            "/admin/v2/{}/stats?getPreciseBacklog={}&subscriptionBacklogSize={}&getEarliestTimeInBacklog={}",
+            topic.rest_path(),
+            scope.precise_backlog,
+            scope.subscription_backlog_size,
+            scope.earliest_time_in_backlog,
+        )
+    }
 }
 
 #[async_trait::async_trait]
@@ -217,7 +245,7 @@ impl BrokerAdmin for PulsarAdminRest {
     }
 
     async fn get_topic_stats(&self, topic: &TopicRef) -> Result<serde_json::Value, BrokerError> {
-        self.get_json(&format!("/admin/v2/{}/stats", topic.rest_path())).await
+        self.get_json(&Self::stats_request_path(topic)).await
     }
 
     async fn get_topic_internal_stats(&self, topic: &TopicRef) -> Result<serde_json::Value, BrokerError> {
@@ -228,3 +256,7 @@ impl BrokerAdmin for PulsarAdminRest {
         self.get_json(&format!("/admin/v2/{}/subscriptions", topic.rest_path())).await
     }
 }
+
+#[cfg(test)]
+#[path = "admin_rest_tests.rs"]
+mod tests;

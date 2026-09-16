@@ -39,7 +39,7 @@ import type { DataTableState } from "@/components/ui/data-table-types";
 import { Button } from "@/components/ui/button";
 import { DeliveryNotice } from "./DeliveryNotice";
 import { SubscriptionTable } from "./SubscriptionTable";
-import { formatBacklogAge, formatNumber, formatPosition } from "./broker-value";
+import { formatNumber, formatPosition, formatScopedBacklogAge, formatScopedNumber } from "./broker-value";
 import { ALERT_CLASS, INDETERMINATE_CLASS, STATUS_CLASS } from "./broker-panel-styles";
 
 export interface TopicDetailPanelProps {
@@ -115,6 +115,7 @@ export function TopicDetailPanel({
 
       <SubscriptionTable
         subscriptions={detail.stats.subscriptions}
+        scope={detail.stats.statsRequestScope}
         state={detail.stats.subscriptions.length === 0 ? "empty" : "ready"}
         onRefresh={onRefresh}
       />
@@ -148,9 +149,16 @@ function StatsSection({ detail }: { detail: TopicDetail }) {
     ["Throughput in (bytes/s)", formatNumber(stats.msgThroughputIn)],
     ["Throughput out (bytes/s)", formatNumber(stats.msgThroughputOut)],
     ["Storage size (bytes)", formatNumber(stats.storageSize)],
-    ["Backlog size (bytes)", formatNumber(stats.backlogSize)],
+    // Backlog size and oldest-backlog-age are both governed by a
+    // `StatsRequestScope` flag (Task 1, R34/R38) — "Not requested" takes
+    // priority over whatever the raw value parsed to when this call
+    // deliberately did not ask for a precise answer.
+    ["Backlog size (bytes)", formatScopedNumber(stats.backlogSize, stats.statsRequestScope, "topicBacklogSize")],
     ["Msg in counter", formatNumber(stats.msgInCounter)],
-    ["Oldest backlog message age", formatBacklogAge(stats.oldestBacklogMessageAge)],
+    [
+      "Oldest backlog message age",
+      formatScopedBacklogAge(stats.oldestBacklogMessageAge, stats.statsRequestScope),
+    ],
   ];
 
   return (

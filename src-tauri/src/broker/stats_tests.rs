@@ -423,3 +423,35 @@ fn consumer_timestamp_serialises_to_the_pinned_wire_shape() {
         serde_json::json!({"state": "unknown"})
     );
 }
+
+/// `packages/broker-contracts/src/topic-detail.ts`'s `StatsRequestScope`
+/// mirrors this field-for-field; a rename on either side breaks the other
+/// silently, so pin the wire shape here — following `BacklogAge`'s
+/// precedent above, but unlike `BacklogAge` this is a plain object (three
+/// bools), never an internally-tagged enum: there is no sentinel value to
+/// carry, only "did this call ask or not".
+#[test]
+fn stats_request_scope_serialises_to_the_pinned_wire_shape() {
+    assert_eq!(
+        serde_json::to_value(TOPIC_STATS_REQUEST_SCOPE).unwrap(),
+        serde_json::json!({
+            "preciseBacklog": false,
+            "subscriptionBacklogSize": false,
+            "earliestTimeInBacklog": false,
+        })
+    );
+}
+
+/// Every `TopicStats` `parse_topic_stats` produces is stamped with the
+/// fixed scope this codebase actually requested — never a per-call
+/// default, and never left for a caller to guess at. This is what lets the
+/// UI trust `stats.statsRequestScope` as a true account of what was asked,
+/// not just what this parser assumes.
+#[test]
+fn parsed_stats_carry_the_actual_request_scope() {
+    let stats = parse_topic_stats(&real_fixture()).expect("parses");
+    assert_eq!(stats.stats_request_scope, TOPIC_STATS_REQUEST_SCOPE);
+    assert!(!stats.stats_request_scope.precise_backlog);
+    assert!(!stats.stats_request_scope.subscription_backlog_size);
+    assert!(!stats.stats_request_scope.earliest_time_in_backlog);
+}

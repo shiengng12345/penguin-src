@@ -37,6 +37,7 @@ const DETAIL: TopicDetail = {
     msgInCounter: 1,
     oldestBacklogMessageAge: { state: "noBacklog" },
     subscriptions: [],
+    statsRequestScope: { preciseBacklog: true, subscriptionBacklogSize: true, earliestTimeInBacklog: true },
   },
   internal: {
     entriesAddedCounter: 1,

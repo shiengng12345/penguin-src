@@ -22,9 +22,80 @@
 // see `formatConsumerTimestamp` below. "Unknown" remains the one word for
 // every other null on this screen: numbers, text, and the diagnostic
 // `blockedOnUnackedMsgs` boolean alike.
-import type { BacklogAge, ConsumerTimestamp, Position, SubscriptionType } from "@penguin/broker-contracts";
+import type {
+  BacklogAge,
+  ConsumerTimestamp,
+  Position,
+  StatsRequestScope,
+  SubscriptionType,
+} from "@penguin/broker-contracts";
 
 export const UNKNOWN = "Unknown";
+
+/** `stats.backlogSize` / `subscriptions[].msgBacklog` /
+ *  `stats.oldestBacklogMessageAge` when the flag that governs them was set
+ *  to `false` (Task 1, ruling R34). Deliberately a different word from
+ *  `UNKNOWN`: "Unknown" means the broker was asked and did not answer;
+ *  "Not requested" means this application deliberately did not ask. Telling
+ *  those apart is the entire reason `StatsRequestScope` exists — collapsing
+ *  them back into one word is precisely the lie Task 1 was written to stop
+ *  (see `formatScopedNumber`'s mutation-check test in
+ *  `broker-value.test.tsx`, which pins that these two strings must render
+ *  differently). */
+export const NOT_REQUESTED = "Not requested";
+
+/** The `TopicStats`/`SubscriptionStats` fields whose presence depends on a
+ *  `StatsRequestScope` flag. A union of field names, not a raw string the
+ *  UI free-associates with a flag — see `SCOPE_FLAG_FOR_FIELD` below. */
+export type ScopedStatsField = "topicBacklogSize" | "subscriptionMsgBacklog" | "oldestBacklogMessageAge";
+
+/** Ruling R38: the field↔flag mapping must be code, not a comment. This is
+ *  the one place that decides which `StatsRequestScope` flag governs which
+ *  field — every formatter below goes through `wasFieldRequested` rather
+ *  than inspecting `scope` directly, so a future field can only be wired up
+ *  correctly (there is nowhere else to guess the mapping from), and
+ *  `field_flag_mapping.test.tsx`'s R38 test proves flipping one flag here
+ *  changes exactly the field(s) listed against it and none other.
+ *
+ *  - `preciseBacklog` ("getPreciseBacklog"): governs `stats.backlogSize`'s
+ *    precision. Pulsar always returns *a* number for this field regardless
+ *    (an estimate when the flag is off), so this mapping exists to label
+ *    that number "not requested precisely" rather than treat its absence —
+ *    it is never actually absent — as unmeasured.
+ *  - `subscriptionBacklogSize` ("subscriptionBacklogSize"): governs each
+ *    subscription's `msgBacklog` — the parameter spec §12.3 singles out as
+ *    unsafe to request unconditionally (it can take Ledger locks on a busy
+ *    broker), and the reason Task 1 exists at all.
+ *  - `earliestTimeInBacklog` ("getEarliestTimeInBacklog"): governs
+ *    `stats.oldestBacklogMessageAge`. */
+const SCOPE_FLAG_FOR_FIELD: Readonly<Record<ScopedStatsField, keyof StatsRequestScope>> = {
+  topicBacklogSize: "preciseBacklog",
+  subscriptionMsgBacklog: "subscriptionBacklogSize",
+  oldestBacklogMessageAge: "earliestTimeInBacklog",
+};
+
+/** Whether `scope` says `field` was actually requested. The one function
+ *  every scoped formatter below calls, so the R38 mapping above is the only
+ *  place that can ever be wrong — never re-derived ad hoc at a call site. */
+export function wasFieldRequested(scope: StatsRequestScope, field: ScopedStatsField): boolean {
+  return scope[SCOPE_FLAG_FOR_FIELD[field]];
+}
+
+/** `formatNumber`, but "Not requested" takes priority over "Unknown" when
+ *  the governing flag was off — see `NOT_REQUESTED`'s doc for why these
+ *  must stay two different strings. */
+export function formatScopedNumber(value: number | null, scope: StatsRequestScope, field: ScopedStatsField): string {
+  return wasFieldRequested(scope, field) ? formatNumber(value) : NOT_REQUESTED;
+}
+
+/** `formatBacklogAge`, scoped by `earliestTimeInBacklog`. When that flag was
+ *  off, the parsed `BacklogAge` (however it came out — `seconds`,
+ *  `noBacklog`, or `unknown`) must not be trusted as a measured answer:
+ *  "Not requested" overrides it rather than deferring to whatever the
+ *  three-state value happened to normalize to. */
+export function formatScopedBacklogAge(value: BacklogAge, scope: StatsRequestScope): string {
+  return wasFieldRequested(scope, "oldestBacklogMessageAge") ? formatBacklogAge(value) : NOT_REQUESTED;
+}
 
 /** For `msgBacklog`, `unackedMessages`, `msgRateOut`, `availablePermits` —
  *  every plain numeric field on these two types. */

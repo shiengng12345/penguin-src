@@ -21,6 +21,7 @@ function makeDetail(overrides: Partial<TopicDetail> = {}): TopicDetail {
       msgInCounter: 0,
       oldestBacklogMessageAge: { state: "unknown" },
       subscriptions: [],
+      statsRequestScope: { preciseBacklog: true, subscriptionBacklogSize: true, earliestTimeInBacklog: true },
     },
     internal: {
       entriesAddedCounter: 0,

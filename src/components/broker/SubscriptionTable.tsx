@@ -16,6 +16,14 @@
 // nobody is attached); `ConsumerTable` carries that same distinction into
 // the expanded row.
 //
+// `msgBacklog` additionally goes through `formatScopedNumber` rather than
+// plain `formatNumber` (Task 1, R34/R38): this call now explicitly asks
+// `subscriptionBacklogSize=false` (spec §12.3 — computing it precisely can
+// take Ledger locks on a busy broker), so a null/withheld value here means
+// "we deliberately did not ask" ("Not requested"), not "the broker didn't
+// answer" ("Unknown") — the `scope` prop is what tells this column which
+// word applies.
+//
 // `msgRateOut` proves delivery to a consumer, never business completion —
 // `DeliveryNotice` (the one place that caveat is worded) sits above the
 // table, since the rate column applies to every row on this screen.
@@ -24,16 +32,22 @@
 // already carries the full list, so (like `ConnectionTable`) this table is
 // always fully in memory: `total`/`limit` are derived from `subscriptions`
 // itself and `onPageChange` has nothing to report.
-import type { SubscriptionStats } from "@penguin/broker-contracts";
+import type { StatsRequestScope, SubscriptionStats } from "@penguin/broker-contracts";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import type { DataTableState } from "@/components/ui/data-table-types";
 import { Button } from "@/components/ui/button";
 import { DeliveryNotice } from "./DeliveryNotice";
 import { ConsumerTable } from "./ConsumerTable";
-import { formatConsumerCount, formatNumber, formatSubscriptionType } from "./broker-value";
+import { formatConsumerCount, formatNumber, formatScopedNumber, formatSubscriptionType } from "./broker-value";
 
 export interface SubscriptionTableProps {
   subscriptions: SubscriptionStats[];
+  /** `TopicStats.statsRequestScope` from the same `TopicDetail` these
+   *  subscriptions came from — required, not defaulted, because the
+   *  "Backlog" column's "Not requested" vs "Unknown" distinction (Task 1)
+   *  is only correct when it reflects what was actually asked for this
+   *  specific fetch. */
+  scope: StatsRequestScope;
   state: DataTableState;
   errorMessage?: string;
   onRefresh: () => void;
@@ -41,6 +55,7 @@ export interface SubscriptionTableProps {
 
 export function SubscriptionTable({
   subscriptions,
+  scope,
   state,
   errorMessage,
   onRefresh,
@@ -76,7 +91,11 @@ export function SubscriptionTable({
       key: "msgBacklog",
       header: "Backlog",
       width: 100,
-      render: (s) => formatNumber(s.msgBacklog),
+      // Governed by `StatsRequestScope.subscriptionBacklogSize` (Task 1) —
+      // this is the field spec §12.3 warns can take Ledger locks on a busy
+      // broker, and the reason this call now asks `false` explicitly rather
+      // than inheriting the REST default.
+      render: (s) => formatScopedNumber(s.msgBacklog, scope, "subscriptionMsgBacklog"),
       sortable: true,
     },
     {
