@@ -39,7 +39,7 @@ import type { DataTableState } from "@/components/ui/data-table-types";
 import { Button } from "@/components/ui/button";
 import { DeliveryNotice } from "./DeliveryNotice";
 import { SubscriptionTable } from "./SubscriptionTable";
-import { formatNumber, formatPosition, formatScopedBacklogAge } from "./broker-value";
+import { formatBigCounter, formatNumber, formatPosition, formatScopedBacklogAge } from "./broker-value";
 import { ALERT_CLASS, INDETERMINATE_CLASS, STATUS_CLASS } from "./broker-panel-styles";
 
 export interface TopicDetailPanelProps {
@@ -148,16 +148,19 @@ function StatsSection({ detail }: { detail: TopicDetail }) {
     ["Msg rate out (msg/s)", formatNumber(stats.msgRateOut)],
     ["Throughput in (bytes/s)", formatNumber(stats.msgThroughputIn)],
     ["Throughput out (bytes/s)", formatNumber(stats.msgThroughputOut)],
-    ["Storage size (bytes)", formatNumber(stats.storageSize)],
-    // Fix round 1, item 1: `backlogSize` is plain `formatNumber`, never
-    // scoped. Measured directly against the live broker,
+    // Task 3: storageSize/backlogSize/msgInCounter are `u64` counters that
+    // cross IPC as decimal strings (never a JS `number`) to survive above
+    // 2^53 - 1 — `formatBigCounter`, never `formatNumber`, renders them.
+    ["Storage size (bytes)", formatBigCounter(stats.storageSize)],
+    // Fix round 1, item 1: `backlogSize` is plain (unscoped), never gated by
+    // `formatScopedNumber`. Measured directly against the live broker,
     // `getPreciseBacklog=false` still returns a real number — the flag
     // governs precision, not presence, so "Not requested" would hide a
     // real answer rather than avoid fabricating a missing one. Only
     // `oldestBacklogMessageAge` below is scoped (governed by
     // `earliestTimeInBacklog`, which really can leave the field untrustworthy).
-    ["Backlog size (bytes)", formatNumber(stats.backlogSize)],
-    ["Msg in counter", formatNumber(stats.msgInCounter)],
+    ["Backlog size (bytes)", formatBigCounter(stats.backlogSize)],
+    ["Msg in counter", formatBigCounter(stats.msgInCounter)],
     [
       "Oldest backlog message age",
       formatScopedBacklogAge(stats.oldestBacklogMessageAge, stats.statsRequestScope),
@@ -250,7 +253,7 @@ function InternalStatsSection({ detail }: { detail: TopicDetail }) {
       <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm sm:grid-cols-4">
         <div className="flex flex-col">
           <dt className="text-xs text-muted-foreground">Entries added</dt>
-          <dd>{formatNumber(internal.entriesAddedCounter)}</dd>
+          <dd>{formatBigCounter(internal.entriesAddedCounter)}</dd>
         </div>
         <div className="flex flex-col">
           <dt className="text-xs text-muted-foreground">Number of entries</dt>
@@ -283,7 +286,7 @@ function InternalStatsSection({ detail }: { detail: TopicDetail }) {
                   <td className="pr-4">{cursor.subscription}</td>
                   <td className="pr-4">{formatPosition(cursor.markDeletePosition)}</td>
                   <td className="pr-4">{formatPosition(cursor.readPosition)}</td>
-                  <td className="pr-4">{formatNumber(cursor.messagesConsumedCounter)}</td>
+                  <td className="pr-4">{formatBigCounter(cursor.messagesConsumedCounter)}</td>
                 </tr>
               ))}
             </tbody>

@@ -10,6 +10,7 @@
 import { describe, expect, it } from "vitest";
 import type { StatsRequestScope } from "@penguin/broker-contracts";
 import {
+  formatBigCounter,
   formatScopedBacklogAge,
   formatScopedNumber,
   formatWriteCapability,
@@ -18,6 +19,43 @@ import {
   wasFieldRequested,
   type ScopedStatsField,
 } from "../broker-value";
+
+// Task 3: `formatBigCounter` — the five `u64` counters (`storageSize`,
+// `backlogSize`, `msgInCounter`, `entriesAddedCounter`,
+// `messagesConsumedCounter`) cross IPC as decimal strings specifically so a
+// value above JS's 2^53 - 1 safe-integer ceiling (9,007,199,254,740,991)
+// never gets read into a `Number` at all. This suite pins that
+// `formatBigCounter` never does that conversion either.
+describe("formatBigCounter — a 19-digit u64 counter renders in full", () => {
+  it("renders null as Unknown, same as every other withheld field", () => {
+    expect(formatBigCounter(null)).toBe(UNKNOWN);
+  });
+
+  it("digit-groups a small value without altering its digits", () => {
+    expect(formatBigCounter("0")).toBe("0");
+    expect(formatBigCounter("12345")).toBe("12,345");
+  });
+
+  it("renders a value above 2^53 - 1 exactly, with every digit preserved", () => {
+    // u64::MAX. Number(u64MAX) in JavaScript rounds to
+    // 18446744073709551616 (off by one) — proof this must never touch
+    // `Number`/`parseInt`.
+    const u64Max = "18446744073709551615";
+    expect(formatBigCounter(u64Max)).toBe("18,446,744,073,709,551,615");
+  });
+
+  it("never emits scientific notation for a 19-digit value", () => {
+    // This is exactly what `String(Number("9223372036854775807"))` produces
+    // today: "9223372036854776000" — the last six digits silently
+    // corrupted, with no error. `formatBigCounter` must not do that
+    // conversion at all.
+    const nineteenDigits = "9223372036854775807";
+    const rendered = formatBigCounter(nineteenDigits);
+    expect(rendered).toBe("9,223,372,036,854,775,807");
+    expect(rendered).not.toMatch(/e\+/i);
+    expect(rendered.replace(/,/g, "")).toBe(nineteenDigits);
+  });
+});
 
 describe("formatWriteCapability", () => {
   it('reads "Not measured" when the read probe never conclusively answered', () => {

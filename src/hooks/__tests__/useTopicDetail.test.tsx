@@ -32,9 +32,9 @@ const DETAIL: TopicDetail = {
     msgRateOut: 1,
     msgThroughputIn: 1,
     msgThroughputOut: 1,
-    storageSize: 1,
-    backlogSize: 0,
-    msgInCounter: 1,
+    storageSize: "1",
+    backlogSize: "0",
+    msgInCounter: "1",
     oldestBacklogMessageAge: { state: "noBacklog" },
     subscriptions: [],
     statsRequestScope: {
@@ -46,7 +46,7 @@ const DETAIL: TopicDetail = {
     },
   },
   internal: {
-    entriesAddedCounter: 1,
+    entriesAddedCounter: "1",
     numberOfEntries: 1,
     lastConfirmedEntry: { ledgerId: 1, entryId: 0 },
     cursors: [],

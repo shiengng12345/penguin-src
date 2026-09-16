@@ -116,6 +116,21 @@ export function formatNumber(value: number | null): string {
   return value === null ? UNKNOWN : String(value);
 }
 
+/** For `storageSize`, `backlogSize`, `msgInCounter` (`TopicStats`) and
+ *  `entriesAddedCounter`, `messagesConsumedCounter` (`InternalStats`/
+ *  `CursorPosition`) — the five `u64` counters Task 3 exists for. These
+ *  arrive as `string | null`, not `number | null`, precisely so this
+ *  function never has to touch `Number(...)`/`parseInt`/`+value`: any of
+ *  those would round a value above 2^53 - 1 exactly the way `JSON.parse`
+ *  already refused to. The digits are grouped with commas for readability —
+ *  by regex over the decimal-string text, not by parsing it into a number —
+ *  so a 19-digit counter still renders in full, with no `e+` and no
+ *  truncation, whatever its magnitude. */
+export function formatBigCounter(value: string | null): string {
+  if (value === null) return UNKNOWN;
+  return value.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+}
+
 /** For `consumerName`, `address`, `clientVersion`. */
 export function formatText(value: string | null): string {
   return value === null ? UNKNOWN : value;

@@ -461,3 +461,65 @@ fn parsed_stats_carry_the_actual_request_scope() {
     assert!(!stats.stats_request_scope.subscription_backlog_size);
     assert!(!stats.stats_request_scope.earliest_time_in_backlog);
 }
+
+/// Task 3: a `u64` counter above JS's safe-integer ceiling (2^53 - 1 =
+/// 9,007,199,254,740,991) must cross the wire as a *quoted decimal string*,
+/// never a bare JSON number — a bare number round-trips exactly inside
+/// serde/Rust (u64 <-> u64), but silently rounds the instant the webview's
+/// `JSON.parse` reads it as an IEEE-754 double. Asserting on the Rust value
+/// alone (`stats.msg_in_counter == Some(u64::MAX)`) would not catch that: the
+/// loss happens in JavaScript, not serde, so the test must inspect the
+/// *serialised JSON text* itself. This must be red before the `serialize_with`
+/// change lands — see the report for the failing output.
+#[test]
+fn msg_in_counter_above_2_pow_53_survives_the_wire_as_a_quoted_decimal_string() {
+    let mut raw = real_fixture();
+    raw["msgInCounter"] = serde_json::json!(u64::MAX);
+    raw["storageSize"] = serde_json::json!(u64::MAX);
+    raw["backlogSize"] = serde_json::json!(u64::MAX);
+    let stats = parse_topic_stats(&raw).expect("parses");
+
+    // Sanity check: the value survives the Rust-side parse exactly. This
+    // alone is not the property under test — see the doc comment above.
+    assert_eq!(stats.msg_in_counter, Some(u64::MAX));
+    assert_eq!(stats.storage_size, Some(u64::MAX));
+    assert_eq!(stats.backlog_size, Some(u64::MAX));
+
+    let json = serde_json::to_string(&stats).expect("serializes");
+    assert!(
+        json.contains("\"msgInCounter\":\"18446744073709551615\""),
+        "msgInCounter must serialise as a quoted decimal string, got: {json}"
+    );
+    assert!(
+        json.contains("\"storageSize\":\"18446744073709551615\""),
+        "storageSize must serialise as a quoted decimal string, got: {json}"
+    );
+    assert!(
+        json.contains("\"backlogSize\":\"18446744073709551615\""),
+        "backlogSize must serialise as a quoted decimal string, got: {json}"
+    );
+    // And never as a bare number under the same key — the specific failure
+    // mode this test exists to catch.
+    assert!(!json.contains("\"msgInCounter\":18446744073709551615"));
+    assert!(!json.contains("\"storageSize\":18446744073709551615"));
+    assert!(!json.contains("\"backlogSize\":18446744073709551615"));
+}
+
+/// A withheld counter must stay distinguishable from a present one: `None`
+/// serialises as JSON `null`, never as a quoted string (which would read as
+/// a real, if odd, value) and never as a bare `0` (which would read as a
+/// measured queue).
+#[test]
+fn a_missing_u64_counter_serialises_as_null_not_a_string_or_zero() {
+    let mut raw = real_fixture();
+    raw.as_object_mut().unwrap().remove("msgInCounter");
+    raw.as_object_mut().unwrap().remove("storageSize");
+    raw.as_object_mut().unwrap().remove("backlogSize");
+    let stats = parse_topic_stats(&raw).expect("still parses");
+    assert_eq!(stats.msg_in_counter, None);
+
+    let json = serde_json::to_string(&stats).expect("serializes");
+    assert!(json.contains("\"msgInCounter\":null"), "got: {json}");
+    assert!(json.contains("\"storageSize\":null"), "got: {json}");
+    assert!(json.contains("\"backlogSize\":null"), "got: {json}");
+}

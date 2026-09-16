@@ -253,8 +253,18 @@ pub struct TopicStats {
     pub msg_rate_out: Option<f64>,
     pub msg_throughput_in: Option<f64>,
     pub msg_throughput_out: Option<f64>,
+    /// `u64` counter that can legitimately exceed JS's 2^53 - 1 safe-integer
+    /// ceiling on a long-lived topic — serialised as a decimal string, never
+    /// a bare JSON number. See `broker::wire_u64`'s module doc.
+    #[serde(serialize_with = "crate::broker::wire_u64::serialize")]
     pub storage_size: Option<u64>,
+    /// See `storage_size`'s doc above; same treatment, same reason.
+    #[serde(serialize_with = "crate::broker::wire_u64::serialize")]
     pub backlog_size: Option<u64>,
+    /// See `storage_size`'s doc above. Of the three, this is the one most
+    /// likely to actually cross the line in practice: a cumulative counter
+    /// on a long-lived, high-traffic topic, not a point-in-time size.
+    #[serde(serialize_with = "crate::broker::wire_u64::serialize")]
     pub msg_in_counter: Option<u64>,
     pub oldest_backlog_message_age: BacklogAge,
     pub subscriptions: Vec<SubscriptionStats>,

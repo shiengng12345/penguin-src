@@ -120,6 +120,11 @@ impl<'de> Deserialize<'de> for Position {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InternalStats {
+    /// A cumulative `u64` counter on a long-lived, high-traffic topic — the
+    /// realistic candidate to exceed JS's 2^53 - 1 safe-integer ceiling.
+    /// Serialised as a decimal string, never a bare JSON number. See
+    /// `broker::wire_u64`'s module doc.
+    #[serde(serialize_with = "crate::broker::wire_u64::serialize")]
     pub entries_added_counter: Option<u64>,
     pub number_of_entries: Option<u64>,
     pub last_confirmed_entry: Option<Position>,
@@ -135,6 +140,9 @@ pub struct CursorPosition {
     pub subscription: String,
     pub mark_delete_position: Position,
     pub read_position: Position,
+    /// See `InternalStats::entries_added_counter`'s doc above; same
+    /// treatment, same reason.
+    #[serde(serialize_with = "crate::broker::wire_u64::serialize")]
     pub messages_consumed_counter: Option<u64>,
 }
 
@@ -324,5 +332,59 @@ mod tests {
             "message did not name the offending path: {}",
             err.message
         );
+    }
+
+    /// Task 3: `entriesAddedCounter` and `messagesConsumedCounter` are `u64`
+    /// counters on a long-lived, high-traffic topic — the realistic
+    /// candidates to cross JS's 2^53 - 1 safe-integer ceiling. A bare JSON
+    /// number round-trips exactly inside Rust (serde_json's `u64 <-> u64` is
+    /// lossless), so a Rust-only round-trip assertion cannot catch the real
+    /// failure, which happens in the webview's `JSON.parse`. This test
+    /// inspects the serialised JSON text itself. Must be red before the
+    /// `serialize_with` change lands.
+    #[test]
+    fn counters_above_2_pow_53_survive_the_wire_as_quoted_decimal_strings() {
+        let mut raw = real_fixture();
+        raw["entriesAddedCounter"] = serde_json::json!(u64::MAX);
+        raw["cursors"]["rg_deposit_accumulate_LOCAL"]["messagesConsumedCounter"] =
+            serde_json::json!(u64::MAX);
+        let internal = parse_internal_stats(&raw).expect("parses");
+
+        // Sanity check only — not the property under test (see doc comment).
+        assert_eq!(internal.entries_added_counter, Some(u64::MAX));
+        let cursor = internal
+            .cursors
+            .iter()
+            .find(|c| c.subscription == "rg_deposit_accumulate_LOCAL")
+            .expect("cursor present");
+        assert_eq!(cursor.messages_consumed_counter, Some(u64::MAX));
+
+        let json = serde_json::to_string(&internal).expect("serializes");
+        assert!(
+            json.contains("\"entriesAddedCounter\":\"18446744073709551615\""),
+            "entriesAddedCounter must serialise as a quoted decimal string, got: {json}"
+        );
+        assert!(
+            json.contains("\"messagesConsumedCounter\":\"18446744073709551615\""),
+            "messagesConsumedCounter must serialise as a quoted decimal string, got: {json}"
+        );
+        // Never as a bare number under the same key — the specific failure
+        // this test exists to catch.
+        assert!(!json.contains("\"entriesAddedCounter\":18446744073709551615"));
+        assert!(!json.contains("\"messagesConsumedCounter\":18446744073709551615"));
+    }
+
+    /// A withheld counter must stay distinguishable from a present one:
+    /// `None` serialises as JSON `null`, never a quoted string and never a
+    /// bare `0`.
+    #[test]
+    fn a_missing_counter_serialises_as_null_not_a_string_or_zero() {
+        let mut raw = real_fixture();
+        raw.as_object_mut().unwrap().remove("entriesAddedCounter");
+        let internal = parse_internal_stats(&raw).expect("still parses");
+        assert_eq!(internal.entries_added_counter, None);
+
+        let json = serde_json::to_string(&internal).expect("serializes");
+        assert!(json.contains("\"entriesAddedCounter\":null"), "got: {json}");
     }
 }

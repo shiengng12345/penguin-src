@@ -13,3 +13,4 @@ pub mod stats;
 mod stats_wire;
 pub mod store;
 pub mod topic_folding;
+mod wire_u64;

@@ -53,9 +53,9 @@ const DETAIL: TopicDetail = {
     msgRateOut: 2,
     msgThroughputIn: 200,
     msgThroughputOut: 200,
-    storageSize: 1000,
-    backlogSize: 0,
-    msgInCounter: 500,
+    storageSize: "1000",
+    backlogSize: "0",
+    msgInCounter: "500",
     oldestBacklogMessageAge: { state: "noBacklog" },
     subscriptions: [
       { name: "anti_addiction_deposit_limit_fpmsnt", msgBacklog: 3400, unackedMessages: 0, msgRateOut: 1, subType: { state: "named", name: "Shared" }, consumers: [] },
@@ -69,7 +69,7 @@ const DETAIL: TopicDetail = {
       excludeConsumers: false,
     },
   },
-  internal: { entriesAddedCounter: 10, numberOfEntries: 10, lastConfirmedEntry: { ledgerId: 1, entryId: -1 }, cursors: [] },
+  internal: { entriesAddedCounter: "10", numberOfEntries: 10, lastConfirmedEntry: { ledgerId: 1, entryId: -1 }, cursors: [] },
   anomalies: [],
   indeterminate: [
     {

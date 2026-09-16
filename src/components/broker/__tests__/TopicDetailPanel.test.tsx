@@ -16,9 +16,9 @@ function makeDetail(overrides: Partial<TopicDetail> = {}): TopicDetail {
       msgRateOut: 0,
       msgThroughputIn: 0,
       msgThroughputOut: 0,
-      storageSize: 0,
-      backlogSize: 0,
-      msgInCounter: 0,
+      storageSize: "0",
+      backlogSize: "0",
+      msgInCounter: "0",
       oldestBacklogMessageAge: { state: "unknown" },
       subscriptions: [],
       statsRequestScope: {
@@ -30,7 +30,7 @@ function makeDetail(overrides: Partial<TopicDetail> = {}): TopicDetail {
       },
     },
     internal: {
-      entriesAddedCounter: 0,
+      entriesAddedCounter: "0",
       numberOfEntries: 0,
       // Deliberately a different ledger/entry than the cursor below, so
       // "38:-1" (asserted with a singular getByText) can only match the
@@ -41,7 +41,7 @@ function makeDetail(overrides: Partial<TopicDetail> = {}): TopicDetail {
           subscription: "rg_deposit_accumulate_LOCAL",
           markDeletePosition: { ledgerId: 38, entryId: -1 },
           readPosition: { ledgerId: 38, entryId: 0 },
-          messagesConsumedCounter: 0,
+          messagesConsumedCounter: "0",
         },
       ],
     },
@@ -192,13 +192,44 @@ describe("TopicDetailPanel", () => {
       const detail = makeDetail({
         stats: {
           ...makeDetail().stats,
-          backlogSize: 12345,
+          backlogSize: "12345",
           statsRequestScope: { ...makeDetail().stats.statsRequestScope, preciseBacklog: false },
         },
       });
       render(<TopicDetailPanel detail={detail} state="ready" onRefresh={vi.fn()} />);
-      expect(screen.getByText("12345")).toBeInTheDocument();
+      // `formatBigCounter` digit-groups for readability — "12,345", not
+      // "12345" — but never via `Number(...)`, which is the whole point of
+      // Task 3.
+      expect(screen.getByText("12,345")).toBeInTheDocument();
       expect(screen.queryByText(/not requested/i)).not.toBeInTheDocument();
+    });
+  });
+
+  // Task 3: msgInCounter/storageSize/backlogSize/entriesAddedCounter/
+  // messagesConsumedCounter are `u64` counters that cross IPC as decimal
+  // strings precisely so a value above JS's 2^53 - 1 safe-integer ceiling
+  // renders in full — no scientific notation, no rounding, no truncation.
+  describe("a 19-digit counter renders in full (Task 3)", () => {
+    const NINETEEN_DIGITS = "9223372036854775807"; // i64::MAX; also < u64::MAX
+
+    it("msgInCounter — no e+, no rounding, no truncation", () => {
+      const detail = makeDetail({
+        stats: { ...makeDetail().stats, msgInCounter: NINETEEN_DIGITS },
+      });
+      render(<TopicDetailPanel detail={detail} state="ready" onRefresh={vi.fn()} />);
+      const rendered = screen.getByText("9,223,372,036,854,775,807");
+      expect(rendered).toBeInTheDocument();
+      expect(rendered.textContent).not.toMatch(/e\+/i);
+    });
+
+    it("entriesAddedCounter — no e+, no rounding, no truncation", () => {
+      const detail = makeDetail({
+        internal: { ...makeDetail().internal, entriesAddedCounter: NINETEEN_DIGITS },
+      });
+      render(<TopicDetailPanel detail={detail} state="ready" onRefresh={vi.fn()} />);
+      const rendered = screen.getByText("9,223,372,036,854,775,807");
+      expect(rendered).toBeInTheDocument();
+      expect(rendered.textContent).not.toMatch(/e\+/i);
     });
   });
 
@@ -230,7 +261,7 @@ describe("TopicDetailPanel", () => {
   it("renders a cursor entryId of -1 as a real position, not a blank", () => {
     const detail = makeDetail({
       internal: {
-        entriesAddedCounter: 5,
+        entriesAddedCounter: "5",
         numberOfEntries: 5,
         lastConfirmedEntry: { ledgerId: 251, entryId: -1 },
         cursors: [

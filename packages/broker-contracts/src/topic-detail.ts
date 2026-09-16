@@ -186,15 +186,26 @@ export interface StatsRequestScope {
 
 /** The parsed subset of a Pulsar topic's `stats` payload. `msgRateOut`
  *  proves delivery to a consumer, never business completion — nothing
- *  downstream may present it as "processed". */
+ *  downstream may present it as "processed".
+ *
+ *  Task 3: `storageSize`, `backlogSize`, and `msgInCounter` are `u64`
+ *  counters on the Rust side that can legitimately exceed JavaScript's
+ *  2^53 - 1 safe-integer ceiling on a long-lived, high-traffic topic — a
+ *  bare JS `number` would silently round such a value on `JSON.parse`, with
+ *  no error. They are therefore `string | null` here, never `number | null`:
+ *  `null` is the same withheld-field sentinel every other optional field on
+ *  this contract uses, and a present value is the exact decimal digits Rust
+ *  parsed, meant to be rendered (via `formatBigCounter` in
+ *  `src/components/broker/broker-value.ts`), never passed through
+ *  `Number(...)`/`parseInt`/arithmetic. */
 export interface TopicStats {
   msgRateIn: number | null;
   msgRateOut: number | null;
   msgThroughputIn: number | null;
   msgThroughputOut: number | null;
-  storageSize: number | null;
-  backlogSize: number | null;
-  msgInCounter: number | null;
+  storageSize: string | null;
+  backlogSize: string | null;
+  msgInCounter: string | null;
   oldestBacklogMessageAge: BacklogAge;
   subscriptions: SubscriptionStats[];
   /** What this call actually asked the broker for (Task 1, R34) — see
@@ -219,12 +230,18 @@ export interface CursorPosition {
   subscription: string;
   markDeletePosition: Position;
   readPosition: Position;
-  messagesConsumedCounter: number | null;
+  /** Task 3: `u64` on the Rust side, `string | null` here for the same
+   *  precision reason as `TopicStats.msgInCounter` — see that field's doc. */
+  messagesConsumedCounter: string | null;
 }
 
 /** The parsed subset of a Pulsar topic's `internalStats` payload. */
 export interface InternalStats {
-  entriesAddedCounter: number | null;
+  /** Task 3: `u64` on the Rust side, `string | null` here — the realistic
+   *  field to actually cross JS's 2^53 - 1 ceiling (a cumulative counter on
+   *  a long-lived, high-traffic topic). See `TopicStats.msgInCounter`'s
+   *  doc. */
+  entriesAddedCounter: string | null;
   numberOfEntries: number | null;
   lastConfirmedEntry: Position | null;
   cursors: CursorPosition[];
