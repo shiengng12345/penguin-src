@@ -268,6 +268,28 @@ mod tests {
         );
     }
 
+    /// The no-colon case is covered above. This is the sneakier half: the
+    /// string has the right *shape*, so a parser that splits first and
+    /// converts carelessly can still end up with one real component and one
+    /// invented zero. A cursor reported at `5:0` reads as "at the start of
+    /// ledger 5", which is a specific operational claim, and a wrong one.
+    #[test]
+    fn a_position_with_one_bad_component_is_an_error_not_a_half_invented_one() {
+        for bad in ["5:abc", "abc:5"] {
+            let mut raw = real_fixture();
+            raw["cursors"]["rg_deposit_accumulate_LOCAL"]["readPosition"] =
+                serde_json::json!(bad);
+            let err = parse_internal_stats(&raw)
+                .expect_err("a half-parsable position must not yield a half-invented one");
+            assert_eq!(err.code, BrokerErrorCode::MalformedResponse, "for {bad}");
+            assert!(
+                err.message.contains("cursors.rg_deposit_accumulate_LOCAL.readPosition"),
+                "message did not name the offending path for {bad}: {}",
+                err.message
+            );
+        }
+    }
+
     #[test]
     fn a_missing_optional_counter_yields_none_not_zero() {
         let mut raw = real_fixture();
