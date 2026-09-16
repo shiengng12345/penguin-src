@@ -16,13 +16,19 @@
 // nobody is attached); `ConsumerTable` carries that same distinction into
 // the expanded row.
 //
-// `msgBacklog` additionally goes through `formatScopedNumber` rather than
-// plain `formatNumber` (Task 1, R34/R38): this call now explicitly asks
-// `subscriptionBacklogSize=false` (spec §12.3 — computing it precisely can
-// take Ledger locks on a busy broker), so a null/withheld value here means
-// "we deliberately did not ask" ("Not requested"), not "the broker didn't
-// answer" ("Unknown") — the `scope` prop is what tells this column which
-// word applies.
+// `msgBacklog` always renders through plain `formatNumber`, regardless of
+// `subscriptionBacklogSize` (Task 1, R34/R38 — corrected by the whole-stage
+// review's item 1). This call explicitly asks `subscriptionBacklogSize=false`
+// (spec §12.3 — computing the subscription-level *byte estimate* precisely
+// can take Ledger locks on a busy broker), but measured directly against the
+// live broker, `msgBacklog` itself comes back identical whether that flag is
+// true or false; only `backlogSize` (which this table does not render)
+// differs. An earlier version of this file routed `msgBacklog` through
+// `formatScopedNumber` keyed on that flag, which rendered "Not requested" on
+// every row of every topic — hiding the exact number this screen exists to
+// show. A withheld `msgBacklog` (the broker genuinely did not answer) still
+// reads "Unknown" via `formatNumber`, same as every other plain numeric
+// field on this table.
 //
 // `msgRateOut` proves delivery to a consumer, never business completion —
 // `DeliveryNotice` (the one place that caveat is worded) sits above the
@@ -38,7 +44,7 @@ import type { DataTableState } from "@/components/ui/data-table-types";
 import { Button } from "@/components/ui/button";
 import { DeliveryNotice } from "./DeliveryNotice";
 import { ConsumerTable } from "./ConsumerTable";
-import { formatConsumerCount, formatNumber, formatScopedNumber, formatSubscriptionType } from "./broker-value";
+import { formatConsumerCount, formatNumber, formatSubscriptionType } from "./broker-value";
 
 export interface SubscriptionTableProps {
   subscriptions: SubscriptionStats[];
@@ -91,11 +97,11 @@ export function SubscriptionTable({
       key: "msgBacklog",
       header: "Backlog",
       width: 100,
-      // Governed by `StatsRequestScope.subscriptionBacklogSize` (Task 1) —
-      // this is the field spec §12.3 warns can take Ledger locks on a busy
-      // broker, and the reason this call now asks `false` explicitly rather
-      // than inheriting the REST default.
-      render: (s) => formatScopedNumber(s.msgBacklog, scope, "subscriptionMsgBacklog"),
+      // Not scoped by `subscriptionBacklogSize` — see this file's header
+      // comment. That flag governs `backlogSize` (a different field this
+      // table does not render), not `msgBacklog`; the real number must
+      // always show.
+      render: (s) => formatNumber(s.msgBacklog),
       sortable: true,
     },
     {

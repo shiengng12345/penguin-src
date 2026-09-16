@@ -223,14 +223,20 @@ describe("SubscriptionTable", () => {
     expect(screen.getByText(/^unknown$/i)).toBeInTheDocument();
   });
 
-  // Task 1 (R34/R38): `subscriptionBacklogSize=false` is now sent
-  // explicitly on every `/stats` call (spec §12.3 — this parameter can take
-  // Ledger locks on a busy broker). Once that flag is off, `msgBacklog`
-  // being null means "we deliberately did not ask", not "the broker didn't
-  // answer" — those are two different facts and must render as two
-  // different, visibly distinct strings.
-  describe("msgBacklog — Not requested vs Unknown (Task 1)", () => {
-    const NOT_REQUESTED_SCOPE: StatsRequestScope = {
+  // Item 1 fix (whole-stage review of Stage 0): `subscriptionBacklogSize`
+  // governs each subscription's byte-level `backlogSize` estimate, which
+  // this table never renders — measured directly against the live broker
+  // (persistent/public/default/fpms_topup):
+  // `subscriptionBacklogSize=false` and `=true` return the identical
+  // `msgBacklog` value (`0` either way); only `backlogSize` differs (`-1`
+  // vs `0`). `msgBacklog` must therefore always render the broker's real
+  // number regardless of this flag. Before this fix, `SCOPE_FLAG_FOR_FIELD`
+  // wired `subscriptionMsgBacklog` to this flag anyway, so every row's
+  // Backlog column rendered "Not requested" no matter what the broker
+  // actually returned — the exact defect R42 fixed for `backlogSize` one
+  // field earlier, repeated here in the same commit.
+  describe("msgBacklog always renders the broker's real number, regardless of subscriptionBacklogSize", () => {
+    const SUBSCRIPTION_BACKLOG_SIZE_FALSE_SCOPE: StatsRequestScope = {
       preciseBacklog: true,
       subscriptionBacklogSize: false,
       earliestTimeInBacklog: true,
@@ -238,40 +244,54 @@ describe("SubscriptionTable", () => {
       excludeConsumers: false,
     };
 
-    it('renders "Not requested" when subscriptionBacklogSize was not asked for', () => {
+    it("renders the real backlog even when subscriptionBacklogSize was not requested", () => {
       render(
-        <SubscriptionTable subscriptions={[stranded]} scope={NOT_REQUESTED_SCOPE} state="ready" onRefresh={vi.fn()} />,
+        <SubscriptionTable
+          subscriptions={[stranded]}
+          scope={SUBSCRIPTION_BACKLOG_SIZE_FALSE_SCOPE}
+          state="ready"
+          onRefresh={vi.fn()}
+        />,
       );
-      expect(screen.getByText(/not requested/i)).toBeInTheDocument();
-      // The real 3400 backlog on `stranded` must not leak through either —
-      // "Not requested" means this call did not trust the number enough to
-      // show it, not merely a different label alongside the same value.
-      expect(screen.queryByText("3400")).not.toBeInTheDocument();
+      // The exact number this screen exists to show must never be hidden
+      // behind "Not requested" — that flag governs the subscription-level
+      // byte estimate (backlogSize), not this field.
+      expect(screen.getByText("3400")).toBeInTheDocument();
+      expect(screen.queryByText(/not requested/i)).not.toBeInTheDocument();
     });
 
-    it('renders "Unknown", not "Not requested", when the flag was on and the broker withheld the value', () => {
+    it('renders "Unknown" for a withheld backlog regardless of subscriptionBacklogSize', () => {
       const withheldBacklog: SubscriptionStats = { ...stranded, msgBacklog: null };
       render(
-        <SubscriptionTable subscriptions={[withheldBacklog]} scope={ALL_REQUESTED} state="ready" onRefresh={vi.fn()} />,
+        <SubscriptionTable
+          subscriptions={[withheldBacklog]}
+          scope={SUBSCRIPTION_BACKLOG_SIZE_FALSE_SCOPE}
+          state="ready"
+          onRefresh={vi.fn()}
+        />,
       );
       expect(screen.getByText(/^unknown$/i)).toBeInTheDocument();
       expect(screen.queryByText(/not requested/i)).not.toBeInTheDocument();
     });
 
-    it("renders two visibly different strings for the two cases above", () => {
-      const withheldBacklog: SubscriptionStats = { ...stranded, msgBacklog: null };
+    it("renders the identical real number whether the flag is on or off", () => {
       const { unmount } = render(
-        <SubscriptionTable subscriptions={[withheldBacklog]} scope={ALL_REQUESTED} state="ready" onRefresh={vi.fn()} />,
+        <SubscriptionTable subscriptions={[stranded]} scope={ALL_REQUESTED} state="ready" onRefresh={vi.fn()} />,
       );
-      const unknownText = screen.getByText(/^unknown$/i).textContent;
+      const withFlagOn = screen.getByText("3400").textContent;
       unmount();
 
       render(
-        <SubscriptionTable subscriptions={[stranded]} scope={NOT_REQUESTED_SCOPE} state="ready" onRefresh={vi.fn()} />,
+        <SubscriptionTable
+          subscriptions={[stranded]}
+          scope={SUBSCRIPTION_BACKLOG_SIZE_FALSE_SCOPE}
+          state="ready"
+          onRefresh={vi.fn()}
+        />,
       );
-      const notRequestedText = screen.getByText(/not requested/i).textContent;
+      const withFlagOff = screen.getByText("3400").textContent;
 
-      expect(notRequestedText).not.toBe(unknownText);
+      expect(withFlagOff).toBe(withFlagOn);
     });
   });
 });

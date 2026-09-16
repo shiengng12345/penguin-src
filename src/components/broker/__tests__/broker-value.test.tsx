@@ -12,7 +12,6 @@ import type { StatsRequestScope } from "@penguin/broker-contracts";
 import {
   formatBigCounter,
   formatScopedBacklogAge,
-  formatScopedNumber,
   formatWriteCapability,
   NOT_REQUESTED,
   UNKNOWN,
@@ -90,7 +89,7 @@ const ALL_REQUESTED: StatsRequestScope = {
 };
 
 describe("wasFieldRequested — the R38 field<->flag mapping", () => {
-  const fields: ScopedStatsField[] = ["subscriptionMsgBacklog", "oldestBacklogMessageAge"];
+  const fields: ScopedStatsField[] = ["oldestBacklogMessageAge"];
 
   it("every field reads as requested when every flag is on", () => {
     for (const field of fields) {
@@ -98,24 +97,25 @@ describe("wasFieldRequested — the R38 field<->flag mapping", () => {
     }
   });
 
-  // R38's own requirement: flipping exactly one flag off must change exactly
-  // the field(s) that flag governs, and leave every other field's answer
-  // untouched. Written as separate cases (one per flag) rather than a single
-  // loop so a mapping mistake names the specific flag it broke.
-  it("flipping subscriptionBacklogSize off changes only subscriptionMsgBacklog", () => {
-    const scope: StatsRequestScope = { ...ALL_REQUESTED, subscriptionBacklogSize: false };
-    expect(wasFieldRequested(scope, "subscriptionMsgBacklog")).toBe(false);
-    expect(wasFieldRequested(scope, "oldestBacklogMessageAge")).toBe(true);
-  });
-
-  it("flipping earliestTimeInBacklog off changes only oldestBacklogMessageAge", () => {
+  it("flipping earliestTimeInBacklog off changes oldestBacklogMessageAge", () => {
     const scope: StatsRequestScope = { ...ALL_REQUESTED, earliestTimeInBacklog: false };
     expect(wasFieldRequested(scope, "oldestBacklogMessageAge")).toBe(false);
-    expect(wasFieldRequested(scope, "subscriptionMsgBacklog")).toBe(true);
   });
 
-  // Fix round 1, item 1: `preciseBacklog` must not be able to affect either
-  // mapped field — it governs `backlogSize`'s precision only, and
+  // Whole-stage review item 1: `subscriptionBacklogSize` must not affect
+  // `oldestBacklogMessageAge` — the two flags are unrelated. This is the
+  // negative-space guard for the fix that removed `subscriptionMsgBacklog`
+  // from `ScopedStatsField` entirely (it was wrongly wired to this flag;
+  // see `ScopedStatsField`'s doc in `broker-value.ts`).
+  it("flipping subscriptionBacklogSize off changes nothing in this mapping", () => {
+    const scope: StatsRequestScope = { ...ALL_REQUESTED, subscriptionBacklogSize: false };
+    for (const field of fields) {
+      expect(wasFieldRequested(scope, field)).toBe(true);
+    }
+  });
+
+  // Fix round 1, item 1: `preciseBacklog` must not be able to affect the
+  // mapped field either — it governs `backlogSize`'s precision only, and
   // `backlogSize` is not (and must never become) a `ScopedStatsField` member.
   // This is the negative-space guard: flipping the flag the old, wrong
   // mapping used to key off of must be a complete no-op here.
@@ -127,28 +127,7 @@ describe("wasFieldRequested — the R38 field<->flag mapping", () => {
   });
 });
 
-describe("formatScopedNumber / formatScopedBacklogAge — Not requested vs Unknown", () => {
-  it('renders "Not requested" when the governing flag is off, regardless of the value', () => {
-    const scope: StatsRequestScope = { ...ALL_REQUESTED, subscriptionBacklogSize: false };
-    expect(formatScopedNumber(42, scope, "subscriptionMsgBacklog")).toBe(NOT_REQUESTED);
-    expect(formatScopedNumber(null, scope, "subscriptionMsgBacklog")).toBe(NOT_REQUESTED);
-  });
-
-  it('renders the ordinary "Unknown" when the flag is on and the value is genuinely absent', () => {
-    expect(formatScopedNumber(null, ALL_REQUESTED, "subscriptionMsgBacklog")).toBe(UNKNOWN);
-  });
-
-  it('renders the real number when the flag is on and the value is present', () => {
-    expect(formatScopedNumber(3400, ALL_REQUESTED, "subscriptionMsgBacklog")).toBe("3400");
-  });
-
-  it('"Not requested" and "Unknown" are two visibly different strings for the same null value', () => {
-    const notRequestedScope: StatsRequestScope = { ...ALL_REQUESTED, subscriptionBacklogSize: false };
-    const notRequested = formatScopedNumber(null, notRequestedScope, "subscriptionMsgBacklog");
-    const unknown = formatScopedNumber(null, ALL_REQUESTED, "subscriptionMsgBacklog");
-    expect(notRequested).not.toBe(unknown);
-  });
-
+describe("formatScopedBacklogAge — Not requested vs Unknown", () => {
   it('an unrequested oldestBacklogMessageAge reads "Not requested" even though the parsed value says noBacklog', () => {
     // The whole point of Task 1's second half: `earliestTimeInBacklog: false`
     // means the broker's own -1/"noBacklog" answer for this call cannot be
