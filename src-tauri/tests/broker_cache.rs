@@ -115,9 +115,17 @@ fn all_topics_query() -> PageQueryDto {
 /// A scratch on-disk SQLite file, unique to this test process, so repeated
 /// `Connection::open` calls see the same state while still never touching
 /// the real product database.
+/// Cargo's test harness runs these `#[tokio::test]`s concurrently on separate
+/// threads, and macOS's clock resolution is coarser than true nanoseconds —
+/// two threads starting within the same tick can read an identical
+/// `SystemTime::now()` value. A monotonic counter, not the clock, is what
+/// actually guarantees a distinct path per call.
+static SCRATCH_DB_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn scratch_db_path() -> std::path::PathBuf {
+    let n = SCRATCH_DB_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     std::env::temp_dir().join(format!(
-        "penguin-broker-cache-test-{}-{}.sqlite3",
+        "penguin-broker-cache-test-{}-{}-{n}.sqlite3",
         std::process::id(),
         std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
     ))
@@ -203,6 +211,140 @@ async fn topic_listing_reads_through_the_cache_against_the_live_broker() {
     let names3 = names_of(&third_data.items);
     assert_eq!(names1, names2, "cached call must return the same topics as the broker call");
     assert_eq!(names1, names3, "refreshed call must return the same topics as the original");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+// --- Fix round 1 ---
+//
+// `refresh` must bypass the cache read, not destroy the cached row: deleting
+// it first converts a recoverable broker failure into permanent data loss,
+// for no benefit (`put_snapshot` is a genuine upsert, so a successful
+// refetch already overwrites the row on its own). This test proves the row
+// survives repeated failed refreshes so an operator sees the last known list
+// through an entire flapping-broker episode, not just once.
+#[tokio::test]
+async fn two_consecutive_failed_refreshes_both_serve_the_cached_list() {
+    let path = scratch_db_path();
+    let seed = open_scratch(&path);
+    // Points at a dead admin endpoint so every broker call fails fast and
+    // deterministically, with no dependency on the live `pulsar` container.
+    let row = store::ConnectionRow {
+        id: "c-dead".into(),
+        kind: "pulsar".into(),
+        name: "Dead".into(),
+        color: "red".into(),
+        admin_url: "http://localhost:1".into(),
+        broker_url: "pulsar://localhost:1".into(),
+        auth_type: "none".into(),
+        secret_handle_id: None,
+        default_tenant: "public".into(),
+        default_namespace: "default".into(),
+        read_only: true,
+        tls_verify: true,
+        timeout_ms: 500,
+        last_status: "unknown".into(),
+        last_checked_at: None,
+        broker_version: None,
+        capabilities_json: None,
+        created_at: 1,
+        updated_at: 1,
+    };
+    store::upsert_connection(&seed, &row).unwrap();
+    store::put_snapshot(
+        &seed,
+        &row.id,
+        "topics",
+        "public/default",
+        r#"{"all":["persistent://public/default/t1"],"partitioned":[]}"#,
+    )
+    .unwrap();
+    drop(seed);
+
+    let query = all_topics_query();
+
+    let first = commands::list_topics_through_cache(open_scratch(&path), &row, "public", "default", &query, true, None)
+        .await
+        .expect("a failed refresh must still return a result, not a hard error");
+    assert_eq!(
+        first.source,
+        BrokerSource::Cache,
+        "broker is unreachable; the first refresh must fall back to the cached list"
+    );
+    let first_names = names_of(&first.data.expect("first refresh should carry cached data").items);
+    assert!(first_names.contains("persistent://public/default/t1"));
+    assert!(!first.warnings.is_empty(), "a failed refresh must say why it fell back to the cache");
+
+    let second = commands::list_topics_through_cache(open_scratch(&path), &row, "public", "default", &query, true, None)
+        .await
+        .expect("a second failed refresh must ALSO still return a result");
+    assert_eq!(
+        second.source,
+        BrokerSource::Cache,
+        "a second consecutive failed refresh must serve the cache again, not fail outright — \
+         this is exactly what an operator needs while a broker is flapping"
+    );
+    let second_names = names_of(&second.data.expect("second refresh should carry cached data").items);
+    assert_eq!(first_names, second_names, "the cached row must survive the first failed refresh unchanged");
+
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A cached entry that fails to deserialize is a poisoned row with no
+/// antidote short of deleting it. This proves it self-heals: the corrupt
+/// entry is discarded, a fresh broker read replaces it (with a warning
+/// naming the discarded entry), and the very next call is served from that
+/// newly-written, valid cache row.
+#[tokio::test]
+async fn a_corrupt_cache_entry_self_heals_from_the_broker() {
+    if reqwest::get(format!("{ADMIN_URL}/admin/v2/persistent/public/default")).await.is_err() {
+        eprintln!(
+            "SKIPPING a_corrupt_cache_entry_self_heals_from_the_broker: broker at {ADMIN_URL} is unreachable"
+        );
+        return;
+    }
+
+    let path = scratch_db_path();
+    let seed = open_scratch(&path);
+    seed_connection(&seed, "c-corrupt");
+    let row = store::get_connection(&seed, "c-corrupt").unwrap().expect("seeded row");
+    store::put_snapshot(&seed, &row.id, "topics", "public/default", "this is not json").unwrap();
+    drop(seed);
+
+    let query = all_topics_query();
+
+    let first = commands::list_topics_through_cache(open_scratch(&path), &row, "public", "default", &query, false, None)
+        .await
+        .expect("a corrupt cache entry must self-heal, not hard-error forever");
+    assert_eq!(
+        first.source,
+        BrokerSource::AdminRest,
+        "the corrupt entry must be discarded and replaced with a fresh broker read"
+    );
+    let first_data = first.data.expect("the recovered call should carry data");
+    assert_eq!(first_data.items.len(), EXPECTED_BUSINESS_TOPIC_COUNT);
+    assert!(
+        first
+            .warnings
+            .iter()
+            .any(|w| w.to_lowercase().contains("unreadable") || w.to_lowercase().contains("discard")),
+        "must name the discarded cache entry: {:?}",
+        first.warnings
+    );
+
+    // Same reasoning as the earlier live test: guarantees the next call's
+    // measured age is a real nonzero number, not a same-millisecond coincidence.
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+
+    let second = commands::list_topics_through_cache(open_scratch(&path), &row, "public", "default", &query, false, None)
+        .await
+        .expect("second call should succeed");
+    assert_eq!(
+        second.source,
+        BrokerSource::Cache,
+        "the self-healed entry must now be a valid, readable cache row"
+    );
+    assert!(second.freshness_ms > 0, "a real cache hit has a non-zero measured age");
 
     let _ = std::fs::remove_file(&path);
 }

@@ -135,10 +135,15 @@ pub fn put_snapshot(
     .map_err(db_err)
 }
 
-/// Drops one cached snapshot. Used by an explicit refresh, which must go to
-/// the broker rather than re-reading what it is trying to replace.
-/// Deleting a row that is not there is success, not an error — refreshing a
-/// view that was never cached is an ordinary thing to do.
+/// Drops one cached snapshot. `refresh` does NOT call this — an explicit
+/// refresh only bypasses reading the cache, since `put_snapshot`'s upsert
+/// already overwrites the row on a successful refetch, and deleting first
+/// would turn a recoverable broker failure into permanent data loss. The
+/// real caller is cache self-healing: a row that fails to deserialize
+/// (`commands::recover_from_corrupt_cache`) is a poisoned entry with no
+/// antidote short of removing it and re-fetching from the broker.
+/// Deleting a row that is not there is success, not an error — discarding a
+/// view that was never cached, or already gone, is an ordinary thing to do.
 pub fn delete_snapshot(
     conn: &Connection,
     connection_id: &str,
