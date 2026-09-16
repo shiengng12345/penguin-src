@@ -294,4 +294,48 @@ describe("SubscriptionTable", () => {
       expect(withFlagOff).toBe(withFlagOn);
     });
   });
+
+  // Whole-stage review item 3: spec §12.3 — an excluded consumer list is not
+  // "list is empty"; a DTO/UI that does not request consumer detail must
+  // say "Not requested", never infer a count of zero. R43 wired
+  // `excludeConsumers` into `broker::anomaly`'s consumer-dependent checks,
+  // but the UI still asserted a confirmed 0-consumer fact from a list that
+  // carries no information at all — both the collapsed "Consumers" column
+  // (`formatConsumerCount`) and the expanded `ConsumerTable`'s empty branch.
+  describe("Consumers column and expanded view — excludeConsumers is Not requested, not zero", () => {
+    const EXCLUDE_CONSUMERS_SCOPE: StatsRequestScope = { ...ALL_REQUESTED, excludeConsumers: true };
+
+    it('renders "Not requested" in the Consumers column when excludeConsumers was true, never "No consumers"', () => {
+      // Measured directly against the live broker (fix round 1, item 3):
+      // excludeConsumers=true returns consumers: [], byte-identical to
+      // Pulsar's own confirmed-empty fact — `stranded` already carries that
+      // same `[]` shape, so this scope alone must change what it means.
+      render(
+        <SubscriptionTable subscriptions={[stranded]} scope={EXCLUDE_CONSUMERS_SCOPE} state="ready" onRefresh={vi.fn()} />,
+      );
+      expect(screen.getByText(/not requested/i)).toBeInTheDocument();
+      expect(screen.queryByText(/no consumers/i)).not.toBeInTheDocument();
+    });
+
+    it('still renders "No consumers" when consumers genuinely were requested and confirmed empty', () => {
+      render(
+        <SubscriptionTable subscriptions={[stranded]} scope={ALL_REQUESTED} state="ready" onRefresh={vi.fn()} />,
+      );
+      expect(screen.getByText(/no consumers/i)).toBeInTheDocument();
+    });
+
+    it('the expanded ConsumerTable view also says "Not requested", not "No consumers attached"', async () => {
+      const user = userEvent.setup();
+      render(
+        <SubscriptionTable subscriptions={[stranded]} scope={EXCLUDE_CONSUMERS_SCOPE} state="ready" onRefresh={vi.fn()} />,
+      );
+      await user.click(screen.getByRole("button", { name: /expand/i }));
+      expect(screen.queryByText(/no consumers attached/i)).not.toBeInTheDocument();
+      // The collapsed row's own "Consumers" cell also reads "Not requested"
+      // (asserted separately above), so this must not just match /not
+      // requested/i anywhere on the page — it has to be the expanded
+      // ConsumerTable's own status message specifically.
+      expect(screen.getByText(/excluded consumer detail/i)).toBeInTheDocument();
+    });
+  });
 });

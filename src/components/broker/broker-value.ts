@@ -69,8 +69,32 @@ export const NOT_REQUESTED = "Not requested";
  *  earlier mapping rendered "Not requested" on every row of every topic's
  *  Backlog column, hiding the exact number this screen exists to show. See
  *  `SubscriptionTable.test.tsx`'s "msgBacklog always renders the broker's
- *  real number" tests, which guard against that regressing. */
-export type ScopedStatsField = "oldestBacklogMessageAge";
+ *  real number" tests, which guard against that regressing.
+ *
+ *  Whole-stage review item 3: `subscriptionConsumers` (governed by
+ *  `excludeConsumers`) is added by this fix. Spec §12.3: 「被排除的列表不是「列表
+ *  为空」。若请求不含 Consumer 明细，DTO 必须标记 `notRequested`，不能推断 Consumer
+ *  数为 0。」 `src-tauri/src/broker/anomaly.rs` already folds an excluded
+ *  consumer list into the anomaly engine's `None` handling (fix round 1,
+ *  item 3) — but this UI still asserted a confirmed 0-consumer fact
+ *  (`formatConsumerCount`'s "No consumers", `ConsumerTable`'s "No consumers
+ *  attached…") from a list that, when excluded, carries no information at
+ *  all. Unlike every other member of this union, the governing flag here is
+ *  read in the INVERTED sense — see `SCOPE_FLAG_FOR_FIELD`'s doc below. */
+export type ScopedStatsField = "oldestBacklogMessageAge" | "subscriptionConsumers";
+
+/** One `ScopedStatsField`'s mapping to the `StatsRequestScope` flag that
+ *  governs it, and the sense in which that flag reads as "requested".
+ *  `requestedWhenFlagIs` exists because `excludeConsumers` (unlike every
+ *  other flag `StatsRequestScope` carries) is worded as an *exclusion*: the
+ *  flag being `true` means the field was NOT requested. Baking that
+ *  inversion into the mapping — rather than special-casing it at a call
+ *  site — keeps `wasFieldRequested` the one function every formatter goes
+ *  through, per ruling R38 below. */
+interface ScopeFlagMapping {
+  flag: keyof StatsRequestScope;
+  requestedWhenFlagIs: boolean;
+}
 
 /** Ruling R38: the field↔flag mapping must be code, not a comment. This is
  *  the one place that decides which `StatsRequestScope` flag governs which
@@ -88,25 +112,32 @@ export type ScopedStatsField = "oldestBacklogMessageAge";
  *    computed at all (unlike `subscriptionBacklogSize`, which governs a
  *    *different* field's precision while the field this UI reads stays
  *    present either way).
+ *  - `excludeConsumers` ("excludeConsumers"), INVERTED
+ *    (`requestedWhenFlagIs: false`): governs `SubscriptionStats.consumers`
+ *    for the purpose of `formatConsumerCount`/`ConsumerTable`'s empty
+ *    branch. `excludeConsumers=true` was excluded from `broker::anomaly`'s
+ *    prior measurement re-used here (fix round 1, item 3's doc on
+ *    `StatsRequestScope.exclude_consumers` in `src-tauri/src/broker/stats.rs`):
+ *    that flag makes Pulsar return `consumers: []`, byte-identical to a
+ *    confirmed-empty list.
  *
- *  `preciseBacklog`, `subscriptionBacklogSize`, and the fix-round-1
- *  `excludePublishers`/`excludeConsumers` flags are deliberately absent:
+ *  `preciseBacklog` and `subscriptionBacklogSize` are deliberately absent:
  *  `preciseBacklog` never makes a field absent (see `ScopedStatsField`'s
  *  doc); `subscriptionBacklogSize` governs `backlogSize`, not `msgBacklog`
- *  (see `ScopedStatsField`'s doc, whole-stage review item 1); nothing on
- *  this contract currently reads `publishers`; and an excluded `consumers`
- *  list is handled where it actually matters for the anomaly engine —
- *  `derive_anomalies`/`derive_indeterminate_checks` in
- *  `src-tauri/src/broker/anomaly.rs`. */
-const SCOPE_FLAG_FOR_FIELD: Readonly<Record<ScopedStatsField, keyof StatsRequestScope>> = {
-  oldestBacklogMessageAge: "earliestTimeInBacklog",
+ *  (see `ScopedStatsField`'s doc, whole-stage review item 1). Nothing on
+ *  this contract currently reads `publishers`, so `excludePublishers` is
+ *  also absent. */
+const SCOPE_FLAG_FOR_FIELD: Readonly<Record<ScopedStatsField, ScopeFlagMapping>> = {
+  oldestBacklogMessageAge: { flag: "earliestTimeInBacklog", requestedWhenFlagIs: true },
+  subscriptionConsumers: { flag: "excludeConsumers", requestedWhenFlagIs: false },
 };
 
 /** Whether `scope` says `field` was actually requested. The one function
  *  every scoped formatter below calls, so the R38 mapping above is the only
  *  place that can ever be wrong — never re-derived ad hoc at a call site. */
 export function wasFieldRequested(scope: StatsRequestScope, field: ScopedStatsField): boolean {
-  return scope[SCOPE_FLAG_FOR_FIELD[field]];
+  const { flag, requestedWhenFlagIs } = SCOPE_FLAG_FOR_FIELD[field];
+  return scope[flag] === requestedWhenFlagIs;
 }
 
 /** `formatBacklogAge`, scoped by `earliestTimeInBacklog`. When that flag was
@@ -169,9 +200,26 @@ export function formatConsumerTimestamp(value: ConsumerTimestamp): string {
 /** The subscription-row "Consumers" summary. `null` and `[]` are different,
  *  determinate facts (see `SubscriptionStats.consumers`'s doc comment) and
  *  must read differently: "Unknown" (we couldn't tell who is attached) is
- *  not "No consumers" (Pulsar confirmed nobody is). */
-export function formatConsumerCount(consumers: unknown[] | null): string {
+ *  not "No consumers" (Pulsar confirmed nobody is).
+ *
+ *  Whole-stage review item 3: an excluded `[]` (`scope.excludeConsumers ===
+ *  true`) is a THIRD, different fact from both of those — this call chose
+ *  not to ask, so `[]` here carries no information at all, and must read
+ *  "Not requested" rather than "No consumers".
+ *
+ *  `consumers === null` is still checked FIRST, ahead of the scope check —
+ *  deliberately the opposite priority from `formatScopedBacklogAge`, where
+ *  the governing flag always wins even over a withheld value. That is
+ *  correct there because `earliestTimeInBacklog` governs
+ *  `oldestBacklogMessageAge`'s presence outright. `excludeConsumers` is
+ *  narrower: measured directly against the live broker, it only ever
+ *  forces the array to `[]` — it does not explain a `consumers` key that is
+ *  missing entirely. A `null` alongside `excludeConsumers: true` is an
+ *  unmodelled combination, not the documented excluded-list behaviour, so
+ *  it must read as the more severe "Unknown", never "Not requested". */
+export function formatConsumerCount(consumers: unknown[] | null, scope: StatsRequestScope): string {
   if (consumers === null) return UNKNOWN;
+  if (!wasFieldRequested(scope, "subscriptionConsumers")) return NOT_REQUESTED;
   if (consumers.length === 0) return "No consumers";
   return consumers.length === 1 ? "1 consumer" : `${consumers.length} consumers`;
 }

@@ -120,7 +120,10 @@ export function SubscriptionTable({
       key: "consumers",
       header: "Consumers",
       width: 130,
-      render: (s) => formatConsumerCount(s.consumers),
+      // Governed by `StatsRequestScope.excludeConsumers` (whole-stage
+      // review item 3) — an excluded `[]` is not a confirmed-empty one, and
+      // must read "Not requested" rather than "No consumers".
+      render: (s) => formatConsumerCount(s.consumers, scope),
     },
   ];
 
@@ -139,7 +142,7 @@ export function SubscriptionTable({
         errorMessage={errorMessage}
         onPageChange={() => {}}
         expandLabel={(s) => s.name}
-        expandedContent={(s) => <ConsumerTable consumers={s.consumers} />}
+        expandedContent={(s) => <ConsumerTable consumers={s.consumers} scope={scope} />}
       />
     </div>
   );

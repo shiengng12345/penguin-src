@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import type { StatsRequestScope } from "@penguin/broker-contracts";
 import {
   formatBigCounter,
+  formatConsumerCount,
   formatScopedBacklogAge,
   formatWriteCapability,
   NOT_REQUESTED,
@@ -89,7 +90,7 @@ const ALL_REQUESTED: StatsRequestScope = {
 };
 
 describe("wasFieldRequested — the R38 field<->flag mapping", () => {
-  const fields: ScopedStatsField[] = ["oldestBacklogMessageAge"];
+  const fields: ScopedStatsField[] = ["oldestBacklogMessageAge", "subscriptionConsumers"];
 
   it("every field reads as requested when every flag is on", () => {
     for (const field of fields) {
@@ -97,9 +98,23 @@ describe("wasFieldRequested — the R38 field<->flag mapping", () => {
     }
   });
 
-  it("flipping earliestTimeInBacklog off changes oldestBacklogMessageAge", () => {
+  it("flipping earliestTimeInBacklog off changes only oldestBacklogMessageAge", () => {
     const scope: StatsRequestScope = { ...ALL_REQUESTED, earliestTimeInBacklog: false };
     expect(wasFieldRequested(scope, "oldestBacklogMessageAge")).toBe(false);
+    expect(wasFieldRequested(scope, "subscriptionConsumers")).toBe(true);
+  });
+
+  // Whole-stage review item 3: `subscriptionConsumers` is mapped to
+  // `excludeConsumers` in the INVERTED sense — the flag being `true` means
+  // the field was NOT requested (Pulsar's own `excludeConsumers` query
+  // parameter excludes consumer detail when true). Every other entry in
+  // this mapping reads "flag true == requested"; this is the one exception,
+  // and it must be exercised on its own, not lumped in with the "every
+  // field on" case above.
+  it("flipping excludeConsumers on (the inverted sense) changes only subscriptionConsumers", () => {
+    const scope: StatsRequestScope = { ...ALL_REQUESTED, excludeConsumers: true };
+    expect(wasFieldRequested(scope, "subscriptionConsumers")).toBe(false);
+    expect(wasFieldRequested(scope, "oldestBacklogMessageAge")).toBe(true);
   });
 
   // Whole-stage review item 1: `subscriptionBacklogSize` must not affect
@@ -124,6 +139,43 @@ describe("wasFieldRequested — the R38 field<->flag mapping", () => {
     for (const field of fields) {
       expect(wasFieldRequested(scope, field)).toBe(true);
     }
+  });
+});
+
+// Whole-stage review item 3: spec §12.3 says "被排除的列表不是「列表为空」。若请求不含
+// Consumer 明细，DTO 必须标记 notRequested，不能推断 Consumer 数为 0。" R43 wired
+// `excludeConsumers` into `broker::anomaly`'s consumer-dependent checks, but
+// `broker-value.ts` explicitly declined the DTO/UI half of that sentence —
+// `formatConsumerCount` returned "No consumers" for an excluded (not empty)
+// list, asserting a consumer count of 0 from a list that carries no
+// information.
+describe('formatConsumerCount — "Not requested" for an excluded consumer list', () => {
+  const EXCLUDE_CONSUMERS_SCOPE: StatsRequestScope = { ...ALL_REQUESTED, excludeConsumers: true };
+
+  it('renders "Not requested" for an excluded (empty) consumer list, never "No consumers"', () => {
+    // Measured directly against the live broker (fix round 1, item 3, see
+    // broker::stats's StatsRequestScope doc): `excludeConsumers=true`
+    // returns `consumers: []`, byte-identical to Pulsar's own confirmed
+    // "nobody attached" fact. That `[]` must not be presented as a measured
+    // count of zero when this call declined to ask.
+    expect(formatConsumerCount([], EXCLUDE_CONSUMERS_SCOPE)).toBe(NOT_REQUESTED);
+  });
+
+  it('renders "No consumers" for a genuinely confirmed-empty list when consumers were requested', () => {
+    expect(formatConsumerCount([], ALL_REQUESTED)).toBe("No consumers");
+  });
+
+  it("still renders Unknown for a withheld (null) consumers key regardless of excludeConsumers", () => {
+    // consumers: null means the key itself was omitted — a different,
+    // genuinely-unknown fact from "we excluded it on purpose". Both scopes
+    // must read this the same way: the broker never sent the key at all.
+    expect(formatConsumerCount(null, EXCLUDE_CONSUMERS_SCOPE)).toBe(UNKNOWN);
+    expect(formatConsumerCount(null, ALL_REQUESTED)).toBe(UNKNOWN);
+  });
+
+  it("still renders the real count for a non-empty list when consumers were requested", () => {
+    expect(formatConsumerCount([{}], ALL_REQUESTED)).toBe("1 consumer");
+    expect(formatConsumerCount([{}, {}], ALL_REQUESTED)).toBe("2 consumers");
   });
 });
 

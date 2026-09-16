@@ -14,19 +14,36 @@
 // colour — because it is the single most diagnostic consumer signal in the
 // payload (the broker itself stopped delivering) and a `null` here must
 // never read as "Not blocked".
-import type { ConsumerStats } from "@penguin/broker-contracts";
+//
+// Whole-stage review item 3: an empty `consumers` array is not always the
+// confirmed-nobody-attached fact it looks like — `scope.excludeConsumers`
+// makes Pulsar send that same `[]` for a request that never asked for
+// consumer detail at all (spec §12.3: 「被排除的列表不是「列表为空」」). The empty
+// branch below checks `wasFieldRequested` before claiming "No consumers".
+import type { ConsumerStats, StatsRequestScope } from "@penguin/broker-contracts";
 import { DataTable, type DataTableColumn } from "@/components/ui/data-table";
 import { DeliveryNotice } from "./DeliveryNotice";
-import { formatBlocked, formatConsumerTimestamp, formatNumber, formatText } from "./broker-value";
+import {
+  formatBlocked,
+  formatConsumerTimestamp,
+  formatNumber,
+  formatText,
+  NOT_REQUESTED,
+  wasFieldRequested,
+} from "./broker-value";
 
 export interface ConsumerTableProps {
   consumers: ConsumerStats[] | null;
+  /** `TopicStats.statsRequestScope` from the same `TopicDetail` this
+   *  subscription's consumers came from — see `SubscriptionTable`'s own
+   *  `scope` prop doc; required for the identical reason. */
+  scope: StatsRequestScope;
 }
 
 const STATUS_CLASS =
   "rounded border border-border bg-muted/40 px-2 py-1 text-xs text-muted-foreground";
 
-export function ConsumerTable({ consumers }: ConsumerTableProps) {
+export function ConsumerTable({ consumers, scope }: ConsumerTableProps) {
   if (consumers === null) {
     return (
       <div role="status" className={STATUS_CLASS}>
@@ -36,6 +53,14 @@ export function ConsumerTable({ consumers }: ConsumerTableProps) {
   }
 
   if (consumers.length === 0) {
+    if (!wasFieldRequested(scope, "subscriptionConsumers")) {
+      return (
+        <div role="status" className={STATUS_CLASS}>
+          {NOT_REQUESTED} — this call excluded consumer detail (excludeConsumers), so an empty
+          list here does not mean nobody is attached.
+        </div>
+      );
+    }
     return (
       <div role="status" className={STATUS_CLASS}>
         No consumers attached to this subscription.
