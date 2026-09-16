@@ -7,5 +7,6 @@ pub mod commands;
 pub mod envelope;
 pub mod ports;
 pub mod security;
+pub mod stats;
 pub mod store;
 pub mod topic_folding;
